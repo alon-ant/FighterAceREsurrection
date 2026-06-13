@@ -1,0 +1,2734 @@
+#!/usr/bin/env python3
+r"""
+Fighter Ace LAN Server v187
+===========================
+
+TODO list:
+  [x] SYN structure mapped (offsets confirmed)
+  [x] Pilot creation/rename/delete (0xe2/0xe7/0xe3) saved to DB
+  [x] Ticket generation: gen <name> at server console → ticket_<name>.vr1
+  [x] Chat: broadcast as APPSPACE sub=0xcd with pilot name
+  [x] Lobby UI List: 0xcc LmsChangePlayers mapped (join/leave broadcasts)
+  [x] Room creation: compound cmd=18 inner type=0x92/sub=0xdc stored in DB
+  [x] Room list (0xce): sends actual room data via build_ce_room_list
+  [x] Room confirm (0x43): slot=room_slot player_count from DB
+  [x] VNET::SendEnterToGame: bc=2 type=0x82 sub=0xc8 detected; not echoed (prevents crash)
+  [x] Player-object layer (v182 → fixed v183 → fixed v184): msg 62 AddPlayer /
+      63 ChangePlayerCB / 96 ScoreTable, decoded from VNet_Rcv.cpp (FUN_004fa5f0 /
+      FUN_004fa9c0 / FUN_00629600). 62 creates REMOTE_PLAYER, 63 op=1 sets side
+      (rp->Camp() @ player+0x2c). Side membership was msg 63 all along — NOT msg 58
+      (v175's guess); msg 58 is a LobbyRcv list, not the arena side-setter.
+      v183 FIX: v182 crashed on side-select (op=2 hit the DELETE path, not camp; and
+      the 63 was sent to the player about itself). op=CAMP is 1; 63 is peers-only.
+      v184 FIX: v183 crashed on arena-JOIN — it sent msg 96 (ScoreTable) on the 201
+      grant, which frees+reallocates the host-side score-table object before the
+      client's world exists (3s stall → WinError 10054). 96 is now DEFERRED; the 62
+      stand-up self-gates to no-ops when alone, so lone entry == known-good v182 path.
+      v185: layer made REQUEST-DRIVEN. bare 0x60 after FLY grant = ScoreTable request
+      → answer msg 96 (v184 left it unanswered → no launch timer, CTD ~20s).
+      v186: INVARIANT added — 62 to client X never carries X's own index; 0x66
+      swallowed; self-63 kept as the team-change mechanism.
+      v187 ROOT CAUSE: every player-object CTD (v182 side-select, v183 join, v185/v186
+      team) was ONE bug — the client delivers Length=bc*16+1 to handlers, NOT the
+      datagram length (proven in vcncnet…510.log: our 8B msg 63 arrived as Size=17
+      with 9B of stale-buffer garbage, parsed as phantom records → ScoreTable/VNet_Rcv
+      "Length>=0" fatal assert → DLL_PROCESS_DETACH). build_appspace_pkt_exact was a
+      fiction; the client ignores real length. FIX: 62/63/96 now TILE to bc*16+1 with
+      parser-valid padding — 63 pads to a multiple of 16 dummy-index records, 62 pads
+      the last record's unused trailing string, 96 appends one pad group (9+7N bytes).
+      Also fixed a 96 count off-by-one (parser loops count+1). The v183 "premature
+      world state" and v185 "use-after-free" theories were both wrong: it was framing.
+  [x] LOBBY/ARENA SERVER COMPLETE (v187). Verified live: auth, pilot mgmt, rooms,
+      arena list, 212 GAME_DEF, player-object layer (62/63/96), team select (chat
+      line + side color), chat, the FLY StartPlace grant (msg 23). The client reaches
+      the runway with a plane assigned. This is the milestone stopping point.
+
+  ── BOUNDARY: entering the flyable world needs the GAME-SERVER CHANNEL (new work) ──
+  The FLY → spawn path is NOT a packet bug. On fly, FUN_004f6320 passes the spawn
+  gate (worldobj exists, -0x1700 "ready" flag set by arena entry) and calls
+  FUN_004e9fa0, which invokes the SIM CONDUCTOR at worldobj+0x1800:
+        (**(code**)(*(worldobj+0x1800)+0x6c))(...)   ← null-vtable CTD
+  worldobj+0x1800 is null. Nothing in the lobby path (LobbyRcv.cpp / VNet_Rcv.cpp,
+  incl. the 212 handler FUN_004ed9c0 which only PARSES the arena def) creates it.
+  The conductor's users live in Sources\FA30\PLANES\plngroup.cpp — the flight-sim
+  layer, a separate subsystem. Peer-hosted FA splits into two channels: the lobby/
+  arena connection (this file) and a SEPARATE game-server VNET connection that runs
+  gameplay and stands up the conductor. We don't serve that channel yet, so the
+  client spawns into a sim that was never initialized → null +0x1800.
+
+  [ ] GAME-SERVER CHANNEL (separate VNET connection) — new design thread:
+      [ ] First question: how is the client told to OPEN the 2nd connection? Trace the
+          writer of worldobj+0x1800 back to its triggering network event; the connect
+          address/port is likely already in something we send (201 JoinToGameAnswer
+          payload, or a GAME_DEF field), since the client must learn where to dial.
+      [ ] Reverse the sim-entry handshake that allocates the conductor (+0x1800).
+      [ ] Then: position/state replication for actual flight.
+  [ ] Multi-player (lobby): verify 62 AddPlayer on a real 2nd-player join (untested)
+  [ ] Pilot stats: rank, score, kills, deaths, squadron (DB placeholders exist)
+
+bc formula: param_3 = bc × 16 + 1
+appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the datagram
+  length. Any length-driven message MUST tile to len ≡ 1 (mod 16) with parser-valid
+  padding. (Root cause of the v182–v186 crash series; see v187 note above.)
+"""
+import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re
+from datetime import datetime
+
+HOST = "0.0.0.0"; PORT = 38999
+FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_server.db')
+
+TICKET_SIZE     = 2172
+TICKET_AB_OFF   = 0x10
+TICKET_F45_OFF  = 0x20
+TICKET_PID_OFF  = 0x24
+TICKET_ACCT_OFF = 0x30
+TICKET_ACCT_LEN = 32
+
+SYN_OFF_AUTH = 56; SYN_OFF_F45 = 72; SYN_OFF_PID = 76; SYN_OFF_ACCT = 88
+TICKET_TEMPLATE = None
+
+def log(tag, msg):
+    n = datetime.now(); ts = n.strftime('%H:%M:%S.') + f'{n.microsecond//1000:03d}'
+    print(f'[{ts}][{tag:<16s}] {msg}', flush=True)
+
+def hx(d, n=None): return binascii.hexlify(bytes(d) if n is None else bytes(d[:n])).decode()
+def fa_timestamp():
+    t = time.time()
+    return ctypes.c_uint32(int(t)-FA_EPOCH).value, int((t%1)*1000*0x10000//1000)+0x800
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS accounts (
+            account_name TEXT PRIMARY KEY,
+            player_id    TEXT NOT NULL,
+            field_45     TEXT NOT NULL DEFAULT "00000045",
+            auth_block   TEXT NOT NULL DEFAULT "00000000000000000000000000000000"
+        );
+        CREATE TABLE IF NOT EXISTS pilots (
+            pilot_name   TEXT PRIMARY KEY,
+            account_name TEXT NOT NULL REFERENCES accounts(account_name),
+            rank         INTEGER NOT NULL DEFAULT 0,
+            score        INTEGER NOT NULL DEFAULT 0,
+            kills        INTEGER NOT NULL DEFAULT 0,
+            deaths       INTEGER NOT NULL DEFAULT 0,
+            squadron     TEXT    NOT NULL DEFAULT '',
+            rights       INTEGER NOT NULL DEFAULT 1,
+            slot_index   INTEGER NOT NULL DEFAULT 1
+        );
+    ''')
+    conn.commit(); conn.close()
+
+def db_upsert_account(acct, pid, f45, ab):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute('''INSERT INTO accounts VALUES(?,?,?,?)
+        ON CONFLICT(account_name) DO UPDATE SET
+        player_id=excluded.player_id,field_45=excluded.field_45,auth_block=excluded.auth_block''',
+        (acct, pid, f45, ab))
+    conn.commit(); conn.close()
+
+def db_ensure_pilot(name, acct, slot):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT OR IGNORE INTO pilots(pilot_name,account_name,slot_index) VALUES(?,?,?)",
+                 (name, acct, slot))
+    conn.commit(); conn.close()
+
+def db_get_account_by_pid(pid_hex):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT account_name,player_id,field_45,auth_block FROM accounts WHERE player_id=?",
+                       (pid_hex.lower(),)).fetchone()
+    conn.close(); return row
+
+def db_get_all_accounts():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT * FROM accounts").fetchall()
+    conn.close(); return rows
+
+def db_get_pilots(acct):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT pilot_name,slot_index FROM pilots WHERE account_name=? ORDER BY slot_index",
+                        (acct,)).fetchall()
+    conn.close(); return rows
+
+def db_delete_pilot(pilot_name, acct):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM pilots WHERE pilot_name=? AND account_name=?", (pilot_name, acct))
+    conn.commit(); conn.close()
+
+def db_rename_pilot(old_name, new_name, acct):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE pilots SET pilot_name=? WHERE pilot_name=? AND account_name=?",
+                 (new_name, old_name, acct))
+    conn.commit(); conn.close()
+
+def db_get_pilot_slot(acct, name):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT slot_index FROM pilots WHERE account_name=? AND pilot_name=?",
+                       (acct, name)).fetchone()
+    conn.close(); return row[0] if row else None
+
+def db_next_slot(acct):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT MAX(slot_index) FROM pilots WHERE account_name=?", (acct,)).fetchone()
+    conn.close(); return (row[0] or 0) + 1
+
+# ─── Terrain table & GAME_DEF terrain extraction ──────────────────────────────
+#
+# FA identifies each arena's map by a TERRAIN NUMBER (1..99, sparse). The number
+# is asserted >=1 (FUN_00438e30 / Trn.hpp:437) and must exist in the client's
+# locally-loaded set, or the engine aborts the moment the Arenas tab renders it.
+# Each room's terrain is chosen by the creator and travels inside the GAME_DEF
+# text blob the client sends at creation, as a "Terrain=N" key/value line — the
+# same field the client prints when it parses a GAME_DEF. We extract it there,
+# store it per-room, and emit it in the 0xd2 record. Names below are the FA stock
+# set (from the production + client logs) and are only used for console display.
+TERRAIN_NAMES = {
+    1: 'Ocean', 2: 'Mediterrain', 3: 'Two Islands', 4: 'Germany', 5: 'Circle',
+    6: 'English Channel', 7: 'Bowl', 8: 'Kursk', 9: 'Canyon', 10: 'Guadalcanal',
+    11: 'North Africa', 12: 'Midway', 13: 'Big Circle', 14: 'Mountains',
+    15: 'Volcano', 16: 'North Cape', 17: 'Western Desert', 19: 'Solomon Islands',
+    22: 'Two Islands II', 23: 'Western Desert II', 24: 'Pacific Island', 29: 'NAW',
+    30: 'Desert NAW', 38: 'Classic_II', 39: 'KOTS Arena', 45: 'Five Towers',
+    48: 'MKOTS Arena', 49: 'Terra Nova', 50: 'Classic_III', 51: 'Classic_III_Snow',
+    60: 'Korea', 61: 'Korea Snow',
+}
+DEFAULT_TERRAIN = 1   # Ocean — present in every stock install; safe fallback
+FORCE_GAMEDEF_TERRAIN = 6  # English Channel — terrain to stamp into client-created
+                           # GAME_DEFs that store terrain=0 (the user's TC rooms are
+                           # English Channel; client loaded terrain 06 at startup)
+
+def extract_terrain_from_gamedef(game_def_raw):
+    """Terrain = param[0x39] of the decompressed GAME_DEF (= arena_object+0xe4).
+
+    CONFIRMED three ways: (1) contrast rooms — Territorial Combat/Mediterranean reads 2,
+    MKOTS reads 48, matching FA's terrain table exactly; (2) FA.exe FUN_00702a40 reads the
+    dialog terrain from arena+0xe4; (3) FUN_0076e690 / FUN_0076d6c0 validate arena+0xe4 via
+    FUN_00438e30 (the _TrnNumber>=1 assert). It is the byte immediately after the 8 camp/
+    team dwords. Layout from the version byte:
+      [0]ver | [1:13]3 dwords | [13]block_len | camps(block_len) | [.]3 ushorts |
+      NAME\\0 | COMMENT\\0 | PASSWORD\\0 | [.]Type | LobbyType\\0 | [.]2 ushorts |
+      [.]8 dwords(32B) | [.]param[0x39]=TERRAIN
+    Returns 1..99 or DEFAULT_TERRAIN.
+    """
+    if not game_def_raw:
+        return DEFAULT_TERRAIN
+    try:
+        d = decompress_gamedef(game_def_raw)
+        if not d or len(d) < 14:
+            return DEFAULT_TERRAIN
+        block_len = d[13]
+        p = 20 + block_len                       # NAME start (ver+3dw+blen+camps+3ushort)
+        for _ in range(3):                       # skip NAME, COMMENT, PASSWORD
+            p = d.index(0, p) + 1
+        p += 1                                   # param[0x2a] Type byte
+        p = d.index(0, p) + 1                    # LobbyType string
+        p += 4                                   # param[0x2f], param[0x30] ushorts
+        p += 32                                  # 8 dwords param[0x31..0x38] (camp/team idx)
+        t = d[p]                                 # param[0x39] = terrain
+        if 1 <= t <= 99:
+            return t
+    except Exception:
+        pass
+    return DEFAULT_TERRAIN
+
+# ─── Binary GAME_DEF layout (from FA.exe FUN_0057bee0 / FUN_0056ed90) ──────────
+#
+# The GAME_DEF is NOT text — it's a packed binary struct. The "Terrain=N" lines we
+# used to grep are FA.exe PRETTY-PRINTING its parsed struct, not the wire format.
+# The stored blob carries a 14-byte prefix (LobbyIndex/flags, zero for a new room)
+# BEFORE the deserialisable GAME_DEF, whose first byte is the VERSION 0x8a (138).
+# The deserialiser (FUN_0057bee0) requires byte[0]==0x8a, then reads:
+#   version(1) | 3 dwords(12) | block_len(1) | camps-block(block_len) | 3 ushorts(6)
+#   | NAME (null-term) | … | Comment | … many scalar/string/array fields …
+# FUN_0056ed90 (camps) asserts it consumes EXACTLY block_len bytes (Camps.cpp p-ptr==len),
+# so NAME starts at  gamedef_start + 1+12+1 + block_len + 6  =  gamedef_start+20+block_len.
+# ─── FA Mix LZ codec (vcncNet/FA.exe FUN_007d68f0) ────────────────────────────
+# The GAME_DEF carried by the 212 message is LZ-COMPRESSED. The decompressor reads
+# exactly `size` input bytes and produces a variable-size output; the deserialiser's
+# end assert (GameDef.cpp:2076 "Source.End()") requires it to consume the WHOLE
+# decompressed buffer. Echoing the client's compressed blob fails because its size
+# (740 ≡4 mod16) can't land on the bc*16+1 appspace grid, so the client over-reads 8
+# stale bytes that decompress into extra output → Source.End.
+#
+# Fix: DECOMPRESS the stored blob, then re-send it via the decompressor's STORED mode
+# (first byte 0x01 → copies size-4 bytes verbatim). We pad a string field so the
+# decompressed size ≡8 mod16, which makes [0xd4][id:4][0x01][3][struct] land EXACTLY
+# on bc*16+1 (payload = D+9). Validated against db_id=24: 732 compressed → 1183 bytes,
+# clean camps/name/comment.
+_NEG_1A1 = -0x1a1
+def _fa_hash(b0, b1, b2):
+    v = ((((b0 << 4) ^ b1) << 4) ^ b2) & 0xffffffff
+    prod = (v * _NEG_1A1) & 0xffffffff
+    if prod & 0x80000000:
+        prod -= 0x100000000
+    return (prod >> 4) & 0x1ff
+
+def fa_decompress(data, size=None):
+    """Reimplementation of FUN_007d68f0. data[0]==0x01 → STORED (copy data[4:size]);
+    else LZ. Returns the decompressed bytes."""
+    data = bytes(data)
+    if size is None:
+        size = len(data)
+    if size < 4:
+        raise ValueError('compressed input too small')
+    if data[0] == 0x01:
+        return data[4:size]
+    out = bytearray()
+    dict_pos = [0] * 4096       # hash buckets (0x200) * 8 ring slots
+    ring = 0
+    lit_run = 0
+    ctrl = 1
+    ip = 4                       # skip 4-byte header
+    end = size
+    while ip < end:
+        if ctrl == 1:
+            if ip + 1 >= end:
+                break
+            ctrl = data[ip] | 0x10000 | (data[ip + 1] << 8)
+            ip += 2
+        nops = 1 if (end - 0x20) < ip else 16
+        for _ in range(nops):
+            if ip >= end:
+                break
+            if (ctrl & 1) == 0:                      # LITERAL
+                out.append(data[ip]); ip += 1
+                lit_run += 1
+                if lit_run == 3:
+                    p = len(out) - 1
+                    slot = (ring + _fa_hash(out[p-2], out[p-1], out[p]) * 8) & 0xfff
+                    dict_pos[slot] = p - 2
+                    lit_run = 2
+                    ring = (ring + 1) & 7
+            else:                                    # MATCH
+                if ip + 1 >= end:
+                    ip = end; break
+                b0 = data[ip]; b1 = data[ip + 1]; ip += 2
+                hi = (b0 & 0xf0) << 4
+                src = dict_pos[(hi | b1) & 0xfff]
+                n = 3 + (b0 & 0xf)
+                for k in range(n):
+                    out.append(out[src + k])
+                start = len(out) - n
+                if lit_run == 0:
+                    dict_pos[((hi | (b1 & 0xfffffff8)) + ring) & 0xfff] = start
+                else:
+                    s = start - lit_run
+                    slot = (ring + _fa_hash(out[s], out[s+1], out[s+2]) * 8) & 0xfff
+                    dict_pos[slot] = s
+                    ring = (ring + 1) & 7
+                    if lit_run == 2:
+                        slot = (ring + _fa_hash(out[s+1], out[s+2], out[s+3]) * 8) & 0xfff
+                        dict_pos[slot] = s + 1
+                        ring = (ring + 1) & 7
+                    lit_run = 0
+                    dict_pos[((hi | (b1 & 0xfffffff8)) + ring) & 0xfff] = start
+                ring = (ring + 1) & 7
+            ctrl >>= 1
+            if ctrl == 1:
+                break
+    return bytes(out)
+
+def _lz_comp_size(n):
+    """Size of the all-literals LZ stream for an n-byte struct:
+    4-byte header + one 2-byte control word per 16 literals + n literal bytes."""
+    return 4 + 2 * ((n + 15) // 16) + n
+
+def encode_all_literals(struct):
+    """Encode `struct` as a valid FA LZ stream using ONLY literals: a 4-byte header
+    (mode byte 0x00 = LZ, NOT 0x01/STORED) followed by [ctrl=0x0000][<=16 literal bytes]
+    groups. ctrl=0x0000 → the decompressor reads 16 literal bits (each copies 1 byte),
+    so the stream decompresses to `struct` verbatim (no matches → dictionary unused).
+    We use this instead of STORED mode: FUN_007d68f0's 0x01 branch reads from the
+    (uninitialised) output buffer, yielding a garbage version byte (v161: 'get 64')."""
+    out = bytearray([0x00, 0x00, 0x00, 0x00])
+    i = 0
+    while i < len(struct):
+        out += b'\x00\x00'
+        out += struct[i:i + 16]
+        i += 16
+    return bytes(out)
+
+def build_lz_gamedef(blob):
+    """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
+    all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') ≡ 1 mod16),
+    then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
+    b = bytes(blob)
+    v = gamedef_start(b)
+    if not b or b[v] != 0x8a:
+        return None, 0, 0
+    comp = b[v - 6:]                 # compressed stream begins 6 bytes before the 0x8a
+    if len(comp) < 4:
+        return None, 0, 0
+    try:
+        d = bytearray(fa_decompress(comp, len(comp)))
+    except Exception as e:
+        log('GAMEDEF212', f'decompress failed: {e}')
+        return None, 0, 0
+    if not d or d[0] != 0x8a:
+        log('GAMEDEF212', f'decompressed version=0x{(d[0] if d else 0):02x} (expected 0x8a)')
+        return None, 0, 0
+    # v166 DEBUG: dump the pristine decompressed GAME_DEF struct so a terrain-contrast
+    # room (Ocean=1 vs English Channel=6) can be diffed field-by-field to pin the terrain
+    # byte. Harmless; remove once the terrain field is located.
+    log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}')
+    # v165: CORRECTION — the ushort at 14+camps_block_len (param_1[0x23]) is NOT the
+    # terrain. It is the PLANE-SET id: FUN_0057bee0 feeds it straight to FUN_004c7cd0,
+    # which loads "PLANES\Planes_%d.txt" (or "Planes.txt" when 0). v164 stamped 6 here,
+    # so the client tried to load the nonexistent "Planes_6.txt" and aborted with
+    # "No planes' definitions found!" (Pln_Info.cpp:93). 0 => default Planes.txt, which
+    # the real 2009 session also used (it loaded SPIT/B17 fine). So we LEAVE 0x23 alone.
+    #
+    # The real terrain field lives at desc+0x1c of the 0xd2 arena descriptor and is the
+    # value FUN_00438e30(N) asserts (N>=1, Trn.hpp:437). Full traces of FUN_0057bee0 (the
+    # GAME_DEF deserializer) and FUN_004efda0 (the 0xd2 list parser) show NEITHER message
+    # carries it: the deserializer parses to an exact Source.End() with no terrain field,
+    # and the list parser reads only GameIndex(+4)+2 names, skipping the 12-byte header.
+    # desc+0x1c is therefore set from FUN_004ed040's param_8 (source still being pinned),
+    # not from anything we currently send. Patching the blob cannot fix it — see notes
+    # below. We do NOT touch the plane-set ushort here.
+    D_orig = len(d)
+    # smallest pad so payload = 5 + comp_size(D+pad) ≡ 1 (mod 16)
+    pad = 0
+    while (5 + _lz_comp_size(D_orig + pad)) % 16 != 1:
+        pad += 1
+        if pad > 64:
+            log('GAMEDEF212', 'could not align (pad>64)')
+            return None, 0, 0
+    if pad:
+        # insert `pad` spaces before the COMMENT's null terminator (cosmetic, the parser
+        # reads it null-terminated). Falls back to the NAME terminator if parsing fails.
+        try:
+            p = 1 + 12
+            block_len = d[p]; p += 1
+            p += block_len + 6
+            name_end = d.index(0, p)
+            comment_end = d.index(0, name_end + 1)
+            d[comment_end:comment_end] = b' ' * pad
+        except (ValueError, IndexError) as e:
+            log('GAMEDEF212', f'comment-pad failed ({e}); padding NAME')
+            try:
+                name_end = d.index(0, 13 + 1 + d[13] + 6)
+                d[name_end:name_end] = b' ' * pad
+            except Exception:
+                return None, 0, 0
+    return encode_all_literals(bytes(d)), D_orig, pad
+
+def decompress_gamedef(blob):
+    """Return the decompressed GAME_DEF struct (starts with version 0x8a) from a stored
+    blob, or None. The stored blob is LZ-compressed beginning 6 bytes before the 0x8a."""
+    try:
+        b = bytes(blob)
+        if not b:
+            return None
+        v = gamedef_start(b)
+        if b[v] != 0x8a:
+            return None
+        d = fa_decompress(b[v - 6:], len(b) - (v - 6))
+        return d if d and d[0] == 0x8a else None
+    except Exception:
+        return None
+
+def gamedef_start(blob):
+    """Offset of the GAME_DEF VERSION byte (0x8a) within the stored blob.
+    Used for NAME extraction (fields are positioned relative to the version)."""
+    if not blob:
+        return 0
+    b = bytes(blob)
+    i = b.find(0x8a)
+    return i if i >= 0 else 0
+
+def gamedef_212_start(blob):
+    """Offset where the 212 GAME_DEF must BEGIN = 6 bytes before the 0x8a version.
+    The deserialiser (FUN_0057bee0) consumes a 6-byte GAME_DEF header (FUN_007cc610 +
+    a 1-byte advance) BEFORE reading the version, so the stream we push must include
+    those 6 bytes. Proven empirically: v158 started at the 0x8a and the client read
+    version blob[ver+6]=0x90 ('get 144'); starting at ver-6 lands the 0x8a where the
+    deserialiser looks. It also makes [0xd4][id:4][gdef] land exactly on bc*16+1
+    (e.g. 5+732=737), so no pad/over-read. Blob layout:
+      [8-byte outer prefix][6-byte gd header][0x8a version][body…]"""
+    v = gamedef_start(blob)
+    return max(0, v - 6)
+
+def extract_name_from_gamedef(game_def_raw):
+    """Room NAME from the DECOMPRESSED GAME_DEF (the stored blob is LZ-compressed, so the
+    raw bytes look mangled e.g. 'TerHorial C'; decompressing yields the real name). Name
+    sits at struct offset 20+block_len (version+3dwords+block_len byte+camps+3 ushorts)."""
+    if not game_def_raw:
+        return ''
+    try:
+        d = decompress_gamedef(game_def_raw)
+        if not d or len(d) < 14:
+            return ''
+        block_len = d[13]
+        off = 20 + block_len
+        if off >= len(d):
+            return ''
+        end = d.find(0, off)
+        if end < 0:
+            end = len(d)
+        raw = d[off:end]
+        name = ''.join(chr(c) for c in raw if 0x20 <= c <= 0x7e).strip()
+        return name[:31]
+    except Exception:
+        return ''
+
+# ─── Room DB ──────────────────────────────────────────────────────────────────
+
+def init_rooms_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS rooms (
+            room_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            room_name     TEXT    NOT NULL DEFAULT 'Unnamed',
+            creator_pilot TEXT    NOT NULL DEFAULT '',
+            account_name  TEXT    NOT NULL DEFAULT '',
+            room_slot     INTEGER NOT NULL DEFAULT 35,
+            game_def_raw  BLOB,
+            terrain       INTEGER NOT NULL DEFAULT 1,
+            status        TEXT    NOT NULL DEFAULT 'open',
+            created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS room_players (
+            room_id      INTEGER NOT NULL,
+            pilot_name   TEXT    NOT NULL,
+            account_name TEXT    NOT NULL DEFAULT '',
+            joined_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (room_id, pilot_name)
+        );
+    ''')
+    # Migration: add room_slot if DB was created before this column was introduced
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN room_slot INTEGER DEFAULT 35")
+        conn.commit()
+        log('DB', 'Migration: added room_slot column to rooms table')
+    except Exception:
+        pass  # column already exists — expected on every normal startup
+    # Migration: add terrain column + backfill from each room's stored GAME_DEF text.
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN terrain INTEGER DEFAULT 1")
+        conn.commit()
+        log('DB', 'Migration: added terrain column to rooms table')
+        for rid, gdef in conn.execute("SELECT room_id, game_def_raw FROM rooms").fetchall():
+            t = extract_terrain_from_gamedef(gdef)
+            conn.execute("UPDATE rooms SET terrain=? WHERE room_id=?", (t, rid))
+        conn.commit()
+        log('DB', 'Migration: backfilled terrain from stored GAME_DEFs')
+    except Exception:
+        pass  # column already exists — expected on every normal startup
+    # Always re-derive room_name from the binary GAME_DEF (the old text-regex path
+    # left every room 'Unnamed' since the blob is binary, not INI text). Cheap, and
+    # corrects rooms created before binary name extraction existed.
+    try:
+        fixed = 0
+        for rid, gdef, cur_name in conn.execute(
+                "SELECT room_id, game_def_raw, room_name FROM rooms WHERE status='open'").fetchall():
+            nm = extract_name_from_gamedef(gdef)
+            if nm and nm != cur_name:
+                conn.execute("UPDATE rooms SET room_name=? WHERE room_id=?", (nm, rid))
+                fixed += 1
+        if fixed:
+            conn.commit()
+            log('DB', f'Migration: re-derived room_name for {fixed} room(s) from binary GAME_DEF')
+    except Exception as e:
+        log('DB', f'name re-derive skipped: {e}')
+    conn.commit(); conn.close()
+
+def db_create_room(creator_pilot, account, game_def_raw, room_slot=35, terrain=None):
+    if terrain is None:
+        terrain = extract_terrain_from_gamedef(game_def_raw)
+    room_name = extract_name_from_gamedef(game_def_raw) or 'Unnamed'
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO rooms(room_name, creator_pilot, account_name, game_def_raw, room_slot, terrain) "
+        "VALUES(?,?,?,?,?,?)",
+        (room_name, creator_pilot, account, game_def_raw, room_slot, terrain))
+    room_id = cur.lastrowid
+    conn.commit(); conn.close()
+    return room_id
+
+def db_get_open_rooms():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT room_id, room_name, creator_pilot, account_name, created_at, room_slot, "
+        "game_def_raw, terrain "
+        "FROM rooms WHERE status='open' ORDER BY created_at DESC").fetchall()
+    conn.close(); return rows
+
+def db_close_room(room_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE rooms SET status='closed' WHERE room_id=?", (room_id,))
+    conn.execute("DELETE FROM room_players WHERE room_id=?", (room_id,))
+    conn.commit(); conn.close()
+
+def db_room_join(room_id, pilot, account):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT OR REPLACE INTO room_players(room_id,pilot_name,account_name) VALUES(?,?,?)",
+                 (room_id, pilot, account))
+    conn.commit(); conn.close()
+
+def db_room_leave(pilot):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM room_players WHERE pilot_name=?", (pilot,))
+    conn.commit(); conn.close()
+
+def db_get_pilots_in_room(room_id):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT pilot_name, joined_at FROM room_players WHERE room_id=? ORDER BY joined_at",
+        (room_id,)).fetchall()
+    conn.close(); return rows
+
+def db_get_room_for_pilot(pilot_name):
+    """Return (room_id, room_slot) if pilot has an open room, else None.
+    Checks by creator_pilot first (most common), then room_players membership.
+    Logs the result explicitly so connection drops are diagnosable.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute(
+            "SELECT room_id, room_slot FROM rooms "
+            "WHERE status='open' AND creator_pilot=? "
+            "ORDER BY created_at DESC LIMIT 1", (pilot_name,)).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT r.room_id, r.room_slot FROM rooms r "
+                "JOIN room_players p ON r.room_id=p.room_id "
+                "WHERE r.status='open' AND p.pilot_name=? "
+                "ORDER BY r.created_at DESC LIMIT 1", (pilot_name,)).fetchone()
+        conn.close()
+        if row:
+            log('DB', f'db_get_room_for_pilot("{pilot_name}") → room_id={row[0]} slot=0x{row[1]:02x}')
+        else:
+            log('DB', f'db_get_room_for_pilot("{pilot_name}") → None (no open room)')
+        return (row[0], row[1]) if row else None
+    except Exception as e:
+        log('DB', f'db_get_room_for_pilot error: {e}')
+        return None
+
+def db_room_player_count(room_id):
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT COUNT(*) FROM room_players WHERE room_id=?", (room_id,)).fetchone()
+    conn.close(); return row[0] if row else 0
+
+# ─── Ticket template ──────────────────────────────────────────────────────────
+
+TICKET_PATHS = [
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ticket_base.vr1'),
+    r"C:\games\FA\ticket.vr1", r"C:\Games\FA\ticket.vr1", "ticket.vr1",
+]
+
+def load_ticket_template():
+    global TICKET_TEMPLATE
+    for path in TICKET_PATHS:
+        if not os.path.exists(path): continue
+        data = open(path, 'rb').read()
+        if len(data) != TICKET_SIZE:
+            log('TICKET', f'Skipping {path}: size {len(data)} ≠ {TICKET_SIZE}'); continue
+        TICKET_TEMPLATE = bytearray(data)
+        base_acct = data[TICKET_ACCT_OFF:TICKET_ACCT_OFF+TICKET_ACCT_LEN].split(b'\x00')[0].decode(errors='replace')
+        base_pid  = hx(data[TICKET_PID_OFF:TICKET_PID_OFF+4])
+        log('TICKET', f'Template loaded: {path} ({TICKET_SIZE}b) base_acct="{base_acct}" base_pid={base_pid}')
+        return True
+    log('TICKET', 'No base ticket found — ticket generation unavailable')
+    return False
+
+def generate_ticket(account_name: str) -> tuple:
+    if TICKET_TEMPLATE is None: raise RuntimeError("No ticket template loaded")
+    account_name = account_name.strip()
+    if not account_name: raise ValueError("Account name cannot be empty")
+    if len(account_name) > TICKET_ACCT_LEN - 1: raise ValueError(f"Account name too long")
+    if not all(0x20 <= ord(c) <= 0x7e for c in account_name): raise ValueError("Must be printable ASCII")
+    conn = sqlite3.connect(DB_PATH)
+    existing = conn.execute("SELECT player_id FROM accounts WHERE account_name=?", (account_name,)).fetchone()
+    conn.close()
+    if existing: raise ValueError(f'Account "{account_name}" already exists (pid={existing[0]})')
+    pid_bytes = pid_hex = None
+    for _ in range(200):
+        candidate = secrets.token_bytes(4)
+        if db_get_account_by_pid(candidate.hex()) is None:
+            pid_bytes = candidate; pid_hex = candidate.hex(); break
+    if pid_bytes is None: raise RuntimeError("Could not generate unique PID")
+    ab_hex  = hx(TICKET_TEMPLATE[TICKET_AB_OFF:TICKET_AB_OFF+16])
+    f45_hex = hx(TICKET_TEMPLATE[TICKET_F45_OFF:TICKET_F45_OFF+4])
+    ticket = bytearray(TICKET_TEMPLATE)
+    ticket[TICKET_PID_OFF:TICKET_PID_OFF+4] = pid_bytes
+    acct_field = account_name.encode('ascii') + b'\x00' * (TICKET_ACCT_LEN - len(account_name))
+    ticket[TICKET_ACCT_OFF:TICKET_ACCT_OFF+TICKET_ACCT_LEN] = acct_field
+    assert len(ticket) == TICKET_SIZE
+    db_upsert_account(account_name, pid_hex, f45_hex, ab_hex)
+    log('TICKET_GEN', f'Created account="{account_name}" pid={pid_hex}')
+    return bytes(ticket), pid_hex
+
+def cmd_gen_ticket(account_name: str):
+    try: ticket_bytes, pid_hex = generate_ticket(account_name)
+    except Exception as e: log('TICKET_GEN', f'ERROR: {e}'); return
+    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'ticket_{account_name}.vr1')
+    with open(out_path, 'wb') as f: f.write(ticket_bytes)
+    saved = open(out_path, 'rb').read()
+    acct_rb = saved[TICKET_ACCT_OFF:TICKET_ACCT_OFF+TICKET_ACCT_LEN].split(b'\x00')[0].decode()
+    pid_rb  = hx(saved[TICKET_PID_OFF:TICKET_PID_OFF+4])
+    log('TICKET_GEN', f'Saved: {out_path}')
+    log('TICKET_GEN', f'  Verify: acct="{acct_rb}" pid={pid_rb} size={len(saved)}b')
+
+def console_handler():
+    log('CONSOLE', 'Ready. Commands: gen <name> | list | help')
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line: continue
+        parts = line.split(None, 1); cmd = parts[0].lower()
+        if cmd == 'gen':
+            if len(parts) < 2: log('CONSOLE', 'Usage: gen <account_name>')
+            else: cmd_gen_ticket(parts[1].strip())
+        elif cmd == 'list':
+            accounts = db_get_all_accounts()
+            if not accounts: log('CONSOLE', 'No accounts in DB')
+            for a, p, f45, ab in accounts:
+                log('CONSOLE', f'  {a}  pid={p}  pilots={[n for n,_ in db_get_pilots(a)]}')
+            rooms = db_get_open_rooms()
+            log('CONSOLE', f'Open rooms: {len(rooms)}')
+            for r in rooms:
+                rid, rname, creator = r[0], r[1], r[2]
+                trn = r[7] if len(r) > 7 else DEFAULT_TERRAIN
+                pcount = db_room_player_count(rid)
+                tname = TERRAIN_NAMES.get(trn, '?')
+                log('CONSOLE', f'  room {rid}: name={rname!r} creator={creator} '
+                               f'terrain={trn} ({tname}) players={pcount}')
+        elif cmd == 'clearrooms':
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE rooms SET status='closed'")
+            conn.execute('DELETE FROM room_players')
+            conn.commit(); conn.close()
+            log('CONSOLE', 'All rooms cleared')
+        elif cmd == 'help':
+            log('CONSOLE', 'gen <name>  — generate ticket for new account')
+            log('CONSOLE', 'list        — show all accounts and their pilots')
+        else: log('CONSOLE', f'Unknown command "{cmd}". Type "help".')
+
+# ─── SYN identification ───────────────────────────────────────────────────────
+
+def identify_account_from_syn(syn_data):
+    payload = syn_data[8:]
+    pid_hex = hx(payload[SYN_OFF_PID:SYN_OFF_PID+4])   if len(payload) > SYN_OFF_PID+4  else '00000000'
+    ab_hex  = hx(payload[SYN_OFF_AUTH:SYN_OFF_AUTH+16]) if len(payload) > SYN_OFF_AUTH+16 else '0'*32
+    f45_hex = hx(payload[SYN_OFF_F45:SYN_OFF_F45+4])   if len(payload) > SYN_OFF_F45+4  else '00000000'
+    null = payload.find(b'\x00', SYN_OFF_ACCT)
+    raw  = payload[SYN_OFF_ACCT:null] if null > SYN_OFF_ACCT else b''
+    acct = raw.decode('ascii', errors='ignore').strip()
+    log('SYN', f'pid={pid_hex}  acct_raw={raw.hex()!r}  acct="{acct}"')
+    if acct and all(0x20 <= ord(c) <= 0x7e for c in acct):
+        log('SYN', f'Identified: account="{acct}" pid={pid_hex}')
+        db_upsert_account(acct, pid_hex, f45_hex, ab_hex)
+        return (acct, pid_hex, f45_hex, ab_hex)
+    log('SYN', f'Name unreadable, falling back to pid search')
+    row = db_get_account_by_pid(pid_hex)
+    if row: return row
+    for row in db_get_all_accounts():
+        pid_bytes = bytes.fromhex(row[1])
+        idx = payload.find(pid_bytes)
+        if idx >= 0:
+            if idx >= 20:
+                ab_scan  = hx(payload[idx-20:idx-4])
+                f45_scan = hx(payload[idx-4:idx])
+                db_upsert_account(row[0], row[1],
+                    f45_scan if f45_scan != '0'*8 else row[2],
+                    ab_scan  if len(ab_scan)==32  else row[3])
+            return db_get_account_by_pid(row[1])
+    return None
+
+# ─── Startup ──────────────────────────────────────────────────────────────────
+
+init_db(); init_rooms_db(); load_ticket_template()
+for _a, _p, *_ in db_get_all_accounts():
+    log('DB', f'account="{_a}" pid={_p} pilots={[n for n,_ in db_get_pilots(_a)]}')
+
+# ─── Packet builders ──────────────────────────────────────────────────────────
+
+def build_synack():
+    fa_s, fa_frac = fa_timestamp()
+    p = bytearray(84); p[2]=0x10
+    struct.pack_into('>I',p,8,fa_s); struct.pack_into('>I',p,12,fa_frac)
+    c=16
+    for off,val in [(0,30),(0x14,8),(0x18,5000),(0x1C,10),(0x20,30000),
+                    (0x24,5000),(0x28,200),(0x2C,50),(0x30,100),(0x34,16),(0x38,16),(0x3C,100)]:
+        struct.pack_into('>I',p,c+off,val)
+    return bytes(p), fa_s
+
+def build_time_reply(cd):
+    ti = struct.unpack_from('>H',cd,8)[0] if len(cd)>=10 else 0
+    ms=int((time.time()%1.0)*1000); p=bytearray(144); p[0]=2; p[2]=0x80
+    struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,STATUS_INDEX)
+    struct.pack_into('>H',p,14,ti); return bytes(p)
+
+def build_beacon(seq, idx=0):
+    ms=int((time.time()%1.0)*1000); p=bytearray(144); p[0]=2; p[1]=0x40; p[2]=0x80
+    struct.pack_into('<H',p,6,seq&0xFFFF); struct.pack_into('>I',p,8,ms&0x3FFFF)
+    struct.pack_into('>H',p,12,STATUS_INDEX); struct.pack_into('>H',p,14,idx); return bytes(p)
+
+def build_rel_ack(cid, seq=0):
+    p=bytearray(8); p[0]=0; p[1]=cid&0xFF; p[2]=2
+    struct.pack_into('>I',p,4,(seq<<20)|0x00020000); return bytes(p)
+
+def build_data(cmd, sq=0):
+    p=bytearray(15); p[0]=2; p[2]=0x20; p[10]=(cmd>>8)&0xFF; p[11]=cmd&0xFF; p[14]=sq&0xFF
+    return bytes(p)
+
+def build_rel(payload, seq=0):
+    h=bytearray(8); h[0]=0; h[2]=0x20; h[3]=seq&0xFF
+    struct.pack_into('>I',h,4,0x20000000); return bytes(h)+bytes(payload)
+
+def build_appspace_pkt(data_bytes):
+    n = len(data_bytes); bc = 0 if n<=1 else (n-1+15)//16; size = bc*16+1
+    pl = bytearray(4+size); pl[0]=bc&0xFF; pl[1]=0x12; pl[4:4+min(n,size)]=data_bytes[:size]
+    return bytes(pl)
+
+def build_appspace_pkt_exact(data_bytes):
+    """Like build_appspace_pkt but the payload is the EXACT length of data_bytes —
+    NO rounding up to bc*16+1, so NO trailing zero padding. Required for the 212
+    GAME_DEF: the client decompresses exactly `size-5` bytes (mix.cpp), and any pad
+    bytes are fed into the decompressor → DecompressedResultSize overflow / corrupt
+    parse. The real server's 212 ('in 212'793') is likewise not bc*16+1-aligned, i.e.
+    sent at exact size. bc is still set (block hint) but the buffer is not padded."""
+    n = len(data_bytes); bc = 0 if n <= 1 else (n - 1 + 15) // 16
+    pl = bytearray(4 + n); pl[0] = bc & 0xFF; pl[1] = 0x12; pl[4:4 + n] = data_bytes
+    return bytes(pl)
+
+def build_typed_pkt(type_byte, data_bytes, bc=None):
+    n = len(data_bytes)
+    if bc is None: bc = 0 if n <= 1 else (n - 1 + 15) // 16
+    size = bc * 16 + 1; pl = bytearray(4 + size)
+    pl[0] = bc & 0xFF; pl[1] = type_byte; pl[4:4 + min(n, size)] = data_bytes[:size]
+    return bytes(pl)
+
+def build_auth64(pid_hex, f45_hex, ab_hex, acct):
+    d = bytearray(64)
+    pid=bytes.fromhex(pid_hex); f45=bytes.fromhex(f45_hex); ab=bytes.fromhex(ab_hex)
+    acct_b=(acct.encode() if isinstance(acct,str) else acct)+b'\x00'
+    d[4:8]=pid[:4]; d[8:12]=f45[:4]; d[12:16]=ab[:4]; d[16:32]=ab[:16]
+    d[32:32+len(acct_b)]=acct_b[:32]; return bytes(d)
+
+def build_auth_response(auth64):
+    pl=bytearray(80); pl[0]=4; pl[3]=0x64; pl[4:16]=auth64[32:44]; pl[16:80]=auth64
+    return bytes(pl)
+
+def build_da_session():
+    data=bytearray(17); data[0]=0xDA; data[1]=0x01
+    return build_appspace_pkt(bytes(data))
+
+def build_e1_pilot_list(pilots):
+    data = bytearray([0xe1])
+    for (name, _slot) in pilots:
+        data.extend((name.encode() if isinstance(name,str) else name) + b'\x00')
+    pl = build_appspace_pkt(bytes(data)); bc = pl[0]
+    log('PILOTS', f'{len(pilots)} pilot(s) bc={bc}(p3={bc*16+1}): {[n for n,_ in pilots]}')
+    return pl
+
+def build_empty_room_list(sub_cmd):
+    return build_appspace_pkt(bytes([sub_cmd]))
+
+def build_ce_room_list(rooms):
+    """Build 0xce AppSpaceList response.
+
+    0xce = AppSpaceList = PLAYER/SQUADRON PRESENCE list, NOT the arena/room list.
+    Evidence: sending GAME_DEF bytes via 0xce causes FA.exe to:
+      - Parse them as player/squad records
+      - Send sub=0xd7/0xd9 packets with IDs extracted from our GAME_DEF
+      - Populate the Squadrons tab with faction names
+      - NEVER add a room to the arena list
+    Empty 0xce (just the byte) = correctly represents "0 players in lobby".
+    TODO: find which sub-command (0xca ServerList? 0xcb GameList?) holds the room list.
+    Ghidra targets: FUN_006ace60, FUN_0070f940, XREF to ArenaSt (0x00a59ad8),
+                    RECEIVER<EVENT_LOBBY_CREATE_ONE_GAME_ARENAS_INFO> at 0x00bf9c98.
+    """
+    return build_appspace_pkt(bytes([0xce]))  # empty = 0 lobby players
+
+# ─── 0xcb GameList (ARENA LIST) — experimental, switchable ────────────────────
+#
+# Confirmed via Ghidra this session:
+#   FUN_004f03b0  : client sends bare [0xcb] on lobby entry = GameList request.
+#   FUN_0070eda0  : displays ArenasInfo (LobbyDialogsInitPars+0xa0), 40B entries,
+#                   renders the string at entry+8.
+#   FUN_006ad210  : ArenasInfo::operator[]  → base+index*0x28.
+#   FUN_006af980  : JOIN reads ArenaSt[+4]=GameIndex, ArenaSt[+0xc]=GameDef(0 OK).
+#   FUN_0076bd00  : finds ArenaSt by matching [+4]==GameIndex.
+# In-memory ArenaSt: [+0]type [+4]GameIndex [+8]name [+0xc]GameDef(optional).
+#
+# The WIRE format of the 0xcb RESPONSE (what the receive-parser converts into
+# those 40B records) is the one thing we could NOT pin from decompilation, so
+# this builder offers several candidates. Flip GAMELIST_FORMAT and re-test.
+#
+# GameIndex convention observed for room CREATION echoes:
+#   bytes[2:6] = [0x00][0xff][0xff][name[0]]  →  e.g. "Test1" → 0x54ffff00.
+# We reuse that here so a listed arena's GameIndex matches what Join expects.
+
+GAMELIST_FORMAT = 'empty'   # 0xcb is the LOBBY PLAYER list, not arenas — keep empty until handled separately
+
+def _arena_gameindex(name):
+    """GameIndex as FA derives it for a room: [00][ff][ff][name[0]] LE."""
+    first = (name.encode()[:1] or b'\x00')[0]
+    return bytes([0x00, 0xff, 0xff, first])   # 4 bytes, little-endian on wire
+
+def build_gamelist(rooms):
+    """Build the 0xcb GameList (arena list) response.
+
+    `rooms` = rows from db_get_open_rooms():
+        (room_id, room_name, creator_pilot, account_name, created_at, room_slot, game_def_raw)
+    """
+    fmt = GAMELIST_FORMAT
+    data = bytearray([0xcb])
+
+    if fmt == 'empty' or not rooms:
+        log('GAMELIST', f'0xcb → empty ({len(rooms)} rooms, fmt={fmt})')
+        return build_appspace_pkt(bytes([0xcb]))
+
+    if fmt == 'byte_name':
+        # CONFIRMED by decompiling the 0xcb receive parser (FUN_004ef8b0):
+        #   payload = [0xcb] then, per arena, [1 byte id][name + NUL].
+        # The parser reads pkt[1]=id (→ ArenaSt+4 / GameIndex via FUN_004ed150),
+        # then scans the name to its NUL (→ ArenaSt+8, the displayed field),
+        # advancing strlen+2 per record; it stops on an empty name (so trailing
+        # zero padding is a safe terminator). The leading byte is irrelevant for
+        # display, so we use a 1-based arena index here.
+        for i, r in enumerate(rooms, start=1):
+            nm = (r[1] or 'Arena')
+            data.append(i & 0xFF)                  # 1-byte id (non-zero)
+            data.extend(nm.encode()[:31] + b'\x00')  # name + NUL
+
+    elif fmt == 'names':
+        # FA's proven list convention (cf. 0xe1 pilot list): just concatenated
+        # null-terminated names, no count, no index. Client assigns indices.
+        for r in rooms:
+            nm = (r[1] or 'Arena')
+            data.extend(nm.encode()[:31] + b'\x00')
+
+    elif fmt == 'idx_name':
+        # Per arena: [GameIndex 4B LE][name \0]
+        for r in rooms:
+            nm = (r[1] or 'Arena')
+            data.extend(_arena_gameindex(nm))
+            data.extend(nm.encode()[:31] + b'\x00')
+
+    elif fmt == 'count_idx_name':
+        # [count 1B] then [GameIndex 4B][name \0] per arena
+        data.append(len(rooms) & 0xFF)
+        for r in rooms:
+            nm = (r[1] or 'Arena')
+            data.extend(_arena_gameindex(nm))
+            data.extend(nm.encode()[:31] + b'\x00')
+
+    elif fmt == 'fixed40':
+        # Mirror the in-memory 40B ArenaSt minus the vtable:
+        #   [+0:4]=0  [+4:8]=GameIndex  [+8:0x28]=name padded to 32B
+        for r in rooms:
+            nm = (r[1] or 'Arena')
+            rec = bytearray(40)
+            rec[4:8] = _arena_gameindex(nm)
+            nb = nm.encode()[:31]
+            rec[8:8+len(nb)] = nb
+            data.extend(rec)
+
+    else:
+        log('GAMELIST', f'unknown GAMELIST_FORMAT={fmt!r}, sending empty')
+        return build_appspace_pkt(bytes([0xcb]))
+
+    pkt = build_appspace_pkt(bytes(data))
+    bc = pkt[0]
+    names = [ (r[1] or 'Arena') for r in rooms ]
+    log('GAMELIST', f'0xcb → {len(rooms)} arena(s) fmt={fmt} '
+                    f'payload={len(data)}B bc={bc}(p3={bc*16+1}): {names}')
+    log('GAMELIST', f'0xcb payload hex: {bytes(data).hex()}')
+    return pkt
+
+# ─── 0xd2 ARENA LIST (THE REAL ONE) ───────────────────────────────────────────
+#
+# CONFIRMED this session via the real 2009 capture (messages04.log) + Ghidra:
+#   * Real lobby prefetch: 0xce(squadrons) 0xca(news) 0xcb(lobby players) then
+#     out 210'1 → in 210'1110  ← the 1110-byte ARENA/ROOM LIST.
+#   * handler[0xd2] = FUN_004efda0 parses it and fires PTR_LOOP_00bfe95c, which is
+#     the arena dialog's receiver (FUN_0076e8b0 param_1[3], vtable 0xaa9658) →
+#     writes the displayed arena vector (LobbyDialogsInitPars +0xa8) that
+#     FUN_0070eda0 renders. So 0xd2 IS the arena tab's list.
+#   * The Arenas tab issues NO query on click — it renders this prefetch data and
+#     receives live 0xcc(204) updates afterward.
+#
+# Record format (from the FUN_004efda0 parse loop):
+#   [0xd2] then per room:
+#       [12-byte header]   — only header[+4:+8] = GameIndex is read by the parser
+#       [name1 \0]         — primary name (FUN_007ed210(pcVar10) → displayed)
+#       [name2 \0]         — second string (host/owner column)
+#   Stride = 12 + len(name1)+1 + len(name2)+1; loop stops on empty/over-length,
+#   so trailing zero padding terminates safely.
+#
+# GameIndex must match what JOIN expects. FA derives a created room's GameIndex as
+# bytes[2:6] of the 0xdc create = [00 ff ff creator[0]] (e.g. "Test1" → 0x54ffff00),
+# so we reuse that here keyed on the creator pilot.
+
+# Per-arena terrain now comes from the DB (extracted from each room's GAME_DEF at
+# creation). ARENA_TRN_NUMBER is only the fallback when a row somehow lacks one.
+ARENA_TRN_NUMBER = DEFAULT_TERRAIN
+
+def build_arenalist(rooms):
+    """Build the 0xd2 arena/room list response (the Arenas tab's list)."""
+    data = bytearray([0xd2])
+    if not rooms:
+        log('ARENALIST', f'0xd2 → empty (0 rooms)')
+        return build_appspace_pkt(bytes([0xd2]))
+    listed = []
+    records = []
+    for r in rooms:
+        room_name = (r[1] or 'Arena')
+        creator   = (r[2] or room_name)          # pilot who created the room
+        gamedef = bytes(r[6]) if len(r) > 6 and r[6] else b''
+        trn      = extract_terrain_from_gamedef(gamedef) & 0xFF    # param[0x39]; 1..99
+        planeset = 0                                              # desc+0x04; 0 = default Planes.txt
+        # 12-byte record header — field→descriptor map PROVEN from FUN_004efda0
+        # disassembly (the register loads feeding FUN_004ef130→FUN_004ed040):
+        #   [+0:4]  *(rec+0)        → desc+0x04  PLANE-SET (validated by FUN_004c2b60)
+        #   [+4:4]  GameIndex       → desc+0x08  (also the uVar2 key; matches Join)
+        #   [+8]    flag byte: bit0→desc+0x10, bit1→desc+0x14, bit2→desc+0x20
+        #   [+9:2]  ushort          → desc+0x18
+        #   [+11]   HIGH byte of the +8 dword → desc+0x1c  TERRAIN (_TrnNumber) ★
+        hdr = bytearray(12)
+        hdr[0:4]  = (planeset & 0xFFFFFFFF).to_bytes(4, 'little')  # plane-set (default)
+        hdr[4:8]  = _arena_gameindex(creator)                     # [00 ff ff creator[0]]
+        hdr[8]    = 0                                             # flag bits (none)
+        hdr[9:11] = (0).to_bytes(2, 'little')                     # desc+0x18 (unused)
+        hdr[11]   = trn                                           # TERRAIN → desc+0x1c ★
+        # Name slots (empirically, from v167 live test): the FIRST name is the
+        # category/section HEADER the client groups rows under; the SECOND name is
+        # the arena's own row label. So name1 = category, name2 = the room's name.
+        category = 'Custom Arenas'
+        records.append((bytes(hdr), category.encode()[:31], room_name.encode()[:31]))
+        listed.append((room_name, trn))
+    # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven — it keeps starting
+    # new records until consumed >= len, with NO bounds check, so leftover zero pad
+    # would spawn a phantom record and read past the buffer → crash. build_appspace_pkt
+    # frames to bc*16+1, so we pad the LAST record's *category* (name1) with spaces
+    # (before its NUL) to land exactly on the block boundary — keeping the arena's
+    # display name (name2) clean (no trailing spaces).
+    def _assemble(extra_pad):
+        d = bytearray([0xd2])
+        last = len(records) - 1
+        for i, (hdr, cat, arena) in enumerate(records):
+            d.extend(hdr)
+            if i == last and extra_pad > 0:
+                d.extend(cat + (b'\x20' * extra_pad) + b'\x00')
+            else:
+                d.extend(cat + b'\x00')
+            d.extend(arena + b'\x00')
+        return d
+    d0 = _assemble(0)
+    L  = len(d0)
+    bc = 0 if L <= 1 else (L - 1 + 15) // 16
+    size = bc * 16 + 1
+    pad = size - L
+    data = _assemble(pad)
+    pkt = build_appspace_pkt(bytes(data)); bc = pkt[0]
+    desc = [f'{n}(trn{t}:{TERRAIN_NAMES.get(t, "?")})' for n, t in listed]
+    log('ARENALIST', f'0xd2 → {len(rooms)} arena(s) payload={len(data)}B '
+                     f'bc={bc}(p3={bc*16+1}) pad={pad}: {desc}')
+    log('ARENALIST', f'0xd2 payload hex: {bytes(data).hex()}')
+    return pkt
+
+# ─── 0xd4 / 212  GAME_DEF push (v164 experiment) ──────────────────────────────
+#
+# The 0xd2 list record carries ONLY GameIndex + 2 names; the parser never sets the
+# descriptor's terrain field (desc+0x1c stays 0 → _TrnNumber>=1 assert at tab-open).
+# Terrain lives in the arena's GAME_DEF (a packed BINARY blob, NOT INI text — the
+# client pretty-prints it as Terrain=N). The 212 handler FUN_004ed9c0 reads the
+# message as [0xd4][LobbyIndex:4 != 0][binary blob], then FUN_0057f390 deserialises
+# the blob into the arena object (incl. terrain). Hypothesis: the list display
+# resolves each arena's terrain from a GAME_DEF the client has cached, keyed by
+# GameIndex. A server arena this client never selected was never cached → terrain 0
+# → crash. So push the stored GAME_DEF as a 212 (same GameIndex as the 0xd2 record)
+# BEFORE the list, so the arena — with its real terrain — is cached first.
+def build_gamedef_212(room):
+    """[0xd4][GameIndex:4][LZ GAME_DEF] as an APPSPACE packet, EXACT bc*16+1 size.
+    The stored blob is LZ-compressed at a size (≡4 mod16) that can't sit on the
+    bc*16+1 grid. We decompress it and RE-ENCODE it as an all-literals LZ stream whose
+    size we control (comment pad) so the 212 payload lands exactly on bc*16+1 — no
+    over-read, valid version byte, parser consumes the whole decompressed buffer."""
+    creator = (room[2] or room[1] or 'Arena')
+    gidx    = _arena_gameindex(creator)          # 4 bytes [00 ff ff creator[0]] (non-zero)
+    blob    = bytes(room[6]) if len(room) > 6 and room[6] else b''
+    comp, D, pad = build_lz_gamedef(blob)
+    if comp is None:
+        log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
+        return None
+    payload = bytes([0xd4]) + gidx + comp
+    n = len(payload); bc = 0 if n <= 1 else (n - 1 + 15) // 16
+    log('GAMEDEF212', f'212 LZ gidx={gidx.hex()} decompressed={D}B pad={pad} '
+                      f'comp={len(comp)}B name={room[1]!r} payload={n}B bc*16+1={bc*16+1} '
+                      f'{"ALIGNED" if n==bc*16+1 else "MISALIGNED!"}')
+    return build_appspace_pkt_exact(payload)
+
+def build_join_game_answer_201(client_number=0, player_index=0):
+    """FA message 201 (0xc9) = VNET::JoinToGameAnswer — the server's grant in reply to
+    the client's SendEnterToGame (200/0xc8). Decoded from handler FUN_004f88f0
+    (VNET::JoingToGameAnswerCB), dispatch slot _DAT_00c821fc (id 201):
+        [0xc9][ClientNumber:4 LE signed][PlayerIndex:4 LE signed]   (read at +1 and +5)
+    ClientNumber >= 0 AND PlayerIndex >= 0  →  client allocates its client+player
+    objects, sets DAT_00bfedb4=ClientNumber (clears the 0xfffffffe 'entering' state),
+    sends 0x41, sets DAT_00c82eb0=0 (STOPS the 0x43 poll) and DAT_00c82348=1 (game
+    active). ClientNumber < 0  →  'not granted, keep polling' (what our 0x43 confirm
+    effectively signalled). Handler reads fixed offsets, so bc*16+1 zero-pad is fine."""
+    payload = (bytes([0xc9])
+               + (client_number & 0xFFFFFFFF).to_bytes(4, 'little')
+               + (player_index  & 0xFFFFFFFF).to_bytes(4, 'little'))
+    log('JGA201', f'JoinToGameAnswer ClientNumber={client_number} PlayerIndex={player_index} '
+                  f'payload={payload.hex()}')
+    return build_appspace_pkt(payload)
+
+
+# ── IN-ARENA CHAT (msg 20 / 0x14) ──────────────────────────────────────────────
+# Decoded from the message-20 dispatch handler FUN_004f6030 (lobby builder
+# FUN_004f1490 installs it at slot _DAT_00c81f28). The handler:
+#   iVar6 = GetPlayer(*(param_1+2))          ; PlayerIndex at +2 (4 bytes, LE)
+#       if 0  →  "ChatMessage from unknown player with PlayerIndex=%i" + drop
+#   channel = *(param_1+1)                   ; +1
+#       3      →  FUN_0046a420(0,0xd,"%s: %s", name, text)            (plain)
+#       4      →  uppercase(text) then same + sound                  (shout)
+#       0/1/2  →  team/squadron-coloured "%s: %s", BUT only if player+0x1c != 0;
+#                 squad colour looked up from *(param_1+6) (SquadronId)
+#   text = param_1+10
+# So the DISPLAY wire form (what the client renders) is:
+#       [0x14][channel:1][PlayerIndex:4 LE][SquadronId:4 LE][text\0]
+# i.e. the SEND form [0x14][channel][text\0] with an 8-byte PlayerIndex+SquadronId
+# inserted after the channel. Our old blind echo left the text where PlayerIndex
+# should be, so the handler read "Hell" (0x6C6C6548) as the index → unknown player.
+# We stamp PlayerIndex=0 — the player allocated by the 201 grant — so it resolves to
+# the local pilot ("Test1").
+
+def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
+    """Build the DISPLAY form of msg 20 so the client renders a chat line."""
+    if isinstance(text, str):
+        text = text.encode('ascii', 'replace')
+    text = text.split(b'\x00')[0]  # stop at first NUL — drop any trailing wrapper bytes
+    payload = (bytes([0x14, channel & 0xFF])
+               + (player_index & 0xFFFFFFFF).to_bytes(4, 'little')
+               + (squadron_id  & 0xFFFFFFFF).to_bytes(4, 'little')
+               + text + b'\x00')
+    return build_appspace_pkt(payload)
+
+
+def reflect_chat_20(s, channel, text, player_index=0):
+    """Reflect an in-arena chat so it renders in the chat pane. Recipients are scoped to
+    the SENDER's room (multi-room isolation) and, for team/squadron channels, further to
+    same-side / same-squad players: channel 0=all (whole room), 1=team (same nation),
+    2=squadron (same squad — squad tracking TODO, currently sender only). The line is
+    stamped with the SENDER's PlayerIndex so every recipient resolves it to the sender's
+    name via FUN_004f6030's GetPlayer."""
+    if isinstance(text, (bytes, bytearray)):
+        disp = text.split(b'\x00')[0].decode('ascii', 'replace')
+    else:
+        disp = str(text)
+    room = s.current_room
+    room_players = get_sessions_in_room(room) if room is not None else []
+    if channel == 1:
+        targets = [x for x in room_players if x.nation == s.nation]
+    elif channel == 2:
+        targets = [s]                       # squadron membership not modelled yet
+    else:
+        targets = list(room_players)        # channel 0 = whole room
+    if s not in targets:
+        targets.append(s)
+    if not targets:
+        targets = [s]
+    pkt = build_chat_display_20(channel, text, player_index=s.player_index)
+    log('CHAT20', f'reflect ch={channel} {disp!r} from PI={s.player_index} '
+                  f'→ {len(targets)} player(s) in room {room}')
+    for sess in targets:
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
+                         f'← chat-20 ch={channel} {disp!r}', to=3.0), daemon=True).start()
+
+def build_arena_players_213(room, counts=None, names=None):
+    """FA message 213 — arena player info, the reply to the client's 'out 213' request.
+    Layout decoded from incoming-213 handler FUN_004ef6e0:
+        [0xd5][GameIndex:4][8 × uint16 per-nation counts]   (header = 0x15 = 21 bytes)
+        then a length-driven list of [player_name\\0] (the arena roster).
+    The 8 uint16s at +5..+0x13 are pushed to observers as per-nation player tallies
+    (the Nations-list counts). local_30 (GameIndex) must be non-zero or the handler
+    no-ops. Sent at EXACT length (no bc*16+1 zero pad) so the roster loop ends on the
+    wire length — zero padding would be parsed as phantom empty-name players."""
+    creator = (room[2] or room[1] or 'Arena')
+    gidx = _arena_gameindex(creator)                         # 4 bytes, non-zero
+    counts = (list(counts) if counts else [0] * 8)[:8]
+    while len(counts) < 8:
+        counts.append(0)
+    payload = bytearray([0xd5]) + gidx
+    for c in counts:
+        payload += int(c & 0xFFFF).to_bytes(2, 'little')     # 8 ushorts = 16 bytes
+    # COUNTS ONLY — no trailing strings. Re-RE of the incoming-213 handler
+    # (FUN_004ef6e0) shows the strings after +0x15 are NOT a roster: each NUL-string
+    # (budgeted strlen+1+2) is appended to a UI list — and that list renders in the
+    # arena-selection page's "Combat Action" box. Our invented roster is exactly the
+    # "player names + corrupt strings" bug (the per-record trailing bytes, e.g.
+    # nation=0xff, parsed as 1-char garbage strings). Per-nation grouping comes from
+    # the 8 counts above, not from names here. Until we emulate real combat-action
+    # lines, send counts only; bc-grid zero padding may yield blank entries at most.
+    if names:
+        log('ARENA213', f'NOTE: roster names suppressed (combat-action box): {names}')
+    log('ARENA213', f'213 gidx={gidx.hex()} counts={counts} (counts-only) '
+                    f'payload={len(payload)}B')
+    return build_appspace_pkt_exact(bytes(payload))
+
+# ── PLAYER-OBJECT LAYER (msgs 62 / 63 / 96) ────────────────────────────────────
+# Decoded from FA.exe VNet_Rcv.cpp handlers (dispatch table FUN_004f1490):
+#   msg 62 (0x3e) → FUN_004fa5f0  "Add existing REMOTE_PLAYER %s PlayerIndex=%i"
+#   msg 63 (0x3f) → FUN_004fa9c0  ChangePlayerCB (op=add/remove/change-camp)
+#   msg 96 (0x60) → FUN_004f53b0 → FUN_00629600  SCORE_TABLE (ScoreTable.cpp)
+#
+# CRITICAL FRAMING — THE bc*16+1 OVER-DELIVERY BUG (root cause of every CTD v182–v186):
+# The client's appspace layer does NOT deliver the exact datagram length to message
+# handlers. It delivers Length = bc*16+1, where bc is the block count in the vcnc
+# header. PROVEN by the client trace (vcncnet…510.log) for our 8-byte msg 63:
+#     ProcessMessages(256) Cmd=0 Size=17
+#     Receiving Message 0 - Data: 3f 00 00 00 00 00 00 01 | 00 00 00 8a 00 00 00 00 e6
+# Our 7-byte record, then 9 bytes of STALE RECEIVE-BUFFER GARBAGE (here the head of
+# the prior 212 stream: 8a 00 00 ...). All three handlers (62 FUN_004fa5f0,
+# 63 FUN_004fa9c0, 96 FUN_00629600) are length-driven record loops that parse until
+# Length runs out and then assert "Length>=0" at severity 0xffffffff (fatal). The
+# garbage tail is parsed as phantom records; the final partial record drives Length
+# negative → assertion → DLL_PROCESS_DETACH ~2s later. This — NOT use-after-free,
+# NOT premature world state — was the killer in every player-object crash.
+#
+# THE RULE: a length-driven payload MUST TILE EXACTLY to bc*16+1, i.e.
+# len(payload) % 16 == 1, with the padding forming PARSER-VALID, side-effect-free
+# records. build_appspace_pkt_exact is a no-op fiction here (the client ignores the
+# real length); each builder below pads itself to the bc*16+1 boundary:
+#   63: pad to a multiple of 16 fixed records with dummy PlayerIndex (lookup fails →
+#       "Unknown RemotePlayer" log → skipped, zero side effects).
+#   62: pad the LAST record's trailing (unused, scanned) string — absorbs 0..15B.
+#   96: append one pad group whose count tiles the remainder (7 is invertible mod 16);
+#       it writes zero score-defs at a high object-type base → harmless.
+#
+# DEPENDENCY CHAIN (the actual player-object lifecycle):
+#   62 creates the REMOTE_PLAYER object  →  63 sets its Camp()/side (player+0x2c)
+#   →  96 feeds the scoreboard.  v175's guess that the 121-byte msg 58 set side
+#   membership was WRONG: msg 58 (FUN_004eff50, LobbyRcv.cpp) is a LOBBY 3-byte-record
+#   list, not the in-arena side-setter. Side membership is msg 63 op=change-camp.
+
+def _pad_to_bc_boundary_len(payload_len):
+    """Return how many bytes to add so payload_len becomes ≡ 1 (mod 16) = bc*16+1."""
+    return (1 - payload_len) % 16
+
+MSG_ADD_PLAYER_62      = 0x3e
+MSG_CHANGE_PLAYER_63   = 0x3f
+MSG_SCORE_TABLE_96     = 0x60
+
+# msg 63 ChangePlayerCB ops (the per-record op byte at record+6):
+# msg 63 ChangePlayerCB ops (the per-record op byte at record+6). Decoded from the
+# branch structure of FUN_004fa9c0: after the player is found by index,
+#     if (iVar12 == 1) → CAMP path: writes rp->Camp() at player+0x2c
+#     else (any op != 1) → DELETE path: FUN_007fca00 + free(player object)
+# v182 SHIPPED THESE INVERTED (CAMP=2) → op=2 hit the delete path and freed a live
+# player object → crash-to-desktop on side-select (messages07.log, WinError 10054).
+CP_OP_CAMP   = 1     # iVar12==1 → change-camp (set side); the ONLY op that sets +0x2c
+CP_OP_REMOVE = 0     # any op != 1 → delete the remote player object (we use 0)
+
+def build_add_player_62(records):
+    """FA msg 62 (0x3e) — Add existing REMOTE_PLAYER (handler FUN_004fa5f0).
+    Per-record wire layout (decompiled record stride):
+        [PlayerIndex:4 LE][side:1][reserved:1][name\\0][str2\\0]
+    The handler reads PlayerIndex at +0, side at +4 (masked &0xf, valid 0..8 else
+    0xffffffff), a byte at +5, then a NUL-terminated name at +6, then a SECOND
+    NUL-terminated string (scanned but unused for our purposes — send empty).
+    `records` = list of (player_index, side, name). side None → 0xff (unassigned).
+    Sent at EXACT length — see CRITICAL FRAMING note above.
+
+    *** INVARIANT: a 62 sent to client X must NEVER contain X's own PlayerIndex. ***
+    The msg 201 grant handler (FUN_004f88f0) already creates the LOCAL player's entry
+    in the same table (FUN_004f3230, camp=-1, local pilot name). A 62 record for an
+    existing index takes the "Add existing REMOTE_PLAYER" path: delete + free + re-add.
+    For the local index that would free the live local player while the GamerClient
+    (DAT_00c6eb98+0x128) still points at it. (NOTE: the v185 self-62 CTD was ALSO
+    caused by bc*16+1 framing garbage — see v187 — but this delete+re-add hazard is
+    real independent of framing, so the invariant stands. Peers only.)"""
+    data = bytearray([MSG_ADD_PLAYER_62])
+    for pi, side, name in records:
+        sb = 0xff if side is None else (side & 0xff)
+        nb = (name.encode('ascii', 'replace') if isinstance(name, str) else name)
+        data += (pi & 0xFFFFFFFF).to_bytes(4, 'little')
+        data += bytes([sb, 0x00])
+        data += nb + b'\x00'      # name
+        data += b'\x00'           # str2 (empty, NUL-terminated)
+    # TILE to bc*16+1 (see CRITICAL FRAMING): the handler scans str2 to its NUL, so
+    # we can grow the LAST record's str2 with filler bytes before its terminator
+    # without adding a phantom record. Remove the lone terminator we just wrote,
+    # insert `pad` filler bytes, then re-terminate.
+    pad = _pad_to_bc_boundary_len(len(data))
+    if pad:
+        data = data[:-1] + (b'\x20' * pad) + b'\x00'   # spaces inside str2, then NUL
+    assert len(data) % 16 == 1, f'62 framing {len(data)} !≡1 mod16'
+    log('PLAYER62', f'AddPlayer {len(records)} rec(s) (pad={pad}): '
+                    f'{[(pi, sd, (n if isinstance(n,str) else n.decode("ascii","replace"))) for pi,sd,n in records]}')
+    return build_appspace_pkt_exact(bytes(data))
+
+# Dummy PlayerIndex for 63 padding records: a value the client's player table will
+# never contain, so FUN_007fcac0 lookup fails → "Unknown RemotePlayer(%i)" log →
+# record skipped with ZERO side effects (no add, no delete, no camp write).
+DUMMY_PLAYER_INDEX = 0xFFFFFFFE
+
+def build_change_player_63(records):
+    """FA msg 63 (0x3f) — ChangePlayerCB (handler FUN_004fa9c0). Fixed 7-byte records:
+        [PlayerIndex:4 LE][side:1][reserved:1][op:1]
+    op (record+6), from the handler's branch structure after the player is found:
+        op == 1  → CHANGE-CAMP: writes rp->Camp() (player+0x2c) to `side` (masked &0xf).
+                   This is the message that moves a player between nation groups.
+        op != 1  → DELETE: frees the remote player object (FUN_007fca00 + free).
+    An unknown PlayerIndex logs "Unknown RemotePlayer(%i)" and is skipped — so the
+    target must already exist (via the 201 grant for self, or a peer's 62), and must
+    NOT be the recipient's own index for a delete op.
+    `records` = list of (player_index, side, op).
+
+    FRAMING: records are a fixed 7 bytes, payload = 1 + 7*n. To tile bc*16+1 we need
+    (1 + 7*n) ≡ 1 (mod 16) → 7*n ≡ 0 (mod 16) → n ≡ 0 (mod 16). We pad the record
+    count up to the next multiple of 16 with DUMMY_PLAYER_INDEX records (op=0; lookup
+    fails → skipped, no side effects). See CRITICAL FRAMING note."""
+    recs = list(records)
+    n = len(recs)
+    target = ((n + 15) // 16) * 16 if n else 16   # next multiple of 16 (min 16)
+    while len(recs) < target:
+        recs.append((DUMMY_PLAYER_INDEX, None, 0))   # skipped by the handler
+    data = bytearray([MSG_CHANGE_PLAYER_63])
+    for pi, side, op in recs:
+        sb = 0xff if side is None else (side & 0xff)
+        data += (pi & 0xFFFFFFFF).to_bytes(4, 'little')
+        data += bytes([sb, 0x00, op & 0xff])
+    assert len(data) % 16 == 1, f'63 framing {len(data)} !≡1 mod16'
+    log('PLAYER63', f'ChangePlayer {n} real + {target - n} pad rec(s): {records}')
+    return build_appspace_pkt_exact(bytes(data))
+
+def build_score_table_96(nation_scores=None, object_groups=None):
+    """FA msg 96 (0x60) — SCORE_TABLE (FUN_004f53b0 → FUN_00629600, ScoreTable.cpp).
+
+    *** SEND ONLY ON REQUEST (bare inbound 0x60) — NEVER UNSOLICITED AT ENTRY ***
+    v183 sent this on the 201 grant and crashed arena-join (messages08.log): the
+    handler frees+reallocates the host-side score-table object before the client's
+    world is stood up (~3s stall → WinError 10054). The client REQUESTS the table
+    with a bare 0x60 right after the FLY 23 StartPlace grant (messages09.log) —
+    answer it then, and only then.
+
+    The dispatch handler FUN_004f53b0 passes (payload+1, len-1) to FUN_00629600, which
+    reads its buffer starting at the VERSION byte:
+        [0x60][version=0x02][7 × uint16 LE tallies]   (handler buffer = version-first)
+    so on the wire, immediately after the 0x60 msg-id comes version 0x02, then the 7
+    ushorts (param_1[0..6]). version MUST be 2 or the client asserts
+    "Wrong SCORE_TABLE version". Header total = 1(id)+1(ver)+14 = 16 bytes.
+    Then a length-driven list of object-score groups; each group:
+        [base_index:1][count:1] then (count+1) × 7-byte object records
+        [obj_type:1][score:2 LE][kills:2 LE][?:2 LE]
+    NOTE the +1: the parser does `param_2 = count + 1` and loops that many times,
+    consuming 9 + 7*count bytes per group, then asserts Length>=0. An empty arena
+    needs NO real groups (loop guard `param_3>0` ends immediately after the header).
+
+    FRAMING: like 62/63 the client delivers Length=bc*16+1, so the payload must tile
+    to ≡1 (mod 16) or the leftover bytes are parsed as a garbage group → the
+    ScoreTable.cpp:0x6c "Length>=0" assert (fatal). Header is 16B (≡0 mod16), so an
+    otherwise-empty table needs +1 byte... but a group is min 9B. We instead append
+    ONE pad group sized so 9+7N tiles the whole payload: since gcd(7,16)=1 there is
+    always an N in 0..15. The pad group uses a high base_index (240) so its zero
+    score-defs land on unused object-type slots — harmless. See CRITICAL FRAMING."""
+    ns = (list(nation_scores) if nation_scores else [0] * 7)[:7]
+    while len(ns) < 7:
+        ns.append(0)
+    data = bytearray([MSG_SCORE_TABLE_96, 0x02])        # msg-id, then SCORE_TABLE version
+    for v in ns:
+        data += int(v & 0xFFFF).to_bytes(2, 'little')   # 7 ushorts = 14 bytes
+    n_real_groups = 0
+    if object_groups:
+        for base_index, recs in object_groups:
+            n_real_groups += 1
+            # count byte = len(recs)-1 because the parser loops count+1 times
+            cnt = max(len(recs) - 1, 0)
+            data += bytes([base_index & 0xff, cnt & 0xff])
+            for (obj_type, score, kills, extra) in recs:
+                data += bytes([obj_type & 0xff])
+                data += int(score & 0xFFFF).to_bytes(2, 'little')
+                data += int(kills & 0xFFFF).to_bytes(2, 'little')
+                data += int(extra & 0xFFFF).to_bytes(2, 'little')
+    # TILE to bc*16+1 with one pad group consuming 9+7N bytes.
+    deficit = _pad_to_bc_boundary_len(len(data))        # 0..15 bytes still needed
+    # We must add a whole group: solve 9 + 7N ≡ deficit (mod 16) for N in 0..15.
+    inv7 = 7   # 7*7=49≡1 mod16, so 7⁻¹ ≡ 7
+    N = (inv7 * (deficit - 9)) % 16
+    pad_recs = N + 1                                     # parser loops count+1 times
+    data += bytes([0xF0, N & 0xff])                     # base_index=240, count=N
+    data += b'\x00' * (7 * pad_recs)                    # zeroed score-defs
+    assert len(data) % 16 == 1, f'96 framing {len(data)} !≡1 mod16'
+    log('SCORE96', f'ScoreTable nation_scores={ns} real_groups={n_real_groups} '
+                   f'pad_group(N={N}, recs={pad_recs})')
+    return build_appspace_pkt_exact(bytes(data))
+
+def push_player_roster_62(s, reason=''):
+    """Send msg 62 to s: the full set of OTHER players already in s's room, so the
+    client builds a REMOTE_PLAYER object for each. Self is excluded (the local pilot
+    is the player object allocated by the 201 grant, not a remote)."""
+    room_id = s.current_room
+    if room_id is None:
+        return
+    peers = [x for x in get_sessions_in_room(room_id) if x is not s]
+    if not peers:
+        log('PLAYER62', f'no peers in room {room_id} to advertise to {s.current_pilot} {reason}')
+        return
+    records = [(p.player_index, p.nation, p.current_pilot or 'Player') for p in peers]
+    pkt = build_add_player_62(records)
+    send_rel(s, pkt, f'← AddPlayer 62 ({len(records)} peer(s)){(" " + reason) if reason else ""}', to=5.0)
+
+def broadcast_player_join_62(joiner, reason=''):
+    """Tell every OTHER player in joiner's room to add `joiner` as a REMOTE_PLAYER
+    (msg 62, single record). Symmetric to push_player_roster_62, for the live case
+    where someone enters a room others are already in."""
+    room_id = joiner.current_room
+    if room_id is None:
+        return
+    peers = [x for x in get_sessions_in_room(room_id) if x is not joiner]
+    if not peers:
+        log('PLAYER62', f'no peers in room {room_id} to announce {joiner.current_pilot} to '
+                        f'{(reason or "").strip()}')
+        return
+    rec = [(joiner.player_index, joiner.nation, joiner.current_pilot or 'Player')]
+    pkt = build_add_player_62(rec)
+    n = 0
+    for sess in peers:
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
+                         f'← AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
+                         to=3.0), daemon=True).start()
+        n += 1
+    log('PLAYER62', f'broadcast join of {joiner.current_pilot} → {n} peer(s) in room {room_id}')
+
+def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
+    """Broadcast a msg 63 ChangePlayerCB for session s to EVERY player in the room,
+    including s themselves.
+
+    CORRECTED (v185/v186): v183's peers-only rule was a misread of FUN_004fa9c0 —
+    the `iVar12 != DAT_00bfedb4` skip is the GetClient (FUN_004f2560) scan over the
+    512-entry CLIENT table, skipping the local CLIENT NUMBER (DAT_00bfedb4 is set to
+    jga->ClientNumber in the 201 handler), not the player lookup. The rp is resolved
+    through FUN_007fcac0 for ANY index, INCLUDING the recipient's own: the msg 201
+    grant handler (FUN_004f88f0) creates the local player's entry in that table
+    (camp=-1, local pilot name) at join time. A self-directed 63 op=1 therefore
+    resolves immediately, sets the camp (which drives friendly/enemy CHAT COLOR via
+    FUN_0046bba0 in the msg 20 handler), and prints the "<pilot> changed to
+    <nation>" system chat line. This is the designed team-change mechanism.
+    The v182 crash was solely the op=2 delete path. NEVER send msg 62 about a
+    player's own index (see build_add_player_62 invariant)."""
+    room_id = s.current_room
+    if room_id is None:
+        return
+    rec = [(s.player_index, side, op)]
+    pkt = build_change_player_63(rec)
+    n = 0
+    for sess in get_sessions_in_room(room_id):
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
+                         f'← ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
+                         f'{(" " + reason) if reason else ""}', to=3.0), daemon=True).start()
+        n += 1
+    log('PLAYER63', f'broadcast camp-change {s.current_pilot} side={side} op={op} → '
+                    f'{n} session(s) incl. self')
+
+def send_arenalist_with_gamedefs(s, rooms, label):
+    """v164: send each room's 212 GAME_DEF FIRST, then the 0xd2 list.
+    The 212 parse (FUN_0057bee0) calls the terrain setter FUN_004c7cd0(terrain) with
+    the GAME_DEF's terrain ushort. build_lz_gamedef now patches that ushort from 0 to a
+    valid terrain (FORCE_GAMEDEF_TERRAIN), so when the single arena is auto-selected and
+    the list-box builds its Trn preview, _TrnNumber>=1 holds. (v163 sent the list alone
+    and still asserted: with no 212 the current terrain stayed 0.)"""
+    for r in rooms:
+        if len(r) > 6 and r[6]:
+            pkt = build_gamedef_212(r)
+            if pkt is not None:
+                send_rel(s, pkt, f'← GAME_DEF 212 (room {r[0]})', to=5.0)
+                time.sleep(0.01)
+    send_rel(s, build_arenalist(rooms), label, to=3.0)
+
+def build_chat_broadcast(pilot_name, message):
+    nb = (pilot_name.encode() if isinstance(pilot_name,str) else pilot_name) + b'\x00'
+    mb = (message.encode() if isinstance(message,str) else message) + b'\x00'
+    return build_appspace_pkt(bytes([0xcd]) + nb + mb)
+
+def build_ui_player_update(pilot_name, is_join=True):
+    """Build 0xcc LmsChangePlayers packet to update the lobby UI list."""
+    action_flag = 0x01 if is_join else 0x00
+    status_byte = 0x00 if is_join else 0xFF
+    nb = (pilot_name.encode() if isinstance(pilot_name,str) else pilot_name) + b'\x00'
+    return build_appspace_pkt(bytes([0xcc, action_flag, status_byte]) + nb)
+
+# ─── Session state ────────────────────────────────────────────────────────────
+
+_session_counter = itertools.count(1)
+
+class S:
+    def __init__(self, cid, addr):
+        self.sid = next(_session_counter)
+        self.cid=cid; self.addr=addr; self.sq=0; self.ts=0
+        self.rx=0; self.closing=False; self.t0=time.time()
+        self.rseq=0; self._lock=threading.Lock(); self._evts={}
+        self.auth_done=False; self.post_auth_cmds=[]
+        self.account=None; self.auth64=None; self.auth_payload=None
+        self.current_pilot=None; self.current_slot=0; self.current_room=None; self.room_slot=0; self.last_43_ts=0.0; self.entered_game=False; self.in_game=False; self.client_granted=False
+        # ── Per-room game state (multi-room: every player's runtime state is keyed
+        # to the room they entered, so chat / roster / positions never cross rooms) ──
+        self.client_number=0      # assigned at the 201 grant, unique WITHIN the room
+        self.player_index=0       # ditto; stamped into chat/roster so it resolves to us
+        self.nation=None          # selected side 0..7 (US=0…), None = "In Menu"/unassigned
+    def nsq(self): v=self.sq; self.sq=(self.sq+1)&0xFF; return v
+    def nts(self): self.ts=(self.ts+1)&0xFF; return self.ts
+    def ela(self): return time.time()-self.t0
+    def nrel(self):
+        with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0x1FF; return v
+    def sig(self, seq):
+        with self._lock: e=self._evts.get(seq)
+        if e: e.set(); return True
+        return False
+    def mke(self, seq):
+        e=threading.Event()
+        with self._lock: self._evts[seq]=e; return e
+    def rme(self, seq): self._lock.acquire(); self._evts.pop(seq,None); self._lock.release()
+
+sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+sock.bind((HOST,PORT)); sock.settimeout(0.5)
+sids={}; sadrs={}; sl=threading.Lock(); running=True
+
+def get_s(addr):
+    with sl: return sadrs.get(addr)
+
+def send_rel(s, payload, label='', to=5.0):
+    seq=s.nrel(); e=s.mke(seq)
+    try: sock.sendto(build_rel(payload,seq),s.addr)
+    except OSError: s.rme(seq); return False
+    bc=payload[0]
+    log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
+    ok=e.wait(timeout=to); s.rme(seq)
+    log('TX/RELIABLE',f'seq={seq} {"ACKed ✓" if ok else "TIMEOUT ✗"}')
+    return ok
+
+def get_all_sessions():
+    with sl: return [s for s in sids.values() if s.auth_done and not s.closing]
+
+def get_sessions_in_room(room_id):
+    """All players currently INSIDE a given game room. The unit of isolation for
+    multi-room hosting: chat, roster and (later) position updates are broadcast only
+    to the sessions this returns, so nothing leaks between concurrently-hosted rooms."""
+    if room_id is None: return []
+    with sl:
+        return [s for s in sids.values()
+                if s.auth_done and not s.closing and s.entered_game
+                and s.current_room == room_id]
+
+def assign_player_slot(s, room_id):
+    """Allocate a room-scoped ClientNumber/PlayerIndex when a player enters a room.
+    Index = number of players already in that room, so the first player is 0, the
+    next 1, etc. — unique within the room but independent across rooms."""
+    peers = [x for x in get_sessions_in_room(room_id) if x is not s]
+    s.client_number = len(peers)
+    s.player_index  = len(peers)
+    log('ROOM', f'{s.current_pilot} → room {room_id} slot ClientNumber={s.client_number} '
+                f'PlayerIndex={s.player_index} (peers={len(peers)})')
+    return s.client_number, s.player_index
+
+def _find_room_by_id(room_id):
+    for r in db_get_open_rooms():
+        if r[0] == room_id:
+            return r
+    return None
+
+def push_arena_players_213(s, reason=''):
+    """Rebuild + broadcast msg 213 for s's room from the live per-session nation state,
+    so the Nations list counts and the per-side roster reflect who picked which side.
+    Strictly room-scoped: only players inside this room receive it."""
+    room_id = s.current_room
+    if room_id is None:
+        return
+    room = _find_room_by_id(room_id)
+    if room is None:
+        return
+    sessions = get_sessions_in_room(room_id)
+    counts = [0] * 8
+    roster = []
+    for sess in sessions:
+        nm = sess.current_pilot or 'Player'
+        roster.append((nm, sess.nation))
+        if sess.nation is not None and 0 <= sess.nation < 8:
+            counts[sess.nation] += 1
+    pkt = build_arena_players_213(room, counts=counts, names=roster)
+    log('TEAM', f'push 213 room={room_id} counts={counts} roster={roster} {reason}')
+    for sess in sessions:
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
+                         f'← 213 re-push ({reason})', to=3.0), daemon=True).start()
+
+def handle_team_select(s, nation):
+    """Client picked / left a side — msg 68 (0x44) = [0x44][nation:1][?:1]. nation 0..7
+    is a side index (US=0, GB=1, SU=2, GE=3, JP=4, NU=…); 0xff / out-of-range = leave.
+    Msg 68 itself has NO inbound dispatch handler in FA.exe, so it must NOT be echoed.
+
+    SOLVED (v182 → v183 → v185): side membership is driven by msg 63 ChangePlayerCB
+    op==1 CHANGE-CAMP (FUN_004fa9c0). v175's msg-58 guess was wrong (msg 58 =
+    LobbyRcv list). History of fixes:
+      v182 CTD: op was inverted — CAMP shipped as 2, but op==1 is camp and op!=1 is
+        the DELETE path; op=2 freed a live player object.
+      v183 overcorrection: made the 63 peers-only, citing the `iVar12 != DAT_00bfedb4`
+        skip. MISREAD — that skip is in a separate 512-entry in-world object scan;
+        the rp lookup (FUN_007fcac0) resolves ANY index including the recipient's
+        own, and the op==1 path prints the "<pilot> changed to <nation>" chat line.
+        Result: own team change never showed in chat (messages09.log).
+      v185/v186: 63 is broadcast to ALL room members INCLUDING the sender. The self
+        rp ALWAYS exists by team-select time: the msg 201 grant handler
+        (FUN_004f88f0) creates the local player's table entry (camp=-1) at join, so
+        the self-63 resolves, sets the camp (chat color), and prints the line. The
+        v185 0x66-roster experiment is REVERTED — a 62 self-record deletes that
+        live local entry → use-after-free CTD (messages10.log).
+    We still record s.nation for chat/roster scoping and the DB layer."""
+    if nation is None or nation == 0xff or nation > 7:
+        s.nation = None
+        raw = 0xff if nation is None else nation
+        log('TEAM', f'{s.current_pilot} LEFT team (raw=0x{raw:02x}) — msg 63 op=CAMP side=0xff')
+        if s.entered_game and s.current_room is not None:
+            broadcast_player_change_63(s, None, op=CP_OP_CAMP, reason='(team leave)')
+    else:
+        s.nation = nation
+        log('TEAM', f'{s.current_pilot} joined side {nation} — msg 63 op=CAMP')
+        if s.entered_game and s.current_room is not None:
+            broadcast_player_change_63(s, nation, op=CP_OP_CAMP, reason='(team join)')
+
+def _find_room_by_gidx(game_idx):
+    """Resolve an open room by its 32-bit GameIndex (LE int)."""
+    for r in db_get_open_rooms():
+        if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+            return r
+    return None
+
+def handle_gamedef_request(s, game_idx, via=''):
+    """FA msg 212 — on-demand GAME_DEF for the selected arena ("out 212'5").
+    Without the reply the arena-select dialog never populates: blank briefing /
+    combat text, empty nations list, Join disabled. Shared by the direct
+    (type=0x52 sub=0xd4) and compound-wrapped paths — the compound variant used to
+    fall into the blanket inner_type==0x52 drop, which is exactly the intermittent
+    'empty description + disabled Join' bug."""
+    room = _find_room_by_gidx(game_idx)
+    if room is not None:
+        pkt = build_gamedef_212(room)
+        if pkt is not None:
+            send_rel(s, pkt, f'← GAME_DEF 212 on-demand{via} (room {room[0]} gidx=0x{game_idx:08x})', to=5.0)
+        else:
+            log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: LZ build failed')
+    else:
+        log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: no matching open room — silent')
+
+def handle_213_request(s, game_idx, via=''):
+    """FA msg 213 — arena player-info request (counts + roster). If the requester's
+    own room, build from live per-session nation state; otherwise DB roster."""
+    room = _find_room_by_gidx(game_idx)
+    if room is None:
+        log('POST-AUTH', f'213 request{via} gidx=0x{game_idx:08x}: no matching room — silent')
+        return
+    sessions = get_sessions_in_room(room[0])
+    if sessions:
+        counts = [0] * 8
+        roster = []
+        for sess in sessions:
+            roster.append((sess.current_pilot or 'Player', sess.nation))
+            if sess.nation is not None and 0 <= sess.nation < 8:
+                counts[sess.nation] += 1
+    else:
+        try:
+            roster = [(p, None) for p, _ in db_get_pilots_in_room(room[0])]
+        except Exception:
+            roster = []
+        counts = [0] * 8
+    send_rel(s, build_arena_players_213(room, counts=counts, names=roster),
+             f'← ArenaPlayers 213{via} (room {room[0]} gidx=0x{game_idx:08x}, {len(roster)} players)', to=5.0)
+
+def handle_fly_start_place(s, af, mid, n, via=''):
+    """FLY: msg 23 (0x17) StartPlaceList. The Fly button sends one 3-byte record
+    [AF][mid][N] with N=0xff ("give me a start place on airfield AF"). The inbound
+    handler FUN_004f6320 parses 3-byte records, logs "SP N %i on AF %i", and for the
+    waiting player (WaitingForStartPlaceList): N=0xff → start place -1 → DENY path
+    (vtable+0x54) — which is what our old echo did, leaving the client hanging at the
+    last gate before the cockpit; valid N → set position, vtable+8 = SPAWN into the
+    world (FUN_004e9fa0). So we grant: reply msg 23 with the same record, N assigned.
+
+    Wire form is built byte-identical to the echo framing that demonstrably arrived
+    as `in 23'4` / one record (4-byte appspace header, type 0x42) — msg 23 must not
+    gain pad bytes, since pad zeros would parse as bogus [AF=0][N=0] records."""
+    grant_n = 0 if n == 0xff else n
+    pkt = bytes([0x00, 0x42, 0x00, 0x00, 0x17, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
+    log('FLY23', f'StartPlace request{via} AF={af} mid={mid} N=0x{n:02x} → GRANT N={grant_n}')
+    threading.Thread(target=lambda: send_rel(s, pkt,
+                     f'← StartPlaceList 23 GRANT (AF={af} N={grant_n})', to=5.0),
+                     daemon=True).start()
+
+def handle_leave_arena(s):
+    """Client pressed 'back to lobby' — msg 64 (0x40). Msg 64 has NO inbound dispatch
+    handler → must NOT be echoed (echo → "Unknown Type 64").
+
+    SOLVED (v178) — what the client waits for after the back button:
+    The back button fires a UI callback → FUN_004edf0e → FUN_004f1b10: full game-globals
+    reset + re-arm of the SAME 1-Hz 0x43 connect-poll used at game entry. Data-xrefs on
+    the poll timer DAT_00c82eb0 show exactly three poll-stoppers: the 201 join grant
+    (FUN_004f88f0), and FUN_004edcf0 — the handler for lobby msg 218 (0xDA), the
+    "lobby attach answer" (dispatch slot 0xc82240 → id (0xc82240-0xc81ed8)/4 = 218).
+    FUN_004edcf0 stores session dwords + MyRights (logs "**** MyRights=%i ****"), sets
+    DAT_00c82eb0 = 0 (poll STOP) and notifies the lobby UI observers. It's the same
+    218'17 every session receives right after login (our reply to 0xde).
+
+    So leaving = re-entering the lobby state machine: clear the in-game state and
+    RE-SEND the 0xDA lobby attach answer; the client stops polling and the lobby UI
+    takes over (it will then re-request news/arena list itself)."""
+    log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) — leaving game '
+                 f'(room {s.current_room}), clearing in-game state, NOT echoed')
+    # v182: tell peers to drop this player's REMOTE_PLAYER object (msg 63 op=REMOVE)
+    # BEFORE we clear s.entered_game / s.current_room, so the broadcast still scopes
+    # to the room and resolves the player_index. op=0 (CP_OP_REMOVE) → FUN_004fa9c0
+    # remove path (iVar12==0).
+    if s.entered_game and s.current_room is not None:
+        room_id = s.current_room
+        rec = [(s.player_index, s.nation, CP_OP_REMOVE)]
+        pkt = build_change_player_63(rec)
+        for sess in get_sessions_in_room(room_id):
+            if sess is s:
+                continue
+            threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
+                             f'← ChangePlayer 63 REMOVE ({s.current_pilot})', to=3.0),
+                             daemon=True).start()
+    s.entered_game = False
+    s.client_granted = False   # allow a fresh 201 grant on re-entry
+    s.nation = None
+    # Clear DB room membership too, or the pilot lingers in db_get_pilots_in_room
+    # forever (the stale "Test2 in room 39" roster seen across restarts).
+    if s.current_pilot:
+        try:
+            db_room_leave(s.current_pilot)
+        except Exception as e:
+            log('LEAVE', f'db_room_leave failed: {e}')
+    # The poll stopper: 218 (0xDA) lobby attach answer (FUN_004edcf0 → DAT_00c82eb0=0)
+    threading.Thread(target=lambda: send_rel(s, build_da_session(),
+                     '← 0xDA lobby re-attach (218) — stops post-leave 0x43 poll',
+                     to=5.0), daemon=True).start()
+
+# ─── Lobby broadcasts ─────────────────────────────────────────────────────────
+
+def broadcast_system(message, exclude_sess=None):
+    bcast = build_chat_broadcast('Server', message)
+    for sess in get_all_sessions():
+        if sess is exclude_sess: continue
+        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, '← sys msg', to=3.0),
+                         daemon=True).start()
+
+def build_room_echo_pkt(db_id):
+    """Build the type=0x92 sub=0xdc room creation echo for a room in the DB.
+    Returns the packet bytes, or None if the room is missing/invalid."""
+    try:
+        _c = sqlite3.connect(DB_PATH)
+        row = _c.execute(
+            "SELECT game_def_raw, room_slot, creator_pilot FROM rooms WHERE room_id=? AND status='open'",
+            (db_id,)).fetchone()
+        _c.close()
+        if not row or not row[0]:
+            return None
+        gdef = bytes(row[0])[:740].ljust(740, b'\x00')
+        slot = row[1] or 0x23
+        cname = (row[2] or '').encode('ascii', 'replace')[:23] + b'\x00'
+        cname = cname.ljust(24, b'\x00')
+        # inner data after sub=0xdc: [slot][0x00][0xff][0xff][creator(24B)][GAME_DEF(740B)]
+        # GameIndex is derived by FA.exe as bytes[2:6] of this inner data =
+        # [0x00][0xff][0xff][creator[0]] in LE.
+        inner_data = bytes([slot, 0x00, 0xff, 0xff]) + cname + gdef
+        return build_typed_pkt(0x92, bytes([0xdc]) + inner_data)
+    except Exception as e:
+        log('ROOM-ECHO', f'build failed db_id={db_id}: {e}')
+        return None
+
+def send_room_echo(sess, db_id, label=None):
+    """Send the 0xdc room creation echo for db_id to a specific session."""
+    pkt = build_room_echo_pkt(db_id)
+    if pkt is None: return False
+    lbl = label or f'← room echo db_id={db_id}'
+    threading.Thread(target=lambda: send_rel(sess, pkt, lbl, to=5.0), daemon=True).start()
+    return True
+
+def send_all_room_echoes(sess):
+    """Send 0xdc echoes for every open room in the DB to a session.
+    Called when a client enters the lobby so its arena list populates."""
+    rooms = db_get_open_rooms()
+    if not rooms:
+        log('ROOM-ECHO', f'no open rooms to advertise to session')
+        return
+    own_id = sess.current_room
+    log('ROOM-ECHO', f'advertising {len(rooms)} room(s) to session (own={own_id})')
+    for r in rooms:
+        db_id, _name, creator, _acct, _t, slot, _gd = r
+        tag = ' [OWN]' if db_id == own_id else ''
+        send_room_echo(sess, db_id, label=f'← room echo db_id={db_id} creator="{creator}"{tag}')
+
+def broadcast_room_creation(db_id, exclude_sess=None):
+    """Send the 0xdc echo for a newly-created room to every other authenticated
+    session, so their arena lists show the new room."""
+    pkt = build_room_echo_pkt(db_id)
+    if pkt is None:
+        log('ROOM-ECHO', f'broadcast skipped (no pkt) db_id={db_id}')
+        return
+    n = 0
+    for sess in get_all_sessions():
+        if sess is exclude_sess: continue
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← broadcast new room db_id={db_id}', to=3.0),
+                         daemon=True).start()
+        n += 1
+    log('ROOM-ECHO', f'broadcast room db_id={db_id} → {n} other session(s)')
+
+def send_active_list(target_sess):
+    others = [s.current_pilot for s in get_all_sessions()
+              if s.current_pilot and s is not target_sess]
+    msg = ('In lobby: ' + ', '.join(others)) if others else 'No other pilots currently in lobby'
+    threading.Thread(target=lambda: send_rel(target_sess, build_chat_broadcast('Server', msg),
+                                              '← active list', to=3.0), daemon=True).start()
+
+def broadcast_player_join(pilot_name, exclude_sess=None):
+    pkt = build_ui_player_update(pilot_name, is_join=True)
+    for sess in get_all_sessions():
+        if sess is exclude_sess: continue
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← UI ADD [{pilot_name}]', to=3.0),
+                         daemon=True).start()
+
+def broadcast_player_leave(pilot_name, exclude_sess=None):
+    pkt = build_ui_player_update(pilot_name, is_join=False)
+    for sess in get_all_sessions():
+        if sess is exclude_sess: continue
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← UI REMOVE [{pilot_name}]', to=3.0),
+                         daemon=True).start()
+
+def send_initial_ui_list(target_sess):
+    for sess in get_all_sessions():
+        if sess is not target_sess and sess.current_pilot:
+            pkt = build_ui_player_update(sess.current_pilot, is_join=True)
+            time.sleep(0.05)
+            send_rel(target_sess, pkt, f'← UI INIT ADD [{sess.current_pilot}]', to=3.0)
+
+# ─── Connection handler ───────────────────────────────────────────────────────
+
+def handle_syn(data, addr):
+    acct_row = identify_account_from_syn(data)
+    cid=data[1:5]; s=S(cid,addr)
+    if acct_row:
+        acct, pid_hex, f45_hex, ab_hex = acct_row
+        s.account=acct; s.auth64=build_auth64(pid_hex, f45_hex, ab_hex, acct)
+        s.auth_payload=build_auth_response(s.auth64)
+        pilots=db_get_pilots(acct)
+        with sl: active = len([x for x in sids.values() if x.auth_done and not x.closing])
+        log('SYN',f'Ready: account="{acct}" {len(pilots)} pilot(s) [sid={s.sid}, active_sessions={active}]')
+    else: log('SYN','WARNING: unknown account')
+    with sl: sids[s.sid]=s; sadrs[addr]=s
+    time.sleep(0.015)
+    synack,fa_s=build_synack(); sock.sendto(synack,addr); log('TX/SYNACK',f'FA_s=0x{fa_s:08X}')
+    time.sleep(0.025)
+    sock.sendto(build_beacon(s.nts(),0),addr); log('TX/BEACON','idx=0')
+    def sp():
+        time.sleep(0.05)
+        if not s.closing: sock.sendto(build_data(100,s.nsq()),s.addr); log('TX/SYS','cmd=100')
+    threading.Thread(target=sp,daemon=True).start()
+
+def login(s):
+    log('LOGIN','══ v187 AUTH ══')
+    if not s.auth_payload: log('LOGIN','No auth payload'); return
+    if not send_rel(s,s.auth_payload,'← cmd=100 auth',to=8.0): return
+    log('LOGIN',f'Auth ACKed T+{s.ela():.3f}s')
+    s.auth_done=True
+    def _hb():
+        errors = 0
+        while not s.closing and not s.in_game:
+            time.sleep(5)
+            if not s.closing:
+                try:
+                    sock.sendto(bytes([0,0,0,0xd3]),s.addr)
+                    errors = 0
+                except OSError:
+                    errors += 1
+                    if errors >= 3:   # 3 consecutive failures → client gone
+                        log('SESSION', 'Heartbeat failed 3x — closing session')
+                        s.closing = True
+                        with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+                        break
+    threading.Thread(target=_hb,daemon=True).start()
+    deadline=time.time()+300.0
+    while time.time()<deadline and not s.closing:
+        cmds=[]
+        with s._lock: cmds=list(s.post_auth_cmds); s.post_auth_cmds.clear()
+        for cmd,pl in cmds: handle_post_auth(s,cmd,pl)
+        time.sleep(0.02)
+
+def parse_e4_selection(pl):
+    if len(pl) <= 10: return None, None
+    sb = pl[10]
+    if sb < 0x20:
+        name = pl[11:].split(b'\x00')[0].decode('ascii', errors='replace')
+        return name, sb
+    else:
+        name = pl[10:].split(b'\x00')[0].decode('ascii', errors='replace')
+        return name, None
+
+def _handle_chat_pl(s, pl):
+    sub = pl[4] if len(pl) > 4 else 0
+    if sub == 0xcd:
+        raw   = pl[5:] if len(pl) > 5 else b''
+        parts = raw.split(b'\x00')
+        name  = parts[0].decode('ascii', 'replace')
+        msg   = parts[1].decode('ascii', 'replace') if len(parts) > 1 else ''
+        sender = s.current_pilot or name
+    else:
+        slot_char = pl[9]  if len(pl) > 9  else 0
+        parts     = pl[10:].split(b'\x00') if len(pl) > 10 else [b'', b'']
+        rest      = parts[0].decode('ascii', 'replace')
+        msg       = parts[1].decode('ascii', 'replace') if len(parts) > 1 else ''
+        reconstructed = (chr(slot_char) + rest) if 0x20 <= slot_char <= 0x7e else rest
+        sender = s.current_pilot or reconstructed
+    log('CHAT', f'[{sender}]: {msg!r}')
+    bcast = build_chat_broadcast(sender, msg)
+    sessions = get_all_sessions()
+    log('CHAT', f'Broadcasting to {len(sessions)} session(s)')
+    for sess in sessions:
+        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, f'← chat [{sender}]', to=3.0),
+                         daemon=True).start()
+
+COMPOUND_CMDS = {530, 578, 4610}
+
+def handle_compound(s, outer_cmd, pl):
+    if len(pl) < 5: log('COMPOUND', f'cmd={outer_cmd} too short'); return
+    inner = bytes(pl[4:])
+    if len(inner) < 5: log('COMPOUND', f'cmd={outer_cmd} inner too short'); return
+
+    inner_type = inner[1]; inner_cmd = (inner[2] << 8) | inner[3]; inner_sub = inner[4]
+    log('COMPOUND', f'cmd={outer_cmd}(0x{outer_cmd:04x}) inner '
+        f'type=0x{inner_type:02x} cmd={inner_cmd} sub=0x{inner_sub:02x}')
+
+    if inner_type == 0x22 and inner_sub == 0xe2:
+        name_raw = inner[6:] if len(inner) > 6 else b''
+        new_name = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
+        if new_name and s.account:
+            slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
+            log('COMPOUND', f'Created "{new_name}" slot={slot}')
+        threading.Thread(target=lambda: send_rel(s, inner, '← compound create echo', to=5.0), daemon=True).start()
+        return
+
+    if inner_type == 0x42 and inner_sub == 0xe7:
+        old_raw  = inner[8:40]  if len(inner) >= 40 else inner[8:]
+        new_raw  = inner[40:72] if len(inner) >= 72 else b''
+        old_name = old_raw.split(b'\x00')[0].decode('ascii', 'replace')
+        new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
+        if old_name and new_name and s.account:
+            db_rename_pilot(old_name, new_name, s.account)
+            log('COMPOUND', f'Renamed "{old_name}" → "{new_name}"')
+        threading.Thread(target=lambda: send_rel(s, inner, '← compound rename echo', to=5.0), daemon=True).start()
+        return
+
+    if inner_type == 0x42 and inner_sub == 0xe3:
+        name_raw = inner[8:] if len(inner) > 8 else b''
+        pname    = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
+        if pname and s.account: db_delete_pilot(pname, s.account)
+        data = bytearray(33); data[0]=0xe3; data[1]=0x00; data[2]=0x00; data[3]=0x00
+        nb = (pname.encode() + b'\x00') if pname else b'\x00'
+        data[4:4+min(len(nb),29)] = nb[:29]
+        resp = build_typed_pkt(0x42, bytes(data), bc=2)
+        threading.Thread(target=lambda: send_rel(s, resp, '← compound delete success', to=5.0), daemon=True).start()
+        return
+
+    if inner_type == 0x40 and inner_cmd == 5:
+        log('COMPOUND', 'inner vcncExitAppSpace → exit reply')
+        pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
+        if not send_rel(s, bytes(pl2), 'exit appspace reply'):
+            s.closing = True
+            with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+        return
+
+    if inner_cmd == 2:
+        log('COMPOUND', 'inner vcncDisconnect → disconnect reply')
+        pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
+        send_rel(s, bytes(pl2), 'disconnect reply')
+        return
+
+    if inner_type == 0x12 and inner_sub == 0xe1:
+        pilots = db_get_pilots(s.account) if s.account else []
+        resp = build_e1_pilot_list(pilots)
+        threading.Thread(target=lambda: send_rel(s, resp, '← compound pilot list', to=5.0), daemon=True).start()
+        return
+
+    if inner_type == 0x62 and inner_sub == 0xe4:
+        pname, exslot = parse_e4_selection(inner)
+        if pname:
+            slot = exslot or db_get_pilot_slot(s.account, pname) or 0
+            s.current_pilot = pname; s.current_slot = slot
+            log('COMPOUND', f'Pilot selected: "{pname}" slot={slot}')
+        threading.Thread(target=lambda: send_rel(s, inner, '← compound pilot select echo', to=5.0), daemon=True).start()
+        return
+
+    if inner_sub == 0xcd or (len(inner) > 8 and inner[8] == 0xcd):
+        log('COMPOUND', 'inner chat → _handle_chat_pl')
+        _handle_chat_pl(s, inner)
+        return
+
+    # ── IN-ARENA CHAT, compound-wrapped (inner sub=0x14) ──────────────────────
+    # Same msg-20 chat as the direct path, but inside a compound (cmd in
+    # COMPOUND_CMDS). inner = pl[4:], so inner[4]=sub=0x14, inner[5]=channel,
+    # inner[6:]=text. Reflect with PlayerIndex=0 → renders as the local pilot.
+    if inner_sub == 0x14:
+        channel = inner[5] if len(inner) > 5 else 0
+        text    = bytes(inner[6:]) if len(inner) > 6 else b''
+        log('COMPOUND', f'inner sub=0x14 chat → reflect ch={channel}')
+        reflect_chat_20(s, channel, text)
+        return
+
+    # ── TEAM / SIDE SELECT, compound-wrapped (inner sub=0x44) ─────────────────
+    # This is how FA actually sends it in the arena lobby (cmd=530). inner[5]=nation.
+    if inner_sub == 0x44:
+        nation = inner[5] if len(inner) > 5 else 0xff
+        log('COMPOUND', f'inner sub=0x44 team-select → nation=0x{nation:02x}')
+        handle_team_select(s, nation)
+        return
+
+    # ── LEAVE ARENA / BACK TO LOBBY, compound-wrapped (inner sub=0x40) ─────────
+    # msg 64 = the back button. No inbound handler → must NOT be echoed.
+    if inner_sub == 0x40:
+        log('COMPOUND', 'inner sub=0x40 → leave-arena (back to lobby), NOT echoed')
+        handle_leave_arena(s)
+        return
+
+    # ── FLY / START PLACE, compound-wrapped (inner sub=0x17) ───────────────────
+    # [0x17][AF][mid][N]; reply the grant, never echo (echo = deny).
+    if inner_sub == 0x17 and len(inner) >= 8:
+        handle_fly_start_place(s, inner[5], inner[6], inner[7], via=' (compound)')
+        return
+
+    # ── ROOM CREATION (inner type=0x92 sub=0xdc) ──────────────────────────────
+    # Always arrives via compound cmd=18.
+    # inner layout (from inner[4:] = data):
+    #   data[0]=0xdc (sub), data[1]=room_slot (e.g. 0x23), data[2:5]=flags (0x00 0xff 0xff)
+    #   data[5:29] = creator pilot name (24-byte null-padded)
+    #   data[29:769] = GAME_DEF (740 bytes, confirmed by FA.exe "GAME_DEF size 740")
+    # Echo inner → FA.exe gets "in 220'777" which shows the room locally.
+    # Player count starts at 0 — creator enters via VNET::SendEnterToGame (type=0x1d).
+    if inner_sub == 0xdc and len(inner) > 33:  # inner_type varies per session (0x92 or 0xa2)
+        data      = inner[4:]
+        room_slot = data[1] if len(data) > 1 else 0
+        creator_raw = data[5:29].split(b'\x00')[0].decode('ascii', 'replace') if len(data) > 5 else ''
+        creator   = s.current_pilot or creator_raw
+        # Store the FULL GAME_DEF — the old data[29:769] cap truncated it to 740 and the
+        # deserialiser ran off the end (Mix.hpp:539). data[29:] = the whole GAME_DEF the
+        # client serialised (the inner's appspace data, minus the 29-byte room header).
+        game_def  = bytes(data[29:])
+        room_id   = db_create_room(creator, s.account or '', game_def, room_slot)
+        # Close any previous open rooms for this pilot — prevents >1 room in DB
+        # which would cause 0xce packet to exceed FA.exe's receive limit (bc>48)
+        if creator:
+            _c = sqlite3.connect(DB_PATH)
+            _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
+                       (creator, room_id))
+            _c.commit(); _c.close()
+        s.current_room = room_id
+        s.room_slot    = room_slot
+        if creator:
+            db_room_join(room_id, creator, s.account or '')
+        log('COMPOUND', f'ROOM CREATED db_id={room_id} slot=0x{room_slot:02x} '
+            f'creator="{creator}" name="{extract_name_from_gamedef(game_def)}" '
+            f'inner={len(inner)}b data={len(data)}b GAME_DEF={len(game_def)}b '
+            f'ver=0x{(bytes(game_def)[gamedef_start(game_def)] if game_def else 0):02x} '
+            f'terrain={extract_terrain_from_gamedef(game_def)} '
+            f'({TERRAIN_NAMES.get(extract_terrain_from_gamedef(game_def), "?")}) players=1')
+        # Exclude creator: chat arriving before the echo disrupts FA.exe state machine
+        broadcast_system(f'[{creator}] created a room', exclude_sess=s)
+        threading.Thread(target=lambda: send_rel(s, inner, '← compound echo room create', to=5.0), daemon=True).start()
+        # Broadcast new room to all OTHER sessions so their arena lists update
+        threading.Thread(target=lambda: broadcast_room_creation(room_id, exclude_sess=s), daemon=True).start()
+        return
+
+    # ── ARENA LIST REQUEST (inner sub=0xd2) ──────────────────────────────────
+    # 0xd2 = the Arenas-tab room list (real log: out 210 → in 210'1110). FA.exe
+    # often wraps it in a compound. Respond with open rooms, not an echo.
+    if inner_sub == 0xd2:
+        active_rooms = db_get_open_rooms()
+        log('COMPOUND', f'inner sub=0xd2 → ArenaList ({len(active_rooms)} rooms)')
+        # v164: push GAME_DEF (212) per room first so terrain is cached, then the list.
+        threading.Thread(
+            target=lambda: send_arenalist_with_gamedefs(
+                s, active_rooms, '← compound ArenaList 0xd2'),
+            daemon=True).start()
+        return
+
+    # ── ROOM CONFIRM POLL (inner sub=0x43) ────────────────────────────────────
+    # When room creation goes via compound cmd=18, FA.exe ALSO wraps ALL 0x43 polls
+    # in compound (cmd=12434 or cmd=37424). It never sends a direct sub=0x43 in that
+    # case, so we MUST respond here with the same 17-byte room status packet.
+    # Apply the same 0.5s rate limit as the direct APPSPACE handler.
+    if inner_sub == 0x43:
+        now = time.time()
+        if now - s.last_43_ts < 0.5:
+            log('COMPOUND', 'inner sub=0x43 → rate-limited')
+            return
+        s.last_43_ts = now
+        room_slot = getattr(s, 'room_slot', 0)
+        rooms = db_get_open_rooms()
+        if rooms and (s.current_room or room_slot):
+            rid    = s.current_room or rooms[0][0]
+            pcount = db_room_player_count(rid)
+            slot   = room_slot or (rid & 0xFF)
+            resp_data = bytes([0x43, slot, 0x00, 0x00, 0x00, pcount, 0x01,
+                               0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+            mode = 'GAME' if s.entered_game else 'lobby'
+            log('COMPOUND', f'inner sub=0x43 → {mode} confirm slot=0x{slot:02x} db_id={rid} players={pcount}')
+            resp = build_appspace_pkt(resp_data)
+            threading.Thread(target=lambda: send_rel(s, resp, f'← compound 0x43 {mode} confirm', to=3.0),
+                             daemon=True).start()
+        else:
+            log('COMPOUND', 'inner sub=0x43 → no room yet, not responding')
+        return
+
+    # Compound-wrapped VNET::SendEnterToGame (inner type=0x82 sub=0xc8 = msg 200).
+    # This run proved the Join sends the 200 INSIDE a compound (cmd=0x0212), not as a
+    # bare type=0x82 — so it was hitting "echo inner" below, bouncing the 200 back to the
+    # client as "in 200'40" → FA: "NET::MESSAGE with Unknown Type 200". NEVER echo it.
+    # Instead resolve the room from the inner GameIndex (inner[5:9]) and enter game mode,
+    # exactly like the direct type=0x82 path, so the 0x43 game-connect poll gets answered.
+    if inner_type == 0x82 and inner_sub == 0xc8:
+        game_idx = int.from_bytes(inner[5:9], 'little') if len(inner) >= 9 else 0
+        pname = (inner[12:44].split(b'\x00')[0].decode('ascii', 'replace').strip()
+                 if len(inner) >= 13 else '')
+        if not s.current_room:
+            for r in db_get_open_rooms():
+                if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+                    s.current_room = r[0]
+                    s.room_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
+                    break
+        if pname and s.current_room:
+            existing = [p for p, _ in db_get_pilots_in_room(s.current_room)]
+            if pname not in existing:
+                db_room_join(s.current_room, pname, s.account or '')
+        s.entered_game = True
+        s.entering_gidx = game_idx
+        s.nation = None                       # enters "In Menu" until a side is picked
+        assign_player_slot(s, s.current_room)
+        log('COMPOUND', f'SendEnterToGame (compound) pilot="{pname}" gidx=0x{game_idx:08x} '
+                        f'room={s.current_room} → GAME MODE, NOT echoed')
+        # Same entry GRANT as the direct path: reply msg 201 (0xc9) JoinToGameAnswer.
+        # GUARD (RE FUN_004f88f0): the JoinToGameAnswer handler asserts ClientID<0 on
+        # entry, so a 2nd 201 while already granted crashes the client. Grant once/entry.
+        if s.client_granted:
+            log('COMPOUND', 'JoinToGameAnswer 201 already granted this entry — suppressing duplicate')
+        else:
+            s.client_granted = True
+            send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
+                     f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+                     f'PlayerIndex={s.player_index} → GRANT)', to=5.0)
+        # ── PLAYER-OBJECT LAYER (v184) ───────────────────────────────────────────
+        # 62 advertises peers to the newcomer and the newcomer to peers. Both calls
+        # SELF-GATE: with no peers in the room they send nothing, so a lone player's
+        # entry is byte-identical to the known-good v182 path.
+        # msg 96 (ScoreTable) is DEFERRED — v183 sent it here unconditionally and it
+        # crashed arena-join (messages08.log): FUN_004f53b0 frees+reallocates the
+        # host-side score-table object mid-entry, before the client's world is stood
+        # up, wedging it (3s stall → WinError 10054). A lone player has nothing to
+        # score; seed the board later, after full world-load, not during the grant.
+        def _stand_up_player_objects(_s=s):
+            push_player_roster_62(_s, reason='(on enter, compound)')
+            broadcast_player_join_62(_s, reason='(on enter, compound)')
+        threading.Thread(target=_stand_up_player_objects, daemon=True).start()
+        return
+
+    # ── ARENA-SELECT DATA REQUESTS, compound-wrapped (inner type=0x52) ─────────
+    # THE ARENA-LIST RELIABILITY BUG: msg 212 (sub=0xd4, GAME_DEF request) and msg 213
+    # (sub=0xd5, player-info request) sometimes arrive compound-wrapped instead of
+    # direct. The old blanket inner_type==0x52 rule swallowed them → no GAME_DEF reply
+    # → empty description + disabled Join until the client happened to re-request
+    # directly (tab away and back). Answer them here exactly like the direct path.
+    # inner layout: inner[4]=sub, inner[5:9]=GameIndex LE.
+    if inner_sub == 0xd4:
+        gidx = int.from_bytes(inner[5:9], 'little') if len(inner) >= 9 else 0
+        log('COMPOUND', f'inner sub=0xd4 GAME_DEF request gidx=0x{gidx:08x}')
+        handle_gamedef_request(s, gidx, via=' (compound)')
+        return
+    if inner_sub == 0xd5:
+        gidx = int.from_bytes(inner[5:9], 'little') if len(inner) >= 9 else 0
+        log('COMPOUND', f'inner sub=0xd5 ArenaPlayers request gidx=0x{gidx:08x}')
+        handle_213_request(s, gidx, via=' (compound)')
+        return
+
+    # Compound inner type=0x52 (sub=0xd7/0xd9): squad/team update — do NOT echo
+    if inner_type == 0x52:
+        log('COMPOUND', f'inner 0x52/0x{inner_sub:02x} (squad/team update) — not echoed')
+        return
+    # No-echo messages (see direct path NO_ECHO_SUBS): 0x20 = no-handler status; 0x03 =
+    # NET::OBJECT delete notify (echo → bounds-error crash); 0x45 (msg 69) =
+    # SCENE_TAG_MESSAGE — spawn-point selection notify. Its inbound handler asserts
+    # Length % sizeof(SCENE_TAG_MESSAGE::PACKED_INFO) == 0 (VNet_Rcv.cpp:1400), so
+    # echoing the 2-byte select notify crashes the client (messages03.log).
+    if inner_sub in (0x20, 0x03, 0x45):
+        log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) — swallow')
+        return
+    log('COMPOUND', f'unknown inner → echo inner')
+    threading.Thread(target=lambda: send_rel(s, inner, '← compound echo unknown inner', to=5.0), daemon=True).start()
+
+
+def handle_post_auth(s, cmd, pl):
+    bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
+    sub=pl[4] if len(pl)>4 else 0
+    log('POST-AUTH',f'cmd={cmd}(0x{cmd:04x}) type=0x{tb:02x} sub=0x{sub:02x} bc={bc}(p3={bc*16+1}) sz={len(pl)}')
+    stored=bytes(pl)
+    _h4=hx(stored[:4]) if len(stored)>=4 else hx(stored)
+    _d4=hx(stored[4:8]) if len(stored)>=8 else (hx(stored[4:]) if len(stored)>4 else '')
+    log('RX/REL/PL', f'  [{_h4}|{_d4}] +{hx(stored[8:8+80]) if len(stored)>8 else ""}')
+
+    if cmd in COMPOUND_CMDS:
+        handle_compound(s, cmd, pl); return
+
+    if (len(pl) > 8 and pl[8] == 0xcd) or sub == 0xcd:
+        _handle_chat_pl(s, pl); return
+
+    # ── IN-ARENA CHAT (msg 20 / 0x14) ──────────────────────────────────────────
+    # Sent by the client as [0x14][channel:1][text\0]; channel 0=all,1=team,2=squadron.
+    # The FA reliable type-scan cycles the OUTER type per message, so the same chat
+    # arrives in different wrappers: DIRECT (sub=pl[4]=0x14, e.g. type=0xe2) or a
+    # type-scan double-wrap (outer type 0x01..0x12, inner header, sub at pl[8]=0x14).
+    # Compound-wrapped chat (cmd in COMPOUND_CMDS) is caught in handle_compound above.
+    # We reflect with PlayerIndex=0 (the player from the 201 grant) so the display
+    # handler FUN_004f6030 resolves it to "Test1" instead of logging "unknown player".
+    if sub == 0x14:                                            # direct
+        channel = pl[5] if len(pl) > 5 else 0
+        text    = bytes(pl[6:]) if len(pl) > 6 else b''
+        reflect_chat_20(s, channel, text); return
+    if sub == 0x00 and len(pl) > 10 and pl[8] == 0x14:         # type-scan double-wrap
+        channel = pl[9]
+        text    = bytes(pl[10:])
+        reflect_chat_20(s, channel, text); return
+
+    # ── TEAM / SIDE SELECT (msg 68 / 0x44) ─────────────────────────────────────
+    # [0x44][nation:1][?:1]; nation 0..7 = side (US=0…), 0xff = leave. No incoming
+    # handler in FA.exe → never echo. Same wrapper variants as chat.
+    if sub == 0x44:                                            # direct
+        nation = pl[5] if len(pl) > 5 else 0xff
+        handle_team_select(s, nation); return
+    if sub == 0x00 and len(pl) > 9 and pl[8] == 0x44:          # type-scan double-wrap
+        nation = pl[9]
+        handle_team_select(s, nation); return
+
+    # ── LEAVE ARENA / BACK TO LOBBY (msg 64 / 0x40) ────────────────────────────
+    # No inbound handler in FA.exe → never echo (echo → "Unknown Type 64"). Same
+    # wrapper variants as the others.
+    if sub == 0x40:                                            # direct
+        handle_leave_arena(s); return
+    if sub == 0x00 and len(pl) > 8 and pl[8] == 0x40:          # type-scan double-wrap
+        handle_leave_arena(s); return
+
+    # ── NOTIFY MESSAGES, type-scan double-wrapped — must not be echoed ─────────
+    # 0x03 = NET::OBJECT delete notify (echo → client-side bounds-error crash),
+    # 0x20 = no-handler status (echo → "Unknown Type 32"). Direct variants are
+    # swallowed by NO_ECHO_SUBS below; this catches the wrapped form before the
+    # generic echo fallthrough re-sends the whole wrapper.
+    if sub == 0x00 and len(pl) > 8 and pl[8] in (0x03, 0x20, 0x45):
+        log('POST-AUTH', f'scan-inner sub=0x{pl[8]:02x} (notify, must not echo) → swallow')
+        return
+
+    # ── FLY / START PLACE (msg 23 / 0x17) ──────────────────────────────────────
+    # [0x17][AF][mid][N]; N=0xff = request. Reply is the GRANT (see
+    # handle_fly_start_place) — echoing the request back denies the spawn.
+    if sub == 0x17 and len(pl) >= 8:                           # direct
+        handle_fly_start_place(s, pl[5], pl[6], pl[7]); return
+    if sub == 0x00 and len(pl) >= 12 and pl[8] == 0x17:        # type-scan double-wrap
+        handle_fly_start_place(s, pl[9], pl[10], pl[11], via=' (scan)'); return
+
+    if cmd == 0:
+        if tb == 0x12:
+            if sub == 0xe1:
+                pilots=db_get_pilots(s.account) if s.account else []
+                resp=build_e1_pilot_list(pilots)
+                threading.Thread(target=lambda:send_rel(s,resp,'← pilot list',to=5.0),daemon=True).start(); return
+            if sub == 0xde:
+                def da_then_echo():
+                    da=build_da_session()
+                    if not send_rel(s,da,'← 0xDA',to=5.0): return
+                    time.sleep(0.005); send_rel(s,stored,'← echo 0xde',to=5.0)
+                threading.Thread(target=da_then_echo,daemon=True).start(); return
+            if sub in (0xce, 0xca, 0xcb):
+                if sub == 0xce:
+                    active_rooms = db_get_open_rooms()
+                    resp = build_ce_room_list(active_rooms)
+                    raw_len = len(resp) - 4  # payload after vcncNet header
+                    log('CE', f'AppSpaceList: {len(active_rooms)} room(s) → {raw_len} bytes raw')
+                    label = f'← AppSpaceList ({len(active_rooms)} rooms, {raw_len}B)'
+                elif sub == 0xcb:
+                    # GameList = THE ARENA LIST (confirmed via FUN_004f03b0).
+                    # Respond with open rooms as arena records instead of empty.
+                    active_rooms = db_get_open_rooms()
+                    resp = build_gamelist(active_rooms)
+                    raw_len = len(resp) - 4
+                    label = f'← GameList ({len(active_rooms)} arenas, {raw_len}B, fmt={GAMELIST_FORMAT})'
+                else:
+                    names = {0xca:'ServerList'}
+                    resp = build_empty_room_list(sub)
+                    label = f'← empty {names.get(sub, hex(sub))}'
+                threading.Thread(target=lambda:send_rel(s,resp,label,to=5.0),daemon=True).start()
+                # NOTE (v151): NO room echo here. List population is done entirely by
+                # the 0xcb GameList response above ([0xcb] + per arena [1 byte][name\0],
+                # parsed by FUN_004ef8b0). The old send_all_room_echoes() pushed 0x92
+                # echoes that drove the client into a room (0x43 polling) instead of
+                # leaving it on the Arenas list. Rooms created live by OTHER sessions
+                # are still broadcast via the 0xdc create path; steady-state listing is
+                # the 0xcb query the client issues when opening the Arenas tab.
+                return
+            if sub == 0xcd:
+                _handle_chat_pl(s, pl); return
+            if sub == 0xd2:
+                # 0xd2 = THE ARENA LIST request (real log: out 210'1 → in 210'1110).
+                # v164: push each room's GAME_DEF (212) FIRST so the client caches the
+                # arena's terrain, then send the list. (Was: list only → terrain 0 crash.)
+                active_rooms = db_get_open_rooms()
+                threading.Thread(
+                    target=lambda: send_arenalist_with_gamedefs(
+                        s, active_rooms, f'← ArenaList 0xd2 ({len(active_rooms)} rooms)'),
+                    daemon=True).start(); return
+            # APPSPACE-type outer with inner 0x43 (e.g. [00120000|00120000]+43)
+            # type=0x12 is used as the outer type by the retry counter in this case.
+            if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0xd2 and not s.entered_game:
+                log('POST-AUTH','APPSPACE-scan sub=0xd2 → echo inner')
+                threading.Thread(target=lambda: send_rel(s, build_appspace_pkt(bytes([0xd2])),
+                                 '← APPSPACE-scan echo 0xd2', to=3.0), daemon=True).start()
+                return
+            if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0x43:
+                now = time.time()
+                if now - s.last_43_ts >= 0.5:
+                    s.last_43_ts = now
+                    room_slot = getattr(s,'room_slot',0)
+                    rooms = db_get_open_rooms()
+                    if rooms and (s.current_room or room_slot):
+                        rid   = s.current_room or rooms[0][0]
+                        pcount= db_room_player_count(rid)
+                        slot  = room_slot or (rid & 0xFF)
+                        rd = bytes([0x43,slot,0,0,0,pcount,0x01,0,0,0,0,0,0,0,0,0,0])
+                        log('POST-AUTH',f'APPSPACE-scan sub=0x43 → room confirm slot=0x{slot:02x} players={pcount}')
+                        resp = build_appspace_pkt(rd)
+                        threading.Thread(target=lambda:send_rel(s,resp,'← APPSPACE-scan 0x43',to=3.0),daemon=True).start()
+                    else: log('POST-AUTH','APPSPACE-scan sub=0x43 → no room yet')
+                else: log('POST-AUTH','APPSPACE-scan sub=0x43 → rate-limited')
+                return
+            if sub == 0x43:
+                # 0x43 poll. In lobby mode this is the room-creation confirm; after
+                # VNET::SendEnterToGame (s.entered_game) the client polls it once a second
+                # as the game-connect handshake (reliable; the type-scan is its retry). We
+                # now ANSWER it in both modes so the client stops retrying and we can drive
+                # the game-entry. EXPERIMENT v170: reply with the [0x43][slot][..][players]
+                # confirm and observe whether the client advances or wants a scene push next.
+                now = time.time()
+                if now - s.last_43_ts < 0.5:
+                    log('POST-AUTH', 'sub=0x43 → rate-limited, skipping')
+                    return
+                s.last_43_ts = now
+                room_slot = getattr(s, 'room_slot', 0)
+                rooms = db_get_open_rooms()
+                if rooms and (s.current_room or room_slot):
+                    rid    = s.current_room or rooms[0][0]
+                    pcount = db_room_player_count(rid)
+                    slot   = room_slot or (rid & 0xFF)
+                    # data[6]=0x01 (lobby flag in creation); keep it for the first game-mode
+                    # test — if the client rejects it we'll vary this byte / the layout.
+                    resp_data = bytes([0x43, slot, 0x00, 0x00, 0x00, pcount, 0x01,
+                                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+                    mode = 'GAME' if s.entered_game else 'lobby'
+                    log('POST-AUTH', f'sub=0x43 {mode} confirm → slot=0x{slot:02x} '
+                        f'db_id={rid} players={pcount}')
+                    resp = build_appspace_pkt(resp_data)
+                    threading.Thread(target=lambda:send_rel(s,resp,f'← 0x43 {mode} confirm',to=3.0),daemon=True).start()
+                else:
+                    log('POST-AUTH', 'sub=0x43 → no room, not responding (avoids null crash)')
+                return
+            if sub == 0x60 and s.entered_game:
+                # Bare 0x60 = client REQUESTS the SCORE_TABLE (msg 96). Sent right
+                # after the FLY 23 StartPlace grant (messages09.log 06:51:00.782).
+                # v184 left it unanswered → client stalled in the 0x43 poll loop, the
+                # launch timer never started, CTD after ~20s. THIS is the correct,
+                # solicited send point for 96 — the v183 crash was sending it
+                # UNSOLICITED during entry, before the client's world existed.
+                log('SCORE96', 'bare 0x60 = ScoreTable request → answering msg 96')
+                resp = build_score_table_96()
+                threading.Thread(target=lambda: send_rel(s, resp,
+                                 '← ScoreTable 96 (on request)', to=5.0), daemon=True).start()
+                return
+            if sub == 0x66 and s.entered_game:
+                # Bare 0x66 (msg 102): function unknown (no inbound handler slot for
+                # 102; the client emits it right after team select). v185 answered it
+                # with a 62 roster INCLUDING the requester — FATAL (messages10.log):
+                # the msg 201 handler (FUN_004f88f0) already creates the LOCAL
+                # player's entry in the player table (FUN_004f3230 + insert, camp=-1),
+                # and a 62 record for an existing index DELETES + re-adds it — i.e. it
+                # freed the live local player while the GamerClient still pointed at
+                # it → use-after-free → delayed CTD (~1.7s). Unanswered 0x66 is proven
+                # harmless (messages09: client chatted and flew fine). → swallow.
+                log('POST-AUTH', f'bare 0x66 from {s.current_pilot} → swallow '
+                                 f'(unknown fn; harmless unanswered. self-62 barred by invariant)')
+                return
+            return
+
+        if tb == 0x22:
+            if sub == 0xe2 and s.account:
+                name_raw=pl[6:] if len(pl)>6 else b''
+                new_name=name_raw.split(b'\x00')[0].decode('ascii',errors='replace')
+                if new_name:
+                    slot=db_next_slot(s.account); db_ensure_pilot(new_name,s.account,slot)
+            threading.Thread(target=lambda:send_rel(s,stored,'← echo 0xe2',to=5.0),daemon=True).start(); return
+
+        if tb == 0x42:
+            if sub == 0xe3:
+                name_raw = pl[8:] if len(pl)>8 else b''
+                pname = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
+                if pname and s.account: db_delete_pilot(pname, s.account)
+                data = bytearray(33); data[0]=0xe3
+                nb = pname.encode() + b'\x00'
+                data[4:4+min(len(nb),29)] = nb[:29]
+                resp = build_typed_pkt(0x42, bytes(data), bc=2)
+                threading.Thread(target=lambda: send_rel(s, resp, '← delete success', to=5.0), daemon=True).start(); return
+            if sub == 0xe7:
+                old_raw = pl[8:40] if len(pl)>=40 else pl[8:]
+                new_raw = pl[40:72] if len(pl)>=72 else b''
+                old_name = old_raw.split(b'\x00')[0].decode('ascii', 'replace')
+                new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
+                if old_name and new_name and s.account: db_rename_pilot(old_name, new_name, s.account)
+                threading.Thread(target=lambda: send_rel(s, stored, '← echo rename', to=5.0), daemon=True).start(); return
+            threading.Thread(target=lambda: send_rel(s, stored, 'echo type=0x42', to=5.0), daemon=True).start(); return
+
+        if tb == 0x62 and sub == 0xe4:
+            pname, explicit_slot = parse_e4_selection(pl)
+            if pname:
+                slot = explicit_slot or db_get_pilot_slot(s.account, pname) or 0
+                s.current_pilot = pname; s.current_slot = slot
+                log('POST-AUTH',f'Pilot selected: "{pname}" slot={slot}')
+                # NOTE (v151): NO room auto-restore. The real client never auto-joins
+                # a room on reconnect — the player lands on the tabbed menu and only
+                # sees rooms when they open the Arenas tab (via the 0xcb list). The old
+                # restore + 0x92 echo made the client believe it owned/occupied a room
+                # and start 0x43 polling, which confounded every list test. The room
+                # still exists server-side (db_get_open_rooms) and appears in 0xcb.
+                broadcast_system(f'[{pname}] has joined the lobby')
+                broadcast_player_join(pname, exclude_sess=s)
+                threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
+                threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
+            threading.Thread(target=lambda:send_rel(s,stored,'← echo 0xe4',to=5.0),daemon=True).start()
+            return
+
+        if tb == 0x01:
+            # Guard: only trigger for real ExitAppSpace notice (len<=5 = no inner data).
+            # Type-scan packets also use type=0x01 but have inner data (len=9).
+            # Without this guard, type-scan packets kill the session prematurely.
+            if len(pl) <= 5:
+                log('POST-AUTH','vcncExitAppSpace notice')
+                if s.current_pilot:
+                    broadcast_player_leave(s.current_pilot, exclude_sess=s)
+                    broadcast_system(f'[{s.current_pilot}] has left')
+                    db_room_leave(s.current_pilot)
+                s.closing=True
+                with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+                return
+            # else: type-scan packet with inner data — fall through to generic echo
+
+        # type=0x92 sub=0xdc direct path (fallback; normally arrives via compound cmd=18)
+        if tb == 0x92 and sub == 0xdc and len(pl) > 33:
+            data = pl[4:]
+            room_slot = data[1] if len(data) > 1 else 0
+            creator_raw = data[5:29].split(b'\x00')[0].decode('ascii','replace') if len(data)>5 else ''
+            creator = s.current_pilot or creator_raw
+            game_def = bytes(data[29:])   # full GAME_DEF (no 769 truncation)
+            room_id = db_create_room(creator, s.account or '', game_def, room_slot)
+            s.current_room = room_id; s.room_slot = room_slot
+            if creator:
+                _c = sqlite3.connect(DB_PATH)  # close stale rooms (direct)
+                _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
+                           (creator, room_id))
+                _c.commit(); _c.close()
+                db_room_join(room_id, creator, s.account or '')  # players=1 from first 0x43
+            log('POST-AUTH', f'ROOM CREATED (direct) db_id={room_id} slot=0x{room_slot:02x} creator="{creator}" players=1')
+            broadcast_system(f'[{creator}] created a room', exclude_sess=s)
+            # Echo to creator (existing behavior) + broadcast to all other sessions
+            # so their arena lists show the new room.
+            threading.Thread(target=lambda:send_rel(s,stored,'← echo room create',to=5.0),daemon=True).start()
+            threading.Thread(target=lambda:broadcast_room_creation(room_id, exclude_sess=s), daemon=True).start()
+            return
+
+        # type=0x52: pilot/squad/team update packets (FA.exe → server only)
+        # sub=0xd5 = pilot status (rank, score, faction)
+        # sub=0xd7 = team/squad name update (loops if echoed — FA.exe retries indefinitely)
+        # sub=0xd9 = related team info (same issue)
+        # DO NOT echo: echoing type=0x52 back to FA.exe causes infinite retry loops
+        # and fills the squadron page with GAME_DEF garbage when triggered by wrong 0xce data.
+        if tb == 0x52:
+            if sub == 0xe0:
+                # sub=0xe0 = "EnterArena" phase 1 (5 bytes: [0xe0][GameIndex 4B])
+                # Sent at type=0x52 just before VNET::SendEnterToGame.
+                # GameIndex at pl[5:9] LE.
+                if len(pl) >= 9:
+                    game_idx = int.from_bytes(pl[5:9], 'little')
+                    log('POST-AUTH', f'EnterArena sub=0xe0 GameIndex=0x{game_idx:08x} ({game_idx}) — accepted')
+                else:
+                    log('POST-AUTH', f'EnterArena sub=0xe0 len={len(pl)} — accepted')
+                return
+            if sub == 0xd7:
+                # sub=0xd7 = FUN_004f0570 "SetArena" (5 bytes: [0xd7][GameIndex 4B])
+                # Sets current arena on server. No response needed.
+                if len(pl) >= 9:
+                    game_idx = int.from_bytes(pl[5:9], 'little')
+                    log('POST-AUTH', f'SetArena sub=0xd7 GameIndex=0x{game_idx:08x} — accepted')
+                else:
+                    log('POST-AUTH', f'SetArena sub=0xd7 len={len(pl)} — accepted')
+                return
+            if sub == 0xd4:
+                # FA message 212 — on-demand GAME_DEF request ("out 212'5"); see
+                # handle_gamedef_request. pl[5:9] = GameIndex (LE).
+                game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
+                handle_gamedef_request(s, game_idx)
+                return
+            if sub == 0xd5:
+                # FA message 213 — arena player-info request; see handle_213_request.
+                game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
+                handle_213_request(s, game_idx)
+                return
+            else:
+                log('POST-AUTH', f'type=0x52 sub=0x{sub:02x} len={len(pl)} — accepted (not echoed)')
+            return
+
+                # VNET::SendEnterToGame — DIRECT FORMAT: bc=2, type=0x82, cmd=0, sub=0xc8=200
+        # FA.exe logs: "VNET::SendEnterToGame GameIndex=NNN" + "out 200'40"
+        # Pilot name at pl[12:44] (32-byte null-padded, confirmed from capture).
+        # DO NOT echo this packet — server echoing type=0x82/sub=0xc8 causes FA.exe
+        # to log "NET::MESSAGE with Unknown Type 200" and break the session.
+        # After this, stop sending 0x43 responses; FA.exe will exit cleanly via type-scan.
+        if tb == 0x82 and sub == 0xc8 and len(pl) >= 44:
+            game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
+            pname_raw = pl[12:44] if len(pl) >= 44 else pl[12:]
+            pname = pname_raw.split(b'\x00')[0].decode('ascii', 'replace').strip()
+            # Browse-and-join: current_room isn't set (room was created earlier), so
+            # resolve which room is being entered from the GameIndex in the 200 packet.
+            if not s.current_room:
+                for r in db_get_open_rooms():
+                    if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+                        s.current_room = r[0]
+                        s.room_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
+                        break
+            if pname and s.current_room:
+                existing = [p for p,_ in db_get_pilots_in_room(s.current_room)]
+                if pname not in existing:
+                    db_room_join(s.current_room, pname, s.account or '')
+                log('POST-AUTH', f'VNET::SendEnterToGame (direct) pilot="{pname}" gidx=0x{game_idx:08x} room={s.current_room}')
+            else:
+                log('POST-AUTH', f'VNET::SendEnterToGame (direct) pilot="{pname}" gidx=0x{game_idx:08x} (no room)')
+            s.entered_game = True
+            s.entering_gidx = game_idx
+            s.nation = None                   # enters "In Menu" until a side is picked
+            assign_player_slot(s, s.current_room)
+            log('POST-AUTH', 'GAME MODE — will answer 0x43 game-connect poll (not echoing 200)')
+            # Send the real entry GRANT: msg 201 (0xc9) JoinToGameAnswer. ClientNumber and
+            # PlayerIndex are the room-scoped slot (both >= 0 → grant). This stops the
+            # 0x43 poll and moves the client into the arena (handler FUN_004f88f0).
+            # GUARD (RE FUN_004f88f0): handler asserts ClientID<0 on entry — a 2nd 201
+            # while already granted crashes the client. Grant once per entry.
+            if s.client_granted:
+                log('POST-AUTH', 'JoinToGameAnswer 201 already granted this entry — suppressing duplicate')
+            else:
+                s.client_granted = True
+                send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
+                         f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+                         f'PlayerIndex={s.player_index} → GRANT)', to=5.0)
+            # ── PLAYER-OBJECT LAYER (v184) ───────────────────────────────────────
+            # Now that the local player is granted, stand up the remote-player view:
+            #   1. msg 62 → tell the newcomer about every peer already in the room
+            #      (builds a REMOTE_PLAYER object for each — handler FUN_004fa5f0).
+            #   2. msg 62 → tell those peers about the newcomer (live join).
+            # Both 62 calls self-gate: no peers → nothing sent, so a lone player's
+            # entry is byte-identical to the known-good v182 path.
+            # Side/camp (msg 63) is NOT sent here: nation is still None ("In Menu")
+            # until the client picks a side, which drives handle_team_select → 63.
+            # msg 96 (ScoreTable) is DEFERRED — v183 sent it unconditionally here and
+            # it crashed arena-join (messages08.log): FUN_004f53b0 frees+reallocates
+            # the host-side score-table object mid-entry, before the client's world is
+            # stood up, wedging it (3s stall → WinError 10054). Seed the board after
+            # full world-load, not during the grant.
+            def _stand_up_player_objects(_s=s):
+                push_player_roster_62(_s, reason='(on enter)')
+                broadcast_player_join_62(_s, reason='(on enter)')
+            threading.Thread(target=_stand_up_player_objects, daemon=True).start()
+            # Do NOT echo: echoing type=0x82/sub=0xc8 causes FA.exe "Unknown Type 200"
+            return
+
+        # ── WRAPPED VNET::SendEnterToGame ─────────────────────────────────────────
+        # Outer packet: bc=0, type=RETRY_COUNTER, cmd=0, sub=INNER_BC
+        # Inner at pl[4:]: [inner_bc=0x02][inner_type=0x82][0x00][0x00][inner_sub=0xc8]...
+        # BUG HISTORY: was inside sub==0x00 && len<=16 gate → IMPOSSIBLE to trigger.
+        #   pl[4]=inner_bc=0x02 ≠ 0x00   AND   len(pl)=48 > 16.
+        # FIX: check here with only pl[5]==0x82 and pl[8]==0xc8, ANY outer sub.
+        if len(pl) >= 17 and pl[5] == 0x82 and pl[8] == 0xc8:
+            pname_raw = pl[16:48] if len(pl) >= 48 else pl[16:]
+            pname = pname_raw.split(b'\x00')[0].decode('ascii', 'replace').strip()
+            game_idx = int.from_bytes(pl[9:13], 'little') if len(pl) >= 13 else 0
+            if pname and s.current_room:
+                existing = [p for p,_ in db_get_pilots_in_room(s.current_room)]
+                if pname not in existing:
+                    db_room_join(s.current_room, pname, s.account or '')
+                log('POST-AUTH', f'VNET::SendEnterToGame (WRAPPED) inner_bc=0x{sub:02x} GameIndex=0x{game_idx:08x} pilot="{pname}" room={s.current_room}')
+            else:
+                log('POST-AUTH', f'VNET::SendEnterToGame (WRAPPED) inner_bc=0x{sub:02x} GameIndex=0x{game_idx:08x} (no room)')
+            s.entered_game = True
+            log('POST-AUTH', 'GAME MODE (wrapped VNET) — stopping 0x43, not echoing')
+            return
+
+        # ── SCAN-INNER PACKET DETECTION ──────────────────────────────────────────
+        # FA.exe wraps APPSPACE sub-commands in type-scan outer packets:
+        #   outer: bc=0, type=RETRY_COUNTER, cmd=0, sub=0x00
+        #   inner at pl[4:]: inner[1]=type, inner[3]=cmd_lo, inner[4]=sub
+        # These fire every 1s between compound 0x43 retries (every ~13s).
+        if sub == 0x00 and len(pl) >= 9 and len(pl) <= 16:
+            inner1 = pl[5] if len(pl) > 5 else 0   # inner type byte
+            inner3 = pl[7] if len(pl) > 7 else 0   # inner cmd low byte
+            inner4 = pl[8] if len(pl) > 8 else 0   # inner sub
+
+            # Inner type=0x52 (pilot/squad status): accept silently — echoing causes loops
+            if inner1 == 0x52:
+                log('POST-AUTH', f'scan-inner 0x52/0x{inner4:02x} — accepted silently')
+                return
+
+            # Inner sub=0xd2: pre-room signal retry via type-scan → echo it
+            if inner1 == 0x12 and inner4 == 0xd2 and not s.entered_game:
+                log('POST-AUTH','scan-inner sub=0xd2 → echo inner')
+                threading.Thread(target=lambda: send_rel(s, build_appspace_pkt(bytes([0xd2])),
+                                 '← scan-inner echo 0xd2', to=3.0), daemon=True).start()
+                return
+
+            # (VNET wrapped check moved OUT of this block — was dead code here
+            #  because inner bc=0x02 makes outer sub=0x02 ≠ 0x00, AND len=48 > 16)
+
+            # Inner APPSPACE sub=0x43: type-scan room confirm poll
+            if inner1 == 0x12 and inner4 == 0x43:
+                now = time.time()
+                if now - s.last_43_ts >= 0.5:
+                    s.last_43_ts = now
+                    room_slot = getattr(s,'room_slot',0)
+                    rooms = db_get_open_rooms()
+                    if rooms and (s.current_room or room_slot):
+                        rid   = s.current_room or rooms[0][0]
+                        pcount= db_room_player_count(rid)
+                        slot  = room_slot or (rid & 0xFF)
+                        rd = bytes([0x43,slot,0,0,0,pcount,0x01,0,0,0,0,0,0,0,0,0,0])
+                        log('POST-AUTH',f'scan-inner sub=0x43 → room confirm slot=0x{slot:02x} players={pcount}')
+                        resp = build_appspace_pkt(rd)
+                        threading.Thread(target=lambda:send_rel(s,resp,'← scan-inner 0x43',to=3.0),daemon=True).start()
+                    else:
+                        log('POST-AUTH','scan-inner sub=0x43 → no room yet')
+                else:
+                    log('POST-AUTH','scan-inner sub=0x43 → rate-limited')
+                return  # never echo these
+
+            # Inner vcncExitAppSpace (inner type=0x40, inner cmd=5)
+            if inner1 == 0x40 and inner3 == 0x05:
+                log('POST-AUTH','scan-inner vcncExitAppSpace → exit reply')
+                pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
+                if not send_rel(s,bytes(pl2),'exit appspace reply (scan)'):
+                    s.closing=True
+                    with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+                return
+
+        # Messages that must NEVER be echoed. Two kinds:
+        #  - 0x20 (msg 32): no inbound dispatch handler → echo logs "Unknown Type 32".
+        #  - 0x03 (msg 3): NET::OBJECT delete NOTIFY (client → server "I deleted object
+        #    N", e.g. `out 3'3` [03 00 80] right after the back-button teardown's
+        #    "del CLIENT Me 0"). Msg 3 DOES have an inbound handler — "Server require
+        #    delete object %i" — so echoing it back commands the CLIENT to delete a
+        #    bogus object id and crashes the engine: bounds error
+        #    ARR<NET::OBJECT*,2048>[29696] (messages01.log, the post-leave crash).
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45}
+        if sub in NO_ECHO_SUBS:
+            log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) → swallow')
+            return
+
+        # Generic cmd=0 echo for all other type bytes
+        log('POST-AUTH',f'cmd=0 type=0x{tb:02x} sub=0x{sub:02x} → echo')
+        threading.Thread(target=lambda:send_rel(s,stored,f'echo type=0x{tb:02x}',to=5.0),daemon=True).start()
+        return
+
+    if cmd == 0x0222:
+        if len(pl) >= 15:
+            inner_sub = pl[8] if len(pl)>8 else 0
+            if inner_sub == 0xe4:
+                sb14 = pl[14] if len(pl)>14 else 0
+                if sb14 < 0x20: pname = pl[15:].split(b'\x00')[0].decode('ascii','replace')
+                else:             pname = pl[14:].split(b'\x00')[0].decode('ascii','replace')
+                slot = db_get_pilot_slot(s.account, pname) or 0
+                s.current_pilot=pname; s.current_slot=slot
+        threading.Thread(target=lambda:send_rel(s,stored,'← echo cmd=546',to=5.0),daemon=True).start(); return
+
+    if cmd==3:
+        time.sleep(0.05)
+        rec=bytearray(15); rec[0]=2; rec[2]=0x20; rec[11]=0xD3; rec[14]=s.nsq()
+        sock.sendto(bytes(rec),s.addr)
+        time.sleep(0.05); sock.sendto(build_data(106,s.nsq()),s.addr)
+    elif cmd==2:
+        pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64; send_rel(s,bytes(pl2),'disconnect reply')
+    elif cmd==5:
+        log('POST-AUTH','vcncExitAppSpace (cmd=5)')
+        pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
+        if not send_rel(s,bytes(pl2),'exit appspace reply'):
+            s.closing=True   # reply timed out → client gone, stop heartbeat
+            with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+    elif cmd==512:
+        pilots=db_get_pilots(s.account) if s.account else []
+        resp=build_e1_pilot_list(pilots)
+        threading.Thread(target=lambda:send_rel(s,resp,'← pilot list 512',to=5.0),daemon=True).start()
+    elif cmd==530: pass
+    else:
+        if len(pl) >= 9: handle_compound(s, cmd, pl)
+
+# ─── Packet receiver ──────────────────────────────────────────────────────────
+
+def on_pkt(data, addr):
+    s=get_s(addr)
+    if not s: return
+    sz=len(data)
+    if sz==12 and (data[2]&0x80):
+        sock.sendto(build_time_reply(data),addr); return
+    if sz>=8:
+        dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
+        if pt==1:
+            s.rx+=1; cs=data[3] if sz>3 else 0
+            pl=data[8:] if sz>8 else b''
+            time.sleep(0.01); sock.sendto(build_rel_ack(30,cs),s.addr)
+            cv=struct.unpack_from('>H',pl,2)[0] if len(pl)>=4 else 0
+            if cv==4:
+                s.session_id=pl[4:6] if len(pl)>=6 else b'\x00\x01'
+                if not getattr(s,'_login_started',False):
+                    s._login_started=True
+                    threading.Thread(target=login,args=(s,),daemon=True).start()
+            elif s.auth_done:
+                with s._lock: s.post_auth_cmds.append((cv,pl))
+            return
+        if pt==0 and sz==8:
+            aseq=(dw>>20)&0x1FF
+            with s._lock: is_ack=aseq in s._evts
+            if is_ack:
+                s.sig(aseq); return
+            s.closing=True
+            if s.current_pilot:
+                broadcast_player_leave(s.current_pilot, exclude_sess=s)
+                broadcast_system(f'[{s.current_pilot}] has left')
+                db_room_leave(s.current_pilot)
+            with sl: sadrs.pop(addr,None); sids.pop(s.sid,None); return
+
+# ─── Main loop ────────────────────────────────────────────────────────────────
+
+log('SERVER',f'Fighter Ace LAN Server v187 on {HOST}:{PORT}')
+threading.Thread(target=console_handler, daemon=True).start()
+
+while running:
+    try: data,addr=sock.recvfrom(65536)
+    except socket.timeout: continue
+    except KeyboardInterrupt: running=False; break
+    except Exception as e: log('ERROR',str(e)); continue
+    if not data: continue
+    pt=data[0]; sz=len(data)
+    if sz==912 and pt==0: threading.Thread(target=handle_syn,args=(data,addr),daemon=True).start()
+    elif sz==8 and data[2]==2: on_pkt(data,addr)
+    elif sz==8: on_pkt(data,addr)
+    elif pt==2: on_pkt(data,addr)
+    elif pt==0: on_pkt(data,addr)
