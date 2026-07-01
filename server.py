@@ -1,7 +1,22 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v187
+Fighter Ace LAN Server v189
 ===========================
+v189: STABLE MILESTONE — 2-player flight + team changes + crash recovery.
+      * Per-side plane catalog now echoed as 3-byte [planeID][ushort] records so the client's
+        msg-58 reader (len-1)/3 ingests every kept plane (GE bombers no longer dropped).
+      * Telemetry relay marker is size-independent (cmd==0, opcode 0x07, T&0x0f==2, scan off
+        0/4) — fixes asymmetric visibility (both clients now see each other).
+      * Team-change roster: broadcast on current_room (not entered_game) so switches made at
+        team-select propagate; self-63 sent JOIN-only (neutral echo caused a lobby-bail loop);
+        no-op dedup so reliable retransmits of the same side don't re-broadcast (flood/CTD).
+      * Server crash-recovery: SIO_UDP_CONNRESET disabled on Windows (a client CTD no longer
+        starves recvfrom → reconnect gets a populated pilot/arena list without a restart);
+        Linux is immune by default. Reconnect reaps the stale same-account ghost session.
+      Known-rough (deferred, non-blocking): reliable-seq wrap wedge after a very long single
+      segment (~250 pkts, no re-entry); exit-to-lobby re-entry reliable desync on that path.
+v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF_DEBUG
+      flag gates the per-build decompressed-hex dump (default off).
 
 TODO list:
   [x] SYN structure mapped (offsets confirmed)
@@ -285,7 +300,8 @@ ARENA_PLANESETS = {
 # StartAirfield maps side→forced field; the user's rooms use -1 (no force) for all real
 # sides, so the granted start place (AF from the FLY 23 grant) is used as-is — ground
 # start needs no StartAirfield change. We stamp StartGround=1 into every served GAME_DEF.
-FORCE_GROUND_START = True   # True → rewrite StartGround=1 (runway spawn) in served GAME_DEFs
+FORCE_GROUND_START = False  # reverted 2026-06-28: serve each arena's GAME_DEF untouched; use a native ground-start arena. Set True to re-enable the StartGround rewrite.
+GAMEDEF_DEBUG = False  # v188: gate the per-212-build decompressed-hex dump. Set True to re-enable when diffing GAME_DEF fields.
 
 def planeset_for_room(room):
     """Resolve the plane-set index for a room (room[1]=name, room[2]=creator).
@@ -301,6 +317,100 @@ def planeset_for_room(room):
     except Exception:
         pass
     return DEFAULT_PLANESET
+
+# ─── FFA neutral-team guard ────────────────────────────────────────────────────────────
+# FFA vs TC is decided by the camps-block AllianceVar (leading cstring of the camps block;
+# parsed by FA.exe FUN_0056ed90 -> FUN_0056e990, Camps.cpp). The ACTIVE-CAMP MASK
+# (camps+0x60) is built from which hex DIGITS appear in the string (not the dashes); Neutral
+# (camp 7) is ALWAYS force-added. KEY CONSTRAINT (found v188 via live test + server log):
+# Neutral has NO aircraft, so the in-arena side picker will not let you fly it -- a
+# Neutral-ONLY arena left the picker with nothing flyable and it fell back to US. So instead
+# we keep ONE real, flyable camp active (FFA_FLYABLE_CAMP, default 0 = US slot, which has
+# planes and is the picker default) plus the forced Neutral, and relabel BOTH name groups to
+# "Neutral". Result: a 2-column all-Neutral arena the player can actually fly in (they join
+# the flyable camp and show as Neutral). Verified against live rooms (round-trip, p-ptr==len,
+# bc*16+1). NOTE: relabeling is display-only; flyability is gated by plane availability /
+# camp index, not the label string, so camp 0 stays flyable even when shown as "Neutral".
+def is_ffa_room(room):
+    """True if the room is a Free-For-All arena (by NAME or web-editable CATEGORY)."""
+    try:
+        name = (room[1] or '') if len(room) > 1 else ''
+        cat  = (room[8] if len(room) > 8 and room[8] else '')
+        return 'free for all' in name.lower() or 'free for all' in cat.lower()
+    except Exception:
+        return False
+
+def _camp_mask_from_av(av):
+    """Active-camp mask the client's FUN_0056e990 computes from an AllianceVar: each hex
+    digit sets its camp bit; Neutral (7) is always forced active. (An empty string would
+    make the client activate ALL camps, so callers must never produce one.)"""
+    mask = 0
+    for ch in av:
+        c = chr(ch).upper()
+        if '0' <= c <= '9':   mask |= 1 << (ord(c) - 48)
+        elif 'A' <= c <= 'F': mask |= 1 << (10 + ord(c) - 65)
+    return (mask | 0x80) & 0xff
+
+def _split_camp_groups(after_av, ngroups):
+    """Split the post-AllianceVar camps bytes into ngroups groups of 4 NUL-terminated
+    cstrings (code, abbrev, fullname, extra). Returns (groups, consumed_bytes)."""
+    pos = 0; groups = []
+    for _ in range(ngroups):
+        start = pos
+        for _f in range(4):
+            pos = after_av.index(0, pos) + 1
+        groups.append(bytes(after_av[start:pos]))
+    return groups, pos
+
+# Which real (flyable) camp index the (now-disabled) FFA camps rewrite would keep active.
+FFA_FLYABLE_CAMP = 0
+
+# FFA camps rewrite is DISABLED (v188, after live testing). Two findings killed it:
+#  (1) The client's camp table is GLOBAL and last-write-wins. At lobby time the server
+#      pushes a 212 GAME_DEF for EVERY room and the client parses each into one shared camp
+#      table; the FFA room is parsed LAST, so its reduced camps ({0,7}) overwrote the table
+#      for ALL arenas -> every other room showed only camp 0 selectable, 1-4 greyed.
+#      Entering a room does not re-parse, so there is no per-room isolation to exploit.
+#  (2) FFA is not 'one Neutral team' at all -- the arena's own Comment reads 'no teams just
+#      you against everyone else'. Stock FFA legitimately lists all nations in the side
+#      picker (you choose your aircraft's nation); the free-for-all (everyone hostile,
+#      no teams) comes from the camps FFA flag that '01234' already sets. So the original
+#      served camps were correct and need no rewrite. Leave this False; serve camps as-is.
+FFA_NEUTRAL_GUARD = False
+
+def force_ffa_two_col(d, flyable_camp=FFA_FLYABLE_CAMP):
+    """Rewrite the camps block so the FFA arena has exactly the flyable camp (default 0)
+    plus the always-forced Neutral camp (7) active, with BOTH name groups relabeled to the
+    real Neutral cstrings. Mutates `d` in place and fixes block_len (d[13]). The player
+    joins the flyable camp (picker default, has planes) and is shown as Neutral; the result
+    is the 2-column all-Neutral layout. The strict Camps.cpp p-ptr==len assert still holds
+    (we recompute the active mask exactly as the client does and emit one group per active
+    bit). Returns (changed, info)."""
+    try:
+        block_len = d[13]
+        camps = bytes(d[14:14 + block_len])
+        av_end = camps.index(0)
+        av = camps[:av_end]
+        mask = _camp_mask_from_av(av)
+        active = [i for i in range(8) if mask & (1 << i)]
+        groups, consumed = _split_camp_groups(camps[av_end + 1:], len(active))
+        if (av_end + 1) + consumed != block_len:     # must match the client's parser exactly
+            return False, 'camps parse mismatch'
+        if 7 not in active:
+            return False, 'no Neutral camp'
+        neutral = groups[active.index(7)]            # reuse the real Neutral cstrings (NU/NEU/Neutral)
+        new_av = bytes(str(flyable_camp), 'ascii')   # e.g. b'0'
+        if av == new_av:
+            return False, 'already collapsed'
+        new_mask = _camp_mask_from_av(new_av)        # {flyable_camp, 7}
+        new_active = [i for i in range(8) if new_mask & (1 << i)]
+        new_camps = new_av + b'\x00' + neutral * len(new_active)   # one Neutral group per active bit
+        d[14:14 + block_len] = new_camps
+        d[13] = len(new_camps)
+        return True, {'old_av': av, 'new_av': new_av, 'active': new_active,
+                      'old_block_len': block_len, 'new_block_len': len(new_camps)}
+    except (ValueError, IndexError) as e:
+        return False, f'error: {e}'
 
 def extract_terrain_from_gamedef(game_def_raw):
     """Terrain = param[0x39] of the decompressed GAME_DEF (= arena_object+0xe4).
@@ -359,6 +469,177 @@ def gamedef_startground_offset(d):
         pass
     return None
 
+# ── Per-team AIRCRAFT assignment (which nation flies each plane) ────────────────
+# WHY: every stored GAME_DEF leaves all 121 planes with record BYTE 0 = 0x1f. That byte is
+# PLANE.field[0], the CAMP BITMASK the flyability gate FUN_00438330 checks:
+#     flyable(plane, camp) = field[0] & (1<<camp).   0x1f = bits 0..4 = all 5 camps may fly
+# every plane (no per-nation restriction at all). FIX (apply_plane_teams): rewrite byte 0 to
+# (1<<camp) so each plane admits ONLY its team; the wrong-nation planes then grey out per
+# side. The record stays the 4-byte [mask][0xff][lim][lim] form.
+# NOT the earlier 6-byte [attr][camp+0x7d][0][0][lim][lim] form: that set PLANE.hascamp,
+# which (a) never touched byte 0 so it never actually filtered, and (b) put the plane into
+# the client's camp-RESTRICTED hangar display -> the bogus 'max N / used N' line. (The side
+# PICKER's camp enablement is a separate thing entirely: camp-active from airfields/camps,
+# not plane records.)
+#
+# EVENTS / MIX-AND-MATCH: to move a plane to another team just edit the lists below. Anything
+# not listed (incl. every US type) stays on camp 0 (USA). For a one-off event arena with a
+# custom roster, add ROOM_PLANE_TEAMS[<room_id>] = {camp:[names], ...}; it overrides the
+# global table for that room only. Camps: 0=USA 1=GB 2=USSR 3=Germany 4=Japan.
+# Re-enabled 2026-06-29: build_lz_gamedef now emits a REAL LZ-compressed stream (fa_compress)
+# instead of all-literals, which shrinks even teamed GAME_DEFs far under the client's per-packet
+# MTU (TC 1585B -> 801B), so the oversized-packet stall that emptied the arena list is gone.
+PLANE_TEAMS_ENABLED = True
+
+# FILTER MECHANISM (2026-06-30). Two ways to make each side see only its own aircraft:
+#   True  (catalog echo): leave every plane flyable by ALL camps in the GAME_DEF
+#         (byte0 = 0x1f) and instead trim the per-side plane list the server ECHOES back on
+#         the client's 0x3a catalog upload. The client's OWN flyable set never changes with
+#         side, so switching teams stays a lightweight in-place swap and does NOT drop into
+#         the leave/teardown path that wedges the HQ menu. This is the FA "option 1".
+#   False (flyability gate): set byte0 = (1<<camp) so FUN_00438330 greys wrong-nation planes.
+#         Correct teams + clean display, BUT the per-side flyable LIST shrinks/empties on a
+#         side change, forcing the heavy leave/re-entry flow -> HQ menu hang.
+# Flip to False to fall straight back to the byte0 build if the filtered echo doesn't take.
+PLANE_FILTER_VIA_CATALOG = True
+# The client's msg-58 DOWNLOAD decoder FUN_004eff50 (LobbyRcv.cpp:0x209) parses (Size-1)/3
+# records of 3 BYTES each: [planeID:1][ushort LE:2]. The UPLOAD is flat 1-byte ids, but the
+# ECHO must be 3-byte records or the count is read as (Size-1)/3 of garbage (1-byte GE echo
+# Size=27 -> only 8 planes, dropping the bombers at the tail). Visibility is driven by planeID
+# membership in the list (hangar consumer FUN_006de570 gates on the GAME_DEF plane-info array,
+# not this ushort), so the ushort is ancillary; 0 is safe. Bump if planes show greyed.
+CATALOG_RECORD_USHORT = 0
+
+# Stock FA 4.20 plane roster in GAME_DEF SLOT/ID order (slot = list index = the plane ID the
+# GAME_DEF plane block is keyed by). The serve-time rewrite is keyed by slot; this maps
+# slot->name so the team tables below can read by name.
+# CORRECTED 2026-06-30: the prior list was in the client's HANGAR DISPLAY order, not slot
+# order, so name->slot put camp bits on the wrong planes (Germany showed allied bombers).
+# Rebuilt into true ID order via the msg-58 catalog, which maps display-position->plane-ID.
+# ID 107 is the only plane the client omits from its catalog (the L2D2 transport) -> never
+# shown; placed here for completeness.
+PLANE_ROSTER = [
+    "F4F-3","P-39D","P-40C","P-40E-1","F4F-4","F4U-1a","P-38G","F6F-3","P-47D","F4U-1c",
+    "P-51D","P-38L","F4U-4","Hurr-Ia","Spit-Ia","Spit-Vb_LF","Hurr-IIC","Spit-Vb_F","Typhoon","Spit-IXc",
+    "Seafire","Spit-IXe","Spit-XIV","Tempest","I-16","LaGG-3","Hurr-IIb","Kittyhawk-Ia","Yak-1b","P-39Q",
+    "La-5FN","Yak-3","Yak-9U","La-7","Bf-109E-4/B","Bf-109F-4/B","FW-190A-4/U3","FW-190A-8/R6","FW-190A-8/R3","Bf-109G-6/R2",
+    "FW-190A-8/R2","Bf-109G-6/R6","FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","HA-200","A6M2","Ki-44-IIc37","A6M5a",
+    "Ki-61","J2M3","N1K2-J","Ki-84-1a","A6M7","Ki-100","B-25D","TBF-1c","A-20Gu","B-17G",
+    "Dauntless","Mosquito_B_IV","Avenger_II","DB-7B","Mosquito_FB_VI","Mitchell_III","Pe-8","Pe-2","IL-2","A-20Gs",
+    "Tu-2","Tu-4","Ju-88","Do-217E-2","He-111","Do-217J-1","Ju-87G-2","D3A","G5N1","G4M2",
+    "Ju-87D-3","MiG-3","J9Y","C-47A","Dakota_Mk.II","Li-2","Ju-52/3m","Mosquito_B_IX",'Mosquito_"Tse-Tse"',"Mitchell_II",
+    "B-29","Martlet_I","Ki-44-IIc","Ki-43-IIa","Tomahawk","Kittyhawk","Hurr-IID","Yak-9UT","Bf-109E-1/B","Ki-84-1c",
+    "FW-190F-8","F4U-4C","Bf-110C-4","Bf-110G-2","SBD-2","Lancaster","B5N2","L2D2","Ki-67","MiG-15bis",
+    "F-86E","Meteor_F1","Tunnan","Ouragan","B-25J","IL-10","MiG-9","DH.100","Me-163B","FH-1_Phantom",
+    "Pulqui",
+]
+
+# Historical default. Edit freely for events; unlisted planes -> USA (camp 0).
+PLANE_TEAMS = {
+    1: [  # Great Britain
+        "Hurr-Ia","Spit-Ia","Martlet_I","Tomahawk","Hurr-IIC","Spit-Vb_F","Hurr-IID","Kittyhawk",
+        "Spit-Vb_LF","Seafire","Spit-IXc","Spit-IXe","Typhoon","Spit-XIV","Tempest","Meteor_F1",
+        "DH.100","Ouragan","Tunnan","Mosquito_B_IV","Lancaster","Mitchell_II","Avenger_II","DB-7B",
+        "Mosquito_FB_VI",'Mosquito_"Tse-Tse"',"Mitchell_III","Mosquito_B_IX","Dakota_Mk.II",
+    ],
+    2: [  # USSR
+        "I-16","MiG-3","LaGG-3","Hurr-IIb","Kittyhawk-Ia","Yak-1b","P-39Q","La-5FN","Yak-3",
+        "Yak-9U","La-7","Yak-9UT","MiG-9","MiG-15bis","Pe-8","Pe-2","IL-2","A-20Gs","Tu-2",
+        "IL-10","Tu-4","Li-2",
+    ],
+    3: [  # Germany
+        "Bf-109E-1/B","Bf-109E-4/B","Bf-110C-4","Bf-109F-4/B","FW-190A-4/U3","Bf-110G-2",
+        "Bf-109G-6/R2","FW-190A-8/R6","FW-190F-8","FW-190A-8/R3","Bf-109G-6/R6","FW-190A-8/R2",
+        "FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","Me-163B","Pulqui","HA-200","Ju-88",
+        "Do-217E-2","Ju-87D-3","He-111","Do-217J-1","Ju-87G-2","Ju-52/3m",
+    ],
+    4: [  # Japan
+        "A6M2","Ki-43-IIa","Ki-44-IIc","Ki-44-IIc37","A6M5a","Ki-61","J2M3","N1K2-J","Ki-84-1a",
+        "Ki-84-1c","A6M7","Ki-100","D3A","B5N2","G5N1","G4M2","Ki-67","J9Y","L2D2",
+    ],
+}
+
+# Optional per-room override: {room_id: {camp:[names], ...}}. Falls back to PLANE_TEAMS.
+ROOM_PLANE_TEAMS = {}
+
+def _slot_camp_map(teams):
+    """{camp:[names]} -> {slot:camp} against PLANE_ROSTER. Unlisted slots -> 0 (USA)."""
+    name_camp = {}
+    for camp, names in teams.items():
+        for nm in names:
+            name_camp[nm] = camp
+    return {i: name_camp.get(nm, 0) for i, nm in enumerate(PLANE_ROSTER)}
+
+def plane_camp_for_room(room):
+    """slot->camp map for this room (per-room override else global), or None if disabled."""
+    if not PLANE_TEAMS_ENABLED:
+        return None
+    teams = ROOM_PLANE_TEAMS.get(room[0], PLANE_TEAMS) if room else PLANE_TEAMS
+    return _slot_camp_map(teams)
+
+def _session_slot_camp(s):
+    """slot->camp map for the session's current room (per-room override else global table).
+    Used by the 0x3a catalog-echo filter to keep only the player's current side's plane IDs."""
+    rid = getattr(s, 'current_room', None)
+    teams = ROOM_PLANE_TEAMS.get(rid, PLANE_TEAMS) if rid is not None else PLANE_TEAMS
+    return _slot_camp_map(teams)
+
+def _gamedef_plane_block(d):
+    """Locate the plane block in a DECOMPRESSED GAME_DEF: returns (start, count, blen) where
+    d[start]=count, d[start+1:start+3]=u16 block_len, d[start+3:start+3+blen]=records. Anchored
+    on the same walk extract_terrain_from_gamedef uses (to the terrain byte), then scans for the
+    count/length-prefixed record list that consumes exactly. Stock rooms store every plane in the
+    4-byte [attr][0xff][lim][lim] form (blen == 4*(count+1)); that exact signature is required so
+    we never lock onto a look-alike region. Returns None if not found."""
+    try:
+        block_len = d[13]
+        p = 20 + block_len
+        for _ in range(3):
+            p = d.index(0, p) + 1
+        p += 1
+        p = d.index(0, p) + 1
+        p += 4 + 32                              # 2 ushorts + 8 dwords; terrain byte at p
+        for s in range(p, len(d) - 3):
+            count = d[s]
+            if count == 0 or count > 128:
+                continue
+            blen = struct.unpack_from('<H', d, s + 1)[0]
+            if blen != 4 * (count + 1) or s + 3 + blen > len(d):
+                continue
+            rec = d[s + 3:s + 3 + blen]
+            if all(rec[i + 1] == 0xff for i in range(0, blen, 4)):
+                return s, count, blen
+    except (ValueError, IndexError):
+        pass
+    return None
+
+def apply_plane_teams(d, slot_camp):
+    """Rewrite the plane block of bytearray `d` in place so each plane is flyable ONLY by
+    its assigned nation. The flyability gate is FA.exe FUN_00438330:
+        flyable(plane, camp) = PLANE.field[0] & (1 << camp)
+    where PLANE.field[0] is record BYTE 0 (stock 0x1f = bits 0..4 = all 5 camps). We set
+    byte 0 to (1<<camp) so a plane admits only its team; the record STAYS the 4-byte
+    [mask][0xff][l1][l2] no-nation form (marker 0xff, both limit bytes preserved).
+    WHY this and not the 6-byte [attr][camp+0x7d][..] form: that form set PLANE.hascamp,
+    which (a) never touched byte 0 so it never actually filtered, and (b) dropped the plane
+    into the client's camp-RESTRICTED hangar display -> the bogus 'max/used' line. Byte-0
+    masking greys wrong-nation planes through FUN_00438330 with NO hascamp (no 'max/used')
+    and does not grow the block (no MTU pressure). Returns (start, blen, blen) or None."""
+    loc = _gamedef_plane_block(d)
+    if not loc:
+        return None
+    s, count, blen = loc
+    rec = bytearray(d[s + 3:s + 3 + blen])
+    for slot in range(count + 1):
+        if PLANE_FILTER_VIA_CATALOG:
+            rec[slot * 4] = 0x1f                  # all camps flyable; per-side filter is the 0x3a echo
+        else:
+            camp = slot_camp.get(slot, 0) & 7
+            rec[slot * 4] = 1 << camp             # byte0 = camp bitmask (US=0x01 … JP=0x10)
+        # marker rec[+1] stays 0xff (no-hascamp form); limits rec[+2],rec[+3] preserved
+    d[s + 3:s + 3 + blen] = rec
+    return s, blen, blen
+
 # ─── Binary GAME_DEF layout (from FA.exe FUN_0057bee0 / FUN_0056ed90) ──────────
 #
 # The GAME_DEF is NOT text — it's a packed binary struct. The "Terrain=N" lines we
@@ -401,8 +682,14 @@ def fa_decompress(data, size=None):
         raise ValueError('compressed input too small')
     if data[0] == 0x01:
         return data[4:size]
-    out = bytearray()
-    dict_pos = [0] * 4096       # hash buckets (0x200) * 8 ring slots
+    # FA's decompressor (FUN_007d68f0) pre-initialises EVERY dictionary slot to point at
+    # the 18-byte constant "123456789012345678", so a MATCH emitted before that slot was
+    # populated by literals copies from THAT string — not from output offset 0. Model it
+    # as an 18-byte PREFIX on the output buffer with all dict slots = offset 0; the real
+    # output is out[18:]. Without this, a blob whose early op is such a match (the trn5
+    # 'Circle' GAME_DEF) decompresses to garbage → client GAME_DEF parser over-read CTD.
+    out = bytearray(b"123456789012345678")
+    dict_pos = [0] * 4096       # every slot points at the init string (offset 0 in `out`)
     ring = 0
     lit_run = 0
     ctrl = 1
@@ -454,7 +741,7 @@ def fa_decompress(data, size=None):
             ctrl >>= 1
             if ctrl == 1:
                 break
-    return bytes(out)
+    return bytes(out[18:])   # strip the 18-byte dictionary-init prefix
 
 def _lz_comp_size(n):
     """Size of the all-literals LZ stream for an n-byte struct:
@@ -476,7 +763,82 @@ def encode_all_literals(struct):
         i += 16
     return bytes(out)
 
-def build_lz_gamedef(blob, planeset=0):
+def fa_compress(d, flo=-1, fhi=-1):
+    """Encode `d` as a real FA LZ stream (the inverse of fa_decompress): literals plus 3-18
+    byte dictionary matches, emitted by CO-SIMULATING the decompressor's exact dictionary
+    state (18-byte init prefix, hash/ring/lit_run, slot writes) so every match resolves to the
+    correct source at decode time. Repetitive GAME_DEFs (the plane block especially) shrink
+    dramatically vs encode_all_literals, keeping the 212 payload under the client's MTU.
+    Positions in [flo,fhi) are forced to literals (byte-granular alignment padding: a run of
+    spaces would otherwise collapse to one fixed-size match and never move the size residue).
+    The caller MUST verify the result via fa_decompress before serving."""
+    d = bytes(d)
+    out = bytearray(b"123456789012345678")     # decompressor's dictionary-init prefix
+    dict_pos = [0] * 4096; ring = 0; lit_run = 0
+    content_map = {}                            # 3-byte content -> {slots currently holding it}
+    slot_content = {}                           # slot -> its indexed 3-byte content
+    def set_slot(slot, pos):
+        old = slot_content.get(slot)
+        if old is not None:
+            s = content_map.get(old)
+            if s is not None: s.discard(slot)
+        dict_pos[slot] = pos; c = bytes(out[pos:pos + 3])
+        if len(c) == 3:
+            content_map.setdefault(c, set()).add(slot); slot_content[slot] = c
+        else:
+            slot_content.pop(slot, None)
+    ops = []; q = 0; N = len(d)
+    while q < N:
+        best_n = 0; best_slot = -1; best_src = -1
+        if not (flo <= q < fhi) and q + 3 <= N:
+            cand = content_map.get(d[q:q + 3])
+            if cand:
+                for S in cand:
+                    src = dict_pos[S]; n = 0; lim = min(18, N - q)
+                    while n < lim:
+                        pos = src + n
+                        pb = out[pos] if pos < len(out) else d[q + (pos - len(out))]
+                        if pb != d[q + n]: break
+                        n += 1
+                    if n > best_n: best_n = n; best_slot = S; best_src = src
+                    if best_n == lim: break
+        if best_n >= 3:
+            S = best_slot; n = best_n; src = best_src
+            b0 = (((S >> 8) & 0xf) << 4) | (n - 3); b1 = S & 0xff; hi = (b0 & 0xf0) << 4
+            for k in range(n): out.append(out[src + k])
+            start = len(out) - n
+            if lit_run == 0:
+                set_slot(((hi | (b1 & 0xfffffff8)) + ring) & 0xfff, start)
+            else:
+                s = start - lit_run
+                set_slot((ring + _fa_hash(out[s], out[s + 1], out[s + 2]) * 8) & 0xfff, s); ring = (ring + 1) & 7
+                if lit_run == 2:
+                    set_slot((ring + _fa_hash(out[s + 1], out[s + 2], out[s + 3]) * 8) & 0xfff, s + 1); ring = (ring + 1) & 7
+                lit_run = 0
+                set_slot(((hi | (b1 & 0xfffffff8)) + ring) & 0xfff, start)
+            ring = (ring + 1) & 7; ops.append((1, b0, b1)); q += n
+        else:
+            ch = d[q]; out.append(ch); q += 1; lit_run += 1
+            if lit_run == 3:
+                p = len(out) - 1
+                set_slot((ring + _fa_hash(out[p - 2], out[p - 1], out[p]) * 8) & 0xfff, p - 2)
+                lit_run = 2; ring = (ring + 1) & 7
+            ops.append((0, ch))
+    # serialize: 4-byte header (byte0=0x00 => LZ mode) + groups of 16 ops, each preceded by its
+    # 2-byte control word (bit set = match, LSB = first op of the group).
+    s = bytearray([0, 0, 0, 0]); i = 0
+    while i < len(ops):
+        grp = ops[i:i + 16]; ctrl = 0
+        for j, op in enumerate(grp):
+            if op[0] == 1: ctrl |= (1 << j)
+        s.append(ctrl & 0xff); s.append((ctrl >> 8) & 0xff)
+        for op in grp:
+            if op[0] == 0: s.append(op[1])
+            else: s.append(op[1]); s.append(op[2])
+        i += 16
+    return bytes(s)
+
+def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') ≡ 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -495,10 +857,25 @@ def build_lz_gamedef(blob, planeset=0):
     if not d or d[0] != 0x8a:
         log('GAMEDEF212', f'decompressed version=0x{(d[0] if d else 0):02x} (expected 0x8a)')
         return None, 0, 0
+    # FFA neutral-team guard: for Free-For-All rooms, rewrite the camps block to a 2-column
+    # all-Neutral set (one flyable camp + forced Neutral, both labeled "Neutral") so the
+    # side picker / 213 Nations box / roster show Neutral AND the player can still fly
+    # (Neutral itself has no planes; the flyable camp does). Runs BEFORE pad alignment /
+    # plane-set patch so d[13] and the word[0x23] offset (14+d[13]) stay consistent.
+    if force_ffa:
+        changed, info = force_ffa_two_col(d)
+        if changed:
+            log('GAMEDEF212', f"FFA guard: camps -> 2-col Neutral "
+                              f"(AllianceVar {info['old_av']!r} -> {info['new_av']!r}, "
+                              f"active camps {info['active']}, "
+                              f"block_len {info['old_block_len']} -> {info['new_block_len']})")
+        elif info != 'already collapsed':
+            log('GAMEDEF212', f'FFA guard: camps unchanged ({info})')
     # v166 DEBUG: dump the pristine decompressed GAME_DEF struct so a terrain-contrast
     # room (Ocean=1 vs English Channel=6) can be diffed field-by-field to pin the terrain
     # byte. Harmless; remove once the terrain field is located.
-    log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}')
+    if GAMEDEF_DEBUG:
+        log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}')
     # v165: CORRECTION — the ushort at 14+camps_block_len (param_1[0x23]) is NOT the
     # terrain. It is the PLANE-SET id: FUN_0057bee0 feeds it straight to FUN_004c7cd0,
     # which loads "PLANES\Planes_%d.txt" (or "Planes.txt" when 0). v164 stamped 6 here,
@@ -540,8 +917,51 @@ def build_lz_gamedef(blob, planeset=0):
                 log('GAMEDEF212', f'StartGround @+{sg} {old} -> 1 (runway spawn)')
         else:
             log('GAMEDEF212', 'StartGround offset unresolved; leaving spawn as-is')
+    # PER-TEAM PLANES: rewrite each plane's nation marker so every active camp owns aircraft
+    # (else all planes default to camp 0/USA and GB/SU/GE/JP grey out in the side picker).
+    # Runs after the camps/plane-set/StartGround patches (their offsets precede the plane
+    # block) and before pad alignment so the pad accounts for the grown block.
+    if plane_camp:
+        pinfo = apply_plane_teams(d, plane_camp)
+        if pinfo:
+            ps, ob, nb = pinfo
+            c = {}
+            for v in plane_camp.values():
+                c[v] = c.get(v, 0) + 1
+            log('GAMEDEF212', f"plane-teams @+{ps}: block {ob}->{nb}B  "
+                              f"US={c.get(0,0)} GB={c.get(1,0)} SU={c.get(2,0)} "
+                              f"GE={c.get(3,0)} JP={c.get(4,0)}")
+        else:
+            log('GAMEDEF212', 'plane-teams: plane block not located; planes left on USA')
     D_orig = len(d)
-    # smallest pad so payload = 5 + comp_size(D+pad) ≡ 1 (mod 16)
+    # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
+    # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
+    # and overflowed it -> the oversized 212 stalled the in-order reliable channel -> the 0xd2
+    # arena list queued behind it never arrived -> empty lobby). There is no closed-form size,
+    # so we pad the COMMENT and recompress until 5+len(comp) ≡ 1 (mod 16); the pad bytes are
+    # FORCED to literals (flo..fhi) so each adds exactly one byte (a run of spaces would else
+    # collapse to one fixed-size match and never move the residue). The chosen stream is
+    # round-trip verified before use; any miss falls back to the all-literals encoder.
+    try:
+        p = 1 + 12
+        block_len = d[p]; p += 1
+        p += block_len + 6
+        name_end = d.index(0, p)
+        comment_end = d.index(0, name_end + 1)
+    except (ValueError, IndexError):
+        comment_end = None
+    if comment_end is not None:
+        for pad in range(0, 48):
+            dp = bytes(d[:comment_end]) + b' ' * pad + bytes(d[comment_end:])
+            comp = fa_compress(dp, comment_end, comment_end + pad)
+            if (5 + len(comp)) % 16 == 1:
+                if fa_decompress(comp, len(comp)) == dp:
+                    return comp, len(dp), pad
+                log('GAMEDEF212', f'real-LZ round-trip mismatch at pad={pad}; using all-literals')
+                break
+        else:
+            log('GAMEDEF212', 'real-LZ could not align within 48; using all-literals')
+    # FALLBACK: all-literals encoder with closed-form pad (original behaviour).
     pad = 0
     while (5 + _lz_comp_size(D_orig + pad)) % 16 != 1:
         pad += 1
@@ -669,6 +1089,15 @@ def init_rooms_db():
         log('DB', 'Migration: backfilled terrain from stored GAME_DEFs')
     except Exception:
         pass  # column already exists — expected on every normal startup
+    # Migration: add the arena-list SECTION HEADER / category (name1) column. Editable
+    # from the web admin Arena Management panel; default 'Custom Arenas' = the value
+    # build_arenalist hardcoded before this was made per-room.
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN category TEXT NOT NULL DEFAULT 'Custom Arenas'")
+        conn.commit()
+        log('DB', 'Migration: added category column to rooms table')
+    except Exception:
+        pass  # column already exists — expected on every normal startup
     # Always re-derive room_name from the binary GAME_DEF (the old text-regex path
     # left every room 'Unnamed' since the blob is binary, not INI text). Cheap, and
     # corrects rooms created before binary name extraction existed.
@@ -704,13 +1133,21 @@ def db_get_open_rooms():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT room_id, room_name, creator_pilot, account_name, created_at, room_slot, "
-        "game_def_raw, terrain "
+        "game_def_raw, terrain, category "
         "FROM rooms WHERE status='open' ORDER BY created_at DESC").fetchall()
     conn.close(); return rows
 
+# 2026-06-29: keep rooms listed even after they empty out (or when their creator opens a
+# new room), so e.g. a Territorial Combat ground room and a Free For All air room coexist
+# instead of the second one reaping the first. With this True, db_close_room only VACATES
+# the room (clears its players) and leaves status='open'. Manual cleanup is still available
+# via the console 'clearrooms' command. Set False to restore auto-close-on-empty.
+PERSIST_ROOMS = True
+
 def db_close_room(room_id):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE rooms SET status='closed' WHERE room_id=?", (room_id,))
+    if not PERSIST_ROOMS:
+        conn.execute("UPDATE rooms SET status='closed' WHERE room_id=?", (room_id,))
     conn.execute("DELETE FROM room_players WHERE room_id=?", (room_id,))
     conn.commit(); conn.close()
 
@@ -853,6 +1290,12 @@ def console_handler():
             conn.execute('DELETE FROM room_players')
             conn.commit(); conn.close()
             log('CONSOLE', 'All rooms cleared')
+        elif cmd == 'reopen':
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.execute("UPDATE rooms SET status='open' WHERE status='closed'")
+            n = cur.rowcount
+            conn.commit(); conn.close()
+            log('CONSOLE', f'Re-opened {n} closed room(s) (now visible in the arena list)')
         elif cmd == 'help':
             log('CONSOLE', 'gen <name>  — generate ticket for new account')
             log('CONSOLE', 'list        — show all accounts and their pilots')
@@ -1091,10 +1534,14 @@ def build_ce_room_list(rooms):
 
 GAMELIST_FORMAT = 'empty'   # 0xcb is the LOBBY PLAYER list, not arenas — keep empty until handled separately
 
-def _arena_gameindex(name):
-    """GameIndex as FA derives it for a room: [00][ff][ff][name[0]] LE."""
+def _arena_gameindex(name, room_id=0):
+    """GameIndex as FA derives it for a room: 4 LE bytes [room_id&0xff][ff][ff][name[0]].
+    name[0] is the MSB (it overlaps the creator-name field in the room echo). The LOW
+    byte — a fixed 0x00 before 2026-06-29 — now carries room_id, so two rooms whose
+    creators share a first letter no longer collide on the GameIndex. room_id=0
+    reproduces the legacy value, kept as a resolution fallback in _find_room_by_gidx."""
     first = (name.encode()[:1] or b'\x00')[0]
-    return bytes([0x00, 0xff, 0xff, first])   # 4 bytes, little-endian on wire
+    return bytes([room_id & 0xff, 0xff, 0xff, first])   # 4 bytes, little-endian on wire
 
 def build_gamelist(rooms):
     """Build the 0xcb GameList (arena list) response.
@@ -1218,14 +1665,14 @@ def build_arenalist(rooms):
         #   [+11]   HIGH byte of the +8 dword → desc+0x1c  TERRAIN (_TrnNumber) ★
         hdr = bytearray(12)
         hdr[0:4]  = (planeset & 0xFFFFFFFF).to_bytes(4, 'little')  # plane-set (default)
-        hdr[4:8]  = _arena_gameindex(creator)                     # [00 ff ff creator[0]]
+        hdr[4:8]  = _arena_gameindex(creator, r[0])                     # [00 ff ff creator[0]]
         hdr[8]    = 0                                             # flag bits (none)
         hdr[9:11] = (0).to_bytes(2, 'little')                     # desc+0x18 (unused)
         hdr[11]   = trn                                           # TERRAIN → desc+0x1c ★
         # Name slots (empirically, from v167 live test): the FIRST name is the
         # category/section HEADER the client groups rows under; the SECOND name is
         # the arena's own row label. So name1 = category, name2 = the room's name.
-        category = 'Custom Arenas'
+        category = (r[8] if len(r) > 8 and r[8] else 'Custom Arenas')   # name1 section header (web-editable)
         records.append((bytes(hdr), category.encode()[:31], room_name.encode()[:31]))
         listed.append((room_name, trn))
     # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven — it keeps starting
@@ -1277,9 +1724,11 @@ def build_gamedef_212(room):
     size we control (comment pad) so the 212 payload lands exactly on bc*16+1 — no
     over-read, valid version byte, parser consumes the whole decompressed buffer."""
     creator = (room[2] or room[1] or 'Arena')
-    gidx    = _arena_gameindex(creator)          # 4 bytes [00 ff ff creator[0]] (non-zero)
+    gidx    = _arena_gameindex(creator, room[0])          # 4 bytes [00 ff ff creator[0]] (non-zero)
     blob    = bytes(room[6]) if len(room) > 6 and room[6] else b''
-    comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room))
+    comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
+                                    force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
+                                    plane_camp=plane_camp_for_room(room))
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -1379,7 +1828,7 @@ def build_arena_players_213(room, counts=None, names=None):
     no-ops. Sent at EXACT length (no bc*16+1 zero pad) so the roster loop ends on the
     wire length — zero padding would be parsed as phantom empty-name players."""
     creator = (room[2] or room[1] or 'Arena')
-    gidx = _arena_gameindex(creator)                         # 4 bytes, non-zero
+    gidx = _arena_gameindex(creator, room[0])                         # 4 bytes, non-zero
     counts = (list(counts) if counts else [0] * 8)[:8]
     while len(counts) < 8:
         counts.append(0)
@@ -1727,8 +2176,19 @@ def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
         return
     rec = [(s.player_index, side, op)]
     pkt = build_change_player_63(rec)
+    # The SUBJECT must receive its OWN camp change for a real team JOIN (side is a nation):
+    # the self-63 is what sets the local player's camp (chat colour + world/chat roster line),
+    # and get_sessions_in_room filters on entered_game (briefly False at team-select after an
+    # exit-flight), so without this the roster froze on the first side. But NEVER echo a
+    # side=None (neutral/leave) self-63 to the subject: telling the client it has no team makes
+    # it bail to the lobby (msg-64), and on a reliable-desynced re-entered channel that turns
+    # into a back-to-lobby retransmit storm → 'Test1 leaving GBR' flood → dropped connection.
+    # The transient leave is the client's own action; peers still get it for their roster.
+    recipients = list(get_sessions_in_room(room_id))
+    if side is not None and s not in recipients:
+        recipients.append(s)
     n = 0
-    for sess in get_sessions_in_room(room_id):
+    for sess in recipients:
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
                          f'← ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
                          f'{(" " + reason) if reason else ""}', to=3.0), daemon=True).start()
@@ -1820,6 +2280,21 @@ class S:
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+# ── Windows UDP WSAECONNRESET trap (FATAL server-recovery fix) ────────────────────────────
+# When the server sendto()s a client that has CTD'd / closed its port, Windows posts an ICMP
+# port-unreachable and then raises WSAECONNRESET (WinError 10054) on the NEXT recvfrom() —
+# DISCARDING the datagram that was waiting. The dead session's heartbeat keeps firing every
+# ~5s, so each one eats an inbound packet; a reconnecting client's SYN / pilot-list / arena-list
+# requests get intermittently dropped and come back EMPTY, needing a full server restart. The
+# dead session is never reaped because on Windows the failure surfaces on recvfrom, not sendto,
+# so the heartbeat's OSError 3-strikes path never fires. Disabling SIO_UDP_CONNRESET makes
+# recvfrom ignore the stale ICMP and never drop a good datagram. Guarded/no-op off Windows.
+try:
+    _SIO_UDP_CONNRESET = getattr(socket, 'SIO_UDP_CONNRESET', 0x9800000C)
+    sock.ioctl(_SIO_UDP_CONNRESET, False)
+    log('INIT', 'SIO_UDP_CONNRESET disabled (recvfrom survives client CTDs)')
+except (AttributeError, OSError, ValueError):
+    pass
 sock.bind((HOST,PORT)); sock.settimeout(0.5)
 sids={}; sadrs={}; sl=threading.Lock(); running=True
 
@@ -2194,10 +2669,23 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
     pl = data[8:]
-    if len(pl) >= 2 and pl[:2] != b'\x05\x42':
-        pl = pl[4:]                     # strip the sz=100 [seq][flags] prefix
-    if pl[:5] != _TELEM_MARK or len(pl) < 9:
+    # The flying-state object-update appspace = [bc][T][00][00][07][tick u16][ONumber u16]...
+    # T's LOW nibble is 0x2 (appspace-data channel); T's HIGH nibble is the SIZE
+    # (Size = bc*16 + T>>4), so it VARIES with payload length — Test1's update is 86B (T=0x62)
+    # while Test2's is 84B (T=0x42). The old check pinned T to 0x42 AND blindly stripped a
+    # 4-byte prefix whenever pl[:2]!=0x0542, which MANGLED Test1's prefix-less 0x05 0x62 stream
+    # ((00 00 07 ...) != marker -> early return -> Test1 never relayed -> peers couldn't see
+    # Test1). Match the SIZE-INDEPENDENT signature instead (cmd==0x0000, opcode 0x07, T low
+    # nibble 0x2), scanning offset 0 (no prefix) and 4 (sz=100 [seq][flags] prefix).
+    _telem = None
+    for _off in (0, 4):
+        c = pl[_off:]
+        if len(c) >= 9 and c[2] == 0 and c[3] == 0 and c[4] == 0x07 and (c[1] & 0x0f) == 0x02:
+            _telem = c
+            break
+    if _telem is None:
         return                          # not a flying-state object update (e.g. pre-spawn 00c2)
+    pl = _telem
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
@@ -2304,21 +2792,45 @@ def handle_team_select(s, nation):
         live local entry → use-after-free CTD (messages10.log).
     We still record s.nation for chat/roster scoping and the DB layer."""
     if nation is None or nation == 0xff or nation > 7:
+        _changed = s.nation is not None
         s.nation = None
         raw = 0xff if nation is None else nation
         log('TEAM', f'{s.current_pilot} LEFT team (raw=0x{raw:02x}) — msg 63 op=CAMP side=0xff')
-        if s.entered_game and s.current_room is not None:
+        # A camp change is a ROSTER event, not a flight event — broadcast whenever the
+        # player is still associated with a room, NOT only while entered_game. Exiting a
+        # flight to the team-select/HQ screen runs handle_leave_arena which clears
+        # entered_game (but KEEPS current_room), so gating on entered_game silently dropped
+        # every team change made AT team-select after the first spawn.
+        # DEDUP: only broadcast on an ACTUAL side change. On a desynced re-entered channel
+        # the client reliably RE-SENDS the same msg-63 every ~5s (its ACK isn't clearing the
+        # send-queue); re-broadcasting each retransmit is a reliable send that further
+        # perturbs the channel → 'Test1 joining/leaving' flood → the client gives up (~30s)
+        # → 10054. A retransmit of the current side is a no-op (s.nation already matches), so
+        # skip the re-broadcast and let the bare ACK land.
+        if _changed and s.current_room is not None:
             broadcast_player_change_63(s, None, op=CP_OP_CAMP, reason='(team leave)')
     else:
+        _changed = s.nation != nation
         s.nation = nation
         log('TEAM', f'{s.current_pilot} joined side {nation} — msg 63 op=CAMP')
-        if s.entered_game and s.current_room is not None:
+        # Broadcast only on an actual change (see the team-leave branch): the first join
+        # after entering broadcasts (s.nation was reset to None at SendEnterToGame), while
+        # a reliable retransmit of the same join finds s.nation already set → no re-send.
+        if _changed and s.current_room is not None:
             broadcast_player_change_63(s, nation, op=CP_OP_CAMP, reason='(team join)')
 
 def _find_room_by_gidx(game_idx):
-    """Resolve an open room by its 32-bit GameIndex (LE int)."""
-    for r in db_get_open_rooms():
-        if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+    """Resolve an open room by its 32-bit GameIndex (LE int). Matches the per-room
+    UNIQUE index [room_id&0xff][ff][ff][creator[0]] first; falls back to the legacy
+    creator-only index [00 ff ff creator[0]] (newest match) for a client still holding
+    the pre-unique value — e.g. a creator's own room before it re-reads the 0xd2 list,
+    which db_get_open_rooms orders newest-first so the creator's just-made room wins."""
+    rooms = db_get_open_rooms()
+    for r in rooms:
+        if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', r[0]), 'little') == game_idx:
+            return r
+    for r in rooms:
+        if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', 0), 'little') == game_idx:
             return r
     return None
 
@@ -2549,10 +3061,12 @@ def build_room_echo_pkt(db_id):
         slot = row[1] or 0x23
         cname = (row[2] or '').encode('ascii', 'replace')[:23] + b'\x00'
         cname = cname.ljust(24, b'\x00')
-        # inner data after sub=0xdc: [slot][0x00][0xff][0xff][creator(24B)][GAME_DEF(740B)]
-        # GameIndex is derived by FA.exe as bytes[2:6] of this inner data =
-        # [0x00][0xff][0xff][creator[0]] in LE.
-        inner_data = bytes([slot, 0x00, 0xff, 0xff]) + cname + gdef
+        # inner data after sub=0xdc: [slot][room_id&0xff][0xff][0xff][creator(24B)][GAME_DEF]
+        # GameIndex = bytes[2:6] of [0xdc]+inner_data = [room_id&0xff][0xff][0xff][creator[0]]
+        # LE. The low byte (was a fixed 0x00) now carries room_id so two rooms whose
+        # creators share a first letter no longer collide — matches _arena_gameindex(
+        # creator, db_id) used by the 0xd2 list / 212 / join resolution.
+        inner_data = bytes([slot, db_id & 0xff, 0xff, 0xff]) + cname + gdef
         return build_typed_pkt(0x92, bytes([0xdc]) + inner_data)
     except Exception as e:
         log('ROOM-ECHO', f'build failed db_id={db_id}: {e}')
@@ -2625,12 +3139,38 @@ def send_initial_ui_list(target_sess):
 
 # ─── Connection handler ───────────────────────────────────────────────────────
 
+def _reap_stale_sessions(acct, new_sess):
+    """Reap any prior session bound to the SAME account (a reconnect after a CTD/timeout).
+    On Windows the dead client is never detected on sendto (the failure surfaces as a 10054 on
+    recvfrom), so without this the old session's heartbeat thread + lobby-roster entry linger
+    as a ghost across reconnects. One account == one live connection here, so any OTHER session
+    on this account is stale. new_sess is not yet registered in sids at call time, so it is
+    never itself reaped; clean each stale one exactly like a graceful leave so the reconnecting
+    client starts fresh (no duplicate pilot in the roster, no orphaned start-place / room row)."""
+    with sl:
+        stale = [x for x in list(sids.values())
+                 if x.account == acct and x is not new_sess and not x.closing]
+    for x in stale:
+        x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
+        try:
+            if x.current_pilot:
+                broadcast_player_leave(x.current_pilot, exclude_sess=x)
+                broadcast_system(f'[{x.current_pilot}] has left')
+                db_room_leave(x.current_pilot)
+            _free_start_place(x)
+        except Exception as _e:
+            log('REAP', f'cleanup error: {_e}')
+        with sl:
+            sadrs.pop(x.addr, None); sids.pop(x.sid, None)
+        log('REAP', f'reaped stale session for account="{acct}" (reconnect) — ghost cleared')
+
 def handle_syn(data, addr):
     acct_row = identify_account_from_syn(data)
     cid=data[1:5]; s=S(cid,addr)
     if acct_row:
         acct, pid_hex, f45_hex, ab_hex = acct_row
         s.account=acct; s.auth64=build_auth64(pid_hex, f45_hex, ab_hex, acct)
+        _reap_stale_sessions(acct, s)
         s.auth_payload=build_auth_response(s.auth64)
         pilots=db_get_pilots(acct)
         with sl: active = len([x for x in sids.values() if x.auth_done and not x.closing])
@@ -2647,7 +3187,7 @@ def handle_syn(data, addr):
     threading.Thread(target=sp,daemon=True).start()
 
 def login(s):
-    log('LOGIN','══ v187 AUTH ══')
+    log('LOGIN','══ v189 AUTH ══')
     if not s.auth_payload: log('LOGIN','No auth payload'); return
     if not send_rel(s,s.auth_payload,'← cmd=100 auth',to=8.0): return
     log('LOGIN',f'Auth ACKed T+{s.ela():.3f}s')
@@ -2845,9 +3385,11 @@ def handle_compound(s, outer_cmd, pl):
         # client serialised (the inner's appspace data, minus the 29-byte room header).
         game_def  = bytes(data[29:])
         room_id   = db_create_room(creator, s.account or '', game_def, room_slot)
-        # Close any previous open rooms for this pilot — prevents >1 room in DB
-        # which would cause 0xce packet to exceed FA.exe's receive limit (bc>48)
-        if creator:
+        # One-room-per-creator enforcement (CLOSE the pilot's other open rooms) — now gated
+        # behind PERSIST_ROOMS. With unique per-room GameIndexes a creator can hold several
+        # rooms at once, and the original 0xce>bc48 worry is moot (0xce is empty). This SQL
+        # was silently closing an earlier same-creator room (FFA when TC was made next).
+        if creator and not PERSIST_ROOMS:
             _c = sqlite3.connect(DB_PATH)
             _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
                        (creator, room_id))
@@ -2924,7 +3466,7 @@ def handle_compound(s, outer_cmd, pl):
                  if len(inner) >= 13 else '')
         if not s.current_room:
             for r in db_get_open_rooms():
-                if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+                if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', r[0]), 'little') == game_idx:
                     s.current_room = r[0]
                     s.room_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
                     break
@@ -3388,10 +3930,11 @@ def handle_post_auth(s, cmd, pl):
             room_id = db_create_room(creator, s.account or '', game_def, room_slot)
             s.current_room = room_id; s.room_slot = room_slot
             if creator:
-                _c = sqlite3.connect(DB_PATH)  # close stale rooms (direct)
-                _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
-                           (creator, room_id))
-                _c.commit(); _c.close()
+                if not PERSIST_ROOMS:              # one-room-per-creator — gated (see compound path)
+                    _c = sqlite3.connect(DB_PATH)  # close stale rooms (direct)
+                    _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
+                               (creator, room_id))
+                    _c.commit(); _c.close()
                 db_room_join(room_id, creator, s.account or '')  # players=1 from first 0x43
             log('POST-AUTH', f'ROOM CREATED (direct) db_id={room_id} slot=0x{room_slot:02x} creator="{creator}" players=1')
             broadcast_system(f'[{creator}] created a room', exclude_sess=s)
@@ -3456,7 +3999,7 @@ def handle_post_auth(s, cmd, pl):
             # resolve which room is being entered from the GameIndex in the 200 packet.
             if not s.current_room:
                 for r in db_get_open_rooms():
-                    if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena'), 'little') == game_idx:
+                    if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', r[0]), 'little') == game_idx:
                         s.current_room = r[0]
                         s.room_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
                         break
@@ -3606,6 +4149,30 @@ def handle_post_auth(s, cmd, pl):
             log('POST-AUTH', 'cmd=0 sub=0x3a (exit hangar list) → echo UNRELIABLE')
             send_unrel(s, stored, 'echo 0x3a (exit, UNREL)')
             return
+
+        # ── Per-side CATALOG FILTER (PLANE_FILTER_VIA_CATALOG): trim the echoed 0x3a plane
+        # list to the player's current side so each nation sees only its own aircraft, while
+        # the GAME_DEF leaves every plane flyable (byte0=0x1f) so side-changes stay light.
+        # UPLOAD 0x3a payload = [bc][T][00][00][0x3a][plane_id ...] (flat ONE byte per id);
+        # appspace Size = bc*16 + (T>>4) covers the 0x3a sub byte + the ids. The client's
+        # DOWNLOAD decoder reads (Size-1)/3 records of 3 BYTES [planeID][ushort], so we MUST
+        # re-encode the kept ids as 3-byte records (not 1-byte) — otherwise GE's 26 ids echo
+        # as Size=27 -> (27-1)/3 = 8 garbage records, dropping the tail bombers. Reframed via
+        # build_ingame_pkt (Size == byte count). Only filters when ON A SIDE (0..4) and the
+        # upload carries more than that side's planes; never emits EMPTY (would re-trip the
+        # leave/teardown), falling through to verbatim.
+        if sub == 0x3a and PLANE_FILTER_VIA_CATALOG and s.nation is not None and 0 <= s.nation < 5:
+            size = pl[0] * 16 + (pl[1] >> 4)
+            if 1 <= size and 4 + size <= len(pl):
+                ids = list(pl[5:4 + size])
+                sc = _session_slot_camp(s)
+                kept = [i for i in ids if sc.get(i, 0) == s.nation]
+                if kept and len(kept) != len(ids):
+                    rec = b''.join(struct.pack('<BH', i & 0xff, CATALOG_RECORD_USHORT & 0xffff) for i in kept)
+                    fpkt = build_ingame_pkt(bytes([0x3a]) + rec)
+                    log('POST-AUTH', f'cmd=0 sub=0x3a → side {s.nation} catalog filtered {len(ids)}→{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)')
+                    threading.Thread(target=lambda p=fpkt: send_reply(s, p, 'echo 0x3a (side-filtered, 3B)', to=5.0), daemon=True).start()
+                    return
 
         # Echo-by-default for everything else (lobby AND in-game). The session that
         # reached flight (messages16) echoed in-game build/spawn messages; a blanket
@@ -3765,7 +4332,20 @@ def _stall_watch():
 
 # ─── Main loop ────────────────────────────────────────────────────────────────
 
-log('SERVER',f'Fighter Ace LAN Server v187 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v188 on {HOST}:{PORT}')
+# ── ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
+#    so their camps/side block can be diffed against what a created room stores. The
+#    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
+#    prefix is skipped automatically. Read-only.
+for _gdf in ('FFA', 'TC'):
+    try:
+        _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          'FA', 'NewArenas', f'{_gdf}.gdf')
+        with open(_p, 'rb') as _f:
+            _raw = _f.read()
+        log('GDFDUMP', f'{_gdf}.gdf raw={len(_raw)}B (verbatim, NOT decompressed): {bytes(_raw).hex()}')
+    except Exception as _e:
+        log('GDFDUMP', f'{_gdf}.gdf dump failed: {_e}')
 threading.Thread(target=console_handler, daemon=True).start()
 
 # Start the separate web server and inject our local server variables into it
