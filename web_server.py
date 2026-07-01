@@ -5,7 +5,9 @@ import subprocess
 import sqlite3
 import hashlib
 import secrets
+import json
 from http import cookies
+from html import escape as hesc
 
 WEB_PORT = 80
 DEFAULT_CLIENT_PATH = r"C:\games\FA\FA.exe"
@@ -36,7 +38,17 @@ def migrate_web_db():
         c.execute("ALTER TABLE accounts ADD COLUMN is_admin INTEGER DEFAULT 0")
         
     c.execute("UPDATE accounts SET is_admin=1 WHERE account_name='admin'")
-        
+
+    # Arena (room) section-header / category column, editable from the admin Arena
+    # Management panel. Default 'Custom Arenas' matches the game server's prior hardcoded
+    # value. The game server's init_rooms_db adds this too; harmless if already present.
+    try:
+        rcols = [row[1] for row in c.execute("PRAGMA table_info(rooms)").fetchall()]
+        if rcols and 'category' not in rcols:
+            c.execute("ALTER TABLE rooms ADD COLUMN category TEXT NOT NULL DEFAULT 'Custom Arenas'")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
     SRV['log']('WEB', 'Database schema verified for web login and admin roles.')
@@ -122,22 +134,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <h1>Welcome Pilot</h1>
                 
                 <div class="card">
-                    <h2 style="margin-top:0;">1. Play Locally (Host)</h2>
+                    <h2 style="margin-top:0;">Play Fighter Ace</h2>
                     <form method="POST" action="/update_path" style="margin-bottom: 15px;">
                         <label>Your Game Client Path:</label>
                         <input type="text" name="client_path" value="{display_path}" required>
                         <button type="submit" style="background: #6c757d;">Save Path Settings</button>
                     </form>
-                    <form method="POST" action="/launch">
-                        <button type="submit" class="btn-green">Deploy Ticket & Launch Game</button>
-                    </form>
-                </div>
-
-                <div class="card">
-                    <h2 style="margin-top:0;">2. Play Remotely</h2>
-                    <p style="font-size: 0.9em; color: #555;">Download your ticket for another PC.</p>
                     <form method="GET" action="/download">
-                        <button type="submit">Download ticket.vr1</button>
+                        <button type="submit" class="btn-green">Launch Game</button>
                     </form>
                 </div>
             """
@@ -251,33 +255,57 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(SRV['db_path'])
             users = conn.execute("SELECT account_name, is_admin FROM accounts ORDER BY account_name").fetchall()
             
-            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
-            arena_table = 'arenas' if 'arenas' in tables else ('rooms' if 'rooms' in tables else None)
-            
+            # Arena (room) management. Rooms live in the `rooms` table; expose name,
+            # title (the arena-list section header / category) and status for editing.
             arena_html = ""
-            if arena_table:
-                try:
-                    arena_rows = conn.execute(f"SELECT rowid, * FROM {arena_table}").fetchall()
-                    if not arena_rows:
-                        arena_html = "<tr><td colspan='2'>No active arenas found.</td></tr>"
-                    for row in arena_rows:
-                        a_id = row[0]
-                        a_desc = str(row[1]) if len(row) > 1 else f"Arena DB_ID {a_id}"
-                        arena_html += f"""
-                        <tr>
-                            <td><strong>{a_desc}</strong> <br><small style="color:#666;">(DB Row: {a_id})</small></td>
-                            <td style="text-align:right;">
-                                <form method="POST" action="/admin/delete_arena" onsubmit="return confirm('Delete this arena?');">
-                                    <input type="hidden" name="table" value="{arena_table}">
-                                    <input type="hidden" name="rowid" value="{a_id}">
-                                    <button type="submit" class="btn-red" style="width:auto; padding:8px 12px; margin:0;">Delete Arena</button>
-                                </form>
-                            </td>
-                        </tr>"""
-                except Exception as e:
-                    arena_html = f"<tr><td colspan='2'>Error loading arenas: {e}</td></tr>"
-            else:
-                arena_html = "<tr><td colspan='2'>No arenas/rooms table found in database.</td></tr>"
+            try:
+                rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+                cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
+                arena_rows = conn.execute(
+                    "SELECT room_id, COALESCE(room_name,''), COALESCE(creator_pilot,''), "
+                    "COALESCE(status,'open'), COALESCE(terrain,1), " + cat_sel + ", "
+                    "(SELECT COUNT(*) FROM room_players rp WHERE rp.room_id=rooms.room_id) "
+                    "FROM rooms ORDER BY created_at DESC").fetchall()
+                if not arena_rows:
+                    arena_html = "<tr><td>No arenas in the database.</td><td></td></tr>"
+                for rid, rname, creator, status, terrain, category, pcount in arena_rows:
+                    sel_open   = 'selected' if status == 'open' else ''
+                    sel_closed = 'selected' if status != 'open' else ''
+                    row_bg = '' if status == 'open' else 'background:#f3f3f3;'
+                    arena_html += f"""
+                    <tr style="{row_bg}">
+                        <td>
+                            <form method="POST" action="/admin/edit_arena" style="margin:0;">
+                                <input type="hidden" name="room_id" value="{rid}">
+                                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
+                                    <label style="font-size:0.8em; color:#666;">Name<br>
+                                        <input type="text" name="room_name" value="{hesc(str(rname), quote=True)}" style="width:190px; padding:6px; margin:2px 0;">
+                                    </label>
+                                    <label style="font-size:0.8em; color:#666;">Title (section header)<br>
+                                        <input type="text" name="category" value="{hesc(str(category), quote=True)}" style="width:170px; padding:6px; margin:2px 0;">
+                                    </label>
+                                    <label style="font-size:0.8em; color:#666;">Status<br>
+                                        <select name="status" style="padding:7px; margin:2px 0;">
+                                            <option value="open" {sel_open}>open</option>
+                                            <option value="closed" {sel_closed}>closed</option>
+                                        </select>
+                                    </label>
+                                    <button type="submit" class="btn-green" style="width:auto; padding:8px 16px; margin:0;">Save</button>
+                                </div>
+                                <small style="color:#888;">DB id {rid} &middot; creator {hesc(str(creator), quote=True) or '?'} &middot; terrain {terrain} &middot; players {pcount}</small>
+                            </form>
+                        </td>
+                        <td style="text-align:right; vertical-align:top; white-space:nowrap;">
+                            <a href="/admin/arena_settings?room={rid}" class="btn-green" style="display:inline-block; width:auto; padding:8px 14px; margin:0 0 6px 0; text-decoration:none;">&#9881; Edit&nbsp;Settings</a><br>
+                            <form method="POST" action="/admin/delete_arena" onsubmit="return confirm('Permanently delete this arena row?');">
+                                <input type="hidden" name="table" value="rooms">
+                                <input type="hidden" name="rowid" value="{rid}">
+                                <button type="submit" class="btn-red" style="width:auto; padding:8px 12px; margin:0;">Delete</button>
+                            </form>
+                        </td>
+                    </tr>"""
+            except Exception as e:
+                arena_html = f"<tr><td>Error loading arenas: {e}</td><td></td></tr>"
 
             user_html = ""
             for u_name, is_adm in users:
@@ -315,7 +343,76 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </div>
             """
             self.send_html(content)
-            
+
+        elif self.path.startswith('/admin/arena_settings'):
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><p>Administrator privileges required.</p><a href='/admin'>&larr; Back</a>")
+                return
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                room_id = int(qs.get('room', ['0'])[0])
+            except (ValueError, TypeError):
+                room_id = 0
+            conn = sqlite3.connect(SRV['db_path'])
+            rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+            sj_sel = "COALESCE(settings_json,'{}')" if 'settings_json' in rcols else "'{}'"
+            cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
+            row = conn.execute(
+                "SELECT room_id, COALESCE(room_name,''), " + cat_sel + ", COALESCE(status,'open'), "
+                "game_def_raw, " + sj_sel + " FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+            conn.close()
+            if not row:
+                self.send_html("<h2>Arena not found</h2><a href='/admin'>&larr; Back to Admin</a>")
+                return
+            rid, rname, category, status, gdef, sj = row
+            # current value for each field = GAME_DEF as-created value, overlaid with saved edits
+            base = {}
+            try:
+                if SRV.get('settings_read') and gdef:
+                    base = SRV['settings_read'](bytes(gdef)) or {}
+            except Exception:
+                base = {}
+            try:
+                overrides = json.loads(sj) if sj else {}
+            except Exception:
+                overrides = {}
+            if not isinstance(overrides, dict):
+                overrides = {}
+            cur = dict(base); cur.update(overrides)
+            fields_html = ""
+            for key, delta, label in SRV.get('tail_fields', []):
+                val = cur.get(key, '')
+                edited = ' &bull; <span style="color:#c60;">edited</span>' if key in overrides else ''
+                fields_html += (
+                    '<label style="display:block; margin:10px 0; font-size:0.9em; color:#333;">'
+                    + hesc(str(label)) + edited + '<br>'
+                    + '<input type="number" step="1" name="s_' + hesc(str(key)) + '" value="'
+                    + hesc(str(val)) + '" style="width:200px; padding:6px;"></label>')
+            sel_open = 'selected' if status == 'open' else ''
+            sel_closed = 'selected' if status != 'open' else ''
+            content = f"""
+                <div class="nav"><a href="/admin">&larr; Back to Admin</a></div>
+                <h1>Edit Arena &mdash; {hesc(str(rname))}</h1>
+                <div class="card">
+                <form method="POST" action="/admin/arena_settings">
+                    <input type="hidden" name="room_id" value="{rid}">
+                    <h3 style="margin-top:0;">General</h3>
+                    <label style="display:block; margin:10px 0;">Name<br>
+                        <input type="text" name="room_name" value="{hesc(str(rname), quote=True)}" style="width:280px; padding:6px;"></label>
+                    <label style="display:block; margin:10px 0;">Title (arena-list section header)<br>
+                        <input type="text" name="category" value="{hesc(str(category), quote=True)}" style="width:280px; padding:6px;"></label>
+                    <label style="display:block; margin:10px 0;">Status<br>
+                        <select name="status" style="padding:7px;"><option value="open" {sel_open}>open</option><option value="closed" {sel_closed}>closed</option></select></label>
+                    <h3>Arena settings</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">All values in <strong>feet</strong>. Leave a field blank to keep the value the arena was created with. Changes are written into the arena's GAME_DEF and take effect the next time the arena is entered (they are served fresh on entry).</p>
+                    {fields_html}
+                    <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
+                        &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
+                </form>
+                </div>
+            """
+            self.send_html(content)
+
         elif self.path == '/login':
             content = """
                 <h1>Server Login</h1>
@@ -360,10 +457,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 return
                 
             try:
-                ticket_bytes, _ = SRV['get_existing_ticket'](user)
+            
+                ticket_bytes, pid_hex = SRV['get_existing_ticket'](user)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/octet-stream')
-                self.send_header('Content-Disposition', 'attachment; filename="ticket.vr1"')
+                self.send_header('Content-Disposition', f'attachment; filename="ticket_{pid_hex}.vr1"')
                 self.end_headers()
                 self.wfile.write(ticket_bytes)
             except Exception as e:
@@ -481,6 +579,32 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_header('Location', '/admin')
             self.end_headers()
 
+        elif self.path == '/admin/edit_arena':
+            if not is_user_admin(user): return self.send_error(403)
+            try:
+                rid = int(qs.get('room_id', ['0'])[0])
+            except (ValueError, TypeError):
+                rid = 0
+            room_name = qs.get('room_name', [''])[0].strip() or 'Unnamed'
+            category  = qs.get('category', [''])[0].strip() or 'Custom Arenas'
+            status    = qs.get('status', ['open'])[0].strip()
+            if status not in ('open', 'closed'):
+                status = 'open'
+            if rid:
+                conn = sqlite3.connect(SRV['db_path'])
+                rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+                if 'category' in rcols:
+                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=? WHERE room_id=?",
+                                 (room_name, category, status, rid))
+                else:
+                    conn.execute("UPDATE rooms SET room_name=?, status=? WHERE room_id=?",
+                                 (room_name, status, rid))
+                conn.commit(); conn.close()
+                SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} status={status}")
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
         elif self.path == '/admin/delete_arena':
             if not is_user_admin(user): return self.send_error(403)
             table = qs.get('table', [''])[0].strip()
@@ -494,15 +618,53 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header('Location', '/admin')
             self.end_headers()
-                
+
+        elif self.path == '/admin/arena_settings':
+            if not is_user_admin(user): return self.send_error(403)
+            try:
+                rid = int(qs.get('room_id', ['0'])[0])
+            except (ValueError, TypeError):
+                rid = 0
+            room_name = qs.get('room_name', [''])[0].strip() or 'Unnamed'
+            category  = qs.get('category', [''])[0].strip() or 'Custom Arenas'
+            status    = qs.get('status', ['open'])[0].strip()
+            if status not in ('open', 'closed'): status = 'open'
+            # collect the arena-setting fields (name prefix s_) into a {key: feet} override dict.
+            # Blank fields are omitted so the GAME_DEF keeps its as-created value for them.
+            settings = {}
+            for key, delta, label in SRV.get('tail_fields', []):
+                v = qs.get('s_' + key, [''])[0].strip()
+                if v != '':
+                    try:
+                        settings[key] = int(round(float(v)))
+                    except ValueError:
+                        pass
+            if rid:
+                conn = sqlite3.connect(SRV['db_path'])
+                rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+                if 'settings_json' in rcols:
+                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=?, settings_json=? WHERE room_id=?",
+                                 (room_name, category, status, json.dumps(settings), rid))
+                else:
+                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=? WHERE room_id=?",
+                                 (room_name, category, status, rid))
+                conn.commit(); conn.close()
+                SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} "
+                                  f"status={status} settings={settings}")
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
     def log_message(self, format, *args):
         pass
 
-def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn):
+def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None, tail_fields=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
     SRV['log'] = log_fn
+    SRV['settings_read'] = settings_read_fn          # arena_settings_read(blob) -> {key: feet}
+    SRV['tail_fields'] = tail_fields or []           # [(key, delta, label), ...]
 
     migrate_web_db()
     server_address = ('', WEB_PORT)

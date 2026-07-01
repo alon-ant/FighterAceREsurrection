@@ -1,7 +1,55 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v191
+Fighter Ace LAN Server v197
 ===========================
+v197: BAIL-OUT respawn fix, part 2 (completes v196). v196 stopped echoing the parachute's
+      msg-4 (killing the 'Unsupported message 4' error) but SWALLOWED it outright — and the
+      client allocates a fresh object Number for the parachute, so the server's Number counter
+      then ran one BEHIND. The next respawn's ServerConfirm carried the stale Number (259 vs the
+      client's 260) → 'Confirm object 259 not found in list → send delete' → fresh plane deleted,
+      dead engine. Now the parachute out-4 (type=0xf2 sub=0x04) CONSUMES a Number to stay in
+      lock-step with the client (still no echo, no confirm, no spawn-ident advance).
+v196: BAIL-OUT respawn fix. On a bail the client spawns the parachute pilot and sends its
+      object state as msg-4 wrapped type=0xf2 sub=0x04 (out 4'15). That fell through to the
+      generic echo → the client received an echoed msg-4 → 'ERROR: Unsupported message 4',
+      which CORRUPTED its object list, so the next spawn's ServerConfirm was refused ('Confirm
+      object 260 not found in list → send delete') and the fresh plane was deleted (dead engine,
+      teardown). msg-4 is the client's OWN object state and must NEVER be echoed — the normal
+      spawn out-4 (type=0x12) is ServerConfirmed; any other sub=0x04 is now swallowed.
+v195: RESPAWN-AFTER-CRASHLAND fix, part 3 (the actual one). v193/v194 fixed the DIRECT msg-3
+      death path, but the log showed the crashland delete arrives WRAPPED — outer type=0x06,
+      inner sub=0x03 — which hit the type-scan 'notify → swallow' branch and bypassed the death
+      handler entirely, so obj_confirmed was never re-armed and the respawn's out 4 still got no
+      ServerConfirm (Conductor error, dead engine, CTD). The in-arena own-plane-removal logic
+      (drop plane + stay in arena + re-arm obj_confirmed/flying) is now a shared helper
+      _ingame_own_object_removed, called from BOTH the direct tb=0x42/0x52/0x32 path and the
+      wrapped scan-inner (outer 0x06) path.
+v194: RESPAWN-AFTER-CRASHLAND fix, part 2 (completes v193). A crashland respawn does
+      InsertPlayer + out 4 with NO fresh StartPlace (the plane is on the ground, client
+      continues in place), so obj_confirmed stayed True from the prior spawn and
+      _fire_server_confirm gated the out-4 out → no ServerConfirm → Conductor error ('Server
+      sent client something it doesn't understand'), engine-start ignored, then CTD. Now the
+      msg-3 death handler ALSO re-arms obj_confirmed/flying = False, so the next out 4 confirms
+      a fresh object whether or not a StartPlace preceded it. (v193 kept entered_game=True so
+      the out-4 handler still runs; both are required.)
+v193: RESPAWN-AFTER-CRASHLAND fix — the msg-3 own-plane delete used s.flying to tell a death
+      from an exit-to-HQ, but a CRASHLAND (off-runway, over-speed damage) sends no respawn
+      StartPlace first, so flying stayed True and the death was mis-handled as an exit →
+      handle_leave_arena cleared entered_game / sent the 0xDA handoff and BROKE the next
+      respawn (engine-start ignored, in-game base-switch gone, only a full rejoin recovered).
+      Now ANY in-arena own-plane removal is treated as a death: drop the dead plane on peers
+      and stay in the arena so respawns work in place. Real leave-to-lobby still comes as
+      msg-64 and tears down normally.
+v192: WEB ARENA SETTINGS EDITOR — '⚙ Edit Settings' button on each arena in the web /admin
+      panel opens a per-arena editor (name, section-header/title, status + GAME_DEF settings).
+      Wired settings so far: the 7 visual ranges (fighters/bombers/tanks/plane-tags/other-tags/
+      padlock/chat) and the 2 oxygen ceilings (with/without mask), edited in feet. These live in
+      the fixed 173-byte post-plane-block GAME_DEF tail (float32 metres), located per-arena via
+      _gamedef_plane_block so offsets hold across arenas (verified byte-identical on TC/Nations/
+      FFA). Edits are stored as {key:feet} JSON in a new rooms.settings_json column and APPLIED
+      AT 212 SERVE TIME in build_lz_gamedef (in-place float writes — original blob never mutated,
+      212 stays bc*16+1 aligned). Take effect on the next arena entry. Pre-block settings
+      (checkboxes/dropdowns/physics/weather) are variable-offset and not yet wired.
 v191: Arena-creation AUTO-JOIN fix — the CREATE flow sends no 0xc8 SendEnterToGame; the client
       drives entry off the 1-Hz 0x43 game-connect poll and waits for a JoinToGameAnswer 201 to
       clear it. We only echoed 'room confirm', so the poll never stopped → ~15s soft timeout →
@@ -115,7 +163,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   length. Any length-driven message MUST tile to len ≡ 1 (mod 16) with parser-valid
   padding. (Root cause of the v182–v186 crash series; see v187 note above.)
 """
-import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re
+import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json
 from datetime import datetime
 
 # Force UTF-8 console output with replacement so a legacy cp1252 console can never crash a
@@ -849,7 +897,82 @@ def fa_compress(d, flo=-1, fhi=-1):
         i += 16
     return bytes(s)
 
-def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None):
+# ── EDITABLE ARENA SETTINGS (post-block GAME_DEF tail) ──────────────────────────
+# The 173-byte region AFTER the plane-team block is a FIXED-layout struct (verified
+# byte-identical across TC / Nations at war / Free For All except the actual values).
+# It is located per-arena via _gamedef_plane_block(d) -> block_end = start + blen, so
+# these offsets are robust across arenas even though absolute offsets shift with the
+# variable name/hash before the block. Each field is a float32 in METRES; the game UI
+# shows/edits them in FEET, so we convert on read/write. Verified against the in-arena
+# OPTIONS screenshots (13000 m = 42651 ft fighters, 4876 m = 15997 ft no-mask ceiling,
+# 9296 m = 30499 ft mask ceiling) and read-tested on all three live arenas.
+_M2FT = 3.280839895
+ARENA_TAIL_FIELDS = [
+    # key,             delta, label
+    ('vr_fighters',     31, 'Visual range – fighters (ft)'),
+    ('vr_bombers',      27, 'Visual range – bombers (ft)'),
+    ('vr_tanks',        39, 'Visual range – tanks (ft)'),
+    ('vr_plane_tags',   43, 'Visual range – plane tags (ft)'),
+    ('vr_other_tags',   47, 'Visual range – other tags (ft)'),
+    ('vr_padlock',      51, 'Visual range – padlock (ft)'),
+    ('vr_chat',         63, 'Chat range (ft)'),
+    ('height_no_mask',  90, 'Oxygen ceiling – without mask (ft)'),
+    ('height_mask',     94, 'Oxygen ceiling – with mask (ft)'),
+]
+
+def _arena_tail_base(d):
+    """Offset of the post-block settings tail in a DECOMPRESSED GAME_DEF, or None.
+    Anchored to the plane-team block so it is correct for any arena."""
+    try:
+        start, cnt, blen = _gamedef_plane_block(d)
+    except Exception:
+        return None
+    if start is None:
+        return None
+    return start + blen
+
+def arena_settings_read(blob):
+    """Read the editable post-block settings from a stored (compressed) GAME_DEF blob.
+    Returns {key: value_in_feet(int)}; empty dict if the blob can't be parsed."""
+    d = decompress_gamedef(blob)
+    if not d:
+        return {}
+    bend = _arena_tail_base(d)
+    if bend is None:
+        return {}
+    out = {}
+    for key, delta, _label in ARENA_TAIL_FIELDS:
+        off = bend + delta
+        if off + 4 <= len(d):
+            try:
+                m = struct.unpack_from('<f', d, off)[0]
+                if m == m:                       # not NaN
+                    out[key] = int(round(m * _M2FT))
+            except Exception:
+                pass
+    return out
+
+def arena_settings_apply(d, settings):
+    """In-place patch the post-block settings of a DECOMPRESSED GAME_DEF bytearray from a
+    {key: feet} override dict. Each patch is a same-length float32 write, so it never
+    shifts the struct or the 212 pad alignment. No-op for missing/blank keys."""
+    if not settings:
+        return
+    bend = _arena_tail_base(d)
+    if bend is None:
+        return
+    for key, delta, _label in ARENA_TAIL_FIELDS:
+        v = settings.get(key)
+        if v is None or v == '':
+            continue
+        off = bend + delta
+        if off + 4 <= len(d):
+            try:
+                struct.pack_into('<f', d, off, float(v) / _M2FT)   # feet -> metres
+            except (ValueError, TypeError):
+                pass
+
+def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') ≡ 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -944,6 +1067,10 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None):
                               f"GE={c.get(3,0)} JP={c.get(4,0)}")
         else:
             log('GAMEDEF212', 'plane-teams: plane block not located; planes left on USA')
+    # WEB-EDITED SETTINGS: patch the post-block tail (visual ranges, oxygen ceilings) from the
+    # per-room override dict. In-place float32 writes, so no struct shift / pad-alignment change.
+    if arena_settings:
+        arena_settings_apply(d, arena_settings)
     D_orig = len(d)
     # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
@@ -1109,6 +1236,15 @@ def init_rooms_db():
         log('DB', 'Migration: added category column to rooms table')
     except Exception:
         pass  # column already exists — expected on every normal startup
+    # Migration: add settings_json — per-room web-edited GAME_DEF setting overrides (visual
+    # ranges, oxygen ceilings, ...). Stored as JSON {key: feet}; applied at 212 serve time in
+    # build_lz_gamedef so the original game_def_raw blob is never mutated/recompressed on save.
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN settings_json TEXT NOT NULL DEFAULT '{}'")
+        conn.commit()
+        log('DB', 'Migration: added settings_json column to rooms table')
+    except Exception:
+        pass  # column already exists — expected on every normal startup
     # Always re-derive room_name from the binary GAME_DEF (the old text-regex path
     # left every room 'Unnamed' since the blob is binary, not INI text). Cheap, and
     # corrects rooms created before binary name extraction existed.
@@ -1139,6 +1275,20 @@ def db_create_room(creator_pilot, account, game_def_raw, room_slot=35, terrain=N
     room_id = cur.lastrowid
     conn.commit(); conn.close()
     return room_id
+
+def db_get_room_settings(room_id):
+    """Return the web-edited GAME_DEF setting overrides for a room as a {key: feet} dict
+    (empty if none/invalid). Applied at 212 serve time by build_lz_gamedef."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT settings_json FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        if row and row[0]:
+            d = json.loads(row[0])
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
 
 def db_get_open_rooms():
     conn = sqlite3.connect(DB_PATH)
@@ -1741,7 +1891,8 @@ def build_gamedef_212(room):
     blob    = bytes(room[6]) if len(room) > 6 and room[6] else b''
     comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
                                     force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
-                                    plane_camp=plane_camp_for_room(room))
+                                    plane_camp=plane_camp_for_room(room),
+                                    arena_settings=db_get_room_settings(room[0]))
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -3229,7 +3380,7 @@ def handle_syn(data, addr):
     threading.Thread(target=sp,daemon=True).start()
 
 def login(s):
-    log('LOGIN','══ v191 AUTH ══')
+    log('LOGIN','══ v197 AUTH ══')
     if not s.auth_payload: log('LOGIN','No auth payload'); return
     if not send_rel(s,s.auth_payload,'← cmd=100 auth',to=8.0): return
     log('LOGIN',f'Auth ACKed T+{s.ela():.3f}s')
@@ -3619,6 +3770,28 @@ def _fire_server_confirm(s, via=''):
             log('SIM13', 'injected remote player Test2 via msg 13{62}')
         threading.Thread(target=_inject, daemon=True).start()
 
+def _ingame_own_object_removed(s, tb, stored):
+    """Shared handler for a msg-3 (sub 0x03) that removes the player's OWN plane while in the
+    arena — a death / crash / crashland (exit-to-HQ too; indistinguishable here). It arrives
+    BOTH as a direct tb=0x42/0x52/0x32 message AND wrapped in an outer type=0x06 (the type-scan
+    form). A CRASHLAND uses the WRAPPED form, so both call sites must route here or the crashland
+    respawn is never re-armed and its out 4 gets no ServerConfirm (Conductor error → dead engine
+    → CTD). Drops the dead plane on peers, stays in the arena, and re-arms obj_confirmed/flying
+    so the NEXT out 4 confirms a fresh object even when the crashland respawn skips its StartPlace.
+    Idempotent via _left_world (cleared on the respawn's ServerConfirm)."""
+    if (s.entered_game and not getattr(s, '_left_world', False)
+            and s.my_obj_number is not None):
+        s._left_world = True
+        log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) = in-arena plane removal '
+                         f'(death/crashland/exit-to-HQ) → drop dead plane, stay in arena, re-arm confirm')
+        _killer = score_on_death(s, stored)   # credit killer + record death in DB (accumulating)
+        broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer)
+        # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
+        # still gets a ServerConfirm. A normal death's StartPlace also resets these — harmless.
+        s.obj_confirmed = False; s.flying = False
+    else:
+        log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) → swallow, no echo (guarded)')
+
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
     sub=pl[4] if len(pl)>4 else 0
@@ -3674,7 +3847,13 @@ def handle_post_auth(s, cmd, pl):
     # 0x20 = no-handler status (echo → "Unknown Type 32"). Direct variants are
     # swallowed by NO_ECHO_SUBS below; this catches the wrapped form before the
     # generic echo fallthrough re-sends the whole wrapper.
-    if sub == 0x00 and len(pl) > 8 and pl[8] in (0x03, 0x20, 0x45):
+    if sub == 0x00 and len(pl) > 8 and pl[8] == 0x03:
+        # Wrapped NET::OBJECT delete: a CRASHLAND death arrives as outer type=0x06 + inner 0x03,
+        # so it MUST run the same in-arena removal path (re-arm the spawn-confirm), not be swallowed
+        # — otherwise the crashland respawn's out 4 gets no ServerConfirm and the engine stays dead.
+        _ingame_own_object_removed(s, tb, stored)
+        return
+    if sub == 0x00 and len(pl) > 8 and pl[8] in (0x20, 0x45):
         log('POST-AUTH', f'scan-inner sub=0x{pl[8]:02x} (notify, must not echo) → swallow')
         return
 
@@ -3884,25 +4063,11 @@ def handle_post_auth(s, cmd, pl):
         # while still flying, drives peer plane-removal (type-3) + the 0xDA HQ handoff.
         # _left_world keeps catching the trailing del-client 0x03 after entered_game clears.
         if (s.entered_game or getattr(s, '_left_world', False)) and sub == 0x03:
-            if s.entered_game and getattr(s, 'flying', False) and not getattr(s, '_left_world', False):
-                s._left_world = True
-                log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) = exit → drop plane on peers + leave')
-                handle_leave_arena(s)
-            elif (s.entered_game and not getattr(s, 'flying', False)
-                  and not getattr(s, '_left_world', False) and s.my_obj_number is not None):
-                # DEATH+respawn: on a crash the client sends its respawn StartPlace (out 23'4)
-                # IMMEDIATELY BEFORE this 0x03, and StartPlace already cleared `flying`. So this
-                # is NOT exit-to-HQ — the player stays in the world and respawns in place. Drop
-                # ONLY the dead plane from peers (type-3); skip the HQ handoff, and DON'T force
-                # peers to re-create on us (we kept their objects). Without this the dead plane's
-                # object id is never deleted on peers → frozen ghost on minimap/radar, piling up
-                # to a peer CTD (messages00: obj 259 created, never deleted; then Test1 CTD).
-                s._left_world = True   # guards the trailing del 0x03; CONFIRM5 clears it on respawn
-                log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) = death → drop dead plane on peers (no HQ handoff)')
-                _killer = score_on_death(s, stored)   # credit killer + record death in DB (accumulating)
-                broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer)
-            else:
-                log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) → swallow, no echo')
+            # A msg-3 that removes the player's OWN plane WHILE IN THE ARENA is a death
+            # (crash / shot / crashland) OR an exit-to-HQ. Routed through the shared helper so the
+            # DIRECT (tb=0x42/0x52/0x32) and the type-scan WRAPPED (outer 0x06) forms behave
+            # identically — a crashland uses the wrapped form (handled at the scan-inner call site).
+            _ingame_own_object_removed(s, tb, stored)
             return
 
         if tb == 0x22:
@@ -4227,6 +4392,27 @@ def handle_post_auth(s, cmd, pl):
         # waits for replies to some of them (e.g. the 0x3a plane list, compound 0x4d).
         # Only genuine fire-and-forget crashers are suppressed via NO_ECHO_SUBS above; if
         # a NEW type crashes on echo with "NET::MESSAGE Unknown Type N", add 0xN there.
+        # msg 4 (client's OWN object state) must NEVER be echoed. The client's msg-4 RECEIVE
+        # path rejects an echoed msg-4 as 'Unsupported message 4' and CORRUPTS its object list,
+        # so the next spawn's ServerConfirm is refused ('Confirm object N not found in list →
+        # send delete') and the fresh plane is deleted → dead engine / teardown. The normal
+        # spawn out-4 (type=0x12) is ServerConfirmed earlier; a BAIL-OUT sends the parachute's
+        # out-4 as type=0xf2 sub=0x04, which lands here — swallow it, never echo. (messages04:
+        # bail → 'in 4'15' → 'Unsupported message 4' → respawn 260 'not found in list'.)
+        if sub == 0x04:
+            # msg-4 is the client's OWN object state — NEVER echo it (an echoed msg-4 is rejected as
+            # 'Unsupported message 4' and corrupts the object list). The plane spawn out-4 (type=0x12)
+            # is ServerConfirmed earlier. A BAIL-OUT sends the PARACHUTE's out-4 as type=0xf2 sub=0x04:
+            # the client allocates a fresh object Number for the parachute, so the server MUST consume
+            # one too — else its global Number counter runs one BEHIND the client's and the next
+            # respawn's ServerConfirm carries a stale Number → the client can't match it ('Confirm
+            # object 259 not found in list → send delete') and deletes the fresh plane (dead engine,
+            # teardown). Consume a Number to stay in lock-step; send NO confirm and do NOT advance the
+            # spawn ident (the parachute is not a ServerConfirmed spawn), and never echo.
+            _pn = next_obj_number()
+            log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object → consumed Number {_pn} '
+                             f'(keep counter in sync), no echo/confirm')
+            return
         log('POST-AUTH',f'cmd=0 type=0x{tb:02x} sub=0x{sub:02x} → echo')
         threading.Thread(target=lambda:send_reply(s,stored,f'echo type=0x{tb:02x}',to=5.0),daemon=True).start()
         return
@@ -4398,7 +4584,7 @@ threading.Thread(target=console_handler, daemon=True).start()
 # Start the separate web server and inject our local server variables into it
 threading.Thread(
     target=start_web_server, 
-    args=(DB_PATH, get_existing_ticket, generate_ticket, log), 
+    args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read, ARENA_TAIL_FIELDS), 
     daemon=True
 ).start()
 
