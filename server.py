@@ -1,7 +1,18 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v189
+Fighter Ace LAN Server v191
 ===========================
+v191: Arena-creation AUTO-JOIN fix — the CREATE flow sends no 0xc8 SendEnterToGame; the client
+      drives entry off the 1-Hz 0x43 game-connect poll and waits for a JoinToGameAnswer 201 to
+      clear it. We only echoed 'room confirm', so the poll never stopped → ~15s soft timeout →
+      client exits. Now the creator's first post-create 0x43 poll grants the 201 (enter game
+      mode, alloc ClientNumber/PlayerIndex, stand up player-object layer), same as the 0xc8
+      path. Gated by a create-only flag; join/lobby polls untouched. (In-arena OPTIONS still
+      read-only — that is FA's peer-host 'am I the arena host?' check, tracked separately.)
+v190: Arena-list category grouping fix — the 0xd2 block-boundary pad was appended to the LAST
+      record's name1 (the CATEGORY the client groups rows under), so a shared category split
+      into a duplicate 'Dogfighting   Arenas' header. Pad now lands on name2 (display label,
+      invisible), keeping every category byte-clean so same-category arenas group together.
 v189: STABLE MILESTONE — 2-player flight + team changes + crash recovery.
       * Per-side plane catalog now echoed as 3-byte [planeID][ushort] records so the client's
         msg-58 reader (len-1)/3 ingests every kept plane (GE bombers no longer dropped).
@@ -1678,19 +1689,21 @@ def build_arenalist(rooms):
     # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven — it keeps starting
     # new records until consumed >= len, with NO bounds check, so leftover zero pad
     # would spawn a phantom record and read past the buffer → crash. build_appspace_pkt
-    # frames to bc*16+1, so we pad the LAST record's *category* (name1) with spaces
-    # (before its NUL) to land exactly on the block boundary — keeping the arena's
-    # display name (name2) clean (no trailing spaces).
+    # frames to bc*16+1, so the LAST record must absorb the pad. Pad name2 (the arena's
+    # DISPLAY label), NOT name1: name1 is the CATEGORY the client groups rows under, and
+    # any trailing spaces on it make an otherwise-identical category compare unequal, so a
+    # shared group (e.g. two 'Dogfighting' arenas) splits into a duplicate 'Dogfighting   
+    # Arenas' header. Trailing spaces on name2 are display-only and invisible in the list.
     def _assemble(extra_pad):
         d = bytearray([0xd2])
         last = len(records) - 1
         for i, (hdr, cat, arena) in enumerate(records):
             d.extend(hdr)
+            d.extend(cat + b'\x00')                       # name1 = CATEGORY (grouping key) — keep clean
             if i == last and extra_pad > 0:
-                d.extend(cat + (b'\x20' * extra_pad) + b'\x00')
+                d.extend(arena + (b'\x20' * extra_pad) + b'\x00')   # pad the DISPLAY label instead
             else:
-                d.extend(cat + b'\x00')
-            d.extend(arena + b'\x00')
+                d.extend(arena + b'\x00')
         return d
     d0 = _assemble(0)
     L  = len(d0)
@@ -2370,6 +2383,35 @@ def assign_player_slot(s, room_id):
     log('ROOM', f'{s.current_pilot} → room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={len(peers)})')
     return s.client_number, s.player_index
+
+def _maybe_grant_create_entry(s):
+    """Auto-join grant for the ARENA CREATOR. Unlike JOIN (client sends 0xc8
+    SendEnterToGame → we reply 201), the CREATE flow sends NO 0xc8 — the client drives
+    entry purely off the 1-Hz 0x43 game-connect poll and waits for a JoinToGameAnswer 201
+    to clear it (DAT_00c82eb0→0, game active). Without the 201 the poll never stops → soft
+    timeout → the client exits the game (server.log 14:47:19 create → ~15s of 0x43 → exit).
+    So on the creator's FIRST 0x43 poll for the room they just created, grant entry exactly
+    like the 0xc8 path. Gated by _await_create_entry (set only by the 0xdc create handler)
+    so JOIN/lobby polls are untouched, and idempotent via client_granted. Returns True if it
+    granted on this call (caller then reports the confirm in GAME mode)."""
+    if not getattr(s, '_await_create_entry', False):
+        return False
+    s._await_create_entry = False
+    if s.entered_game or s.client_granted or s.current_room is None:
+        return False
+    s.entered_game = True
+    s.nation = None                                   # "In Menu" until a side is picked
+    assign_player_slot(s, s.current_room)
+    s.client_granted = True
+    send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
+             f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+             f'PlayerIndex={s.player_index} → GRANT, create auto-join)', to=5.0)
+    def _stand_up(_s=s):
+        push_player_roster_62(_s, reason='(on create, 0x43 grant)')
+        broadcast_player_join_62(_s, reason='(on create, 0x43 grant)')
+    threading.Thread(target=_stand_up, daemon=True).start()
+    log('CREATE-JOIN', f'201 GRANT on creator 0x43 poll (room {s.current_room}) → GAME MODE')
+    return True
 
 # ── TELEMETRY RELAY (multiplayer flight) ───────────────────────────────────────
 # The flying client streams its plane state as UNRELIABLE datagrams (control dword 0,
@@ -3187,7 +3229,7 @@ def handle_syn(data, addr):
     threading.Thread(target=sp,daemon=True).start()
 
 def login(s):
-    log('LOGIN','══ v189 AUTH ══')
+    log('LOGIN','══ v191 AUTH ══')
     if not s.auth_payload: log('LOGIN','No auth payload'); return
     if not send_rel(s,s.auth_payload,'← cmd=100 auth',to=8.0): return
     log('LOGIN',f'Auth ACKed T+{s.ela():.3f}s')
@@ -3396,6 +3438,7 @@ def handle_compound(s, outer_cmd, pl):
             _c.commit(); _c.close()
         s.current_room = room_id
         s.room_slot    = room_slot
+        s._await_create_entry = True   # creator drives entry off the 0x43 poll (no 0xc8); grant 201 on it
         if creator:
             db_room_join(room_id, creator, s.account or '')
         log('COMPOUND', f'ROOM CREATED db_id={room_id} slot=0x{room_slot:02x} '
@@ -3435,6 +3478,7 @@ def handle_compound(s, outer_cmd, pl):
             log('COMPOUND', 'inner sub=0x43 → rate-limited')
             return
         s.last_43_ts = now
+        _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT (enters game)
         if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
             send_unrel(s, build_da_session_safe(), '← 0xDA re-attach RESEND (compound 0x43 poll)')
         room_slot = getattr(s, 'room_slot', 0)
@@ -3716,6 +3760,7 @@ def handle_post_auth(s, cmd, pl):
                 now = time.time()
                 if now - s.last_43_ts >= 0.5:
                     s.last_43_ts = now
+                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
                     if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
                         send_unrel(s, build_da_session_safe(), '← 0xDA re-attach RESEND (appspace 0x43 poll)')
                     room_slot = getattr(s,'room_slot',0)
@@ -3743,6 +3788,7 @@ def handle_post_auth(s, cmd, pl):
                     log('POST-AUTH', 'sub=0x43 → rate-limited, skipping')
                     return
                 s.last_43_ts = now
+                _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
                 room_slot = getattr(s, 'room_slot', 0)
                 rooms = db_get_open_rooms()
                 if rooms and (s.current_room or room_slot):
@@ -4099,6 +4145,7 @@ def handle_post_auth(s, cmd, pl):
                 now = time.time()
                 if now - s.last_43_ts >= 0.5:
                     s.last_43_ts = now
+                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
