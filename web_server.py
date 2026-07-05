@@ -21,6 +21,68 @@ SRV = {
     'log': print
 }
 
+# Tag -> level inference for the web console. Mirrors fa_logging._level_for so the
+# page can colour lines without fa_logging changing its (plain-string) return type.
+_WEB_TAG_LEVELS = {
+    'ERROR': 'ERROR', 'RELDROP': 'WARNING', 'STALL-WATCH': 'WARNING',
+    'RX/DROP': 'WARNING', 'REAP': 'WARNING', 'DISPATCH': 'ERROR',
+    'TX': 'DEBUG', 'RX': 'DEBUG', 'RELAY': 'DEBUG', 'SIM13': 'DEBUG',
+    'GAMEDEF212': 'DEBUG', 'GDFDUMP': 'DEBUG', 'POST-AUTH': 'DEBUG',
+    'COMPOUND': 'DEBUG', 'RELRX': 'DEBUG',
+}
+def _infer_level_from_line(line):
+    # line looks like: [HH:MM:SS.mmm][TAG            ] message
+    try:
+        tag = line.split('][', 1)[1].split(']', 1)[0].strip()
+    except Exception:
+        return 'INFO'
+    if tag in _WEB_TAG_LEVELS:
+        return _WEB_TAG_LEVELS[tag]
+    return _WEB_TAG_LEVELS.get(tag.split('/', 1)[0], 'INFO')
+
+LOG_CONSOLE_PAGE = """
+                <div class="nav"><a href="/admin">&larr; Back to Admin</a> |
+                    <a href="/logout" style="color:#dc3545;">Logout</a></div>
+                <h1>Live Server Console</h1>
+                <div class="card" style="padding:12px;">
+                  <label>Min level:
+                    <select id="lvl" onchange="reload()">
+                      <option value="INFO" selected>INFO+</option>
+                      <option value="DEBUG">DEBUG (all)</option>
+                      <option value="WARNING">WARNING+</option>
+                      <option value="ERROR">ERROR only</option>
+                    </select>
+                  </label>
+                  &nbsp; <label><input type="checkbox" id="auto" checked onchange="toggle()"> Auto-refresh (2s)</label>
+                  &nbsp; <button style="width:auto;padding:6px 12px;margin:0;" onclick="reload()">Refresh now</button>
+                  &nbsp; <label>Filter: <input type="text" id="flt" oninput="render()" style="width:200px;padding:5px;margin:0;"></label>
+                </div>
+                <pre id="con" style="background:#1e1e1e;color:#ddd;padding:12px;border-radius:6px;height:62vh;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
+                <script>
+                var COLORS={DEBUG:"#888",INFO:"#ddd",WARNING:"#e6c07b",ERROR:"#e06c75"};
+                var DATA=[];
+                function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+                function render(){
+                  var flt=document.getElementById('flt').value.toLowerCase();
+                  var con=document.getElementById('con');
+                  var atBottom=con.scrollTop+con.clientHeight>=con.scrollHeight-30;
+                  con.innerHTML=DATA.filter(function(d){return !flt||d.line.toLowerCase().indexOf(flt)>=0;})
+                    .map(function(d){return '<span style="color:'+(COLORS[d.level]||"#ddd")+'">'+esc(d.line)+'</span>';})
+                    .join("\\n");
+                  if(atBottom) con.scrollTop=con.scrollHeight;
+                }
+                function reload(){
+                  var lvl=document.getElementById('lvl').value;
+                  fetch('/admin/logs.json?level='+lvl).then(function(r){return r.json();})
+                    .then(function(j){DATA=j.lines;render();}).catch(function(){});
+                }
+                var timer=null;
+                function toggle(){var on=document.getElementById('auto').checked;
+                  if(on){timer=setInterval(reload,2000);}else{if(timer)clearInterval(timer);timer=null;}}
+                reload(); toggle();
+                </script>
+"""
+
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
@@ -329,7 +391,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             conn.close()
 
             content = f"""
-                <div class="nav"><a href="/">&larr; Back to Dashboard</a> | Logged in as <strong>{user}</strong></div>
+                <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
+                    <a href="/admin/logs" style="color:#17a2b8;">Live Console</a> |
+                    Logged in as <strong>{user}</strong></div>
                 <h1>Server Administration</h1>
                 
                 <div class="card">
@@ -466,6 +530,35 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 self.wfile.write(ticket_bytes)
             except Exception as e:
                 self.send_error(500, f"Error generating ticket: {str(e)}")
+        elif self.path == '/admin/logs':
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><a href='/'>&larr; Back</a>")
+                return
+            self.send_html(LOG_CONSOLE_PAGE)
+        elif self.path.startswith('/admin/logs.json'):
+            if not is_user_admin(user):
+                self.send_error(403); return
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            level = (qs.get('level', ['INFO'])[0] or 'INFO').upper()
+            getter = SRV.get('get_logs')
+            lines = []
+            if getter:
+                try:
+                    raw = getter(500, 'DEBUG')
+                except Exception:
+                    raw = []
+                order = {'DEBUG': 10, 'INFO': 20, 'WARNING': 30, 'ERROR': 40}
+                want = order.get(level, 20)
+                for ln in raw:
+                    lv = _infer_level_from_line(ln)
+                    if order.get(lv, 20) >= want:
+                        lines.append({'level': lv, 'line': ln})
+            body = json.dumps({'lines': lines}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
         else:
             self.send_error(404)
 
@@ -658,13 +751,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None, tail_fields=None):
+def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
+                     tail_fields=None, get_logs_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
     SRV['log'] = log_fn
     SRV['settings_read'] = settings_read_fn          # arena_settings_read(blob) -> {key: feet}
     SRV['tail_fields'] = tail_fields or []           # [(key, delta, label), ...]
+    SRV['get_logs'] = get_logs_fn                    # get_recent_logs(n, min_level) -> [str]
 
     migrate_web_db()
     server_address = ('', WEB_PORT)
