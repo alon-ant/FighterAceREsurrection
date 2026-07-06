@@ -523,9 +523,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             try:
             
                 ticket_bytes, pid_hex = SRV['get_existing_ticket'](user)
+                # Tell the launcher the client path THIS account has stored, so it can
+                # save the ticket next to the right FA.exe and launch it — instead of
+                # relying on a path hard-coded in launcher.ini. Header must be latin-1
+                # safe (HTTP header), so we percent-safe it minimally.
+                try:
+                    conn = sqlite3.connect(SRV['db_path'])
+                    row = conn.execute("SELECT client_path FROM accounts WHERE account_name=?", (user,)).fetchone()
+                    conn.close()
+                    client_path = (row[0] if row and row[0] else DEFAULT_CLIENT_PATH)
+                except Exception:
+                    client_path = DEFAULT_CLIENT_PATH
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/octet-stream')
                 self.send_header('Content-Disposition', f'attachment; filename="ticket_{pid_hex}.vr1"')
+                # Custom header the FA launcher reads to locate the game client.
+                self.send_header('X-Game-Client-Path', client_path)
                 self.end_headers()
                 self.wfile.write(ticket_bytes)
             except Exception as e:
@@ -750,6 +763,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
+    def handle_one_request(self):
+        # Suppress the harmless ConnectionResetError (WinError 10054) that occurs when
+        # the FA launcher's embedded browser opens a download connection and then hands
+        # off to its own WinINet fetch, abandoning the browser's half-opened socket.
+        # Nothing actually failed — the real ticket fetch succeeds on its own connection.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None):
