@@ -2,24 +2,24 @@
 r"""
 Fighter Ace LAN Server v200
 ===========================
-v200: PvE part 2 — SCENE-DESTROY (msg 36) builder + broadcast, and a live-validatable
+v200: PvE part 2 - SCENE-DESTROY (msg 36) builder + broadcast, and a live-validatable
       'destroy' console command. Grounded in the 2009 live-server logs (messages04): the
-      real destroy loop is  out 28 (hit) + out 31 (ground-damage report) → in 36 (server's
-      authoritative SCENE DESTROY/STATE) → client prints 'You have destroyed GER Birchwood'.
-      msg 36 (0x24) handler LAB_004f9d90 decoded: wire = [0x24] then N × 7-byte records
+      real destroy loop is  out 28 (hit) + out 31 (ground-damage report) -> in 36 (server's
+      authoritative SCENE DESTROY/STATE) -> client prints 'You have destroyed GER Birchwood'.
+      msg 36 (0x24) handler LAB_004f9d90 decoded: wire = [0x24] then N x 7-byte records
       [sceneIdx u16 LE][camp/0xFF u8][progress f32]; camp 0xFF = neutralized/destroyed,
-      progress ≤ 0 flips the scene to captured. It is delivered through the IN-GAME VNET
-      dispatch (FUN_004f18a0) which passes the TRUE message length (not bc*16+1) — the live
-      'in 36'8' = exactly one 7-byte record — so msg 36 is framed with build_ingame_pkt
+      progress <= 0 flips the scene to captured. It is delivered through the IN-GAME VNET
+      dispatch (FUN_004f18a0) which passes the TRUE message length (not bc*16+1) - the live
+      'in 36'8' = exactly one 7-byte record - so msg 36 is framed with build_ingame_pkt
       (Size == n), NOT the appspace bc*16+1 tiler.
-        * build_scene_destroy_36(scene_idx, camp, progress) — the 8-byte-per-record builder.
-        * broadcast_scene_36(room_id, ...) — reliable send to everyone in the room.
-        * console 'destroy <sceneIdx> [camp] [progress]' — fire msg 36 at a KNOWN scene index
+        * build_scene_destroy_36(scene_idx, camp, progress) - the 8-byte-per-record builder.
+        * broadcast_scene_36(room_id, ...) - reliable send to everyone in the room.
+        * console 'destroy <sceneIdx> [camp] [progress]' - fire msg 36 at a KNOWN scene index
           (e.g. 30 = 'Bomber Airfield' on TRN02) to validate the wire format in isolation,
-          with ZERO dependence on the still-unconfirmed msg-31 objidx→sceneIdx mapping.
+          with ZERO dependence on the still-unconfirmed msg-31 objidx->sceneIdx mapping.
       Per-scene HP store (SCENE_HP) + auto-destroy-on-depletion logic is implemented but
       GATED OFF (AUTO_SCENE_DESTROY=False): msg 31 reports a finer per-piece object index
-      (129/130/376) whose relation to the 0–59 scene index is not yet confirmed, and sending
+      (129/130/376) whose relation to the 0-59 scene index is not yet confirmed, and sending
       msg 36 with an out-of-range sceneIdx trips the client's bounds assert. The gate stays
       off until the next live capture (v199 GROUND31 logs) pins the mapping.
 v199: PvE groundwork, part 1 + 5-MINUTE SESSION-DEATH fix.
@@ -28,45 +28,45 @@ v199: PvE groundwork, part 1 + 5-MINUTE SESSION-DEATH fix.
       unconditionally in FUN_004f1240), so v198's generic echo raised 'NET::MESSAGE with
       Unknown Type 31' on every strafing/bomb/crash report (messages17). Records are 6 bytes:
       [attacker ONumber u16 LE][target static-object idx u8][event u8, 0x05 seen][damage u16
-      LE] — observed: strafing dmg 92..1239 on objs 129/130, bomb splash = two records in one
+      LE] - observed: strafing dmg 92..1239 on objs 129/130, bomb splash = two records in one
       msg, fuel-tank crash = obj 120 dmg 9976. Consumed in all three arrival forms (direct
       sub=0x1f, type-scan pl[8]=0x1f, compound inner). v199 logs + accumulates per-object HP
-      server-side (GROUND_HP dict, no client notify yet — that's part 2).
+      server-side (GROUND_HP dict, no client notify yet - that's part 2).
       (2) THE 300s DEADLINE: the post-auth drain loop ran 'while time.time()<deadline' with
       deadline=login+300s, so five minutes after login the server silently stopped PROCESSING
-      reliable messages (still ACKing them!) — all msg-31s of the second flight, the exit-
+      reliable messages (still ACKing them!) - all msg-31s of the second flight, the exit-
       appspace and the disconnect of session 01-Jul were RELRX-logged but never handled
       ('Can't exit AppSpace' / 'Can't disconnect server' client errors). Loop now runs until
       s.closing.
 v198: BAIL-OUT respawn fix, part 3 (completes v196/v197). v197 kept the object NUMBER in
-      lock-step by consuming one for the parachute, but did NOT advance the spawn IDENT —
+      lock-step by consuming one for the parachute, but did NOT advance the spawn IDENT -
       and the client's local object-registration ident advances for EVERY object it creates,
       parachute included (out-4 payloads: plane1=ident 0, parachute=ident 1, plane2=ident 2).
       The respawn's ServerConfirm therefore carried ident=1 while the fresh plane was
-      registered under ident 2 → FUN_007e5030 found no local object with ident 1 →
-      'Confirm object 258 not found in list, send delete' (messages08) → fresh plane deleted,
+      registered under ident 2 -> FUN_007e5030 found no local object with ident 1 ->
+      'Confirm object 258 not found in list, send delete' (messages08) -> fresh plane deleted,
       sim loop never started, dead engine. Fix: the ident is IN the client's out-4 payload
       (u16 LE right after the 0x04 msg-id: pl[5:7] direct, pl[9:11] on the type-scan
-      double-wrapped re-spawn form) — parse and ECHO it instead of trusting a server-side
+      double-wrapped re-spawn form) - parse and ECHO it instead of trusting a server-side
       counter; the counter remains only as a fallback and is resynced from the parachute's
       out-4 ident field too.
 v197: BAIL-OUT respawn fix, part 2 (completes v196). v196 stopped echoing the parachute's
-      msg-4 (killing the 'Unsupported message 4' error) but SWALLOWED it outright — and the
+      msg-4 (killing the 'Unsupported message 4' error) but SWALLOWED it outright - and the
       client allocates a fresh object Number for the parachute, so the server's Number counter
       then ran one BEHIND. The next respawn's ServerConfirm carried the stale Number (259 vs the
-      client's 260) → 'Confirm object 259 not found in list → send delete' → fresh plane deleted,
+      client's 260) -> 'Confirm object 259 not found in list -> send delete' -> fresh plane deleted,
       dead engine. Now the parachute out-4 (type=0xf2 sub=0x04) CONSUMES a Number to stay in
       lock-step with the client (still no echo, no confirm, no spawn-ident advance).
 v196: BAIL-OUT respawn fix. On a bail the client spawns the parachute pilot and sends its
       object state as msg-4 wrapped type=0xf2 sub=0x04 (out 4'15). That fell through to the
-      generic echo → the client received an echoed msg-4 → 'ERROR: Unsupported message 4',
+      generic echo -> the client received an echoed msg-4 -> 'ERROR: Unsupported message 4',
       which CORRUPTED its object list, so the next spawn's ServerConfirm was refused ('Confirm
-      object 260 not found in list → send delete') and the fresh plane was deleted (dead engine,
-      teardown). msg-4 is the client's OWN object state and must NEVER be echoed — the normal
+      object 260 not found in list -> send delete') and the fresh plane was deleted (dead engine,
+      teardown). msg-4 is the client's OWN object state and must NEVER be echoed - the normal
       spawn out-4 (type=0x12) is ServerConfirmed; any other sub=0x04 is now swallowed.
 v195: RESPAWN-AFTER-CRASHLAND fix, part 3 (the actual one). v193/v194 fixed the DIRECT msg-3
-      death path, but the log showed the crashland delete arrives WRAPPED — outer type=0x06,
-      inner sub=0x03 — which hit the type-scan 'notify → swallow' branch and bypassed the death
+      death path, but the log showed the crashland delete arrives WRAPPED - outer type=0x06,
+      inner sub=0x03 - which hit the type-scan 'notify -> swallow' branch and bypassed the death
       handler entirely, so obj_confirmed was never re-armed and the respawn's out 4 still got no
       ServerConfirm (Conductor error, dead engine, CTD). The in-arena own-plane-removal logic
       (drop plane + stay in arena + re-arm obj_confirmed/flying) is now a shared helper
@@ -75,50 +75,50 @@ v195: RESPAWN-AFTER-CRASHLAND fix, part 3 (the actual one). v193/v194 fixed the 
 v194: RESPAWN-AFTER-CRASHLAND fix, part 2 (completes v193). A crashland respawn does
       InsertPlayer + out 4 with NO fresh StartPlace (the plane is on the ground, client
       continues in place), so obj_confirmed stayed True from the prior spawn and
-      _fire_server_confirm gated the out-4 out → no ServerConfirm → Conductor error ('Server
+      _fire_server_confirm gated the out-4 out -> no ServerConfirm -> Conductor error ('Server
       sent client something it doesn't understand'), engine-start ignored, then CTD. Now the
       msg-3 death handler ALSO re-arms obj_confirmed/flying = False, so the next out 4 confirms
       a fresh object whether or not a StartPlace preceded it. (v193 kept entered_game=True so
       the out-4 handler still runs; both are required.)
-v193: RESPAWN-AFTER-CRASHLAND fix — the msg-3 own-plane delete used s.flying to tell a death
+v193: RESPAWN-AFTER-CRASHLAND fix - the msg-3 own-plane delete used s.flying to tell a death
       from an exit-to-HQ, but a CRASHLAND (off-runway, over-speed damage) sends no respawn
-      StartPlace first, so flying stayed True and the death was mis-handled as an exit →
+      StartPlace first, so flying stayed True and the death was mis-handled as an exit ->
       handle_leave_arena cleared entered_game / sent the 0xDA handoff and BROKE the next
       respawn (engine-start ignored, in-game base-switch gone, only a full rejoin recovered).
       Now ANY in-arena own-plane removal is treated as a death: drop the dead plane on peers
       and stay in the arena so respawns work in place. Real leave-to-lobby still comes as
       msg-64 and tears down normally.
-v192: WEB ARENA SETTINGS EDITOR — '⚙ Edit Settings' button on each arena in the web /admin
+v192: WEB ARENA SETTINGS EDITOR - '[gear] Edit Settings' button on each arena in the web /admin
       panel opens a per-arena editor (name, section-header/title, status + GAME_DEF settings).
       Wired settings so far: the 7 visual ranges (fighters/bombers/tanks/plane-tags/other-tags/
       padlock/chat) and the 2 oxygen ceilings (with/without mask), edited in feet. These live in
       the fixed 173-byte post-plane-block GAME_DEF tail (float32 metres), located per-arena via
       _gamedef_plane_block so offsets hold across arenas (verified byte-identical on TC/Nations/
       FFA). Edits are stored as {key:feet} JSON in a new rooms.settings_json column and APPLIED
-      AT 212 SERVE TIME in build_lz_gamedef (in-place float writes — original blob never mutated,
+      AT 212 SERVE TIME in build_lz_gamedef (in-place float writes - original blob never mutated,
       212 stays bc*16+1 aligned). Take effect on the next arena entry. Pre-block settings
       (checkboxes/dropdowns/physics/weather) are variable-offset and not yet wired.
-v191: Arena-creation AUTO-JOIN fix — the CREATE flow sends no 0xc8 SendEnterToGame; the client
+v191: Arena-creation AUTO-JOIN fix - the CREATE flow sends no 0xc8 SendEnterToGame; the client
       drives entry off the 1-Hz 0x43 game-connect poll and waits for a JoinToGameAnswer 201 to
-      clear it. We only echoed 'room confirm', so the poll never stopped → ~15s soft timeout →
+      clear it. We only echoed 'room confirm', so the poll never stopped -> ~15s soft timeout ->
       client exits. Now the creator's first post-create 0x43 poll grants the 201 (enter game
       mode, alloc ClientNumber/PlayerIndex, stand up player-object layer), same as the 0xc8
       path. Gated by a create-only flag; join/lobby polls untouched. (In-arena OPTIONS still
-      read-only — that is FA's peer-host 'am I the arena host?' check, tracked separately.)
-v190: Arena-list category grouping fix — the 0xd2 block-boundary pad was appended to the LAST
+      read-only - that is FA's peer-host 'am I the arena host?' check, tracked separately.)
+v190: Arena-list category grouping fix - the 0xd2 block-boundary pad was appended to the LAST
       record's name1 (the CATEGORY the client groups rows under), so a shared category split
       into a duplicate 'Dogfighting   Arenas' header. Pad now lands on name2 (display label,
       invisible), keeping every category byte-clean so same-category arenas group together.
-v189: STABLE MILESTONE — 2-player flight + team changes + crash recovery.
+v189: STABLE MILESTONE - 2-player flight + team changes + crash recovery.
       * Per-side plane catalog now echoed as 3-byte [planeID][ushort] records so the client's
         msg-58 reader (len-1)/3 ingests every kept plane (GE bombers no longer dropped).
       * Telemetry relay marker is size-independent (cmd==0, opcode 0x07, T&0x0f==2, scan off
-        0/4) — fixes asymmetric visibility (both clients now see each other).
+        0/4) - fixes asymmetric visibility (both clients now see each other).
       * Team-change roster: broadcast on current_room (not entered_game) so switches made at
         team-select propagate; self-63 sent JOIN-only (neutral echo caused a lobby-bail loop);
         no-op dedup so reliable retransmits of the same side don't re-broadcast (flood/CTD).
       * Server crash-recovery: SIO_UDP_CONNRESET disabled on Windows (a client CTD no longer
-        starves recvfrom → reconnect gets a populated pilot/arena list without a restart);
+        starves recvfrom -> reconnect gets a populated pilot/arena list without a restart);
         Linux is immune by default. Reconnect reaps the stale same-account ghost session.
       Known-rough (deferred, non-blocking): reliable-seq wrap wedge after a very long single
       segment (~250 pkts, no re-entry); exit-to-lobby re-entry reliable desync on that path.
@@ -128,35 +128,35 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
 TODO list:
   [x] SYN structure mapped (offsets confirmed)
   [x] Pilot creation/rename/delete (0xe2/0xe7/0xe3) saved to DB
-  [x] Ticket generation: gen <name> at server console → ticket_<name>.vr1
+  [x] Ticket generation: gen <name> at server console -> ticket_<name>.vr1
   [x] Chat: broadcast as APPSPACE sub=0xcd with pilot name
   [x] Lobby UI List: 0xcc LmsChangePlayers mapped (join/leave broadcasts)
   [x] Room creation: compound cmd=18 inner type=0x92/sub=0xdc stored in DB
   [x] Room list (0xce): sends actual room data via build_ce_room_list
   [x] Room confirm (0x43): slot=room_slot player_count from DB
   [x] VNET::SendEnterToGame: bc=2 type=0x82 sub=0xc8 detected; not echoed (prevents crash)
-  [x] Player-object layer (v182 → fixed v183 → fixed v184): msg 62 AddPlayer /
+  [x] Player-object layer (v182 -> fixed v183 -> fixed v184): msg 62 AddPlayer /
       63 ChangePlayerCB / 96 ScoreTable, decoded from VNet_Rcv.cpp (FUN_004fa5f0 /
       FUN_004fa9c0 / FUN_00629600). 62 creates REMOTE_PLAYER, 63 op=1 sets side
-      (rp->Camp() @ player+0x2c). Side membership was msg 63 all along — NOT msg 58
+      (rp->Camp() @ player+0x2c). Side membership was msg 63 all along - NOT msg 58
       (v175's guess); msg 58 is a LobbyRcv list, not the arena side-setter.
       v183 FIX: v182 crashed on side-select (op=2 hit the DELETE path, not camp; and
       the 63 was sent to the player about itself). op=CAMP is 1; 63 is peers-only.
-      v184 FIX: v183 crashed on arena-JOIN — it sent msg 96 (ScoreTable) on the 201
+      v184 FIX: v183 crashed on arena-JOIN - it sent msg 96 (ScoreTable) on the 201
       grant, which frees+reallocates the host-side score-table object before the
-      client's world exists (3s stall → WinError 10054). 96 is now DEFERRED; the 62
+      client's world exists (3s stall -> WinError 10054). 96 is now DEFERRED; the 62
       stand-up self-gates to no-ops when alone, so lone entry == known-good v182 path.
       v185: layer made REQUEST-DRIVEN. bare 0x60 after FLY grant = ScoreTable request
-      → answer msg 96 (v184 left it unanswered → no launch timer, CTD ~20s).
-      v186: INVARIANT added — 62 to client X never carries X's own index; 0x66
+      -> answer msg 96 (v184 left it unanswered -> no launch timer, CTD ~20s).
+      v186: INVARIANT added - 62 to client X never carries X's own index; 0x66
       swallowed; self-63 kept as the team-change mechanism.
       v187 ROOT CAUSE: every player-object CTD (v182 side-select, v183 join, v185/v186
-      team) was ONE bug — the client delivers Length=bc*16+1 to handlers, NOT the
-      datagram length (proven in vcncnet…510.log: our 8B msg 63 arrived as Size=17
-      with 9B of stale-buffer garbage, parsed as phantom records → ScoreTable/VNet_Rcv
-      "Length>=0" fatal assert → DLL_PROCESS_DETACH). build_appspace_pkt_exact was a
+      team) was ONE bug - the client delivers Length=bc*16+1 to handlers, NOT the
+      datagram length (proven in vcncnet...510.log: our 8B msg 63 arrived as Size=17
+      with 9B of stale-buffer garbage, parsed as phantom records -> ScoreTable/VNet_Rcv
+      "Length>=0" fatal assert -> DLL_PROCESS_DETACH). build_appspace_pkt_exact was a
       fiction; the client ignores real length. FIX: 62/63/96 now TILE to bc*16+1 with
-      parser-valid padding — 63 pads to a multiple of 16 dummy-index records, 62 pads
+      parser-valid padding - 63 pads to a multiple of 16 dummy-index records, 62 pads
       the last record's unused trailing string, 96 appends one pad group (9+7N bytes).
       Also fixed a 96 count off-by-one (parser loops count+1). The v183 "premature
       world state" and v185 "use-after-free" theories were both wrong: it was framing.
@@ -165,20 +165,20 @@ TODO list:
       line + side color), chat, the FLY StartPlace grant (msg 23). The client reaches
       the runway with a plane assigned. This is the milestone stopping point.
 
-  ── BOUNDARY: entering the flyable world needs the GAME-SERVER CHANNEL (new work) ──
-  The FLY → spawn path is NOT a packet bug. On fly, FUN_004f6320 passes the spawn
+  -- BOUNDARY: entering the flyable world needs the GAME-SERVER CHANNEL (new work) --
+  The FLY -> spawn path is NOT a packet bug. On fly, FUN_004f6320 passes the spawn
   gate (worldobj exists, -0x1700 "ready" flag set by arena entry) and calls
   FUN_004e9fa0, which invokes the SIM CONDUCTOR at worldobj+0x1800:
-        (**(code**)(*(worldobj+0x1800)+0x6c))(...)   ← null-vtable CTD
+        (**(code**)(*(worldobj+0x1800)+0x6c))(...)   <- null-vtable CTD
   worldobj+0x1800 is null. Nothing in the lobby path (LobbyRcv.cpp / VNet_Rcv.cpp,
   incl. the 212 handler FUN_004ed9c0 which only PARSES the arena def) creates it.
-  The conductor's users live in Sources\FA30\PLANES\plngroup.cpp — the flight-sim
+  The conductor's users live in Sources\FA30\PLANES\plngroup.cpp - the flight-sim
   layer, a separate subsystem. Peer-hosted FA splits into two channels: the lobby/
   arena connection (this file) and a SEPARATE game-server VNET connection that runs
   gameplay and stands up the conductor. We don't serve that channel yet, so the
-  client spawns into a sim that was never initialized → null +0x1800.
+  client spawns into a sim that was never initialized -> null +0x1800.
 
-  [ ] GAME-SERVER CHANNEL (separate VNET connection) — new design thread:
+  [ ] GAME-SERVER CHANNEL (separate VNET connection) - new design thread:
       [ ] First question: how is the client told to OPEN the 2nd connection? Trace the
           writer of worldobj+0x1800 back to its triggering network event; the connect
           address/port is likely already in something we send (201 JoinToGameAnswer
@@ -187,18 +187,18 @@ TODO list:
       [ ] Then: position/state replication for actual flight.
   [ ] Multi-player (lobby): verify 62 AddPlayer on a real 2nd-player join (untested)
   [ ] Pilot stats: rank, score, kills, deaths, squadron (DB placeholders exist)
-  [ ] PLANE FILTERING (deferred — "get flying" comes first):
-      Current: all planes shown to all teams (DEFAULT_PLANESET=0 → stock Planes.txt;
+  [ ] PLANE FILTERING (deferred - "get flying" comes first):
+      Current: all planes shown to all teams (DEFAULT_PLANESET=0 -> stock Planes.txt;
       msg 58 0x3a echoed in full). This is intentional for now.
       [ ] Per-arena pool (option 2, mechanism DONE/dormant): map an arena in
           ARENA_PLANESETS to a plane-set index N; REQUIRES authoring PLANES\Planes_N.txt
           into the client VFS (data.q6 ships only Planes.txt=0; v164 proved a missing
-          file → "No planes' definitions found!" abort). Open Q: can a loose
+          file -> "No planes' definitions found!" abort). Open Q: can a loose
           PLANES\Planes_N.txt shadow the pack, or must it be repacked?
       [ ] Per-NATION within one arena (option 1): server replies to the client's
           'out 58'121' catalog (msg 58 / FUN_004eff50) with only the selected side's
           subset instead of echoing all. Needs: (a) decode the [byte][ushort] record
-          → plane mapping (grab US vs GE 'out 58' captures and diff), (b) a plane→nation
+          -> plane mapping (grab US vs GE 'out 58' captures and diff), (b) a plane->nation
           table. Until then 0x3a stays echoed (the exemption in handle_post_auth/
           handle_compound keeps the hangar populated).
   [ ] Telemetry RELAY (multiplayer flight): forward each player's flight-state
@@ -206,10 +206,10 @@ TODO list:
       never echo to the sender (sender-echo = Unknown Type crash). Currently in-game
       telemetry is swallowed (single-player stopgap).
 
-bc formula: param_3 = bc × 16 + 1
+bc formula: param_3 = bc x 16 + 1
 appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the datagram
-  length. Any length-driven message MUST tile to len ≡ 1 (mod 16) with parser-valid
-  padding. (Root cause of the v182–v186 crash series; see v187 note above.)
+  length. Any length-driven message MUST tile to len == 1 (mod 16) with parser-valid
+  padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
 import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json
 from datetime import datetime
@@ -217,7 +217,7 @@ from collections import deque
 
 # Force UTF-8 console output with replacement so a legacy cp1252 console can never crash a
 # worker thread on a box-drawing/arrow/em-dash char in a log line (the login thread died on
-# '══ v187 AUTH ══' under Python 3.14's cp1252 stdout). errors='replace' degrades any
+# '== v187 AUTH ==' under Python 3.14's cp1252 stdout). errors='replace' degrades any
 # unencodable glyph to '?' instead of raising UnicodeEncodeError.
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -256,7 +256,7 @@ def fa_timestamp():
     t = time.time()
     return ctypes.c_uint32(int(t)-FA_EPOCH).value, int((t%1)*1000*0x10000//1000)+0x800
 
-# ─── Database ─────────────────────────────────────────────────────────────────
+# --- Database -----------------------------------------------------------------
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -354,13 +354,13 @@ def db_get_pilot_stats(name):
                        (name,)).fetchone()
     conn.close(); return row   # (score,kills,deaths) or None
 
-# ─── Terrain table & GAME_DEF terrain extraction ──────────────────────────────
+# --- Terrain table & GAME_DEF terrain extraction ------------------------------
 #
 # FA identifies each arena's map by a TERRAIN NUMBER (1..99, sparse). The number
 # is asserted >=1 (FUN_00438e30 / Trn.hpp:437) and must exist in the client's
 # locally-loaded set, or the engine aborts the moment the Arenas tab renders it.
 # Each room's terrain is chosen by the creator and travels inside the GAME_DEF
-# text blob the client sends at creation, as a "Terrain=N" key/value line — the
+# text blob the client sends at creation, as a "Terrain=N" key/value line - the
 # same field the client prints when it parses a GAME_DEF. We extract it there,
 # store it per-room, and emit it in the 0xd2 record. Names below are the FA stock
 # set (from the production + client logs) and are only used for console display.
@@ -374,16 +374,16 @@ TERRAIN_NAMES = {
     48: 'MKOTS Arena', 49: 'Terra Nova', 50: 'Classic_III', 51: 'Classic_III_Snow',
     60: 'Korea', 61: 'Korea Snow',
 }
-DEFAULT_TERRAIN = 1   # Ocean — present in every stock install; safe fallback
-FORCE_GAMEDEF_TERRAIN = 6  # English Channel — terrain to stamp into client-created
+DEFAULT_TERRAIN = 1   # Ocean - present in every stock install; safe fallback
+FORCE_GAMEDEF_TERRAIN = 6  # English Channel - terrain to stamp into client-created
                            # GAME_DEFs that store terrain=0 (the user's TC rooms are
                            # English Channel; client loaded terrain 06 at startup)
 
-# ── Per-arena PLANE SET (option 2: GAME_DEF word[0x23] → PLANES\Planes_<N>.txt) ──
+# -- Per-arena PLANE SET (option 2: GAME_DEF word[0x23] -> PLANES\Planes_<N>.txt) --
 # FA's plane POOL for an arena is selected by GAME_DEF word[0x23] (the first ushort
 # after the camps block). The client feeds it to FUN_004c7cd0 which loads
-#   word[0x23]==0  →  PLANES\Planes.txt   (the full stock list — every plane, all nations)
-#   word[0x23]==N  →  PLANES\Planes_<N>.txt
+#   word[0x23]==0  ->  PLANES\Planes.txt   (the full stock list - every plane, all nations)
+#   word[0x23]==N  ->  PLANES\Planes_<N>.txt
 # This is PER-ARENA (one value per room, same for everyone in it), NOT per-nation.
 # WARNING (the v164 lesson): a nonzero N only works if PLANES\Planes_<N>.txt actually
 # EXISTS in data.q6, else the client aborts at load with 'No planes' definitions found!'
@@ -394,7 +394,7 @@ DEFAULT_PLANESET = 0
 ARENA_PLANESETS = {
     # 'pacific theater': 7,   # example: requires PLANES\Planes_7.txt present in data.q6
 }
-# ── Per-arena GROUND START (StartGround flag in the GAME_DEF) ──────────────────
+# -- Per-arena GROUND START (StartGround flag in the GAME_DEF) ------------------
 # The client spawns in the AIR (OnGround=0, at StartAlt) when the arena's StartGround
 # flag is 0, and on the RUNWAY (OnGround=1) when it is 1. CONFIRMED via FA.exe:
 #   * deserializer FUN_0057bee0 reads it as a single byte into arena+0xec (param[0x3b]),
@@ -402,8 +402,8 @@ ARENA_PLANESETS = {
 #   * printer FUN_005796e0 prints arena+0xec as " StartGround=%s" (yes/no);
 #   * AllowTerrainChange (arena+0xe8) is a separate packed flag bit far later in the
 #     struct, so flipping this byte affects ONLY the spawn, nothing else.
-# StartAirfield maps side→forced field; the user's rooms use -1 (no force) for all real
-# sides, so the granted start place (AF from the FLY 23 grant) is used as-is — ground
+# StartAirfield maps side->forced field; the user's rooms use -1 (no force) for all real
+# sides, so the granted start place (AF from the FLY 23 grant) is used as-is - ground
 # start needs no StartAirfield change. We stamp StartGround=1 into every served GAME_DEF.
 FORCE_GROUND_START = False  # reverted 2026-06-28: serve each arena's GAME_DEF untouched; use a native ground-start arena. Set True to re-enable the StartGround rewrite.
 GAMEDEF_DEBUG = False  # v188: gate the per-212-build decompressed-hex dump. Set True to re-enable when diffing GAME_DEF fields.
@@ -423,7 +423,7 @@ def planeset_for_room(room):
         pass
     return DEFAULT_PLANESET
 
-# ─── FFA neutral-team guard ────────────────────────────────────────────────────────────
+# --- FFA neutral-team guard ------------------------------------------------------------
 # FFA vs TC is decided by the camps-block AllianceVar (leading cstring of the camps block;
 # parsed by FA.exe FUN_0056ed90 -> FUN_0056e990, Camps.cpp). The ACTIVE-CAMP MASK
 # (camps+0x60) is built from which hex DIGITS appear in the string (not the dashes); Neutral
@@ -520,7 +520,7 @@ def force_ffa_two_col(d, flyable_camp=FFA_FLYABLE_CAMP):
 def extract_terrain_from_gamedef(game_def_raw):
     """Terrain = param[0x39] of the decompressed GAME_DEF (= arena_object+0xe4).
 
-    CONFIRMED three ways: (1) contrast rooms — Territorial Combat/Mediterranean reads 2,
+    CONFIRMED three ways: (1) contrast rooms - Territorial Combat/Mediterranean reads 2,
     MKOTS reads 48, matching FA's terrain table exactly; (2) FA.exe FUN_00702a40 reads the
     dialog terrain from arena+0xe4; (3) FUN_0076e690 / FUN_0076d6c0 validate arena+0xe4 via
     FUN_00438e30 (the _TrnNumber>=1 assert). It is the byte immediately after the 8 camp/
@@ -553,7 +553,7 @@ def extract_terrain_from_gamedef(game_def_raw):
 
 def gamedef_startground_offset(d):
     """Byte offset of the StartGround flag within a DECOMPRESSED GAME_DEF struct `d`.
-    It sits exactly ONE byte after the terrain byte (param[0x39]) — the same walk
+    It sits exactly ONE byte after the terrain byte (param[0x39]) - the same walk
     extract_terrain_from_gamedef uses to reach terrain, then +1. Returns None on any
     parse failure (caller then leaves the struct untouched)."""
     try:
@@ -574,7 +574,7 @@ def gamedef_startground_offset(d):
         pass
     return None
 
-# ── Per-team AIRCRAFT assignment (which nation flies each plane) ────────────────
+# -- Per-team AIRCRAFT assignment (which nation flies each plane) ----------------
 # WHY: every stored GAME_DEF leaves all 121 planes with record BYTE 0 = 0x1f. That byte is
 # PLANE.field[0], the CAMP BITMASK the flyability gate FUN_00438330 checks:
 #     flyable(plane, camp) = field[0] & (1<<camp).   0x1f = bits 0..4 = all 5 camps may fly
@@ -740,34 +740,34 @@ def apply_plane_teams(d, slot_camp):
             rec[slot * 4] = 0x1f                  # all camps flyable; per-side filter is the 0x3a echo
         else:
             camp = slot_camp.get(slot, 0) & 7
-            rec[slot * 4] = 1 << camp             # byte0 = camp bitmask (US=0x01 … JP=0x10)
+            rec[slot * 4] = 1 << camp             # byte0 = camp bitmask (US=0x01 ... JP=0x10)
         # marker rec[+1] stays 0xff (no-hascamp form); limits rec[+2],rec[+3] preserved
     d[s + 3:s + 3 + blen] = rec
     return s, blen, blen
 
-# ─── Binary GAME_DEF layout (from FA.exe FUN_0057bee0 / FUN_0056ed90) ──────────
+# --- Binary GAME_DEF layout (from FA.exe FUN_0057bee0 / FUN_0056ed90) ----------
 #
-# The GAME_DEF is NOT text — it's a packed binary struct. The "Terrain=N" lines we
+# The GAME_DEF is NOT text - it's a packed binary struct. The "Terrain=N" lines we
 # used to grep are FA.exe PRETTY-PRINTING its parsed struct, not the wire format.
 # The stored blob carries a 14-byte prefix (LobbyIndex/flags, zero for a new room)
 # BEFORE the deserialisable GAME_DEF, whose first byte is the VERSION 0x8a (138).
 # The deserialiser (FUN_0057bee0) requires byte[0]==0x8a, then reads:
 #   version(1) | 3 dwords(12) | block_len(1) | camps-block(block_len) | 3 ushorts(6)
-#   | NAME (null-term) | … | Comment | … many scalar/string/array fields …
+#   | NAME (null-term) | ... | Comment | ... many scalar/string/array fields ...
 # FUN_0056ed90 (camps) asserts it consumes EXACTLY block_len bytes (Camps.cpp p-ptr==len),
 # so NAME starts at  gamedef_start + 1+12+1 + block_len + 6  =  gamedef_start+20+block_len.
-# ─── FA Mix LZ codec (vcncNet/FA.exe FUN_007d68f0) ────────────────────────────
+# --- FA Mix LZ codec (vcncNet/FA.exe FUN_007d68f0) ----------------------------
 # The GAME_DEF carried by the 212 message is LZ-COMPRESSED. The decompressor reads
 # exactly `size` input bytes and produces a variable-size output; the deserialiser's
 # end assert (GameDef.cpp:2076 "Source.End()") requires it to consume the WHOLE
 # decompressed buffer. Echoing the client's compressed blob fails because its size
-# (740 ≡4 mod16) can't land on the bc*16+1 appspace grid, so the client over-reads 8
-# stale bytes that decompress into extra output → Source.End.
+# (740 ==4 mod16) can't land on the bc*16+1 appspace grid, so the client over-reads 8
+# stale bytes that decompress into extra output -> Source.End.
 #
 # Fix: DECOMPRESS the stored blob, then re-send it via the decompressor's STORED mode
-# (first byte 0x01 → copies size-4 bytes verbatim). We pad a string field so the
-# decompressed size ≡8 mod16, which makes [0xd4][id:4][0x01][3][struct] land EXACTLY
-# on bc*16+1 (payload = D+9). Validated against db_id=24: 732 compressed → 1183 bytes,
+# (first byte 0x01 -> copies size-4 bytes verbatim). We pad a string field so the
+# decompressed size ==8 mod16, which makes [0xd4][id:4][0x01][3][struct] land EXACTLY
+# on bc*16+1 (payload = D+9). Validated against db_id=24: 732 compressed -> 1183 bytes,
 # clean camps/name/comment.
 _NEG_1A1 = -0x1a1
 def _fa_hash(b0, b1, b2):
@@ -778,7 +778,7 @@ def _fa_hash(b0, b1, b2):
     return (prod >> 4) & 0x1ff
 
 def fa_decompress(data, size=None):
-    """Reimplementation of FUN_007d68f0. data[0]==0x01 → STORED (copy data[4:size]);
+    """Reimplementation of FUN_007d68f0. data[0]==0x01 -> STORED (copy data[4:size]);
     else LZ. Returns the decompressed bytes."""
     data = bytes(data)
     if size is None:
@@ -789,10 +789,10 @@ def fa_decompress(data, size=None):
         return data[4:size]
     # FA's decompressor (FUN_007d68f0) pre-initialises EVERY dictionary slot to point at
     # the 18-byte constant "123456789012345678", so a MATCH emitted before that slot was
-    # populated by literals copies from THAT string — not from output offset 0. Model it
+    # populated by literals copies from THAT string - not from output offset 0. Model it
     # as an 18-byte PREFIX on the output buffer with all dict slots = offset 0; the real
     # output is out[18:]. Without this, a blob whose early op is such a match (the trn5
-    # 'Circle' GAME_DEF) decompresses to garbage → client GAME_DEF parser over-read CTD.
+    # 'Circle' GAME_DEF) decompresses to garbage -> client GAME_DEF parser over-read CTD.
     out = bytearray(b"123456789012345678")
     dict_pos = [0] * 4096       # every slot points at the init string (offset 0 in `out`)
     ring = 0
@@ -856,8 +856,8 @@ def _lz_comp_size(n):
 def encode_all_literals(struct):
     """Encode `struct` as a valid FA LZ stream using ONLY literals: a 4-byte header
     (mode byte 0x00 = LZ, NOT 0x01/STORED) followed by [ctrl=0x0000][<=16 literal bytes]
-    groups. ctrl=0x0000 → the decompressor reads 16 literal bits (each copies 1 byte),
-    so the stream decompresses to `struct` verbatim (no matches → dictionary unused).
+    groups. ctrl=0x0000 -> the decompressor reads 16 literal bits (each copies 1 byte),
+    so the stream decompresses to `struct` verbatim (no matches -> dictionary unused).
     We use this instead of STORED mode: FUN_007d68f0's 0x01 branch reads from the
     (uninitialised) output buffer, yielding a garbage version byte (v161: 'get 64')."""
     out = bytearray([0x00, 0x00, 0x00, 0x00])
@@ -943,7 +943,7 @@ def fa_compress(d, flo=-1, fhi=-1):
         i += 16
     return bytes(s)
 
-# ── EDITABLE ARENA SETTINGS (post-block GAME_DEF tail) ──────────────────────────
+# -- EDITABLE ARENA SETTINGS (post-block GAME_DEF tail) --------------------------
 # The 173-byte region AFTER the plane-team block is a FIXED-layout struct (verified
 # byte-identical across TC / Nations at war / Free For All except the actual values).
 # It is located per-arena via _gamedef_plane_block(d) -> block_end = start + blen, so
@@ -955,15 +955,15 @@ def fa_compress(d, flo=-1, fhi=-1):
 _M2FT = 3.280839895
 ARENA_TAIL_FIELDS = [
     # key,             delta, label
-    ('vr_fighters',     31, 'Visual range – fighters (ft)'),
-    ('vr_bombers',      27, 'Visual range – bombers (ft)'),
-    ('vr_tanks',        39, 'Visual range – tanks (ft)'),
-    ('vr_plane_tags',   43, 'Visual range – plane tags (ft)'),
-    ('vr_other_tags',   47, 'Visual range – other tags (ft)'),
-    ('vr_padlock',      51, 'Visual range – padlock (ft)'),
+    ('vr_fighters',     31, 'Visual range - fighters (ft)'),
+    ('vr_bombers',      27, 'Visual range - bombers (ft)'),
+    ('vr_tanks',        39, 'Visual range - tanks (ft)'),
+    ('vr_plane_tags',   43, 'Visual range - plane tags (ft)'),
+    ('vr_other_tags',   47, 'Visual range - other tags (ft)'),
+    ('vr_padlock',      51, 'Visual range - padlock (ft)'),
     ('vr_chat',         63, 'Chat range (ft)'),
-    ('height_no_mask',  90, 'Oxygen ceiling – without mask (ft)'),
-    ('height_mask',     94, 'Oxygen ceiling – with mask (ft)'),
+    ('height_no_mask',  90, 'Oxygen ceiling - without mask (ft)'),
+    ('height_mask',     94, 'Oxygen ceiling - with mask (ft)'),
 ]
 
 def _arena_tail_base(d):
@@ -1018,20 +1018,40 @@ def arena_settings_apply(d, settings):
             except (ValueError, TypeError):
                 pass
 
-# ─── EvP: enemy anti-aircraft / flak (client-side, driven by GAME_DEF AA quality) ─────────
+# --- EvP: enemy anti-aircraft / flak (client-side, driven by GAME_DEF AA quality) ---------
 # EvP flak is simulated CLIENT-SIDE: the AA batteries loaded with the terrain fire at the
 # player when the arena's GAME_DEF sets the [AI] quality fields non-zero. The stock TC.gdf /
 # FFA.gdf templates ship these at 0, so the guns are inert; the 2009 live arenas used
 # AAquality=6, FlakQuality=1, BomberGunnerQuality=3, ShipAAQuality=1, TankAAQuality=1 and the
 # world actively shot players ("GER Anti-Aircraft has damaged your fuselage"). We restore that
-# by patching the 5 AA-quality bytes at 212-serve time — no protocol work, no new message.
+# by patching the 5 AA-quality bytes at 212-serve time - no protocol work, no new message.
 #
 # Field order + wire position CONFIRMED by decompiling the GAME_DEF parser FUN_0057bee0:
 # the client reads AAquality from struct byte +0x418 (== dword field param_1[0x106]), and the
 # 5 quality fields are 5 CONSECUTIVE single bytes on the wire. _gamedef_aa_offset replays the
 # parser's variable-length walk to find them for any arena/terrain.
-EVP_AA_ENABLED = False            # master switch; flip live with the `evp` console command
+EVP_AA_ENABLED = True             # EvP is now always on; per-arena AA/Flak come from the web
+                                  # settings (the `evp` console command still forces/overrides).
 EVP_AA_QUALITY = (6, 1, 3, 1, 1)  # AAquality, FlakQuality, BomberGunnerQuality, ShipAA, TankAA
+                                  # - the DEFAULT when an arena has no web-set AA/Flak sliders.
+
+# The 5 web slider keys (0..6 each) that map 1:1 onto the AA-quality bytes, in wire order.
+# Stored per-arena in rooms.settings_json and read at 212-serve time. Missing keys fall back
+# to the corresponding EVP_AA_QUALITY default so old arenas behave exactly as before.
+EVP_AA_SETTING_KEYS = ('aa_quality', 'flak_quality', 'bomber_gunner', 'ship_aa', 'tank_aa')
+
+def evp_quality_from_settings(arena_settings):
+    """Return the 5-tuple of AA-quality bytes for an arena, taking each value from the web
+    slider (arena_settings[key], clamped 0..6) when present, else the EVP_AA_QUALITY default."""
+    vals = list(EVP_AA_QUALITY)
+    if isinstance(arena_settings, dict):
+        for i, key in enumerate(EVP_AA_SETTING_KEYS):
+            if key in arena_settings:
+                try:
+                    vals[i] = max(0, min(6, int(arena_settings[key])))
+                except (ValueError, TypeError):
+                    pass
+    return tuple(vals)
 
 def _gamedef_aa_offset(d):
     """Offset of the 5 consecutive AA-quality bytes in a DECOMPRESSED GAME_DEF, or None.
@@ -1090,7 +1110,7 @@ def apply_aa_quality(d, values=EVP_AA_QUALITY):
     if off is None:
         return None
     old = list(d[off:off + 5])
-    if not all(0 <= x <= 10 for x in old):     # doesn't look like the AA block — refuse
+    if not all(0 <= x <= 10 for x in old):     # doesn't look like the AA block - refuse
         return None
     for i, v in enumerate(values[:5]):
         d[off + i] = max(0, min(255, int(v)))
@@ -1098,7 +1118,7 @@ def apply_aa_quality(d, values=EVP_AA_QUALITY):
 
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
-    all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') ≡ 1 mod16),
+    all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
     b = bytes(blob)
     v = gamedef_start(b)
@@ -1134,7 +1154,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # byte. Harmless; remove once the terrain field is located.
     if GAMEDEF_DEBUG:
         log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}')
-    # v165: CORRECTION — the ushort at 14+camps_block_len (param_1[0x23]) is NOT the
+    # v165: CORRECTION - the ushort at 14+camps_block_len (param_1[0x23]) is NOT the
     # terrain. It is the PLANE-SET id: FUN_0057bee0 feeds it straight to FUN_004c7cd0,
     # which loads "PLANES\Planes_%d.txt" (or "Planes.txt" when 0). v164 stamped 6 here,
     # so the client tried to load the nonexistent "Planes_6.txt" and aborted with
@@ -1147,7 +1167,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # carries it: the deserializer parses to an exact Source.End() with no terrain field,
     # and the list parser reads only GameIndex(+4)+2 names, skipping the 12-byte header.
     # desc+0x1c is therefore set from FUN_004ed040's param_8 (source still being pinned),
-    # not from anything we currently send. Patching the blob cannot fix it — see notes
+    # not from anything we currently send. Patching the blob cannot fix it - see notes
     # below. We do NOT touch the plane-set ushort here.
     # OPT-IN per-arena plane set (option 2): stamp the plane-set id into word[0x23]
     # (first ushort after the camps block, at +14+block_len) so the client loads
@@ -1196,12 +1216,14 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     if arena_settings:
         arena_settings_apply(d, arena_settings)
     # EvP: enable client-side enemy flak by setting the [AI] AA-quality bytes non-zero.
-    # In-place same-length byte writes (before pad alignment; offset precedes the plane block).
+    # Per-arena AA/Flak come from the web sliders (arena_settings), falling back to the
+    # EVP_AA_QUALITY defaults for any slider not set. In-place same-length byte writes.
     if EVP_AA_ENABLED:
-        _aa = apply_aa_quality(d, EVP_AA_QUALITY)
+        _q = evp_quality_from_settings(arena_settings)
+        _aa = apply_aa_quality(d, _q)
         if _aa:
             _off, _old = _aa
-            log('GAMEDEF212', f'EvP AA quality @+{_off}: {_old} -> {list(EVP_AA_QUALITY)} '
+            log('GAMEDEF212', f'EvP AA quality @+{_off}: {_old} -> {list(_q)} '
                               f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')
         else:
             log('GAMEDEF212', 'EvP AA: quality bytes not located/verified; left as-is')
@@ -1210,7 +1232,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
     # and overflowed it -> the oversized 212 stalled the in-order reliable channel -> the 0xd2
     # arena list queued behind it never arrived -> empty lobby). There is no closed-form size,
-    # so we pad the COMMENT and recompress until 5+len(comp) ≡ 1 (mod 16); the pad bytes are
+    # so we pad the COMMENT and recompress until 5+len(comp) == 1 (mod 16); the pad bytes are
     # FORCED to literals (flo..fhi) so each adds exactly one byte (a run of spaces would else
     # collapse to one fixed-size match and never move the residue). The chosen stream is
     # round-trip verified before use; any miss falls back to the all-literals encoder.
@@ -1291,7 +1313,7 @@ def gamedef_212_start(blob):
     version blob[ver+6]=0x90 ('get 144'); starting at ver-6 lands the 0x8a where the
     deserialiser looks. It also makes [0xd4][id:4][gdef] land exactly on bc*16+1
     (e.g. 5+732=737), so no pad/over-read. Blob layout:
-      [8-byte outer prefix][6-byte gd header][0x8a version][body…]"""
+      [8-byte outer prefix][6-byte gd header][0x8a version][body...]"""
     v = gamedef_start(blob)
     return max(0, v - 6)
 
@@ -1318,7 +1340,7 @@ def extract_name_from_gamedef(game_def_raw):
     except Exception:
         return ''
 
-# ─── Room DB ──────────────────────────────────────────────────────────────────
+# --- Room DB ------------------------------------------------------------------
 
 def init_rooms_db():
     conn = sqlite3.connect(DB_PATH)
@@ -1348,7 +1370,7 @@ def init_rooms_db():
         conn.commit()
         log('DB', 'Migration: added room_slot column to rooms table')
     except Exception:
-        pass  # column already exists — expected on every normal startup
+        pass  # column already exists - expected on every normal startup
     # Migration: add terrain column + backfill from each room's stored GAME_DEF text.
     try:
         conn.execute("ALTER TABLE rooms ADD COLUMN terrain INTEGER DEFAULT 1")
@@ -1360,7 +1382,7 @@ def init_rooms_db():
         conn.commit()
         log('DB', 'Migration: backfilled terrain from stored GAME_DEFs')
     except Exception:
-        pass  # column already exists — expected on every normal startup
+        pass  # column already exists - expected on every normal startup
     # Migration: add the arena-list SECTION HEADER / category (name1) column. Editable
     # from the web admin Arena Management panel; default 'Custom Arenas' = the value
     # build_arenalist hardcoded before this was made per-room.
@@ -1369,8 +1391,8 @@ def init_rooms_db():
         conn.commit()
         log('DB', 'Migration: added category column to rooms table')
     except Exception:
-        pass  # column already exists — expected on every normal startup
-    # Migration: add settings_json — per-room web-edited GAME_DEF setting overrides (visual
+        pass  # column already exists - expected on every normal startup
+    # Migration: add settings_json - per-room web-edited GAME_DEF setting overrides (visual
     # ranges, oxygen ceilings, ...). Stored as JSON {key: feet}; applied at 212 serve time in
     # build_lz_gamedef so the original game_def_raw blob is never mutated/recompressed on save.
     try:
@@ -1378,7 +1400,7 @@ def init_rooms_db():
         conn.commit()
         log('DB', 'Migration: added settings_json column to rooms table')
     except Exception:
-        pass  # column already exists — expected on every normal startup
+        pass  # column already exists - expected on every normal startup
     # Always re-derive room_name from the binary GAME_DEF (the old text-regex path
     # left every room 'Unnamed' since the blob is binary, not INI text). Cheap, and
     # corrects rooms created before binary name extraction existed.
@@ -1483,9 +1505,9 @@ def db_get_room_for_pilot(pilot_name):
                 "ORDER BY r.created_at DESC LIMIT 1", (pilot_name,)).fetchone()
         conn.close()
         if row:
-            log('DB', f'db_get_room_for_pilot("{pilot_name}") → room_id={row[0]} slot=0x{row[1]:02x}')
+            log('DB', f'db_get_room_for_pilot("{pilot_name}") -> room_id={row[0]} slot=0x{row[1]:02x}')
         else:
-            log('DB', f'db_get_room_for_pilot("{pilot_name}") → None (no open room)')
+            log('DB', f'db_get_room_for_pilot("{pilot_name}") -> None (no open room)')
         return (row[0], row[1]) if row else None
     except Exception as e:
         log('DB', f'db_get_room_for_pilot error: {e}')
@@ -1496,7 +1518,7 @@ def db_room_player_count(room_id):
     row = conn.execute("SELECT COUNT(*) FROM room_players WHERE room_id=?", (room_id,)).fetchone()
     conn.close(); return row[0] if row else 0
 
-# ─── Ticket template ──────────────────────────────────────────────────────────
+# --- Ticket template ----------------------------------------------------------
 
 TICKET_PATHS = [
     os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ticket_base.vr1'),
@@ -1509,13 +1531,13 @@ def load_ticket_template():
         if not os.path.exists(path): continue
         data = open(path, 'rb').read()
         if len(data) != TICKET_SIZE:
-            log('TICKET', f'Skipping {path}: size {len(data)} ≠ {TICKET_SIZE}'); continue
+            log('TICKET', f'Skipping {path}: size {len(data)} != {TICKET_SIZE}'); continue
         TICKET_TEMPLATE = bytearray(data)
         base_acct = data[TICKET_ACCT_OFF:TICKET_ACCT_OFF+TICKET_ACCT_LEN].split(b'\x00')[0].decode(errors='replace')
         base_pid  = hx(data[TICKET_PID_OFF:TICKET_PID_OFF+4])
         log('TICKET', f'Template loaded: {path} ({TICKET_SIZE}b) base_acct="{base_acct}" base_pid={base_pid}')
         return True
-    log('TICKET', 'No base ticket found — ticket generation unavailable')
+    log('TICKET', 'No base ticket found - ticket generation unavailable')
     return False
 
 def generate_ticket(account_name: str) -> tuple:
@@ -1564,7 +1586,7 @@ def console_handler():
         except Exception:
             break
         if raw_line == '':          # EOF (stdin closed / piped / detached)
-            log('CONSOLE', 'stdin closed — console commands disabled (server still running)')
+            log('CONSOLE', 'stdin closed - console commands disabled (server still running)')
             return
         line = raw_line.strip()
         if not line: continue
@@ -1600,9 +1622,9 @@ def console_handler():
                 conn.commit(); conn.close()
                 log('CONSOLE', f'Re-opened {n} closed room(s) (now visible in the arena list)')
             elif cmd == 'destroy':
-                # destroy <sceneIdx> [camp] [progress]  — fire msg 36 SCENE DESTROY/STATE at a
+                # destroy <sceneIdx> [camp] [progress]  - fire msg 36 SCENE DESTROY/STATE at a
                 # KNOWN scene index, to validate the msg-36 wire format live (independent of the
-                # unconfirmed msg-31 objidx→sceneIdx mapping). Defaults: camp=0xff (neutralized),
+                # unconfirmed msg-31 objidx->sceneIdx mapping). Defaults: camp=0xff (neutralized),
                 # progress=0.0 (captured/destroyed). Targets every in-game room that has players.
                 args = (parts[1].split() if len(parts) > 1 else [])
                 if not args:
@@ -1651,7 +1673,7 @@ def console_handler():
                     with PROBE_LOCK: PROBE['stop'] = True
                     log('CONSOLE', 'probe sweep stop requested')
                 elif pa[0] == 'save':
-                    n, path = probe_save(); log('CONSOLE', f'probe: {n} objIdx→sceneIdx entries saved to {path}')
+                    n, path = probe_save(); log('CONSOLE', f'probe: {n} objIdx->sceneIdx entries saved to {path}')
                 elif pa[0] == 'show':
                     with PROBE_LOCK:
                         for sc in sorted(PROBE['map']):
@@ -1693,7 +1715,7 @@ def console_handler():
                         try:
                             o = int(ca[1], 0); sc = int(ca[2], 0)
                             p = corr_map_save(o, sc)
-                            log('CONSOLE', f'corr: recorded weapon obj {o} → scene {sc} in {p}')
+                            log('CONSOLE', f'corr: recorded weapon obj {o} -> scene {sc} in {p}')
                         except ValueError:
                             log('CONSOLE', 'corr map: obj and scene must be ints')
                     else:
@@ -1717,7 +1739,7 @@ def console_handler():
                 else:
                     log('CONSOLE', f'corr: unknown subcommand {ca[0]!r}')
             elif cmd == 'autopve':
-                # autopve on|off|status|hp <n>  — live control of weapon-damage auto-destroy
+                # autopve on|off|status|hp <n>  - live control of weapon-damage auto-destroy
                 aa = (parts[1].split() if len(parts) > 1 else [])
                 global AUTO_SCENE_DESTROY, SCENE_DEFAULT_HP
                 if not aa or aa[0] == 'status':
@@ -1725,7 +1747,7 @@ def console_handler():
                                    f'scene HP threshold={SCENE_DEFAULT_HP}, tracked scenes={len(SCENE_HP)}')
                 elif aa[0] == 'on':
                     AUTO_SCENE_DESTROY = True
-                    log('CONSOLE', 'autopve ON — weapon damage now auto-destroys scenes (obj==sceneIdx)')
+                    log('CONSOLE', 'autopve ON - weapon damage now auto-destroys scenes (obj==sceneIdx)')
                 elif aa[0] == 'off':
                     AUTO_SCENE_DESTROY = False
                     log('CONSOLE', 'autopve OFF')
@@ -1743,7 +1765,7 @@ def console_handler():
                 else:
                     log('CONSOLE', 'Usage: autopve on | off | status | hp <n> | reset')
             elif cmd == 'evp':
-                # evp on|off|status|set <a> <f> <bg> <s> <t>  — enemy flak (AA quality in GAME_DEF)
+                # evp on|off|status|set <a> <f> <bg> <s> <t>  - enemy flak (AA quality in GAME_DEF)
                 ea = (parts[1].split() if len(parts) > 1 else [])
                 global EVP_AA_ENABLED, EVP_AA_QUALITY
                 if not ea or ea[0] == 'status':
@@ -1752,11 +1774,11 @@ def console_handler():
                                    f'Re-enter the arena to apply.')
                 elif ea[0] == 'on':
                     EVP_AA_ENABLED = True
-                    log('CONSOLE', 'evp ON — enemy flak enabled; re-enter the arena so the '
+                    log('CONSOLE', 'evp ON - enemy flak enabled; re-enter the arena so the '
                                    'GAME_DEF re-serves with AA quality set')
                 elif ea[0] == 'off':
                     EVP_AA_ENABLED = False
-                    log('CONSOLE', 'evp OFF — re-enter the arena to silence the guns')
+                    log('CONSOLE', 'evp OFF - re-enter the arena to silence the guns')
                 elif ea[0] == 'set' and len(ea) >= 6:
                     try:
                         EVP_AA_QUALITY = tuple(max(0, min(10, int(x))) for x in ea[1:6])
@@ -1766,7 +1788,7 @@ def console_handler():
                 else:
                     log('CONSOLE', 'Usage: evp on | off | status | set <AA> <Flak> <BomberGunner> <ShipAA> <TankAA>')
             elif cmd == 'rec':
-                # rec on|off|status|dump  — flight recorder (reliable + telemetry ring per client)
+                # rec on|off|status|dump  - flight recorder (reliable + telemetry ring per client)
                 ra = (parts[1].split() if len(parts) > 1 else [])
                 global FLIGHT_RECORDER
                 if not ra or ra[0] == 'status':
@@ -1775,7 +1797,7 @@ def console_handler():
                                    f'ring rel={FLIGHT_REC_RELMAX}/unrel={FLIGHT_REC_UNRMAX}, '
                                    f'{len(_sess)} live session(s), dir={FLIGHT_REC_DIR}')
                 elif ra[0] == 'on':
-                    FLIGHT_RECORDER = True; log('CONSOLE', 'rec ON — flight recorder capturing')
+                    FLIGHT_RECORDER = True; log('CONSOLE', 'rec ON - flight recorder capturing')
                 elif ra[0] == 'off':
                     FLIGHT_RECORDER = False; log('CONSOLE', 'rec OFF')
                 elif ra[0] == 'dump':
@@ -1783,14 +1805,14 @@ def console_handler():
                     for s in get_all_sessions():
                         _p=_rec_dump(s, 'manual console dump')
                         if _p:
-                            n+=1; log('CONSOLE', f'  dumped {s.current_pilot} → {_p}')
+                            n+=1; log('CONSOLE', f'  dumped {s.current_pilot} -> {_p}')
                     log('CONSOLE', f'rec dump: wrote {n} file(s)')
                 else:
                     log('CONSOLE', 'Usage: rec on | off | status | dump')
             elif cmd == 'loglevel':
                 a = parts[1].split() if len(parts) > 1 else []
                 if len(a) == 2 and a[0] == 'console':
-                    _falog.set_console_level(a[1]); log('CONSOLE', f'console level → {a[1].upper()}')
+                    _falog.set_console_level(a[1]); log('CONSOLE', f'console level -> {a[1].upper()}')
                 else:
                     log('CONSOLE', 'Usage: loglevel console <DEBUG|INFO|WARNING|ERROR>')
             elif cmd == 'logmute':
@@ -1802,15 +1824,15 @@ def console_handler():
             elif cmd == 'logtags':
                 log('CONSOLE', f'muted tags: {_falog.list_muted() or "(none)"}')
             elif cmd == 'help':
-                log('CONSOLE', 'gen <name>  — generate ticket for new account')
-                log('CONSOLE', 'list        — show all accounts and their pilots')
-                log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] — fire msg 36 SCENE DESTROY to in-game players')
-                log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags — logging control')
+                log('CONSOLE', 'gen <name>  - generate ticket for new account')
+                log('CONSOLE', 'list        - show all accounts and their pilots')
+                log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
+                log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
             else: log('CONSOLE', f'Unknown command "{cmd}". Type "help".')
         except Exception:
             logx('CONSOLE', f'command failed: {line!r}')
 
-# ─── SYN identification ───────────────────────────────────────────────────────
+# --- SYN identification -------------------------------------------------------
 
 def identify_account_from_syn(syn_data):
     payload = syn_data[8:]
@@ -1841,27 +1863,27 @@ def identify_account_from_syn(syn_data):
             return db_get_account_by_pid(row[1])
     return None
 
-# ─── Startup ──────────────────────────────────────────────────────────────────
+# --- Startup ------------------------------------------------------------------
 
 init_db(); init_rooms_db(); load_ticket_template()
 for _a, _p, *_ in db_get_all_accounts():
     log('DB', f'account="{_a}" pid={_p} pilots={[n for n,_ in db_get_pilots(_a)]}')
 
-# ─── Packet builders ──────────────────────────────────────────────────────────
+# --- Packet builders ----------------------------------------------------------
 
 # Time-sync epoch. The in-game STATUS/TIME beacon (type 2, p[1]=0x40, p[2]=0x80) and
 # the time_reply (type 2, p[2]=0x80) carry a packed time dword at p[8:12]:
-#   A = dword & 0x3FFFF  (low 18 bits)  — a MILLISECOND timestamp the client converts
+#   A = dword & 0x3FFFF  (low 18 bits)  - a MILLISECOND timestamp the client converts
 #                                         to seconds (A/1000) + fixed-point fraction
-#   B = dword >> 18      (high 14 bits) — a delay correction, SUBTRACTED; must stay 0
+#   B = dword >> 18      (high 14 bits) - a delay correction, SUBTRACTED; must stay 0
 # The client (vcncNet.dll, RecalculateDriftRate @0x10008739) fits a linear regression of
 # clock-offset (serverTime - localTime) vs localTime over 8 samples; the slope is the
-# drift Rate. If serverTime ADVANCES 1:1 with local time the offset is constant → slope 0.
+# drift Rate. If serverTime ADVANCES 1:1 with local time the offset is constant -> slope 0.
 # The old code sent A=int((time.time()%1.0)*1000) (0..999, sawtoothing every second), so
-# decoded whole-seconds never advanced → slope -1.00075 → NET time froze ~60s in (the
-# 'CRAP!!! HUGE backward NET Time' meltdown @0x10009ff2) → disconnect. Sending a
-# MONOTONIC ms counter makes A/1000 advance at 1 s/s → slope 0. Masked to the 18-bit
-# field (keeps B=0); wraps every 0x3FFFF ms ≈ 262 s — the client re-bases from samples
+# decoded whole-seconds never advanced -> slope -1.00075 -> NET time froze ~60s in (the
+# 'CRAP!!! HUGE backward NET Time' meltdown @0x10009ff2) -> disconnect. Sending a
+# MONOTONIC ms counter makes A/1000 advance at 1 s/s -> slope 0. Masked to the 18-bit
+# field (keeps B=0); wraps every 0x3FFFF ms ~= 262 s - the client re-bases from samples
 # far more often (every ~8 beacons), so the wrap never lands inside a fit window.
 _TSYNC_T0 = time.time()
 def tsync_ms():
@@ -1943,10 +1965,10 @@ def build_appspace_pkt(data_bytes):
     return bytes(pl)
 
 def build_appspace_pkt_exact(data_bytes):
-    """Like build_appspace_pkt but the payload is the EXACT length of data_bytes —
+    """Like build_appspace_pkt but the payload is the EXACT length of data_bytes -
     NO rounding up to bc*16+1, so NO trailing zero padding. Required for the 212
     GAME_DEF: the client decompresses exactly `size-5` bytes (mix.cpp), and any pad
-    bytes are fed into the decompressor → DecompressedResultSize overflow / corrupt
+    bytes are fed into the decompressor -> DecompressedResultSize overflow / corrupt
     parse. The real server's 212 ('in 212'793') is likewise not bc*16+1-aligned, i.e.
     sent at exact size. bc is still set (block hint) but the buffer is not padded."""
     n = len(data_bytes); bc = 0 if n <= 1 else (n - 1 + 15) // 16
@@ -1956,15 +1978,15 @@ def build_appspace_pkt_exact(data_bytes):
 def build_ingame_pkt(data_bytes):
     """BYTE-EXACT in-game framing. THE real Size formula (pinned from the vcncnet log):
     the client computes  Size = bc*16 + (T>>4)  where bc = appspace header byte 0 and
-    T = header byte 1. The length is SPLIT — high bits in bc (×16), low 4 bits in T's
-    HIGH nibble; T's low nibble (0x2) = the APPSPACE-data channel (→ 'Cmd 0'). Proof:
-    StartPlace bc=0 T=0x42 → 0+4=4; 0x3a echo bc=7 T=0x92 → 112+9=121; cd chat bc=3
-    T=0x12 → 48+1=49; 212 bc=84 T=0x12 → 1345. build_appspace_pkt/_exact HARDCODE T=0x12,
-    i.e. they pin the size's low nibble to 1 — that's why every message was forced onto the
-    Size ≡ 1 (mod 16) grid and small msgs had to be padded. To send Size == n exactly:
-    bc = n>>4, T = ((n&0xf)<<4) | 0x2. For n=5 (ServerConfirm): bc=0, T=0x52 → Size 5 →
+    T = header byte 1. The length is SPLIT - high bits in bc (x16), low 4 bits in T's
+    HIGH nibble; T's low nibble (0x2) = the APPSPACE-data channel (-> 'Cmd 0'). Proof:
+    StartPlace bc=0 T=0x42 -> 0+4=4; 0x3a echo bc=7 T=0x92 -> 112+9=121; cd chat bc=3
+    T=0x12 -> 48+1=49; 212 bc=84 T=0x12 -> 1345. build_appspace_pkt/_exact HARDCODE T=0x12,
+    i.e. they pin the size's low nibble to 1 - that's why every message was forced onto the
+    Size == 1 (mod 16) grid and small msgs had to be padded. To send Size == n exactly:
+    bc = n>>4, T = ((n&0xf)<<4) | 0x2. For n=5 (ServerConfirm): bc=0, T=0x52 -> Size 5 ->
     (5-1)/4 = exactly 1 record. (messages34: the old T=0x12 with bc=0 gave Size = 0*16+1 = 1
-    → client read 1 byte → 0 records → no confirm → freeze. THIS is the actual fix.)"""
+    -> client read 1 byte -> 0 records -> no confirm -> freeze. THIS is the actual fix.)"""
     n = len(data_bytes); bc = (n >> 4) & 0xFF
     pl = bytearray(4 + n); pl[0] = bc; pl[1] = ((n & 0x0f) << 4) | 0x02
     pl[4:4 + n] = data_bytes
@@ -2035,13 +2057,13 @@ def build_ce_room_list(rooms):
     """
     return build_appspace_pkt(bytes([0xce]))  # empty = 0 lobby players
 
-# ─── 0xcb GameList (ARENA LIST) — experimental, switchable ────────────────────
+# --- 0xcb GameList (ARENA LIST) - experimental, switchable --------------------
 #
 # Confirmed via Ghidra this session:
 #   FUN_004f03b0  : client sends bare [0xcb] on lobby entry = GameList request.
 #   FUN_0070eda0  : displays ArenasInfo (LobbyDialogsInitPars+0xa0), 40B entries,
 #                   renders the string at entry+8.
-#   FUN_006ad210  : ArenasInfo::operator[]  → base+index*0x28.
+#   FUN_006ad210  : ArenasInfo::operator[]  -> base+index*0x28.
 #   FUN_006af980  : JOIN reads ArenaSt[+4]=GameIndex, ArenaSt[+0xc]=GameDef(0 OK).
 #   FUN_0076bd00  : finds ArenaSt by matching [+4]==GameIndex.
 # In-memory ArenaSt: [+0]type [+4]GameIndex [+8]name [+0xc]GameDef(optional).
@@ -2051,15 +2073,15 @@ def build_ce_room_list(rooms):
 # this builder offers several candidates. Flip GAMELIST_FORMAT and re-test.
 #
 # GameIndex convention observed for room CREATION echoes:
-#   bytes[2:6] = [0x00][0xff][0xff][name[0]]  →  e.g. "Test1" → 0x54ffff00.
+#   bytes[2:6] = [0x00][0xff][0xff][name[0]]  ->  e.g. "Test1" -> 0x54ffff00.
 # We reuse that here so a listed arena's GameIndex matches what Join expects.
 
-GAMELIST_FORMAT = 'empty'   # 0xcb is the LOBBY PLAYER list, not arenas — keep empty until handled separately
+GAMELIST_FORMAT = 'empty'   # 0xcb is the LOBBY PLAYER list, not arenas - keep empty until handled separately
 
 def _arena_gameindex(name, room_id=0):
     """GameIndex as FA derives it for a room: 4 LE bytes [room_id&0xff][ff][ff][name[0]].
     name[0] is the MSB (it overlaps the creator-name field in the room echo). The LOW
-    byte — a fixed 0x00 before 2026-06-29 — now carries room_id, so two rooms whose
+    byte - a fixed 0x00 before 2026-06-29 - now carries room_id, so two rooms whose
     creators share a first letter no longer collide on the GameIndex. room_id=0
     reproduces the legacy value, kept as a resolution fallback in _find_room_by_gidx."""
     first = (name.encode()[:1] or b'\x00')[0]
@@ -2075,14 +2097,14 @@ def build_gamelist(rooms):
     data = bytearray([0xcb])
 
     if fmt == 'empty' or not rooms:
-        log('GAMELIST', f'0xcb → empty ({len(rooms)} rooms, fmt={fmt})')
+        log('GAMELIST', f'0xcb -> empty ({len(rooms)} rooms, fmt={fmt})')
         return build_appspace_pkt(bytes([0xcb]))
 
     if fmt == 'byte_name':
         # CONFIRMED by decompiling the 0xcb receive parser (FUN_004ef8b0):
         #   payload = [0xcb] then, per arena, [1 byte id][name + NUL].
-        # The parser reads pkt[1]=id (→ ArenaSt+4 / GameIndex via FUN_004ed150),
-        # then scans the name to its NUL (→ ArenaSt+8, the displayed field),
+        # The parser reads pkt[1]=id (-> ArenaSt+4 / GameIndex via FUN_004ed150),
+        # then scans the name to its NUL (-> ArenaSt+8, the displayed field),
         # advancing strlen+2 per record; it stops on an empty name (so trailing
         # zero padding is a safe terminator). The leading byte is irrelevant for
         # display, so we use a 1-based arena index here.
@@ -2131,33 +2153,33 @@ def build_gamelist(rooms):
     pkt = build_appspace_pkt(bytes(data))
     bc = pkt[0]
     names = [ (r[1] or 'Arena') for r in rooms ]
-    log('GAMELIST', f'0xcb → {len(rooms)} arena(s) fmt={fmt} '
+    log('GAMELIST', f'0xcb -> {len(rooms)} arena(s) fmt={fmt} '
                     f'payload={len(data)}B bc={bc}(p3={bc*16+1}): {names}')
     log('GAMELIST', f'0xcb payload hex: {bytes(data).hex()}')
     return pkt
 
-# ─── 0xd2 ARENA LIST (THE REAL ONE) ───────────────────────────────────────────
+# --- 0xd2 ARENA LIST (THE REAL ONE) -------------------------------------------
 #
 # CONFIRMED this session via the real 2009 capture (messages04.log) + Ghidra:
 #   * Real lobby prefetch: 0xce(squadrons) 0xca(news) 0xcb(lobby players) then
-#     out 210'1 → in 210'1110  ← the 1110-byte ARENA/ROOM LIST.
+#     out 210'1 -> in 210'1110  <- the 1110-byte ARENA/ROOM LIST.
 #   * handler[0xd2] = FUN_004efda0 parses it and fires PTR_LOOP_00bfe95c, which is
-#     the arena dialog's receiver (FUN_0076e8b0 param_1[3], vtable 0xaa9658) →
+#     the arena dialog's receiver (FUN_0076e8b0 param_1[3], vtable 0xaa9658) ->
 #     writes the displayed arena vector (LobbyDialogsInitPars +0xa8) that
 #     FUN_0070eda0 renders. So 0xd2 IS the arena tab's list.
-#   * The Arenas tab issues NO query on click — it renders this prefetch data and
+#   * The Arenas tab issues NO query on click - it renders this prefetch data and
 #     receives live 0xcc(204) updates afterward.
 #
 # Record format (from the FUN_004efda0 parse loop):
 #   [0xd2] then per room:
-#       [12-byte header]   — only header[+4:+8] = GameIndex is read by the parser
-#       [name1 \0]         — primary name (FUN_007ed210(pcVar10) → displayed)
-#       [name2 \0]         — second string (host/owner column)
+#       [12-byte header]   - only header[+4:+8] = GameIndex is read by the parser
+#       [name1 \0]         - primary name (FUN_007ed210(pcVar10) -> displayed)
+#       [name2 \0]         - second string (host/owner column)
 #   Stride = 12 + len(name1)+1 + len(name2)+1; loop stops on empty/over-length,
 #   so trailing zero padding terminates safely.
 #
 # GameIndex must match what JOIN expects. FA derives a created room's GameIndex as
-# bytes[2:6] of the 0xdc create = [00 ff ff creator[0]] (e.g. "Test1" → 0x54ffff00),
+# bytes[2:6] of the 0xdc create = [00 ff ff creator[0]] (e.g. "Test1" -> 0x54ffff00),
 # so we reuse that here keyed on the creator pilot.
 
 # Per-arena terrain now comes from the DB (extracted from each room's GAME_DEF at
@@ -2168,7 +2190,7 @@ def build_arenalist(rooms):
     """Build the 0xd2 arena/room list response (the Arenas tab's list)."""
     data = bytearray([0xd2])
     if not rooms:
-        log('ARENALIST', f'0xd2 → empty (0 rooms)')
+        log('ARENALIST', f'0xd2 -> empty (0 rooms)')
         return build_appspace_pkt(bytes([0xd2]))
     listed = []
     records = []
@@ -2178,28 +2200,28 @@ def build_arenalist(rooms):
         gamedef = bytes(r[6]) if len(r) > 6 and r[6] else b''
         trn      = extract_terrain_from_gamedef(gamedef) & 0xFF    # param[0x39]; 1..99
         planeset = 0                                              # desc+0x04; 0 = default Planes.txt
-        # 12-byte record header — field→descriptor map PROVEN from FUN_004efda0
-        # disassembly (the register loads feeding FUN_004ef130→FUN_004ed040):
-        #   [+0:4]  *(rec+0)        → desc+0x04  PLANE-SET (validated by FUN_004c2b60)
-        #   [+4:4]  GameIndex       → desc+0x08  (also the uVar2 key; matches Join)
-        #   [+8]    flag byte: bit0→desc+0x10, bit1→desc+0x14, bit2→desc+0x20
-        #   [+9:2]  ushort          → desc+0x18
-        #   [+11]   HIGH byte of the +8 dword → desc+0x1c  TERRAIN (_TrnNumber) ★
+        # 12-byte record header - field->descriptor map PROVEN from FUN_004efda0
+        # disassembly (the register loads feeding FUN_004ef130->FUN_004ed040):
+        #   [+0:4]  *(rec+0)        -> desc+0x04  PLANE-SET (validated by FUN_004c2b60)
+        #   [+4:4]  GameIndex       -> desc+0x08  (also the uVar2 key; matches Join)
+        #   [+8]    flag byte: bit0->desc+0x10, bit1->desc+0x14, bit2->desc+0x20
+        #   [+9:2]  ushort          -> desc+0x18
+        #   [+11]   HIGH byte of the +8 dword -> desc+0x1c  TERRAIN (_TrnNumber) *
         hdr = bytearray(12)
         hdr[0:4]  = (planeset & 0xFFFFFFFF).to_bytes(4, 'little')  # plane-set (default)
         hdr[4:8]  = _arena_gameindex(creator, r[0])                     # [00 ff ff creator[0]]
         hdr[8]    = 0                                             # flag bits (none)
         hdr[9:11] = (0).to_bytes(2, 'little')                     # desc+0x18 (unused)
-        hdr[11]   = trn                                           # TERRAIN → desc+0x1c ★
+        hdr[11]   = trn                                           # TERRAIN -> desc+0x1c *
         # Name slots (empirically, from v167 live test): the FIRST name is the
         # category/section HEADER the client groups rows under; the SECOND name is
         # the arena's own row label. So name1 = category, name2 = the room's name.
         category = (r[8] if len(r) > 8 and r[8] else 'Custom Arenas')   # name1 section header (web-editable)
         records.append((bytes(hdr), category.encode()[:31], room_name.encode()[:31]))
         listed.append((room_name, trn))
-    # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven — it keeps starting
+    # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven - it keeps starting
     # new records until consumed >= len, with NO bounds check, so leftover zero pad
-    # would spawn a phantom record and read past the buffer → crash. build_appspace_pkt
+    # would spawn a phantom record and read past the buffer -> crash. build_appspace_pkt
     # frames to bc*16+1, so the LAST record must absorb the pad. Pad name2 (the arena's
     # DISPLAY label), NOT name1: name1 is the CATEGORY the client groups rows under, and
     # any trailing spaces on it make an otherwise-identical category compare unequal, so a
@@ -2210,7 +2232,7 @@ def build_arenalist(rooms):
         last = len(records) - 1
         for i, (hdr, cat, arena) in enumerate(records):
             d.extend(hdr)
-            d.extend(cat + b'\x00')                       # name1 = CATEGORY (grouping key) — keep clean
+            d.extend(cat + b'\x00')                       # name1 = CATEGORY (grouping key) - keep clean
             if i == last and extra_pad > 0:
                 d.extend(arena + (b'\x20' * extra_pad) + b'\x00')   # pad the DISPLAY label instead
             else:
@@ -2224,28 +2246,28 @@ def build_arenalist(rooms):
     data = _assemble(pad)
     pkt = build_appspace_pkt(bytes(data)); bc = pkt[0]
     desc = [f'{n}(trn{t}:{TERRAIN_NAMES.get(t, "?")})' for n, t in listed]
-    log('ARENALIST', f'0xd2 → {len(rooms)} arena(s) payload={len(data)}B '
+    log('ARENALIST', f'0xd2 -> {len(rooms)} arena(s) payload={len(data)}B '
                      f'bc={bc}(p3={bc*16+1}) pad={pad}: {desc}')
     log('ARENALIST', f'0xd2 payload hex: {bytes(data).hex()}')
     return pkt
 
-# ─── 0xd4 / 212  GAME_DEF push (v164 experiment) ──────────────────────────────
+# --- 0xd4 / 212  GAME_DEF push (v164 experiment) ------------------------------
 #
 # The 0xd2 list record carries ONLY GameIndex + 2 names; the parser never sets the
-# descriptor's terrain field (desc+0x1c stays 0 → _TrnNumber>=1 assert at tab-open).
-# Terrain lives in the arena's GAME_DEF (a packed BINARY blob, NOT INI text — the
+# descriptor's terrain field (desc+0x1c stays 0 -> _TrnNumber>=1 assert at tab-open).
+# Terrain lives in the arena's GAME_DEF (a packed BINARY blob, NOT INI text - the
 # client pretty-prints it as Terrain=N). The 212 handler FUN_004ed9c0 reads the
 # message as [0xd4][LobbyIndex:4 != 0][binary blob], then FUN_0057f390 deserialises
 # the blob into the arena object (incl. terrain). Hypothesis: the list display
 # resolves each arena's terrain from a GAME_DEF the client has cached, keyed by
-# GameIndex. A server arena this client never selected was never cached → terrain 0
-# → crash. So push the stored GAME_DEF as a 212 (same GameIndex as the 0xd2 record)
-# BEFORE the list, so the arena — with its real terrain — is cached first.
+# GameIndex. A server arena this client never selected was never cached -> terrain 0
+# -> crash. So push the stored GAME_DEF as a 212 (same GameIndex as the 0xd2 record)
+# BEFORE the list, so the arena - with its real terrain - is cached first.
 def build_gamedef_212(room):
     """[0xd4][GameIndex:4][LZ GAME_DEF] as an APPSPACE packet, EXACT bc*16+1 size.
-    The stored blob is LZ-compressed at a size (≡4 mod16) that can't sit on the
+    The stored blob is LZ-compressed at a size (==4 mod16) that can't sit on the
     bc*16+1 grid. We decompress it and RE-ENCODE it as an all-literals LZ stream whose
-    size we control (comment pad) so the 212 payload lands exactly on bc*16+1 — no
+    size we control (comment pad) so the 212 payload lands exactly on bc*16+1 - no
     over-read, valid version byte, parser consumes the whole decompressed buffer."""
     creator = (room[2] or room[1] or 'Arena')
     gidx    = _arena_gameindex(creator, room[0])          # 4 bytes [00 ff ff creator[0]] (non-zero)
@@ -2265,14 +2287,14 @@ def build_gamedef_212(room):
     return build_appspace_pkt_exact(payload)
 
 def build_join_game_answer_201(client_number=0, player_index=0):
-    """FA message 201 (0xc9) = VNET::JoinToGameAnswer — the server's grant in reply to
+    """FA message 201 (0xc9) = VNET::JoinToGameAnswer - the server's grant in reply to
     the client's SendEnterToGame (200/0xc8). Decoded from handler FUN_004f88f0
     (VNET::JoingToGameAnswerCB), dispatch slot _DAT_00c821fc (id 201):
         [0xc9][ClientNumber:4 LE signed][PlayerIndex:4 LE signed]   (read at +1 and +5)
-    ClientNumber >= 0 AND PlayerIndex >= 0  →  client allocates its client+player
+    ClientNumber >= 0 AND PlayerIndex >= 0  ->  client allocates its client+player
     objects, sets DAT_00bfedb4=ClientNumber (clears the 0xfffffffe 'entering' state),
     sends 0x41, sets DAT_00c82eb0=0 (STOPS the 0x43 poll) and DAT_00c82348=1 (game
-    active). ClientNumber < 0  →  'not granted, keep polling' (what our 0x43 confirm
+    active). ClientNumber < 0  ->  'not granted, keep polling' (what our 0x43 confirm
     effectively signalled). Handler reads fixed offsets, so bc*16+1 zero-pad is fine."""
     payload = (bytes([0xc9])
                + (client_number & 0xFFFFFFFF).to_bytes(4, 'little')
@@ -2282,30 +2304,30 @@ def build_join_game_answer_201(client_number=0, player_index=0):
     return build_appspace_pkt(payload)
 
 
-# ── IN-ARENA CHAT (msg 20 / 0x14) ──────────────────────────────────────────────
+# -- IN-ARENA CHAT (msg 20 / 0x14) ----------------------------------------------
 # Decoded from the message-20 dispatch handler FUN_004f6030 (lobby builder
 # FUN_004f1490 installs it at slot _DAT_00c81f28). The handler:
 #   iVar6 = GetPlayer(*(param_1+2))          ; PlayerIndex at +2 (4 bytes, LE)
-#       if 0  →  "ChatMessage from unknown player with PlayerIndex=%i" + drop
+#       if 0  ->  "ChatMessage from unknown player with PlayerIndex=%i" + drop
 #   channel = *(param_1+1)                   ; +1
-#       3      →  FUN_0046a420(0,0xd,"%s: %s", name, text)            (plain)
-#       4      →  uppercase(text) then same + sound                  (shout)
-#       0/1/2  →  team/squadron-coloured "%s: %s", BUT only if player+0x1c != 0;
+#       3      ->  FUN_0046a420(0,0xd,"%s: %s", name, text)            (plain)
+#       4      ->  uppercase(text) then same + sound                  (shout)
+#       0/1/2  ->  team/squadron-coloured "%s: %s", BUT only if player+0x1c != 0;
 #                 squad colour looked up from *(param_1+6) (SquadronId)
 #   text = param_1+10
 # So the DISPLAY wire form (what the client renders) is:
 #       [0x14][channel:1][PlayerIndex:4 LE][SquadronId:4 LE][text\0]
 # i.e. the SEND form [0x14][channel][text\0] with an 8-byte PlayerIndex+SquadronId
 # inserted after the channel. Our old blind echo left the text where PlayerIndex
-# should be, so the handler read "Hell" (0x6C6C6548) as the index → unknown player.
-# We stamp PlayerIndex=0 — the player allocated by the 201 grant — so it resolves to
+# should be, so the handler read "Hell" (0x6C6C6548) as the index -> unknown player.
+# We stamp PlayerIndex=0 - the player allocated by the 201 grant - so it resolves to
 # the local pilot ("Test1").
 
 def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
     """Build the DISPLAY form of msg 20 so the client renders a chat line."""
     if isinstance(text, str):
         text = text.encode('ascii', 'replace')
-    text = text.split(b'\x00')[0]  # stop at first NUL — drop any trailing wrapper bytes
+    text = text.split(b'\x00')[0]  # stop at first NUL - drop any trailing wrapper bytes
     payload = (bytes([0x14, channel & 0xFF])
                + (player_index & 0xFFFFFFFF).to_bytes(4, 'little')
                + (squadron_id  & 0xFFFFFFFF).to_bytes(4, 'little')
@@ -2317,7 +2339,7 @@ def reflect_chat_20(s, channel, text, player_index=0):
     """Reflect an in-arena chat so it renders in the chat pane. Recipients are scoped to
     the SENDER's room (multi-room isolation) and, for team/squadron channels, further to
     same-side / same-squad players: channel 0=all (whole room), 1=team (same nation),
-    2=squadron (same squad — squad tracking TODO, currently sender only). The line is
+    2=squadron (same squad - squad tracking TODO, currently sender only). The line is
     stamped with the SENDER's PlayerIndex so every recipient resolves it to the sender's
     name via FUN_004f6030's GetPlayer."""
     if isinstance(text, (bytes, bytearray)):
@@ -2338,20 +2360,20 @@ def reflect_chat_20(s, channel, text, player_index=0):
         targets = [s]
     pkt = build_chat_display_20(channel, text, player_index=s.player_index)
     log('CHAT20', f'reflect ch={channel} {disp!r} from PI={s.player_index} '
-                  f'→ {len(targets)} player(s) in room {room}')
+                  f'-> {len(targets)} player(s) in room {room}')
     for sess in targets:
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'← chat-20 ch={channel} {disp!r}', to=3.0), daemon=True).start()
+                         f'<- chat-20 ch={channel} {disp!r}', to=3.0), daemon=True).start()
 
 def build_arena_players_213(room, counts=None, names=None):
-    """FA message 213 — arena player info, the reply to the client's 'out 213' request.
+    """FA message 213 - arena player info, the reply to the client's 'out 213' request.
     Layout decoded from incoming-213 handler FUN_004ef6e0:
-        [0xd5][GameIndex:4][8 × uint16 per-nation counts]   (header = 0x15 = 21 bytes)
+        [0xd5][GameIndex:4][8 x uint16 per-nation counts]   (header = 0x15 = 21 bytes)
         then a length-driven list of [player_name\\0] (the arena roster).
     The 8 uint16s at +5..+0x13 are pushed to observers as per-nation player tallies
     (the Nations-list counts). local_30 (GameIndex) must be non-zero or the handler
     no-ops. Sent at EXACT length (no bc*16+1 zero pad) so the roster loop ends on the
-    wire length — zero padding would be parsed as phantom empty-name players."""
+    wire length - zero padding would be parsed as phantom empty-name players."""
     creator = (room[2] or room[1] or 'Arena')
     gidx = _arena_gameindex(creator, room[0])                         # 4 bytes, non-zero
     counts = (list(counts) if counts else [0] * 8)[:8]
@@ -2360,9 +2382,9 @@ def build_arena_players_213(room, counts=None, names=None):
     payload = bytearray([0xd5]) + gidx
     for c in counts:
         payload += int(c & 0xFFFF).to_bytes(2, 'little')     # 8 ushorts = 16 bytes
-    # COUNTS ONLY — no trailing strings. Re-RE of the incoming-213 handler
+    # COUNTS ONLY - no trailing strings. Re-RE of the incoming-213 handler
     # (FUN_004ef6e0) shows the strings after +0x15 are NOT a roster: each NUL-string
-    # (budgeted strlen+1+2) is appended to a UI list — and that list renders in the
+    # (budgeted strlen+1+2) is appended to a UI list - and that list renders in the
     # arena-selection page's "Combat Action" box. Our invented roster is exactly the
     # "player names + corrupt strings" bug (the per-record trailing bytes, e.g.
     # nation=0xff, parsed as 1-char garbage strings). Per-nation grouping comes from
@@ -2374,16 +2396,16 @@ def build_arena_players_213(room, counts=None, names=None):
                     f'payload={len(payload)}B')
     return build_appspace_pkt_exact(bytes(payload))
 
-# ── PLAYER-OBJECT LAYER (msgs 62 / 63 / 96) ────────────────────────────────────
+# -- PLAYER-OBJECT LAYER (msgs 62 / 63 / 96) ------------------------------------
 # Decoded from FA.exe VNet_Rcv.cpp handlers (dispatch table FUN_004f1490):
-#   msg 62 (0x3e) → FUN_004fa5f0  "Add existing REMOTE_PLAYER %s PlayerIndex=%i"
-#   msg 63 (0x3f) → FUN_004fa9c0  ChangePlayerCB (op=add/remove/change-camp)
-#   msg 96 (0x60) → FUN_004f53b0 → FUN_00629600  SCORE_TABLE (ScoreTable.cpp)
+#   msg 62 (0x3e) -> FUN_004fa5f0  "Add existing REMOTE_PLAYER %s PlayerIndex=%i"
+#   msg 63 (0x3f) -> FUN_004fa9c0  ChangePlayerCB (op=add/remove/change-camp)
+#   msg 96 (0x60) -> FUN_004f53b0 -> FUN_00629600  SCORE_TABLE (ScoreTable.cpp)
 #
-# CRITICAL FRAMING — THE bc*16+1 OVER-DELIVERY BUG (root cause of every CTD v182–v186):
+# CRITICAL FRAMING - THE bc*16+1 OVER-DELIVERY BUG (root cause of every CTD v182-v186):
 # The client's appspace layer does NOT deliver the exact datagram length to message
 # handlers. It delivers Length = bc*16+1, where bc is the block count in the vcnc
-# header. PROVEN by the client trace (vcncnet…510.log) for our 8-byte msg 63:
+# header. PROVEN by the client trace (vcncnet...510.log) for our 8-byte msg 63:
 #     ProcessMessages(256) Cmd=0 Size=17
 #     Receiving Message 0 - Data: 3f 00 00 00 00 00 00 01 | 00 00 00 8a 00 00 00 00 e6
 # Our 7-byte record, then 9 bytes of STALE RECEIVE-BUFFER GARBAGE (here the head of
@@ -2391,34 +2413,34 @@ def build_arena_players_213(room, counts=None, names=None):
 # 63 FUN_004fa9c0, 96 FUN_00629600) are length-driven record loops that parse until
 # Length runs out and then assert "Length>=0" at severity 0xffffffff (fatal). The
 # garbage tail is parsed as phantom records; the final partial record drives Length
-# negative → assertion → DLL_PROCESS_DETACH ~2s later. This — NOT use-after-free,
-# NOT premature world state — was the killer in every player-object crash.
+# negative -> assertion -> DLL_PROCESS_DETACH ~2s later. This - NOT use-after-free,
+# NOT premature world state - was the killer in every player-object crash.
 #
 # THE RULE: a length-driven payload MUST TILE EXACTLY to bc*16+1, i.e.
 # len(payload) % 16 == 1, with the padding forming PARSER-VALID, side-effect-free
 # records. build_appspace_pkt_exact is a no-op fiction here (the client ignores the
 # real length); each builder below pads itself to the bc*16+1 boundary:
-#   63: pad to a multiple of 16 fixed records with dummy PlayerIndex (lookup fails →
-#       "Unknown RemotePlayer" log → skipped, zero side effects).
-#   62: pad the LAST record's trailing (unused, scanned) string — absorbs 0..15B.
+#   63: pad to a multiple of 16 fixed records with dummy PlayerIndex (lookup fails ->
+#       "Unknown RemotePlayer" log -> skipped, zero side effects).
+#   62: pad the LAST record's trailing (unused, scanned) string - absorbs 0..15B.
 #   96: append one pad group whose count tiles the remainder (7 is invertible mod 16);
-#       it writes zero score-defs at a high object-type base → harmless.
+#       it writes zero score-defs at a high object-type base -> harmless.
 #
 # DEPENDENCY CHAIN (the actual player-object lifecycle):
-#   62 creates the REMOTE_PLAYER object  →  63 sets its Camp()/side (player+0x2c)
-#   →  96 feeds the scoreboard.  v175's guess that the 121-byte msg 58 set side
+#   62 creates the REMOTE_PLAYER object  ->  63 sets its Camp()/side (player+0x2c)
+#   ->  96 feeds the scoreboard.  v175's guess that the 121-byte msg 58 set side
 #   membership was WRONG: msg 58 (FUN_004eff50, LobbyRcv.cpp) is a LOBBY 3-byte-record
 #   list, not the in-arena side-setter. Side membership is msg 63 op=change-camp.
 
 def _pad_to_bc_boundary_len(payload_len):
-    """Return how many bytes to add so payload_len becomes ≡ 1 (mod 16) = bc*16+1."""
+    """Return how many bytes to add so payload_len becomes == 1 (mod 16) = bc*16+1."""
     return (1 - payload_len) % 16
 
 MSG_ADD_PLAYER_62      = 0x3e
 MSG_CHANGE_PLAYER_63   = 0x3f
 MSG_SCORE_TABLE_96     = 0x60
 MSG_SERVER_CONFIRM_5   = 0x05    # in-game ServerConfirm (post-takeoff sim-loop gate)
-SERVERCONFIRM_READY    = True    # build_ingame_pkt (floored bc) → client Size=5 → 1 record
+SERVERCONFIRM_READY    = True    # build_ingame_pkt (floored bc) -> client Size=5 -> 1 record
 ADD_TEST_PLAYER        = False   # was True (fake Test2 roster test). OFF now: with a REAL
                                  # 2nd client it would collide on PlayerIndex 1 and add a
                                  # phantom. Re-enable only for solo roster tests.
@@ -2426,22 +2448,22 @@ ADD_TEST_PLAYER        = False   # was True (fake Test2 roster test). OFF now: w
 # msg 63 ChangePlayerCB ops (the per-record op byte at record+6):
 # msg 63 ChangePlayerCB ops (the per-record op byte at record+6). Decoded from the
 # branch structure of FUN_004fa9c0: after the player is found by index,
-#     if (iVar12 == 1) → CAMP path: writes rp->Camp() at player+0x2c
-#     else (any op != 1) → DELETE path: FUN_007fca00 + free(player object)
-# v182 SHIPPED THESE INVERTED (CAMP=2) → op=2 hit the delete path and freed a live
-# player object → crash-to-desktop on side-select (messages07.log, WinError 10054).
-CP_OP_CAMP   = 1     # iVar12==1 → change-camp (set side); the ONLY op that sets +0x2c
-CP_OP_REMOVE = 0     # any op != 1 → delete the remote player object (we use 0)
+#     if (iVar12 == 1) -> CAMP path: writes rp->Camp() at player+0x2c
+#     else (any op != 1) -> DELETE path: FUN_007fca00 + free(player object)
+# v182 SHIPPED THESE INVERTED (CAMP=2) -> op=2 hit the delete path and freed a live
+# player object -> crash-to-desktop on side-select (messages07.log, WinError 10054).
+CP_OP_CAMP   = 1     # iVar12==1 -> change-camp (set side); the ONLY op that sets +0x2c
+CP_OP_REMOVE = 0     # any op != 1 -> delete the remote player object (we use 0)
 
 def build_add_player_62(records):
-    """FA msg 62 (0x3e) — Add existing REMOTE_PLAYER (handler FUN_004fa5f0).
+    """FA msg 62 (0x3e) - Add existing REMOTE_PLAYER (handler FUN_004fa5f0).
     Per-record wire layout (decompiled record stride):
         [PlayerIndex:4 LE][side:1][reserved:1][name\\0][str2\\0]
     The handler reads PlayerIndex at +0, side at +4 (masked &0xf, valid 0..8 else
     0xffffffff), a byte at +5, then a NUL-terminated name at +6, then a SECOND
-    NUL-terminated string (scanned but unused for our purposes — send empty).
-    `records` = list of (player_index, side, name). side None → 0xff (unassigned).
-    Sent at EXACT length — see CRITICAL FRAMING note above.
+    NUL-terminated string (scanned but unused for our purposes - send empty).
+    `records` = list of (player_index, side, name). side None -> 0xff (unassigned).
+    Sent at EXACT length - see CRITICAL FRAMING note above.
 
     *** INVARIANT: a 62 sent to client X must NEVER contain X's own PlayerIndex. ***
     The msg 201 grant handler (FUN_004f88f0) already creates the LOCAL player's entry
@@ -2449,7 +2471,7 @@ def build_add_player_62(records):
     existing index takes the "Add existing REMOTE_PLAYER" path: delete + free + re-add.
     For the local index that would free the live local player while the GamerClient
     (DAT_00c6eb98+0x128) still points at it. (NOTE: the v185 self-62 CTD was ALSO
-    caused by bc*16+1 framing garbage — see v187 — but this delete+re-add hazard is
+    caused by bc*16+1 framing garbage - see v187 - but this delete+re-add hazard is
     real independent of framing, so the invariant stands. Peers only.)"""
     data = bytearray([MSG_ADD_PLAYER_62])
     for pi, side, name in records:
@@ -2466,42 +2488,42 @@ def build_add_player_62(records):
     pad = _pad_to_bc_boundary_len(len(data))
     if pad:
         data = data[:-1] + (b'\x20' * pad) + b'\x00'   # spaces inside str2, then NUL
-    assert len(data) % 16 == 1, f'62 framing {len(data)} !≡1 mod16'
+    assert len(data) % 16 == 1, f'62 framing {len(data)} !==1 mod16'
     log('PLAYER62', f'AddPlayer {len(records)} rec(s) (pad={pad}): '
                     f'{[(pi, sd, (n if isinstance(n,str) else n.decode("ascii","replace"))) for pi,sd,n in records]}')
     return build_appspace_pkt_exact(bytes(data))
 
 # Dummy PlayerIndex for 63 padding records: a value the client's player table will
-# never contain, so FUN_007fcac0 lookup fails → "Unknown RemotePlayer(%i)" log →
+# never contain, so FUN_007fcac0 lookup fails -> "Unknown RemotePlayer(%i)" log ->
 # record skipped with ZERO side effects (no add, no delete, no camp write).
 DUMMY_PLAYER_INDEX = 0xFFFFFFFE
 
 MSG63_TRUE_LENGTH = True   # send msg-63 as the real 'in 63'8' (true-length in-game framing).
                            # Set False to fall back to the legacy bc*16+1 padded form.
 def build_change_player_63(records):
-    """FA msg 63 (0x3f) — ChangePlayerCB (handler FUN_004fa9c0). Fixed 7-byte records:
+    """FA msg 63 (0x3f) - ChangePlayerCB (handler FUN_004fa9c0). Fixed 7-byte records:
         [PlayerIndex:4 LE][side:1][reserved:1][op:1]
     op (record+6), from the handler's branch structure after the player is found:
-        op == 1  → CHANGE-CAMP: writes rp->Camp() (player+0x2c) to `side` (masked &0xf).
+        op == 1  -> CHANGE-CAMP: writes rp->Camp() (player+0x2c) to `side` (masked &0xf).
                    This is the message that moves a player between nation groups.
-        op != 1  → DELETE: frees the remote player object (FUN_007fca00 + free).
-    An unknown PlayerIndex logs "Unknown RemotePlayer(%i)" and is skipped — so the
+        op != 1  -> DELETE: frees the remote player object (FUN_007fca00 + free).
+    An unknown PlayerIndex logs "Unknown RemotePlayer(%i)" and is skipped - so the
     target must already exist (via the 201 grant for self, or a peer's 62), and must
     NOT be the recipient's own index for a delete op.
     `records` = list of (player_index, side, op).
 
-    FRAMING — TRUE LENGTH (the 2009 'in 63'8' form, fully reverse-engineered):
+    FRAMING - TRUE LENGTH (the 2009 'in 63'8' form, fully reverse-engineered):
       The handler is dispatched with (body, length); it reads the msg-id byte then loops
       `while length > 0` consuming 7 bytes/record. The client derives `length` from the
       packet size, which vcncNet computes as  Size = bc*16 + (T>>4)  (bc = appspace header
       byte 0, T = byte 1).  build_appspace_pkt_exact HARDCODES T=0x12, pinning Size's low
-      nibble to 1 — so an 8-byte 1-record 63 arrived as Size=17 ('in 63'17'), the loop
+      nibble to 1 - so an 8-byte 1-record 63 arrived as Size=17 ('in 63'17'), the loop
       over-read into 2+ records, and we had to pad to 16 records with DUMMY(-2) entries.
       Cost of that workaround: 15 phantom 'Unknown RemotePlayer(-2)' operations PER roster
-      change — something the real 2009 server (always 'in 63'8', 1306×, zero -2 errors) never
+      change - something the real 2009 server (always 'in 63'8', 1306x, zero -2 errors) never
       did, and the leading suspect for the cumulative in-flight freeze.
       build_ingame_pkt encodes the EXACT size instead:  bc=n>>4, T=((n&0xf)<<4)|2.  For a
-      1-record 63 (n=8): bc=0, T=0x82 → Size = 0*16+8 = 8 → 'in 63'8' → handler reads exactly
+      1-record 63 (n=8): bc=0, T=0x82 -> Size = 0*16+8 = 8 -> 'in 63'8' -> handler reads exactly
       one 7-byte record, 0 leftover. No padding, no phantom records. Multiple real records
       still work (n = 1 + 7*k stays exact). Size bound: the client caps at 5000, far above
       any real roster."""
@@ -2513,7 +2535,7 @@ def build_change_player_63(records):
         data += (pi & 0xFFFFFFFF).to_bytes(4, 'little')
         data += bytes([sb, 0x00, op & 0xff])
     if MSG63_TRUE_LENGTH:
-        # true-length in-game framing — the real 'in 63'<len>' form, no dummy padding
+        # true-length in-game framing - the real 'in 63'<len>' form, no dummy padding
         log('PLAYER63', f'ChangePlayer {n} real rec(s) [true-len {len(data)}B]: {records}')
         return build_ingame_pkt(bytes(data))
     # ---- legacy fallback: pad to a multiple of 16 records (bc*16+1 grid) ----
@@ -2525,35 +2547,35 @@ def build_change_player_63(records):
         sb = 0xff if side is None else (side & 0xff)
         data += (pi & 0xFFFFFFFF).to_bytes(4, 'little')
         data += bytes([sb, 0x00, op & 0xff])
-    assert len(data) % 16 == 1, f'63 framing {len(data)} !≡1 mod16'
+    assert len(data) % 16 == 1, f'63 framing {len(data)} !==1 mod16'
     log('PLAYER63', f'ChangePlayer {n} real + {target - n} pad rec(s) [legacy]: {records}')
     return build_appspace_pkt_exact(bytes(data))
 
 def build_server_confirm_5(number, ident=0):
-    """FA msg 5 — ServerConfirm (wire handler FUN_007e5030, in-game dispatch idx 5 @
+    """FA msg 5 - ServerConfirm (wire handler FUN_007e5030, in-game dispatch idx 5 @
     table 0xcbc190+0x14). THE post-takeoff gate: the client registers its plane locally
     with a per-client monotonic IDENT (0 for its first object), sends its full state
-    (out 4'33), then blocks until the server stamps a global object NUMBER onto it —
+    (out 4'33), then blocks until the server stamps a global object NUMBER onto it -
     only then does the sim loop ('out 6') start. Missing it = the ~20s flight freeze.
 
-    Wire: [0x05] then N × [Number:u16 LE][ident:u16 LE]; 'in 5'5' = exactly 1 record.
+    Wire: [0x05] then N x [Number:u16 LE][ident:u16 LE]; 'in 5'5' = exactly 1 record.
     FUN_007e5030 finds the local object whose registration ident == `ident`, asserts its
     NumberVar==-1, sets NumberVar=Number + ClientVar=own-id, then fires the object's
-    OnConfirm (FUN_00427690 → logs 'ServerConfirm. Client=%i, Number=%i', sets
-    DAT_00bfedb8=Number). Number<0 OR ident-not-found → the client DELETEs instead, so
+    OnConfirm (FUN_00427690 -> logs 'ServerConfirm. Client=%i, Number=%i', sets
+    DAT_00bfedb8=Number). Number<0 OR ident-not-found -> the client DELETEs instead, so
     Number must be a valid non-negative u16 and `ident` must match a live local object.
-    Sent BYTE-EXACT via build_ingame_pkt: n=5 → bc=0 → client Size=max(1,5)=5 →
-    (5-1)/4 = exactly 1 record. (build_appspace_pkt_exact's CEIL bc would give bc=1 →
-    Size=17 → 4 records → 3 dummy confirms → 'not found, send delete' / assert → CTD.)"""
+    Sent BYTE-EXACT via build_ingame_pkt: n=5 -> bc=0 -> client Size=max(1,5)=5 ->
+    (5-1)/4 = exactly 1 record. (build_appspace_pkt_exact's CEIL bc would give bc=1 ->
+    Size=17 -> 4 records -> 3 dummy confirms -> 'not found, send delete' / assert -> CTD.)"""
     data = bytes([MSG_SERVER_CONFIRM_5]) + struct.pack('<HH', number & 0xFFFF, ident & 0xFFFF)
     return build_ingame_pkt(data)
 
 def build_add_player_62(records):
-    """FA msg 62 (0x3e) — AddPlayer / REMOTE_PLAYER (handler FUN_004fa5f0, VNET table
+    """FA msg 62 (0x3e) - AddPlayer / REMOTE_PLAYER (handler FUN_004fa5f0, VNET table
     0xc81ed8 slot 62). Adds remote players to the in-game ROSTER/scoreboard (not a 3D
-    object — that's msg 2). Per-record wire format, looped until Length consumed:
+    object - that's msg 2). Per-record wire format, looped until Length consumed:
         [PlayerIndex:u32 LE][camp:u8][field:s8][name:asciiz]
-    record size = 7 + len(name). camp 0-8 valid (handler does camp & 0xf; >=9 → camp=-1).
+    record size = 7 + len(name). camp 0-8 valid (handler does camp & 0xf; >=9 -> camp=-1).
     FUN_004fa5f0 looks the player up by PlayerIndex, allocates a 0x24-byte REMOTE_PLAYER
     (FUN_004f3230(idx,camp,field)), sets the name, and fires the roster/announce UI
     (logs 'Add existing REMOTE_PLAYER %s' if the index already exists). Verified vs real
@@ -2563,7 +2585,7 @@ def build_add_player_62(records):
     data = bytearray([0x3e])                                  # MSG_ADD_PLAYER_62
     for rec in records:
         pidx, camp, name = rec[0], rec[1], rec[2]
-        if camp is None: camp = 0          # player not in a side yet → side 0; msg 63 corrects it
+        if camp is None: camp = 0          # player not in a side yet -> side 0; msg 63 corrects it
         field = rec[3] if len(rec) > 3 else 0
         nb = name.encode('latin1', 'replace')[:31] + b'\x00'  # asciiz, capped
         data += struct.pack('<I', pidx & 0xFFFFFFFF)
@@ -2572,11 +2594,11 @@ def build_add_player_62(records):
     return bytes(data)
 
 def build_msg13(*submsgs):
-    """FA msg 13 (0x0d) — the sim-conductor BATCH CONTAINER (handler LAB_007e3230 @
+    """FA msg 13 (0x0d) - the sim-conductor BATCH CONTAINER (handler LAB_007e3230 @
     0x7e3230). Wraps N sub-messages, each as [len:u16 LE][submsg: type+data, `len` bytes];
     the client then dispatches each one through the normal tables exactly as if received
-    standalone (type<0x14 → in-game 0xcbc190, else VNET 0xc81ed8). This is the literal
-    '{ ... }' group in the real log — e.g. in 13'132 = 1 + (2+18) + (2+24) + (2+83) {62,62,2}.
+    standalone (type<0x14 -> in-game 0xcbc190, else VNET 0xc81ed8). This is the literal
+    '{ ... }' group in the real log - e.g. in 13'132 = 1 + (2+18) + (2+24) + (2+83) {62,62,2}.
     Each arg is the raw type+data of one sub-message (e.g. from build_add_player_62).
     Framed BYTE-EXACT via build_ingame_pkt so the client's Size == the real byte count."""
     data = bytearray([0x0d])                                  # MSG_SIM_BATCH_13
@@ -2586,35 +2608,35 @@ def build_msg13(*submsgs):
     return build_ingame_pkt(bytes(data))
 
 def build_score_table_96(nation_scores=None, object_groups=None):
-    """FA msg 96 (0x60) — SCORE_TABLE (FUN_004f53b0 → FUN_00629600, ScoreTable.cpp).
+    """FA msg 96 (0x60) - SCORE_TABLE (FUN_004f53b0 -> FUN_00629600, ScoreTable.cpp).
 
-    *** SEND ONLY ON REQUEST (bare inbound 0x60) — NEVER UNSOLICITED AT ENTRY ***
+    *** SEND ONLY ON REQUEST (bare inbound 0x60) - NEVER UNSOLICITED AT ENTRY ***
     v183 sent this on the 201 grant and crashed arena-join (messages08.log): the
     handler frees+reallocates the host-side score-table object before the client's
-    world is stood up (~3s stall → WinError 10054). The client REQUESTS the table
-    with a bare 0x60 right after the FLY 23 StartPlace grant (messages09.log) —
+    world is stood up (~3s stall -> WinError 10054). The client REQUESTS the table
+    with a bare 0x60 right after the FLY 23 StartPlace grant (messages09.log) -
     answer it then, and only then.
 
     The dispatch handler FUN_004f53b0 passes (payload+1, len-1) to FUN_00629600, which
     reads its buffer starting at the VERSION byte:
-        [0x60][version=0x02][7 × uint16 LE tallies]   (handler buffer = version-first)
+        [0x60][version=0x02][7 x uint16 LE tallies]   (handler buffer = version-first)
     so on the wire, immediately after the 0x60 msg-id comes version 0x02, then the 7
     ushorts (param_1[0..6]). version MUST be 2 or the client asserts
     "Wrong SCORE_TABLE version". Header total = 1(id)+1(ver)+14 = 16 bytes.
     Then a length-driven list of object-score groups; each group:
-        [base_index:1][count:1] then (count+1) × 7-byte object records
+        [base_index:1][count:1] then (count+1) x 7-byte object records
         [obj_type:1][score:2 LE][kills:2 LE][?:2 LE]
     NOTE the +1: the parser does `param_2 = count + 1` and loops that many times,
     consuming 9 + 7*count bytes per group, then asserts Length>=0. An empty arena
     needs NO real groups (loop guard `param_3>0` ends immediately after the header).
 
     FRAMING: like 62/63 the client delivers Length=bc*16+1, so the payload must tile
-    to ≡1 (mod 16) or the leftover bytes are parsed as a garbage group → the
-    ScoreTable.cpp:0x6c "Length>=0" assert (fatal). Header is 16B (≡0 mod16), so an
+    to ==1 (mod 16) or the leftover bytes are parsed as a garbage group -> the
+    ScoreTable.cpp:0x6c "Length>=0" assert (fatal). Header is 16B (==0 mod16), so an
     otherwise-empty table needs +1 byte... but a group is min 9B. We instead append
     ONE pad group sized so 9+7N tiles the whole payload: since gcd(7,16)=1 there is
     always an N in 0..15. The pad group uses a high base_index (240) so its zero
-    score-defs land on unused object-type slots — harmless. See CRITICAL FRAMING."""
+    score-defs land on unused object-type slots - harmless. See CRITICAL FRAMING."""
     ns = (list(nation_scores) if nation_scores else [0] * 7)[:7]
     while len(ns) < 7:
         ns.append(0)
@@ -2635,27 +2657,27 @@ def build_score_table_96(nation_scores=None, object_groups=None):
                 data += int(extra & 0xFFFF).to_bytes(2, 'little')
     # TILE to bc*16+1 with one pad group consuming 9+7N bytes.
     deficit = _pad_to_bc_boundary_len(len(data))        # 0..15 bytes still needed
-    # We must add a whole group: solve 9 + 7N ≡ deficit (mod 16) for N in 0..15.
-    inv7 = 7   # 7*7=49≡1 mod16, so 7⁻¹ ≡ 7
+    # We must add a whole group: solve 9 + 7N == deficit (mod 16) for N in 0..15.
+    inv7 = 7   # 7*7=49==1 mod16, so 7-1 == 7
     N = (inv7 * (deficit - 9)) % 16
     pad_recs = N + 1                                     # parser loops count+1 times
     data += bytes([0xF0, N & 0xff])                     # base_index=240, count=N
     data += b'\x00' * (7 * pad_recs)                    # zeroed score-defs
-    assert len(data) % 16 == 1, f'96 framing {len(data)} !≡1 mod16'
+    assert len(data) % 16 == 1, f'96 framing {len(data)} !==1 mod16'
     log('SCORE96', f'ScoreTable nation_scores={ns} real_groups={n_real_groups} '
                    f'pad_group(N={N}, recs={pad_recs})')
     return build_appspace_pkt_exact(bytes(data))
 
 # msg-96 = per-object-type point RULES; FUN_004f53b0 FREES the client's own loaded table and
 # rebuilds from ours, so we MUST supply valid defs or a kill reads uninitialised memory
-# (→ Score:-64662, bogus Ace/Rank, freeze — messages13 03.43.45). Two hard constraints from RE:
-#   • SIZE: the msg must fit ONE reliable packet. A full 256-slot table was 1889B and the client
-#     never ACKed it (entry hung → 10054); a 1345B GAME_DEF does ACK, so the ceiling is ~MTU. The
-#     score-def INDEX is the object's TYPE (FUN_00447520: bounds 0..255, but planes log Type=2 —
-#     a small CATEGORY), so only low slots matter. Populate 0..31 → ~321B, well inside one packet.
-#   • FIELD: the scorer reads score-def+0xc (FUN_00449b60); the parser (FUN_00629600) fills that
+# (-> Score:-64662, bogus Ace/Rank, freeze - messages13 03.43.45). Two hard constraints from RE:
+#   * SIZE: the msg must fit ONE reliable packet. A full 256-slot table was 1889B and the client
+#     never ACKed it (entry hung -> 10054); a 1345B GAME_DEF does ACK, so the ceiling is ~MTU. The
+#     score-def INDEX is the object's TYPE (FUN_00447520: bounds 0..255, but planes log Type=2 -
+#     a small CATEGORY), so only low slots matter. Populate 0..31 -> ~321B, well inside one packet.
+#   * FIELD: the scorer reads score-def+0xc (FUN_00449b60); the parser (FUN_00629600) fills that
 #     from the record's THIRD u16 = the 'extra' field, NOT 'score'. Value must be > 0.
-# Record tuple is (obj_type, score, kills, extra) — the points go in `extra`.
+# Record tuple is (obj_type, score, kills, extra) - the points go in `extra`.
 OBJ_SCORE_POINTS_DEFAULT = 100
 SCORE_DEFS_DEFAULT = [(0, [(t, 0, 0, OBJ_SCORE_POINTS_DEFAULT) for t in range(32)])]
 
@@ -2674,7 +2696,7 @@ def push_player_roster_62(s, reason=''):
     pkt = build_msg13(build_add_player_62(records))   # WRAP in msg-13 batch (build_add_player_62
                                                       # returns a RAW sub-message; sending it
                                                       # unwrapped made the client read bc=0x3e=62)
-    send_rel(s, pkt, f'← AddPlayer 62 ({len(records)} peer(s)){(" " + reason) if reason else ""}', to=5.0)
+    send_rel(s, pkt, f'<- AddPlayer 62 ({len(records)} peer(s)){(" " + reason) if reason else ""}', to=5.0)
 
 def broadcast_player_join_62(joiner, reason=''):
     """Tell every OTHER player in joiner's room to add `joiner` as a REMOTE_PLAYER
@@ -2689,20 +2711,20 @@ def broadcast_player_join_62(joiner, reason=''):
                         f'{(reason or "").strip()}')
         return
     rec = [(joiner.player_index, joiner.nation, joiner.current_pilot or 'Player')]
-    pkt = build_msg13(build_add_player_62(rec))       # WRAP in msg-13 batch (was sent raw → bc=62)
+    pkt = build_msg13(build_add_player_62(rec))       # WRAP in msg-13 batch (was sent raw -> bc=62)
     n = 0
     for sess in peers:
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'← AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
+                         f'<- AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
                          to=3.0), daemon=True).start()
         n += 1
-    log('PLAYER62', f'broadcast join of {joiner.current_pilot} → {n} peer(s) in room {room_id}')
+    log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}')
 
 def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
     """Broadcast a msg 63 ChangePlayerCB for session s to EVERY player in the room,
     including s themselves.
 
-    CORRECTED (v185/v186): v183's peers-only rule was a misread of FUN_004fa9c0 —
+    CORRECTED (v185/v186): v183's peers-only rule was a misread of FUN_004fa9c0 -
     the `iVar12 != DAT_00bfedb4` skip is the GetClient (FUN_004f2560) scan over the
     512-entry CLIENT table, skipping the local CLIENT NUMBER (DAT_00bfedb4 is set to
     jga->ClientNumber in the 201 handler), not the player lookup. The rp is resolved
@@ -2725,7 +2747,7 @@ def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
     # exit-flight), so without this the roster froze on the first side. But NEVER echo a
     # side=None (neutral/leave) self-63 to the subject: telling the client it has no team makes
     # it bail to the lobby (msg-64), and on a reliable-desynced re-entered channel that turns
-    # into a back-to-lobby retransmit storm → 'Test1 leaving GBR' flood → dropped connection.
+    # into a back-to-lobby retransmit storm -> 'Test1 leaving GBR' flood -> dropped connection.
     # The transient leave is the client's own action; peers still get it for their roster.
     recipients = list(get_sessions_in_room(room_id))
     if side is not None and s not in recipients:
@@ -2733,10 +2755,10 @@ def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
     n = 0
     for sess in recipients:
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'← ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
+                         f'<- ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
                          f'{(" " + reason) if reason else ""}', to=3.0), daemon=True).start()
         n += 1
-    log('PLAYER63', f'broadcast camp-change {s.current_pilot} side={side} op={op} → '
+    log('PLAYER63', f'broadcast camp-change {s.current_pilot} side={side} op={op} -> '
                     f'{n} session(s) incl. self')
 
 def send_arenalist_with_gamedefs(s, rooms, label):
@@ -2750,7 +2772,7 @@ def send_arenalist_with_gamedefs(s, rooms, label):
         if len(r) > 6 and r[6]:
             pkt = build_gamedef_212(r)
             if pkt is not None:
-                send_rel(s, pkt, f'← GAME_DEF 212 (room {r[0]})', to=5.0)
+                send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
                 time.sleep(0.01)
     send_rel(s, build_arenalist(rooms), label, to=3.0)
 
@@ -2766,7 +2788,7 @@ def build_ui_player_update(pilot_name, is_join=True):
     nb = (pilot_name.encode() if isinstance(pilot_name,str) else pilot_name) + b'\x00'
     return build_appspace_pkt(bytes([0xcc, action_flag, status_byte]) + nb)
 
-# ─── Session state ────────────────────────────────────────────────────────────
+# --- Session state ------------------------------------------------------------
 
 _session_counter = itertools.count(1)
 
@@ -2781,12 +2803,12 @@ class S:
         self.auth_done=False; self.post_auth_cmds=[]
         self.account=None; self.auth64=None; self.auth_payload=None
         self.current_pilot=None; self.current_slot=0; self.current_room=None; self.room_slot=0; self.last_43_ts=0.0; self.entered_game=False; self.in_game=False; self.client_granted=False
-        # ── Per-room game state (multi-room: every player's runtime state is keyed
-        # to the room they entered, so chat / roster / positions never cross rooms) ──
+        # -- Per-room game state (multi-room: every player's runtime state is keyed
+        # to the room they entered, so chat / roster / positions never cross rooms) --
         self.client_number=0      # assigned at the 201 grant, unique WITHIN the room
         self.player_index=0       # ditto; stamped into chat/roster so it resolves to us
-        self.nation=None          # selected side 0..7 (US=0…), None = "In Menu"/unassigned
-        # ── In-game spawn/object state (ServerConfirm + entity stream) ──
+        self.nation=None          # selected side 0..7 (US=0...), None = "In Menu"/unassigned
+        # -- In-game spawn/object state (ServerConfirm + entity stream) --
         self.spawn_ident_next=0   # per-client object IDENT counter (0=first plane); echoed
                                   # in ServerConfirm (msg 5) to bind the client's local
                                   # object to a server object Number.
@@ -2796,17 +2818,17 @@ class S:
         self.last_telem_tick=None # this player's most recent conductor tick (telemetry[5:7]);
         self.last_telem_time=0.0  # used to re-stamp packets we RELAY *to* this player so the
                                   # tick lands on THEIR clock (small +delta = smooth interp)
-        # ── Combat scoring (server-authoritative kill tracking, accumulated in DB) ──
+        # -- Combat scoring (server-authoritative kill tracking, accumulated in DB) --
         self.last_fired_at=0.0    # time.time() of this session's most recent DAMAGE28 (msg 28);
                                   #   used to attribute a peer's death to the most-recent shooter
         self.k_kills=0; self.k_deaths=0; self.k_score=0  # this-session tallies (DB holds the total)
-        # ── Reliable-channel diagnostics (stall hunt) ──
+        # -- Reliable-channel diagnostics (stall hunt) --
         self._rel_rx_time=0.0     # time of last reliable (pt=1) packet FROM this client
         self._unrel_rx_time=0.0   # time of last unreliable in-game packet FROM this client
-        self._rel_rx_last_cs=None # last reliable RX seq byte (data[3]); repeats ⇒ client retransmit
+        self._rel_rx_last_cs=None # last reliable RX seq byte (data[3]); repeats => client retransmit
         self._rel_rx_count=0; self._rel_rx_dups=0; self._ack_in_count=0
         self._stall_warned=False  # STALL-WATCH logs the transition once, not every tick
-        # ── Flight recorder rings (dumped to logs/flightrec/ when STALL-WATCH fires) ──
+        # -- Flight recorder rings (dumped to logs/flightrec/ when STALL-WATCH fires) --
         self._rec_rel=deque(maxlen=FLIGHT_REC_RELMAX)    # reliable msgs both directions
         self._rec_unrel=deque(maxlen=FLIGHT_REC_UNRMAX)  # trailing unreliable telemetry
         self._rec_dumped=False    # dump once per stall, re-armed when reliable RX resumes
@@ -2820,7 +2842,7 @@ class S:
         # counter MUST wrap at 256 to stay in lock-step with the wire and with _evts (keyed on
         # this value). It was &0x1FF (9-bit): fine below 256, but at the 256th reliable send of a
         # session the 9-bit key (256) no longer matched the 8-bit wire seq (0) the client ACKs,
-        # so the ACK lookup missed and EVERY reliable send from then on timed out — a slow
+        # so the ACK lookup missed and EVERY reliable send from then on timed out - a slow
         # "everything eventually wedges" failure on long sessions. &0xFF keeps key, wire, and ACK
         # aligned across the wrap.
         with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0xFF; return v
@@ -2835,9 +2857,9 @@ class S:
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-# ── Windows UDP WSAECONNRESET trap (FATAL server-recovery fix) ────────────────────────────
+# -- Windows UDP WSAECONNRESET trap (FATAL server-recovery fix) ----------------------------
 # When the server sendto()s a client that has CTD'd / closed its port, Windows posts an ICMP
-# port-unreachable and then raises WSAECONNRESET (WinError 10054) on the NEXT recvfrom() —
+# port-unreachable and then raises WSAECONNRESET (WinError 10054) on the NEXT recvfrom() -
 # DISCARDING the datagram that was waiting. The dead session's heartbeat keeps firing every
 # ~5s, so each one eats an inbound packet; a reconnecting client's SYN / pilot-list / arena-list
 # requests get intermittently dropped and come back EMPTY, needing a full server restart. The
@@ -2849,14 +2871,14 @@ try:
     sock.ioctl(_SIO_UDP_CONNRESET, False)
     log('INIT', 'SIO_UDP_CONNRESET disabled (recvfrom survives client CTDs)')
 except (AttributeError, OSError, ValueError) as _e:
-    log('INIT', f'SIO_UDP_CONNRESET not disabled ({_e!r}) — 10054s handled in recv loop instead')
+    log('INIT', f'SIO_UDP_CONNRESET not disabled ({_e!r}) - 10054s handled in recv loop instead')
 sock.bind((HOST,PORT)); sock.settimeout(0.5)
 sids={}; sadrs={}; sl=threading.Lock(); running=True
 
 # Globally-unique in-game object Number allocator. ServerConfirm (msg 5) stamps this
 # onto each spawning player's plane; the client echoes it back as the object id at
-# telemetry offset 7-8 (LE u16, e.g. 0x0100 → bytes 00 01). Distinct per player so a
-# relayed stream never collides with the RECIPIENT's own object on the receiver — A's
+# telemetry offset 7-8 (LE u16, e.g. 0x0100 -> bytes 00 01). Distinct per player so a
+# relayed stream never collides with the RECIPIENT's own object on the receiver - A's
 # plane and B's plane carry different Numbers, so B treats A's update as a remote object.
 _obj_num_lock = threading.Lock(); _obj_num_next = 0x0100
 _obj_num_free = []   # recycled Numbers from deleted own-planes (LIFO); popped before incrementing
@@ -2909,12 +2931,12 @@ def send_rel(s, payload, label='', to=5.0):
     except OSError: s.rme(seq); return False
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
-    _rec(s, 'S→C', 'RELTX',
+    _rec(s, 'S->C', 'RELTX',
          f'seq={seq} type=0x{payload[1]:02x} bc={bc} {label} pl={binascii.hexlify(bytes(payload[:24])).decode()}')
     ok=e.wait(timeout=to); s.rme(seq)
-    log('TX/RELIABLE',f'seq={seq} {"ACKed ✓" if ok else "TIMEOUT ✗"}')
+    log('TX/RELIABLE',f'seq={seq} {"ACKed OK" if ok else "TIMEOUT X"}')
     if not ok:
-        _rec(s, 'S→C', 'RELTX', f'seq={seq} TIMEOUT (no ACK in {to}s) type=0x{payload[1]:02x} {label}')
+        _rec(s, 'S->C', 'RELTX', f'seq={seq} TIMEOUT (no ACK in {to}s) type=0x{payload[1]:02x} {label}')
     return ok
 
 def send_reply(s, payload, label='', to=5.0):
@@ -2942,15 +2964,15 @@ def assign_player_slot(s, room_id):
     """Allocate a ClientNumber/PlayerIndex for a player entering a room.
 
     STABILITY (messages38 CTD): the index MUST stay stable for a session across arena
-    changes. It was `len(peers)` — pure join order — so when two players switched arenas
-    and joined the new one in a different order, their indices SWAPPED (Bigalon 0→1,
-    Test2 1→0). But each client still held its ORIGINAL index and each peer's create/62
+    changes. It was `len(peers)` - pure join order - so when two players switched arenas
+    and joined the new one in a different order, their indices SWAPPED (Bigalon 0->1,
+    Test2 1->0). But each client still held its ORIGINAL index and each peer's create/62
     still referenced the old one, so the client hit 'Add existing REMOTE_PLAYER Test2
-    PlayerIndex=0' (index 0 now claimed by two players) → the peer object's Client()
-    resolved to 0/null → assertion (o->Number()>=0 && o->Client()!=0) Network.cpp:440 →
+    PlayerIndex=0' (index 0 now claimed by two players) -> the peer object's Client()
+    resolved to 0/null -> assertion (o->Number()>=0 && o->Client()!=0) Network.cpp:440 ->
     CTD on BOTH clients on 3D entry. Fix: once a session has an index, KEEP it; only
     recompute if it would actually collide with a peer already in the target room. With
-    ≤8 players the first-assigned indices never collide, so identities stay put across
+    <=8 players the first-assigned indices never collide, so identities stay put across
     every arena change."""
     peers = [x for x in get_sessions_in_room(room_id) if x is not s]
     taken = {getattr(p, 'client_number', None) for p in peers}
@@ -2964,17 +2986,17 @@ def assign_player_slot(s, room_id):
     s._assigned_slot = idx
     s.client_number = idx
     s.player_index  = idx
-    log('ROOM', f'{s.current_pilot} → room {room_id} slot ClientNumber={s.client_number} '
+    log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={len(peers)}, '
                 f'{"kept" if prev==idx else "assigned"})')
     return s.client_number, s.player_index
 
 def _maybe_grant_create_entry(s):
     """Auto-join grant for the ARENA CREATOR. Unlike JOIN (client sends 0xc8
-    SendEnterToGame → we reply 201), the CREATE flow sends NO 0xc8 — the client drives
+    SendEnterToGame -> we reply 201), the CREATE flow sends NO 0xc8 - the client drives
     entry purely off the 1-Hz 0x43 game-connect poll and waits for a JoinToGameAnswer 201
-    to clear it (DAT_00c82eb0→0, game active). Without the 201 the poll never stops → soft
-    timeout → the client exits the game (server.log 14:47:19 create → ~15s of 0x43 → exit).
+    to clear it (DAT_00c82eb0->0, game active). Without the 201 the poll never stops -> soft
+    timeout -> the client exits the game (server.log 14:47:19 create -> ~15s of 0x43 -> exit).
     So on the creator's FIRST 0x43 poll for the room they just created, grant entry exactly
     like the 0xc8 path. Gated by _await_create_entry (set only by the 0xdc create handler)
     so JOIN/lobby polls are untouched, and idempotent via client_granted. Returns True if it
@@ -2989,31 +3011,31 @@ def _maybe_grant_create_entry(s):
     assign_player_slot(s, s.current_room)
     s.client_granted = True
     send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
-             f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
-             f'PlayerIndex={s.player_index} → GRANT, create auto-join)', to=5.0)
+             f'<- JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+             f'PlayerIndex={s.player_index} -> GRANT, create auto-join)', to=5.0)
     def _stand_up(_s=s):
         push_player_roster_62(_s, reason='(on create, 0x43 grant)')
         broadcast_player_join_62(_s, reason='(on create, 0x43 grant)')
     threading.Thread(target=_stand_up, daemon=True).start()
-    log('CREATE-JOIN', f'201 GRANT on creator 0x43 poll (room {s.current_room}) → GAME MODE')
+    log('CREATE-JOIN', f'201 GRANT on creator 0x43 poll (room {s.current_room}) -> GAME MODE')
     return True
 
-# ── TELEMETRY RELAY (multiplayer flight) ───────────────────────────────────────
+# -- TELEMETRY RELAY (multiplayer flight) ---------------------------------------
 # The flying client streams its plane state as UNRELIABLE datagrams (control dword 0,
 # pt 0, sz>8) whose payload is the object-update [05 42 00 00 07][tick:2][Number:2 LE]
-# [posX:3][posY:3][posZ:3][attitude...][config]. Identity is NOT in the payload — both
-# pilots emit object Number 0x0100 by default — so each player is given a GLOBALLY-UNIQUE
+# [posX:3][posY:3][posZ:3][attitude...][config]. Identity is NOT in the payload - both
+# pilots emit object Number 0x0100 by default - so each player is given a GLOBALLY-UNIQUE
 # Number at ServerConfirm (next_obj_number). With distinct Numbers we can forward the
 # stream VERBATIM to every other flying player in the same room: the receiver sees an
-# object Number != its own → a remote plane. We send on the EXISTING server connection
+# object Number != its own -> a remote plane. We send on the EXISTING server connection
 # (header byte1=0, the same one build_rel uses and the client already accepts), control
 # dword 0 (unreliable), per-recipient datagram seq. We normalise to the prefix-less form
 # (strip the optional 4-byte [seq][flags] the sz=100 variant carries) so every relayed
-# packet is the clean 88-byte 05 42… core.
+# packet is the clean 88-byte 05 42... core.
 #
 # OPEN QUESTION this is built to answer EMPIRICALLY: does an incoming update for an
 # unknown Number lazy-CREATE the remote plane, or must the server first synthesise a
-# create (msg 2)? If peers see each other's planes move → lazy-create works. If not →
+# create (msg 2)? If peers see each other's planes move -> lazy-create works. If not ->
 # msg 2 synthesis is the next step. Either outcome is decisive.
 RELAY_TELEMETRY = True
 # v188 DIAGNOSTIC (reversible): trim discretionary lobby/hangar STATUS echoes to slow the
@@ -3023,7 +3045,7 @@ RELAY_TELEMETRY = True
 # and game share it and the reliable seq climbs ~6-8/cycle. Suppressing the small 0x22/0x39
 # echoes (which the client sends repeatedly and does NOT appear to block on) cuts ~3 reliable
 # seqs/cycle. KEEP 0x3a (the 113-byte plane list the hangar waits for). If the lobby HANGS
-# after a leave, set TRIM_RELIABLE_ECHOES=False — that tells us those echoes ARE awaited and
+# after a leave, set TRIM_RELIABLE_ECHOES=False - that tells us those echoes ARE awaited and
 # the crash is lifecycle- not volume-driven.
 TRIM_RELIABLE_ECHOES = True
 TRIM_ECHO_SUBS = {0x22, 0x39}
@@ -3045,13 +3067,13 @@ SEND_EXIT_UNRELIABLE = False
 # progress-based resend then. False reverts this layer to reliable.
 SEND_GAMEPLAY_UNRELIABLE = False
 
-# ─── Flight recorder ──────────────────────────────────────────────────────────────────────
+# --- Flight recorder ----------------------------------------------------------------------
 # The reliable-channel stall (client freezes mid-flight, reliable RX goes silent while
-# unreliable telemetry coasts on stale data) leaves no client-side log — FA only opens a new
+# unreliable telemetry coasts on stale data) leaves no client-side log - FA only opens a new
 # messagesNN.log per launch, and the hang prevents the world-entry lines from flushing. So the
 # server is the only witness. This recorder keeps a small per-session ring of the most recent
 # reliable messages (both directions) plus the tail of unreliable telemetry, and dumps it to a
-# dedicated file the instant STALL-WATCH fires — turning every future freeze into hard data
+# dedicated file the instant STALL-WATCH fires - turning every future freeze into hard data
 # (exact last reliable msg each way, and the telemetry state at the moment of the stall).
 FLIGHT_RECORDER   = True     # master switch (also toggleable live via `rec` console command)
 FLIGHT_REC_RELMAX = 40       # reliable msgs (each direction) kept per session
@@ -3062,7 +3084,7 @@ def _rec_decode_telem(data):
     """Decode the useful trend fields from an unreliable telemetry datagram for the flight
     recorder: the object-update tick (a smoothly advancing counter) and Number (object id).
     Returns a short 'tick=.. Number=..' string, or '' if this isn't a 0x42 object update.
-    Never raises. Cheap — only runs on the small trailing ring, not every packet path."""
+    Never raises. Cheap - only runs on the small trailing ring, not every packet path."""
     try:
         core = data.find(b'\x05\x42\x00\x00\x07')   # object-update marker (handles sz=96 and sz=100)
         if core < 0 or core + 9 > len(data):
@@ -3074,7 +3096,7 @@ def _rec_decode_telem(data):
         return ''
 
 def _rec(s, direction, kind, detail):
-    """Append one event to a session's flight-recorder ring. direction: 'C→S' or 'S→C'.
+    """Append one event to a session's flight-recorder ring. direction: 'C->S' or 'S->C'.
     kind: short tag (RELRX/RELTX/UNREL/EVENT). detail: compact human string. Never raises."""
     if not FLIGHT_RECORDER:
         return
@@ -3105,7 +3127,7 @@ def _rec_dump(s, reason):
         merged = sorted(rel + unr, key=lambda e: e[0])
         t0 = merged[0][0] if merged else time.time()
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(f'# Flight recorder dump — {pilot} — {reason}\n')
+            f.write(f'# Flight recorder dump - {pilot} - {reason}\n')
             f.write(f'# {datetime.now().isoformat()}  rel={len(rel)} unrel={len(unr)}\n')
             f.write(f'# t=seconds since first captured event\n#\n')
             for (t, d, k, det) in merged:
@@ -3117,32 +3139,32 @@ def _rec_dump(s, reason):
 
 _TELEM_MARK = b'\x05\x42\x00\x00\x07'
 # When relaying, stamp the object tick to the RECIPIENT's own latest conductor tick
-# minus this small lead, so the receiver's move loop (FUN_007e4a20 →
+# minus this small lead, so the receiver's move loop (FUN_007e4a20 ->
 # nMoveCycles=(short)(recvTick-objTick)) sees a small POSITIVE delta = the object is a
-# couple cycles behind → smooth dead-reckon-forward interpolation. 0 already gives a
+# couple cycles behind -> smooth dead-reckon-forward interpolation. 0 already gives a
 # small +delta (the recipient's tick is from a few ms ago); a tiny lead adds margin so
 # we never cross into the <-12 'future' error window that snapped the plane.
 RELAY_TICK_LEAD = 0
 
-# ── msg 2 CREATE-OBJECT (remote plane) ──────────────────────────────────────
+# -- msg 2 CREATE-OBJECT (remote plane) --------------------------------------
 # Reversed from FA.exe: msg-2 dispatch LAB_007e4e00 + NetPlane ctor @0x4f2850.
 # Payload = [1 skip byte] + records.  Plane object record = 41 bytes:
 #   [0]      tag = (Type & 0xf) | ((nation & 7) << 4)
-#   [1]      plane_type   (PLN_INFO id; FUN_004c46d0 lookup — MUST be valid or CTD)
+#   [1]      plane_type   (PLN_INFO id; FUN_004c46d0 lookup - MUST be valid or CTD)
 #   [2]      (unused by ctor)
-#   [3]      skin         → NetPlane+0xb30
-#   [4..27]  24B = 6×float32 position+orientation → NetPlane+0xaf0
+#   [3]      skin         -> NetPlane+0xb30
+#   [4..27]  24B = 6xfloat32 position+orientation -> NetPlane+0xaf0
 #   --- trailer @ +28 (13B) ---
 #   [28..29] St  (owner ClientNumber, u16)   [30..31] ONumber (u16)   [32..40] 0
 # Delivered inside a msg-13 batch (real host: in 13 { 62, 62, 2 }).
 SEND_CREATE_OBJECT = True    # emit msg 2 so the remote plane exists (relay then drives it)
 PLANE_OBJ_TYPE     = 1       # object Type (HeaderSize 28). If CTD / no plane, try 8.
-PLANE_TYPE_ID      = 1       # PLN_INFO plane id — TUNE: must be a plane in the loaded set.
+PLANE_TYPE_ID      = 1       # PLN_INFO plane id - TUNE: must be a plane in the loaded set.
 DEFAULT_SKIN       = 0
 
 def build_object_record(st, onumber, nation, plane_type, pos, skin):
     """41-byte PLANE object record (Type 1/8, HeaderSize 28 + 13-byte trailer).
-    tag=Type|nation @[0], PLN_INFO id @[1], skin @[3], 6×float32 pos/orient @[4:28],
+    tag=Type|nation @[0], PLN_INFO id @[1], skin @[3], 6xfloat32 pos/orient @[4:28],
     St (owner ClientNumber u16) @[28], ONumber u16 @[30]."""
     rec = bytearray(41)
     rec[0] = (PLANE_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
@@ -3155,13 +3177,13 @@ def build_object_record(st, onumber, nation, plane_type, pos, skin):
     return bytes(rec)
 
 def build_client_record(st, player_index, name, squadron=0):
-    """41-byte CLIENT (owner station) record — Type 0, HeaderSize 35 + 6-byte trailer.
+    """41-byte CLIENT (owner station) record - Type 0, HeaderSize 35 + 6-byte trailer.
     Layout PROVEN from the client-create parser FUN_004f25b0:
         tag=0 @[0] | Squadron u16 @[1] | name asciiz @[3] |
-        St u16 @[35] (the NET::CLIENT<*,512> index — MUST be <512) | PlayerIndex u32 @[37]
+        St u16 @[35] (the NET::CLIENT<*,512> index - MUST be <512) | PlayerIndex u32 @[37]
     Registers the remote pilot's station so the object record's owner St resolves."""
     rec = bytearray(41)
-    rec[0] = 0x00                                                # tag 0 → client-create path
+    rec[0] = 0x00                                                # tag 0 -> client-create path
     struct.pack_into('<H', rec, 1, squadron & 0xffff)           # Squadron
     nb = (name or 'Player').encode('latin1', 'replace')[:31]
     rec[3:3 + len(nb)] = nb                                      # name asciiz (35B header)
@@ -3174,8 +3196,8 @@ def build_create_object_2(st, onumber, nation, player_index=0, name='Player',
     """msg 2 CREATE-OBJECT. First spawn = 83-byte [0x02]+client(41)+object(41) (the real
     'in 2'83'): registers the owner NET::CLIENT station THEN the plane bound to it.
     Respawn (with_client=False) = 42-byte [0x02]+object(41) ('in 2'42'). The 0x02 msg-id
-    IS the handler's skip byte — NO extra byte (an extra 0 → tag 0 → client-create path
-    → bounds-crash; that was the v187 first-attempt CTD on Test1)."""
+    IS the handler's skip byte - NO extra byte (an extra 0 -> tag 0 -> client-create path
+    -> bounds-crash; that was the v187 first-attempt CTD on Test1)."""
     pt = PLANE_TYPE_ID if plane_type is None else plane_type
     obj = build_object_record(st, onumber, nation, pt, pos or (0.0, 0.0, 0.0), skin)
     body = bytes([0x02])
@@ -3193,14 +3215,14 @@ def send_create_object_for(src, dst, with_client=True):
         return False
     if not with_client:
         # OBJECT-ONLY re-create (airfield change / re-entry): dst may STILL hold this
-        # object number. The client ASSERTs !Objects[N] on create (Network.cpp:391) →
+        # object number. The client ASSERTs !Objects[N] on create (Network.cpp:391) ->
         # creating over a live object is a hard CTD (messages42: dup ONumber=257). Send a
-        # bare type-3 OBJECT delete FIRST (same thread → ordered before the create) so the
+        # bare type-3 OBJECT delete FIRST (same thread -> ordered before the create) so the
         # create lands on an empty slot; if the object was already gone, the delete is a
-        # harmless no-op. client_number=None → the NET::CLIENT station is left intact.
+        # harmless no-op. client_number=None -> the NET::CLIENT station is left intact.
         _predel = build_delete_object_3(onumber=src.my_obj_number, client_number=None)
         send_rel(dst, _predel,
-                 f'← pre-delete obj 0x{src.my_obj_number:04x} on {dst.current_pilot} (re-create resync)',
+                 f'<- pre-delete obj 0x{src.my_obj_number:04x} on {dst.current_pilot} (re-create resync)',
                  to=3.0)
     pkt = build_create_object_2(st=src.client_number, onumber=src.my_obj_number,
                                 nation=(src.nation or 0),
@@ -3208,17 +3230,17 @@ def send_create_object_for(src, dst, with_client=True):
                                 name=(src.current_pilot or 'Player'),
                                 with_client=with_client)
     _form = 'client+object' if with_client else 'object-only'
-    send_rel(dst, pkt, f'← CreateObject 2 ({_form}: {src.current_pilot} St={src.client_number} '
-                       f'PI={src.player_index} ONumber={src.my_obj_number} → {dst.current_pilot})', to=3.0)
+    send_rel(dst, pkt, f'<- CreateObject 2 ({_form}: {src.current_pilot} St={src.client_number} '
+                       f'PI={src.player_index} ONumber={src.my_obj_number} -> {dst.current_pilot})', to=3.0)
     log('CREATE2', f'create-object({_form}) {src.current_pilot} St={src.client_number} '
-                   f'ONumber=0x{src.my_obj_number:04x} plane={PLANE_TYPE_ID} → {dst.current_pilot}')
+                   f'ONumber=0x{src.my_obj_number:04x} plane={PLANE_TYPE_ID} -> {dst.current_pilot}')
     return True
 
 def build_delete_object_3(onumber=None, client_number=None, x=0.0, z=0.0):
-    """In-game msg type 3 (object/client DELETE) — handler FUN_007e3bb0 @ 0x7e3bb0.
+    """In-game msg type 3 (object/client DELETE) - handler FUN_007e3bb0 @ 0x7e3bb0.
     Drops the rendered NetPlane from the in-game OBJECT table (ARR<NET::OBJECT*,2048>
     @ worldobj+0x203). Lobby msg-63 REMOVE only clears the roster/REMOTE_PLAYER, NOT
-    the in-world object — this is the only thing that removes the 3D plane on peers.
+    the in-world object - this is the only thing that removes the 3D plane on peers.
     Wire layout (decompiled):
       [0]   u8  = 3
       [1:5] f32 = X ref-coord  (0.0 -> ABS<thresh -> NO death effect = silent removal)
@@ -3242,16 +3264,16 @@ def build_scored_delete_object_3(onumber, x=0.0, z=0.0):
     """Type-3 delete carrying a SCORED-kill tail so the recipient (the KILLER) runs the
     NET::OBJECT ExitData path and credits the kill on its own scoreboard.
     RE (this is the whole reason the killer never scored before):
-      • FUN_007e3bb0 (type-3 handler) calls an object's delete method (vtable+0x10) ONLY
+      * FUN_007e3bb0 (type-3 handler) calls an object's delete method (vtable+0x10) ONLY
         when the entry has >2 bytes after the id (uVar4>2). Our bare delete is exactly
-        [id:2] → method skipped → plane removed, no score.
-      • vtable+0x10 = FUN_004f8f20 'ExitDataArrive'. It reads exitByte@+2 = (MEC<<4)|EEC.
-        EEC (low nibble) sets the entry size via its return: EEC=3 → returns 0xc → 12-byte
-        entry. MEC (high nibble)=5 → the kill-score branch (FUN_00478640), gated on
+        [id:2] -> method skipped -> plane removed, no score.
+      * vtable+0x10 = FUN_004f8f20 'ExitDataArrive'. It reads exitByte@+2 = (MEC<<4)|EEC.
+        EEC (low nibble) sets the entry size via its return: EEC=3 -> returns 0xc -> 12-byte
+        entry. MEC (high nibble)=5 -> the kill-score branch (FUN_00478640), gated on
         vtable+0xc==0 (true for a REMOTE object = the victim on the killer's screen), so
         it credits THIS client from its own local damage list. The victim's real exit
-        byte was 0x53 = MEC 5 | EEC 3 — exactly that combo.
-      • Entry = [id:2][0x53][9 bytes] = 12B; the 9 tail bytes aren't read on the MEC=5
+        byte was 0x53 = MEC 5 | EEC 3 - exactly that combo.
+      * Entry = [id:2][0x53][9 bytes] = 12B; the 9 tail bytes aren't read on the MEC=5
         path (credit is local), so they're zero filler to reach 12B.
     Body = [03][X:f32=0][Z:f32=0][id:2][0x53][00*9] = 21B (client logs 'in 3'21'). X/Z=0
     keeps it a silent removal (no death-effect call), same as the bare delete."""
@@ -3259,10 +3281,10 @@ def build_scored_delete_object_3(onumber, x=0.0, z=0.0):
     body += struct.pack('<ff', x, z)
     body += struct.pack('<H', onumber & 0x7fff)   # object id, top bit clear
     body += bytes([0x53])                          # exit byte: MEC=5 (score) | EEC=3 (12B entry)
-    body += bytes(9)                               # filler → entry = 12B (unused on MEC=5 path)
+    body += bytes(9)                               # filler -> entry = 12B (unused on MEC=5 path)
     return build_msg13(bytes(body))
 
-# ── Combat scoring constants ────────────────────────────────────────
+# -- Combat scoring constants ----------------------------------------
 KILL_SCORE_POINTS   = 100    # flat points for an air kill (global scoring); tune to taste
 SEND_SCORED_DELETE_TO_KILLER = True   # send the killer a score-tail delete so the kill
                                       #   registers in-game; toggle off for bare deletes.
@@ -3272,7 +3294,7 @@ def score_on_death(victim, death_payload):
     """Persist a respawn-death into the DB (accumulating, global scoring).
 
     The 14-byte 'shot-down' death form (wire sz=18) is a SCORED kill; the short
-    8-byte crash/exit form is not. FA does NOT put the killer on the wire — the
+    8-byte crash/exit form is not. FA does NOT put the killer on the wire - the
     death packet carries 0xFFFFFFFF (the damaged plane finished on the ground) and
     the victim never transmits the killer it computed locally (FUN_00428380 stores
     it only in its own plane). So the server attributes the kill to the most-recent
@@ -3280,7 +3302,7 @@ def score_on_death(victim, death_payload):
     exact for a 1v1 duel, a good approximation for N-player (proper msg-28 target
     parsing is a future refinement)."""
     if len(death_payload) < 14:
-        return                                  # short crash/exit form — not a scored kill
+        return                                  # short crash/exit form - not a scored kill
     now = time.time(); killer = None; best = 0.0
     for p in get_sessions_in_room(victim.current_room):
         if p is victim:
@@ -3304,7 +3326,7 @@ def score_on_death(victim, death_payload):
         vs = db_get_pilot_stats(victim.current_pilot) or (0, 0, 0)
         log('KILL', f'{victim.current_pilot} died (no creditable shooter) | '
                     f'{victim.current_pilot}: score={vs[0]} kills={vs[1]} deaths={vs[2]}')
-    return killer   # credited shooter (or None) → caller sends it the SCORED delete
+    return killer   # credited shooter (or None) -> caller sends it the SCORED delete
 
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                               followup_pkt=None, followup_label='', killer=None):
@@ -3332,56 +3354,56 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
     # gets the proven bare delete. Isolating it to one recipient bounds any CTD risk.
     spkt = (build_scored_delete_object_3(s.my_obj_number)
             if (killer is not None and SEND_SCORED_DELETE_TO_KILLER) else None)
-    _dlabel = (f'← DeleteObject 3 ({s.current_pilot} ONumber=0x{s.my_obj_number:04x} '
+    _dlabel = (f'<- DeleteObject 3 ({s.current_pilot} ONumber=0x{s.my_obj_number:04x} '
                f'St={s.client_number}) {reason}')
     s.__dict__.pop('_created_peers', None)   # re-entry must re-create us on peers
     for sess in get_sessions_in_room(s.current_room):
         if sess is s:
             continue
-        # v190: our exit-to-HQ did 'DelObject -1' — the client wiped EVERY object from its
+        # v190: our exit-to-HQ did 'DelObject -1' - the client wiped EVERY object from its
         # world, including each still-flying peer's plane. The relay only re-creates a peer's
         # object on us when our addr is ABSENT from that peer's _created_peers, so drop it now;
         # else on our re-fly the peer keeps streaming telemetry for an object id we never
-        # re-created → 'Get coord for missing object N' → world-build hang/CTD (messages98).
+        # re-created -> 'Get coord for missing object N' -> world-build hang/CTD (messages98).
         # The relay's 'flying' filter holds these re-creates until our ServerConfirm, so the
         # CREATE lands first, then telemetry. _client_created_peers stays intact: DelObject
-        # removes only the OBJECT; the NET::CLIENT station persists → object-only re-create.
+        # removes only the OBJECT; the NET::CLIENT station persists -> object-only re-create.
         if clear_peer_created:
             pcp = sess.__dict__.get('_created_peers')
             if pcp is not None:
                 pcp.discard(s.addr)
-            # ARENA-CHANGE CTD (messages39): the comment below was half-right — for an
+            # ARENA-CHANGE CTD (messages39): the comment below was half-right - for an
             # in-arena DEATH the client keeps the peer's NET::CLIENT station (object-only
             # re-create is correct). But on BACK-TO-LOBBY / arena change (clear_peer_created)
-            # the leaving client tears its whole world down — the peer's log shows
+            # the leaving client tears its whole world down - the peer's log shows
             # 'del CLIENT <n>' deleting our station, not just our object. If we leave
             # _client_created_peers intact, our re-entry sends an OBJECT-ONLY create whose
-            # owner St references a station the peer already deleted → o->Client()==0 →
-            # assertion Network.cpp:440 → CTD on the peer. So on a world-teardown exit we
+            # owner St references a station the peer already deleted -> o->Client()==0 ->
+            # assertion Network.cpp:440 -> CTD on the peer. So on a world-teardown exit we
             # must also forget the station, forcing a full client+object re-create next time.
             ccp = sess.__dict__.get('_client_created_peers')
             if ccp is not None:
                 ccp.discard(s.addr)
         # v191: send the type-3 DELETE then the optional followup (msg-63 REMOVE) on ONE
-        # thread, in that order, so DELETE always gets the lower reliable seq → a flying peer
+        # thread, in that order, so DELETE always gets the lower reliable seq -> a flying peer
         # tears down the NetPlane BEFORE its REMOTE_PLAYER is freed (no dangling-plane CTD).
         _is_killer = (sess is killer and spkt is not None)
         _delpkt = spkt if _is_killer else pkt
-        _dl2 = (_dlabel + ' [SCORED→killer]') if _is_killer else _dlabel
+        _dl2 = (_dlabel + ' [SCORED->killer]') if _is_killer else _dlabel
         def _send(_s=sess, _del=_delpkt, _dl=_dl2, _fu=followup_pkt, _fl=followup_label):
             send_rel(_s, _del, _dl, to=3.0)
             if _fu is not None:
                 send_rel(_s, _fu, _fl, to=3.0)
         threading.Thread(target=_send, daemon=True).start()
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
-                   f'→ peers in room {s.current_room} {reason}')
+                   f'-> peers in room {s.current_room} {reason}')
 
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
     pl = data[8:]
     # The flying-state object-update appspace = [bc][T][00][00][07][tick u16][ONumber u16]...
     # T's LOW nibble is 0x2 (appspace-data channel); T's HIGH nibble is the SIZE
-    # (Size = bc*16 + T>>4), so it VARIES with payload length — Test1's update is 86B (T=0x62)
+    # (Size = bc*16 + T>>4), so it VARIES with payload length - Test1's update is 86B (T=0x62)
     # while Test2's is 84B (T=0x42). The old check pinned T to 0x42 AND blindly stripped a
     # 4-byte prefix whenever pl[:2]!=0x0542, which MANGLED Test1's prefix-less 0x05 0x62 stream
     # ((00 00 07 ...) != marker -> early return -> Test1 never relayed -> peers couldn't see
@@ -3412,20 +3434,20 @@ def relay_telemetry(src, data):
                 # The NET::CLIENT station is created ONCE per peer and PERSISTS across
                 # death/respawn/exit-to-HQ (type-3 deletes only the OBJECT, never the
                 # client). So only the FIRST create per peer carries the client record;
-                # re-creates are object-only — else the peer hits 'Client N already exist'
-                # on the duplicate station → CTD (messages94: in 2'83 after respawn).
+                # re-creates are object-only - else the peer hits 'Client N already exist'
+                # on the duplicate station -> CTD (messages94: in 2'83 after respawn).
                 _ccp = src.__dict__.setdefault('_client_created_peers', set())
                 _wc = p.addr not in _ccp
                 if _wc:
                     _ccp.add(p.addr)
                 # Fire the create OFF the RX thread: send_create_object_for blocks up to
                 # 3s waiting for the reliable ACK; doing that inline froze the whole
-                # server for 3s mid-flight (no beacons/ACKs) → the peer's keepalive
-                # desynced → FATALLOSTCONNECTION ~30s later (messages54.log).
+                # server for 3s mid-flight (no beacons/ACKs) -> the peer's keepalive
+                # desynced -> FATALLOSTCONNECTION ~30s later (messages54.log).
                 threading.Thread(target=send_create_object_for,
                                  args=(src, p), kwargs={'with_client': _wc}, daemon=True).start()
         # Re-stamp the object tick to the RECIPIENT's own latest tick so their move loop
-        # sees a small +delta (object slightly behind → interpolate) instead of the
+        # sees a small +delta (object slightly behind -> interpolate) instead of the
         # sender's absolute tick, which is skewed ~tens of cycles vs the receiver and
         # tripped the nMoveCycles error that snapped the plane + stalled the sim.
         relayed = bytearray(pl)
@@ -3446,7 +3468,7 @@ def relay_telemetry(src, data):
         num = int.from_bytes(pl[7:9], 'little')
         rticks = {p.current_pilot: p.last_telem_tick for p in peers}
         log('RELAY', f'{src.current_pilot} obj=0x{num:04x} srcTick={src.last_telem_tick} '
-                     f'→ {len(peers)} peer(s) in room {src.current_room} '
+                     f'-> {len(peers)} peer(s) in room {src.current_room} '
                      f'(re-stamp to peer ticks {rticks})')
 
 def _find_room_by_id(room_id):
@@ -3477,20 +3499,20 @@ def push_arena_players_213(s, reason=''):
     log('TEAM', f'push 213 room={room_id} counts={counts} roster={roster} {reason}')
     for sess in sessions:
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'← 213 re-push ({reason})', to=3.0), daemon=True).start()
+                         f'<- 213 re-push ({reason})', to=3.0), daemon=True).start()
 
 def handle_team_select(s, nation):
-    """Client picked / left a side — msg 68 (0x44) = [0x44][nation:1][?:1]. nation 0..7
-    is a side index (US=0, GB=1, SU=2, GE=3, JP=4, NU=…); 0xff / out-of-range = leave.
+    """Client picked / left a side - msg 68 (0x44) = [0x44][nation:1][?:1]. nation 0..7
+    is a side index (US=0, GB=1, SU=2, GE=3, JP=4, NU=...); 0xff / out-of-range = leave.
     Msg 68 itself has NO inbound dispatch handler in FA.exe, so it must NOT be echoed.
 
-    SOLVED (v182 → v183 → v185): side membership is driven by msg 63 ChangePlayerCB
+    SOLVED (v182 -> v183 -> v185): side membership is driven by msg 63 ChangePlayerCB
     op==1 CHANGE-CAMP (FUN_004fa9c0). v175's msg-58 guess was wrong (msg 58 =
     LobbyRcv list). History of fixes:
-      v182 CTD: op was inverted — CAMP shipped as 2, but op==1 is camp and op!=1 is
+      v182 CTD: op was inverted - CAMP shipped as 2, but op==1 is camp and op!=1 is
         the DELETE path; op=2 freed a live player object.
       v183 overcorrection: made the 63 peers-only, citing the `iVar12 != DAT_00bfedb4`
-        skip. MISREAD — that skip is in a separate 512-entry in-world object scan;
+        skip. MISREAD - that skip is in a separate 512-entry in-world object scan;
         the rp lookup (FUN_007fcac0) resolves ANY index including the recipient's
         own, and the op==1 path prints the "<pilot> changed to <nation>" chat line.
         Result: own team change never showed in chat (messages09.log).
@@ -3498,15 +3520,15 @@ def handle_team_select(s, nation):
         rp ALWAYS exists by team-select time: the msg 201 grant handler
         (FUN_004f88f0) creates the local player's table entry (camp=-1) at join, so
         the self-63 resolves, sets the camp (chat color), and prints the line. The
-        v185 0x66-roster experiment is REVERTED — a 62 self-record deletes that
-        live local entry → use-after-free CTD (messages10.log).
+        v185 0x66-roster experiment is REVERTED - a 62 self-record deletes that
+        live local entry -> use-after-free CTD (messages10.log).
     We still record s.nation for chat/roster scoping and the DB layer."""
     if nation is None or nation == 0xff or nation > 7:
         _changed = s.nation is not None
         s.nation = None
         raw = 0xff if nation is None else nation
-        log('TEAM', f'{s.current_pilot} LEFT team (raw=0x{raw:02x}) — msg 63 op=CAMP side=0xff')
-        # A camp change is a ROSTER event, not a flight event — broadcast whenever the
+        log('TEAM', f'{s.current_pilot} LEFT team (raw=0x{raw:02x}) - msg 63 op=CAMP side=0xff')
+        # A camp change is a ROSTER event, not a flight event - broadcast whenever the
         # player is still associated with a room, NOT only while entered_game. Exiting a
         # flight to the team-select/HQ screen runs handle_leave_arena which clears
         # entered_game (but KEEPS current_room), so gating on entered_game silently dropped
@@ -3514,18 +3536,18 @@ def handle_team_select(s, nation):
         # DEDUP: only broadcast on an ACTUAL side change. On a desynced re-entered channel
         # the client reliably RE-SENDS the same msg-63 every ~5s (its ACK isn't clearing the
         # send-queue); re-broadcasting each retransmit is a reliable send that further
-        # perturbs the channel → 'Test1 joining/leaving' flood → the client gives up (~30s)
-        # → 10054. A retransmit of the current side is a no-op (s.nation already matches), so
+        # perturbs the channel -> 'Test1 joining/leaving' flood -> the client gives up (~30s)
+        # -> 10054. A retransmit of the current side is a no-op (s.nation already matches), so
         # skip the re-broadcast and let the bare ACK land.
         if _changed and s.current_room is not None:
             broadcast_player_change_63(s, None, op=CP_OP_CAMP, reason='(team leave)')
     else:
         _changed = s.nation != nation
         s.nation = nation
-        log('TEAM', f'{s.current_pilot} joined side {nation} — msg 63 op=CAMP')
+        log('TEAM', f'{s.current_pilot} joined side {nation} - msg 63 op=CAMP')
         # Broadcast only on an actual change (see the team-leave branch): the first join
         # after entering broadcasts (s.nation was reset to None at SendEnterToGame), while
-        # a reliable retransmit of the same join finds s.nation already set → no re-send.
+        # a reliable retransmit of the same join finds s.nation already set -> no re-send.
         if _changed and s.current_room is not None:
             broadcast_player_change_63(s, nation, op=CP_OP_CAMP, reason='(team join)')
 
@@ -3533,7 +3555,7 @@ def _find_room_by_gidx(game_idx):
     """Resolve an open room by its 32-bit GameIndex (LE int). Matches the per-room
     UNIQUE index [room_id&0xff][ff][ff][creator[0]] first; falls back to the legacy
     creator-only index [00 ff ff creator[0]] (newest match) for a client still holding
-    the pre-unique value — e.g. a creator's own room before it re-reads the 0xd2 list,
+    the pre-unique value - e.g. a creator's own room before it re-reads the 0xd2 list,
     which db_get_open_rooms orders newest-first so the creator's just-made room wins."""
     rooms = db_get_open_rooms()
     for r in rooms:
@@ -3545,28 +3567,28 @@ def _find_room_by_gidx(game_idx):
     return None
 
 def handle_gamedef_request(s, game_idx, via=''):
-    """FA msg 212 — on-demand GAME_DEF for the selected arena ("out 212'5").
+    """FA msg 212 - on-demand GAME_DEF for the selected arena ("out 212'5").
     Without the reply the arena-select dialog never populates: blank briefing /
     combat text, empty nations list, Join disabled. Shared by the direct
-    (type=0x52 sub=0xd4) and compound-wrapped paths — the compound variant used to
+    (type=0x52 sub=0xd4) and compound-wrapped paths - the compound variant used to
     fall into the blanket inner_type==0x52 drop, which is exactly the intermittent
     'empty description + disabled Join' bug."""
     room = _find_room_by_gidx(game_idx)
     if room is not None:
         pkt = build_gamedef_212(room)
         if pkt is not None:
-            send_rel(s, pkt, f'← GAME_DEF 212 on-demand{via} (room {room[0]} gidx=0x{game_idx:08x})', to=5.0)
+            send_rel(s, pkt, f'<- GAME_DEF 212 on-demand{via} (room {room[0]} gidx=0x{game_idx:08x})', to=5.0)
         else:
             log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: LZ build failed')
     else:
-        log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: no matching open room — silent')
+        log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: no matching open room - silent')
 
 def handle_213_request(s, game_idx, via=''):
-    """FA msg 213 — arena player-info request (counts + roster). If the requester's
+    """FA msg 213 - arena player-info request (counts + roster). If the requester's
     own room, build from live per-session nation state; otherwise DB roster."""
     room = _find_room_by_gidx(game_idx)
     if room is None:
-        log('POST-AUTH', f'213 request{via} gidx=0x{game_idx:08x}: no matching room — silent')
+        log('POST-AUTH', f'213 request{via} gidx=0x{game_idx:08x}: no matching room - silent')
         return
     sessions = get_sessions_in_room(room[0])
     if sessions:
@@ -3583,9 +3605,9 @@ def handle_213_request(s, game_idx, via=''):
             roster = []
         counts = [0] * 8
     send_rel(s, build_arena_players_213(room, counts=counts, names=roster),
-             f'← ArenaPlayers 213{via} (room {room[0]} gidx=0x{game_idx:08x}, {len(roster)} players)', to=5.0)
+             f'<- ArenaPlayers 213{via} (room {room[0]} gidx=0x{game_idx:08x}, {len(roster)} players)', to=5.0)
 
-# ── START-PLACE ALLOCATION ────────────────────────────────────────────────────
+# -- START-PLACE ALLOCATION ----------------------------------------------------
 # Each airfield has several start positions (parking/runway spots). The Fly request
 # (msg 23) carries N=0xff = 'assign me a spot'; the old code always granted N=0, so two
 # players on the SAME airfield stacked on the SAME spot. Track occupancy per (room,af)
@@ -3621,7 +3643,7 @@ def _alloc_start_place(s, af, n_req):
             n = 0
             while n in occ and n < SP_MAX:
                 n += 1
-            if n >= SP_MAX:           # more than SP_MAX players on one airfield — reuse slot 0
+            if n >= SP_MAX:           # more than SP_MAX players on one airfield - reuse slot 0
                 n = 0
         occ.add(n)
     s.__dict__['sp_room'] = room; s.__dict__['sp_af'] = af; s.__dict__['sp_n'] = n
@@ -3631,25 +3653,25 @@ def handle_fly_start_place(s, af, mid, n, via=''):
     """FLY: msg 23 (0x17) StartPlaceList. The Fly button sends one 3-byte record
     [AF][mid][N] with N=0xff ("give me a start place on airfield AF"). The inbound
     handler FUN_004f6320 parses 3-byte records, logs "SP N %i on AF %i", and for the
-    waiting player (WaitingForStartPlaceList): N=0xff → start place -1 → DENY path
-    (vtable+0x54) — which is what our old echo did, leaving the client hanging at the
-    last gate before the cockpit; valid N → set position, vtable+8 = SPAWN into the
+    waiting player (WaitingForStartPlaceList): N=0xff -> start place -1 -> DENY path
+    (vtable+0x54) - which is what our old echo did, leaving the client hanging at the
+    last gate before the cockpit; valid N -> set position, vtable+8 = SPAWN into the
     world (FUN_004e9fa0). So we grant: reply msg 23 with the same record, N assigned.
 
     Wire form is built byte-identical to the echo framing that demonstrably arrived
-    as `in 23'4` / one record (4-byte appspace header, type 0x42) — msg 23 must not
+    as `in 23'4` / one record (4-byte appspace header, type 0x42) - msg 23 must not
     gain pad bytes, since pad zeros would parse as bogus [AF=0][N=0] records."""
     old_af  = s.__dict__.get('sp_af')
     grant_n = _alloc_start_place(s, af, n)      # distinct spot per player on this airfield
     af_changed = (old_af is not None and old_af != af)
-    s.obj_confirmed = False; s.flying = False   # new spawn → re-ServerConfirm on its out 4
+    s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
     s.entered_game = True                       # re-fly after exit-to-HQ stays IN the arena: re-arm
                                                 # the msg-4 spawn gate (handle_leave_arena cleared it),
-                                                # else the re-join out-4 is swallowed → no ServerConfirm
-                                                # → no object created → players invisible to each other
-    s.__dict__.pop('_created_peers', None)      # respawn = new ONumber → re-create on peers
+                                                # else the re-join out-4 is swallowed -> no ServerConfirm
+                                                # -> no object created -> players invisible to each other
+    s.__dict__.pop('_created_peers', None)      # respawn = new ONumber -> re-create on peers
     # In-world AIRFIELD CHANGE: the client rebuilds its world and DelObject's the peers'
-    # planes too (the 'Get coord for missing object N' flood) — so each peer must re-
+    # planes too (the 'Get coord for missing object N' flood) - so each peer must re-
     # advertise its object to us. Drop our addr from every peer's object-created set; the
     # relay then re-creates their object on us OBJECT-ONLY (the NET::CLIENT station
     # persists, so no 'Client already exist' CTD). Same recovery the exit-to-HQ delete
@@ -3661,12 +3683,12 @@ def handle_fly_start_place(s, af, mid, n, via=''):
                 _pcp = _p.__dict__.get('_created_peers')
                 if _pcp is not None:
                     _pcp.discard(s.addr)
-        log('FLY23', f'airfield change ({old_af}→{af}) → peers re-create objects on {s.current_pilot}')
+        log('FLY23', f'airfield change ({old_af}->{af}) -> peers re-create objects on {s.current_pilot}')
     if s.__dict__.pop('_rejoin_pending', False):     # re-join only (first join did this at enter)
-        # Re-announce US to PEERS — they removed us via msg-63 REMOVE on our exit, so this is
+        # Re-announce US to PEERS - they removed us via msg-63 REMOVE on our exit, so this is
         # a clean re-add (fixes the phantom/garbage scoreboard row).
         broadcast_player_join_62(s, reason='(re-fly)')
-        # AND re-push the PEER roster back to US — but ONLY for peers we don't currently hold.
+        # AND re-push the PEER roster back to US - but ONLY for peers we don't currently hold.
         # Original code skipped this on the assumption "exit-to-HQ keeps our OWN roster intact",
         # which is FALSE when a PEER also exited to HQ: their object was deleted in our world
         # (Server require delete object N), so on our re-entry we have no REMOTE_PLAYER for them,
@@ -3674,32 +3696,32 @@ def handle_fly_start_place(s, af, mid, n, via=''):
         # loading (messages40: after both exit-to-HQ + a team change, neither got AddPlayer 62
         # and neither spawned). The old use-after-free warning (messages97) was about re-adding
         # a LIVE remote player; we now guard on _created_peers so we only re-advertise peers
-        # whose object we actually dropped — a clean re-create, never a duplicate of a live one.
+        # whose object we actually dropped - a clean re-create, never a duplicate of a live one.
         _cp = s.__dict__.setdefault('_created_peers', set())
         _missing = [p for p in get_sessions_in_room(s.current_room)
                     if p is not s and p.addr not in _cp]
         if _missing:
             records = [(p.player_index, p.nation, p.current_pilot or 'Player') for p in _missing]
             _pkt = build_msg13(build_add_player_62(records))
-            send_rel(s, _pkt, f'← AddPlayer 62 ({len(records)} peer(s)) (re-fly roster rebuild)', to=5.0)
+            send_rel(s, _pkt, f'<- AddPlayer 62 ({len(records)} peer(s)) (re-fly roster rebuild)', to=5.0)
             log('PLAYER62', f're-fly: re-advertised {len(records)} missing peer(s) to '
                             f'{s.current_pilot}: {[p.current_pilot for p in _missing]}')
     pkt = bytes([0x00, 0x42, 0x00, 0x00, 0x17, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
-    log('FLY23', f'StartPlace request{via} AF={af} mid={mid} N=0x{n:02x} → GRANT N={grant_n}')
+    log('FLY23', f'StartPlace request{via} AF={af} mid={mid} N=0x{n:02x} -> GRANT N={grant_n}')
     threading.Thread(target=lambda: send_reply(s, pkt,
-                     f'← StartPlaceList 23 GRANT (AF={af} N={grant_n})', to=5.0),
+                     f'<- StartPlaceList 23 GRANT (AF={af} N={grant_n})', to=5.0),
                      daemon=True).start()
 
 def handle_leave_arena(s):
-    """Client pressed 'back to lobby' — msg 64 (0x40). Msg 64 has NO inbound dispatch
-    handler → must NOT be echoed (echo → "Unknown Type 64").
+    """Client pressed 'back to lobby' - msg 64 (0x40). Msg 64 has NO inbound dispatch
+    handler -> must NOT be echoed (echo -> "Unknown Type 64").
 
-    SOLVED (v178) — what the client waits for after the back button:
-    The back button fires a UI callback → FUN_004edf0e → FUN_004f1b10: full game-globals
+    SOLVED (v178) - what the client waits for after the back button:
+    The back button fires a UI callback -> FUN_004edf0e -> FUN_004f1b10: full game-globals
     reset + re-arm of the SAME 1-Hz 0x43 connect-poll used at game entry. Data-xrefs on
     the poll timer DAT_00c82eb0 show exactly three poll-stoppers: the 201 join grant
-    (FUN_004f88f0), and FUN_004edcf0 — the handler for lobby msg 218 (0xDA), the
-    "lobby attach answer" (dispatch slot 0xc82240 → id (0xc82240-0xc81ed8)/4 = 218).
+    (FUN_004f88f0), and FUN_004edcf0 - the handler for lobby msg 218 (0xDA), the
+    "lobby attach answer" (dispatch slot 0xc82240 -> id (0xc82240-0xc81ed8)/4 = 218).
     FUN_004edcf0 stores session dwords + MyRights (logs "**** MyRights=%i ****"), sets
     DAT_00c82eb0 = 0 (poll STOP) and notifies the lobby UI observers. It's the same
     218'17 every session receives right after login (our reply to 0xde).
@@ -3707,22 +3729,22 @@ def handle_leave_arena(s):
     So leaving = re-entering the lobby state machine: clear the in-game state and
     RE-SEND the 0xDA lobby attach answer; the client stops polling and the lobby UI
     takes over (it will then re-request news/arena list itself)."""
-    log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) — leaving game '
+    log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
     # v182: tell peers to drop this player's REMOTE_PLAYER object (msg 63 op=REMOVE)
     # BEFORE we clear s.entered_game / s.current_room, so the broadcast still scopes
-    # to the room and resolves the player_index. op=0 (CP_OP_REMOVE) → FUN_004fa9c0
+    # to the room and resolves the player_index. op=0 (CP_OP_REMOVE) -> FUN_004fa9c0
     # remove path (iVar12==0).
     if s.entered_game and s.current_room is not None:
         room_id = s.current_room
-        # v191: ORDER MATTERS — the NetPlane holds a pointer to the REMOTE_PLAYER, so the
+        # v191: ORDER MATTERS - the NetPlane holds a pointer to the REMOTE_PLAYER, so the
         # plane (type-3 DELETE) must reach a peer BEFORE the player (msg-63 REMOVE), else a
         # FLYING peer use-after-frees the dangling plane (messages03: a flying Test2 died on
         # 'Test1 leaving game' with no DelObject after it). broadcast_object_delete_3 now
         # sends DELETE then this REMOVE on the same thread (DELETE gets the lower seq). If we
-        # never spawned a NetPlane, there's nothing to dangle — just send the REMOVE.
+        # never spawned a NetPlane, there's nothing to dangle - just send the REMOVE.
         rem_pkt = build_change_player_63([(s.player_index, s.nation, CP_OP_REMOVE)])
-        rem_label = f'← ChangePlayer 63 REMOVE ({s.current_pilot})'
+        rem_label = f'<- ChangePlayer 63 REMOVE ({s.current_pilot})'
         if s.my_obj_number is not None:
             broadcast_object_delete_3(s, reason='(back to lobby)',
                                       followup_pkt=rem_pkt, followup_label=rem_label)
@@ -3735,12 +3757,12 @@ def handle_leave_arena(s):
                                  daemon=True).start()
     s.entered_game = False
     # ARENA-CHANGE CTD (messages39): the leaving client runs 'del CLIENT Me 0' + 'del
-    # CLIENT <n>' for EVERY peer — it destroys its whole world, including all peer
+    # CLIENT <n>' for EVERY peer - it destroys its whole world, including all peer
     # NET::CLIENT stations. So on re-entry every peer must be re-created client+object,
     # not object-only. Forget both our object-tracking AND station-tracking for all peers
-    # (the reverse direction — peers forgetting US — is handled in broadcast_object_delete_3's
+    # (the reverse direction - peers forgetting US - is handled in broadcast_object_delete_3's
     # clear_peer_created block). Without this, our re-entry sends object-only creates whose
-    # owner St points at a station the peer deleted → o->Client()==0 → CTD Network.cpp:440.
+    # owner St points at a station the peer deleted -> o->Client()==0 -> CTD Network.cpp:440.
     s.__dict__.pop('_created_peers', None)
     s.__dict__.pop('_client_created_peers', None)
     _free_start_place(s)       # release the airfield start-place slot we held
@@ -3749,9 +3771,9 @@ def handle_leave_arena(s):
                                # camp-change (msg-63) hits a player nobody re-added -> phantom
                                # scoreboard row with garbage score (messages92: 'Unknown RemotePlayer(1)')
     s.client_granted = False   # allow a fresh 201 grant on re-entry
-    # v189: KEEP s.nation across exit-to-HQ — the player re-flies under the SAME side
+    # v189: KEEP s.nation across exit-to-HQ - the player re-flies under the SAME side
     # without re-sending a camp-change, so clearing it made broadcast_player_join_62 re-add
-    # them as camp 0 = US (messages97: 'GBR Test2 leaving' → 'USA Test2 entering').
+    # them as camp 0 = US (messages97: 'GBR Test2 leaving' -> 'USA Test2 entering').
     # Clear DB room membership too, or the pilot lingers in db_get_pilots_in_room
     # forever (the stale "Test2 in room 39" roster seen across restarts).
     if s.current_pilot:
@@ -3759,26 +3781,26 @@ def handle_leave_arena(s):
             db_room_leave(s.current_pilot)
         except Exception as e:
             log('LEAVE', f'db_room_leave failed: {e}')
-    # The poll stopper: 218 (0xDA) lobby attach answer (FUN_004edcf0 → DAT_00c82eb0=0)
+    # The poll stopper: 218 (0xDA) lobby attach answer (FUN_004edcf0 -> DAT_00c82eb0=0)
     if SEND_EXIT_UNRELIABLE:
         # UNRELIABLE so the exit consumes no reliable seq. If lost, the client keeps polling
         # 0x43 and we resend it there (resend-on-poll). entered_game is now False, so the
         # resend/echo gates below are armed until the player re-enters a game.
         s._awaiting_reattach = True
         send_unrel(s, build_da_session_safe(),
-                   '← 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) — stops post-leave poll')
+                   '<- 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) - stops post-leave poll')
     else:
         threading.Thread(target=lambda: send_rel(s, build_da_session_safe(),
-                         '← 0xDA lobby re-attach (218, Size=15 63-safe) — stops post-leave 0x43 poll',
+                         '<- 0xDA lobby re-attach (218, Size=15 63-safe) - stops post-leave 0x43 poll',
                          to=5.0), daemon=True).start()
 
-# ─── Lobby broadcasts ─────────────────────────────────────────────────────────
+# --- Lobby broadcasts ---------------------------------------------------------
 
 def broadcast_system(message, exclude_sess=None):
     bcast = build_chat_broadcast('Server', message)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, '← sys msg', to=3.0),
+        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, '<- sys msg', to=3.0),
                          daemon=True).start()
 
 def build_room_echo_pkt(db_id):
@@ -3799,7 +3821,7 @@ def build_room_echo_pkt(db_id):
         # inner data after sub=0xdc: [slot][room_id&0xff][0xff][0xff][creator(24B)][GAME_DEF]
         # GameIndex = bytes[2:6] of [0xdc]+inner_data = [room_id&0xff][0xff][0xff][creator[0]]
         # LE. The low byte (was a fixed 0x00) now carries room_id so two rooms whose
-        # creators share a first letter no longer collide — matches _arena_gameindex(
+        # creators share a first letter no longer collide - matches _arena_gameindex(
         # creator, db_id) used by the 0xd2 list / 212 / join resolution.
         inner_data = bytes([slot, db_id & 0xff, 0xff, 0xff]) + cname + gdef
         return build_typed_pkt(0x92, bytes([0xdc]) + inner_data)
@@ -3811,7 +3833,7 @@ def send_room_echo(sess, db_id, label=None):
     """Send the 0xdc room creation echo for db_id to a specific session."""
     pkt = build_room_echo_pkt(db_id)
     if pkt is None: return False
-    lbl = label or f'← room echo db_id={db_id}'
+    lbl = label or f'<- room echo db_id={db_id}'
     threading.Thread(target=lambda: send_rel(sess, pkt, lbl, to=5.0), daemon=True).start()
     return True
 
@@ -3827,7 +3849,7 @@ def send_all_room_echoes(sess):
     for r in rooms:
         db_id, _name, creator, _acct, _t, slot, _gd = r
         tag = ' [OWN]' if db_id == own_id else ''
-        send_room_echo(sess, db_id, label=f'← room echo db_id={db_id} creator="{creator}"{tag}')
+        send_room_echo(sess, db_id, label=f'<- room echo db_id={db_id} creator="{creator}"{tag}')
 
 def broadcast_room_creation(db_id, exclude_sess=None):
     """Send the 0xdc echo for a newly-created room to every other authenticated
@@ -3839,30 +3861,30 @@ def broadcast_room_creation(db_id, exclude_sess=None):
     n = 0
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← broadcast new room db_id={db_id}', to=3.0),
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- broadcast new room db_id={db_id}', to=3.0),
                          daemon=True).start()
         n += 1
-    log('ROOM-ECHO', f'broadcast room db_id={db_id} → {n} other session(s)')
+    log('ROOM-ECHO', f'broadcast room db_id={db_id} -> {n} other session(s)')
 
 def send_active_list(target_sess):
     others = [s.current_pilot for s in get_all_sessions()
               if s.current_pilot and s is not target_sess]
     msg = ('In lobby: ' + ', '.join(others)) if others else 'No other pilots currently in lobby'
     threading.Thread(target=lambda: send_rel(target_sess, build_chat_broadcast('Server', msg),
-                                              '← active list', to=3.0), daemon=True).start()
+                                              '<- active list', to=3.0), daemon=True).start()
 
 def broadcast_player_join(pilot_name, exclude_sess=None):
     pkt = build_ui_player_update(pilot_name, is_join=True)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← UI ADD [{pilot_name}]', to=3.0),
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- UI ADD [{pilot_name}]', to=3.0),
                          daemon=True).start()
 
 def broadcast_player_leave(pilot_name, exclude_sess=None):
     pkt = build_ui_player_update(pilot_name, is_join=False)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'← UI REMOVE [{pilot_name}]', to=3.0),
+        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- UI REMOVE [{pilot_name}]', to=3.0),
                          daemon=True).start()
 
 def send_initial_ui_list(target_sess):
@@ -3870,9 +3892,9 @@ def send_initial_ui_list(target_sess):
         if sess is not target_sess and sess.current_pilot:
             pkt = build_ui_player_update(sess.current_pilot, is_join=True)
             time.sleep(0.05)
-            send_rel(target_sess, pkt, f'← UI INIT ADD [{sess.current_pilot}]', to=3.0)
+            send_rel(target_sess, pkt, f'<- UI INIT ADD [{sess.current_pilot}]', to=3.0)
 
-# ─── Connection handler ───────────────────────────────────────────────────────
+# --- Connection handler -------------------------------------------------------
 
 def _reap_stale_sessions(acct, new_sess):
     """Reap any prior session bound to the SAME account (a reconnect after a CTD/timeout).
@@ -3898,7 +3920,7 @@ def _reap_stale_sessions(acct, new_sess):
             log('REAP', f'cleanup error: {_e}')
         with sl:
             sadrs.pop(x.addr, None); sids.pop(x.sid, None)
-        log('REAP', f'reaped stale session for account="{acct}" (reconnect) — ghost cleared')
+        log('REAP', f'reaped stale session for account="{acct}" (reconnect) - ghost cleared')
 
 def handle_syn(data, addr):
     acct_row = identify_account_from_syn(data)
@@ -3923,9 +3945,9 @@ def handle_syn(data, addr):
     threading.Thread(target=sp,daemon=True).start()
 
 def login(s):
-    log('LOGIN','══ v197 AUTH ══')
+    log('LOGIN','== v197 AUTH ==')
     if not s.auth_payload: log('LOGIN','No auth payload'); return
-    if not send_rel(s,s.auth_payload,'← cmd=100 auth',to=8.0): return
+    if not send_rel(s,s.auth_payload,'<- cmd=100 auth',to=8.0): return
     log('LOGIN',f'Auth ACKed T+{s.ela():.3f}s')
     s.auth_done=True
     def _hb():
@@ -3939,23 +3961,23 @@ def login(s):
                         # 12-byte time pings and only streams unreliable out 6, so the
                         # server must drive the link itself. The 4-byte 0xd3 NOP does NOT
                         # reset the VCNC 60s connection-alive timer (messages35: the client
-                        # received 11× 0xd3 over 60s and still hit FATALLOSTCONNECTION at
+                        # received 11x 0xd3 over 60s and still hit FATALLOSTCONNECTION at
                         # exactly 60s after the last reliable packet = the ServerConfirm).
-                        # A type-2 0x80 TIME beacon DOES reset it — early lobby survived a
-                        # ~19s no-reliable gap on TIME packets alone — so push one every 5s.
+                        # A type-2 0x80 TIME beacon DOES reset it - early lobby survived a
+                        # ~19s no-reliable gap on TIME packets alone - so push one every 5s.
                         sock.sendto(build_beacon(s.nts(), 0), s.addr)
                     else:
                         sock.sendto(bytes([0,0,0,0xd3]), s.addr)   # lobby heartbeat
                     errors = 0
                 except OSError:
                     errors += 1
-                    if errors >= 3:   # 3 consecutive failures → client gone
-                        log('SESSION', 'Heartbeat failed 3x — closing session')
+                    if errors >= 3:   # 3 consecutive failures -> client gone
+                        log('SESSION', 'Heartbeat failed 3x - closing session')
                         s.closing = True
                         with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
                         break
     threading.Thread(target=_hb,daemon=True).start()
-    deadline=time.time()+300.0   # (kept for reference — no longer bounds the loop, v199)
+    deadline=time.time()+300.0   # (kept for reference - no longer bounds the loop, v199)
     while not s.closing:
         cmds=[]
         with s._lock: cmds=list(s.post_auth_cmds); s.post_auth_cmds.clear()
@@ -3992,7 +4014,7 @@ def _handle_chat_pl(s, pl):
     sessions = get_all_sessions()
     log('CHAT', f'Broadcasting to {len(sessions)} session(s)')
     for sess in sessions:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, f'← chat [{sender}]', to=3.0),
+        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, f'<- chat [{sender}]', to=3.0),
                          daemon=True).start()
 
 COMPOUND_CMDS = {530, 578, 4610}
@@ -4012,7 +4034,7 @@ def handle_compound(s, outer_cmd, pl):
         if new_name and s.account:
             slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
             log('COMPOUND', f'Created "{new_name}" slot={slot}')
-        threading.Thread(target=lambda: send_rel(s, inner, '← compound create echo', to=5.0), daemon=True).start()
+        threading.Thread(target=lambda: send_rel(s, inner, '<- compound create echo', to=5.0), daemon=True).start()
         return
 
     if inner_type == 0x42 and inner_sub == 0xe7:
@@ -4022,8 +4044,8 @@ def handle_compound(s, outer_cmd, pl):
         new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
         if old_name and new_name and s.account:
             db_rename_pilot(old_name, new_name, s.account)
-            log('COMPOUND', f'Renamed "{old_name}" → "{new_name}"')
-        threading.Thread(target=lambda: send_rel(s, inner, '← compound rename echo', to=5.0), daemon=True).start()
+            log('COMPOUND', f'Renamed "{old_name}" -> "{new_name}"')
+        threading.Thread(target=lambda: send_rel(s, inner, '<- compound rename echo', to=5.0), daemon=True).start()
         return
 
     if inner_type == 0x42 and inner_sub == 0xe3:
@@ -4034,11 +4056,11 @@ def handle_compound(s, outer_cmd, pl):
         nb = (pname.encode() + b'\x00') if pname else b'\x00'
         data[4:4+min(len(nb),29)] = nb[:29]
         resp = build_typed_pkt(0x42, bytes(data), bc=2)
-        threading.Thread(target=lambda: send_rel(s, resp, '← compound delete success', to=5.0), daemon=True).start()
+        threading.Thread(target=lambda: send_rel(s, resp, '<- compound delete success', to=5.0), daemon=True).start()
         return
 
     if inner_type == 0x40 and inner_cmd == 5:
-        log('COMPOUND', 'inner vcncExitAppSpace → exit reply')
+        log('COMPOUND', 'inner vcncExitAppSpace -> exit reply')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s, bytes(pl2), 'exit appspace reply'):
             s.closing = True
@@ -4046,7 +4068,7 @@ def handle_compound(s, outer_cmd, pl):
         return
 
     if inner_cmd == 2:
-        log('COMPOUND', 'inner vcncDisconnect → disconnect reply')
+        log('COMPOUND', 'inner vcncDisconnect -> disconnect reply')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         send_rel(s, bytes(pl2), 'disconnect reply')
         return
@@ -4054,7 +4076,7 @@ def handle_compound(s, outer_cmd, pl):
     if inner_type == 0x12 and inner_sub == 0xe1:
         pilots = db_get_pilots(s.account) if s.account else []
         resp = build_e1_pilot_list(pilots)
-        threading.Thread(target=lambda: send_rel(s, resp, '← compound pilot list', to=5.0), daemon=True).start()
+        threading.Thread(target=lambda: send_rel(s, resp, '<- compound pilot list', to=5.0), daemon=True).start()
         return
 
     if inner_type == 0x62 and inner_sub == 0xe4:
@@ -4063,65 +4085,65 @@ def handle_compound(s, outer_cmd, pl):
             slot = exslot or db_get_pilot_slot(s.account, pname) or 0
             s.current_pilot = pname; s.current_slot = slot
             log('COMPOUND', f'Pilot selected: "{pname}" slot={slot}')
-        threading.Thread(target=lambda: send_rel(s, inner, '← compound pilot select echo', to=5.0), daemon=True).start()
+        threading.Thread(target=lambda: send_rel(s, inner, '<- compound pilot select echo', to=5.0), daemon=True).start()
         return
 
     if inner_sub == 0xcd or (len(inner) > 8 and inner[8] == 0xcd):
-        log('COMPOUND', 'inner chat → _handle_chat_pl')
+        log('COMPOUND', 'inner chat -> _handle_chat_pl')
         _handle_chat_pl(s, inner)
         return
 
-    # ── IN-ARENA CHAT, compound-wrapped (inner sub=0x14) ──────────────────────
+    # -- IN-ARENA CHAT, compound-wrapped (inner sub=0x14) ----------------------
     # Same msg-20 chat as the direct path, but inside a compound (cmd in
     # COMPOUND_CMDS). inner = pl[4:], so inner[4]=sub=0x14, inner[5]=channel,
-    # inner[6:]=text. Reflect with PlayerIndex=0 → renders as the local pilot.
+    # inner[6:]=text. Reflect with PlayerIndex=0 -> renders as the local pilot.
     if inner_sub == 0x14:
         channel = inner[5] if len(inner) > 5 else 0
         text    = bytes(inner[6:]) if len(inner) > 6 else b''
-        log('COMPOUND', f'inner sub=0x14 chat → reflect ch={channel}')
+        log('COMPOUND', f'inner sub=0x14 chat -> reflect ch={channel}')
         reflect_chat_20(s, channel, text)
         return
 
-    # ── TEAM / SIDE SELECT, compound-wrapped (inner sub=0x44) ─────────────────
+    # -- TEAM / SIDE SELECT, compound-wrapped (inner sub=0x44) -----------------
     # This is how FA actually sends it in the arena lobby (cmd=530). inner[5]=nation.
     if inner_sub == 0x44:
         nation = inner[5] if len(inner) > 5 else 0xff
-        log('COMPOUND', f'inner sub=0x44 team-select → nation=0x{nation:02x}')
+        log('COMPOUND', f'inner sub=0x44 team-select -> nation=0x{nation:02x}')
         handle_team_select(s, nation)
         return
 
-    # ── LEAVE ARENA / BACK TO LOBBY, compound-wrapped (inner sub=0x40) ─────────
-    # msg 64 = the back button. No inbound handler → must NOT be echoed.
+    # -- LEAVE ARENA / BACK TO LOBBY, compound-wrapped (inner sub=0x40) ---------
+    # msg 64 = the back button. No inbound handler -> must NOT be echoed.
     if inner_sub == 0x40:
-        log('COMPOUND', 'inner sub=0x40 → leave-arena (back to lobby), NOT echoed')
+        log('COMPOUND', 'inner sub=0x40 -> leave-arena (back to lobby), NOT echoed')
         handle_leave_arena(s)
         return
 
-    # ── FLY / START PLACE, compound-wrapped (inner sub=0x17) ───────────────────
+    # -- FLY / START PLACE, compound-wrapped (inner sub=0x17) -------------------
     # [0x17][AF][mid][N]; reply the grant, never echo (echo = deny).
     if inner_sub == 0x17 and len(inner) >= 8:
         handle_fly_start_place(s, inner[5], inner[6], inner[7], via=' (compound)')
         return
 
-    # ── ROOM CREATION (inner type=0x92 sub=0xdc) ──────────────────────────────
+    # -- ROOM CREATION (inner type=0x92 sub=0xdc) ------------------------------
     # Always arrives via compound cmd=18.
     # inner layout (from inner[4:] = data):
     #   data[0]=0xdc (sub), data[1]=room_slot (e.g. 0x23), data[2:5]=flags (0x00 0xff 0xff)
     #   data[5:29] = creator pilot name (24-byte null-padded)
     #   data[29:769] = GAME_DEF (740 bytes, confirmed by FA.exe "GAME_DEF size 740")
-    # Echo inner → FA.exe gets "in 220'777" which shows the room locally.
-    # Player count starts at 0 — creator enters via VNET::SendEnterToGame (type=0x1d).
+    # Echo inner -> FA.exe gets "in 220'777" which shows the room locally.
+    # Player count starts at 0 - creator enters via VNET::SendEnterToGame (type=0x1d).
     if inner_sub == 0xdc and len(inner) > 33:  # inner_type varies per session (0x92 or 0xa2)
         data      = inner[4:]
         room_slot = data[1] if len(data) > 1 else 0
         creator_raw = data[5:29].split(b'\x00')[0].decode('ascii', 'replace') if len(data) > 5 else ''
         creator   = s.current_pilot or creator_raw
-        # Store the FULL GAME_DEF — the old data[29:769] cap truncated it to 740 and the
+        # Store the FULL GAME_DEF - the old data[29:769] cap truncated it to 740 and the
         # deserialiser ran off the end (Mix.hpp:539). data[29:] = the whole GAME_DEF the
         # client serialised (the inner's appspace data, minus the 29-byte room header).
         game_def  = bytes(data[29:])
         room_id   = db_create_room(creator, s.account or '', game_def, room_slot)
-        # One-room-per-creator enforcement (CLOSE the pilot's other open rooms) — now gated
+        # One-room-per-creator enforcement (CLOSE the pilot's other open rooms) - now gated
         # behind PERSIST_ROOMS. With unique per-room GameIndexes a creator can hold several
         # rooms at once, and the original 0xce>bc48 worry is moot (0xce is empty). This SQL
         # was silently closing an earlier same-creator room (FFA when TC was made next).
@@ -4143,25 +4165,25 @@ def handle_compound(s, outer_cmd, pl):
             f'({TERRAIN_NAMES.get(extract_terrain_from_gamedef(game_def), "?")}) players=1')
         # Exclude creator: chat arriving before the echo disrupts FA.exe state machine
         broadcast_system(f'[{creator}] created a room', exclude_sess=s)
-        threading.Thread(target=lambda: send_rel(s, inner, '← compound echo room create', to=5.0), daemon=True).start()
+        threading.Thread(target=lambda: send_rel(s, inner, '<- compound echo room create', to=5.0), daemon=True).start()
         # Broadcast new room to all OTHER sessions so their arena lists update
         threading.Thread(target=lambda: broadcast_room_creation(room_id, exclude_sess=s), daemon=True).start()
         return
 
-    # ── ARENA LIST REQUEST (inner sub=0xd2) ──────────────────────────────────
-    # 0xd2 = the Arenas-tab room list (real log: out 210 → in 210'1110). FA.exe
+    # -- ARENA LIST REQUEST (inner sub=0xd2) ----------------------------------
+    # 0xd2 = the Arenas-tab room list (real log: out 210 -> in 210'1110). FA.exe
     # often wraps it in a compound. Respond with open rooms, not an echo.
     if inner_sub == 0xd2:
         active_rooms = db_get_open_rooms()
-        log('COMPOUND', f'inner sub=0xd2 → ArenaList ({len(active_rooms)} rooms)')
+        log('COMPOUND', f'inner sub=0xd2 -> ArenaList ({len(active_rooms)} rooms)')
         # v164: push GAME_DEF (212) per room first so terrain is cached, then the list.
         threading.Thread(
             target=lambda: send_arenalist_with_gamedefs(
-                s, active_rooms, '← compound ArenaList 0xd2'),
+                s, active_rooms, '<- compound ArenaList 0xd2'),
             daemon=True).start()
         return
 
-    # ── ROOM CONFIRM POLL (inner sub=0x43) ────────────────────────────────────
+    # -- ROOM CONFIRM POLL (inner sub=0x43) ------------------------------------
     # When room creation goes via compound cmd=18, FA.exe ALSO wraps ALL 0x43 polls
     # in compound (cmd=12434 or cmd=37424). It never sends a direct sub=0x43 in that
     # case, so we MUST respond here with the same 17-byte room status packet.
@@ -4169,12 +4191,12 @@ def handle_compound(s, outer_cmd, pl):
     if inner_sub == 0x43:
         now = time.time()
         if now - s.last_43_ts < 0.5:
-            log('COMPOUND', 'inner sub=0x43 → rate-limited')
+            log('COMPOUND', 'inner sub=0x43 -> rate-limited')
             return
         s.last_43_ts = now
-        _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT (enters game)
+        _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT (enters game)
         if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-            send_unrel(s, build_da_session_safe(), '← 0xDA re-attach RESEND (compound 0x43 poll)')
+            send_unrel(s, build_da_session_safe(), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
         room_slot = getattr(s, 'room_slot', 0)
         rooms = db_get_open_rooms()
         if rooms and (s.current_room or room_slot):
@@ -4184,18 +4206,18 @@ def handle_compound(s, outer_cmd, pl):
             resp_data = bytes([0x43, slot, 0x00, 0x00, 0x00, pcount, 0x01,
                                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
             mode = 'GAME' if s.entered_game else 'lobby'
-            log('COMPOUND', f'inner sub=0x43 → {mode} confirm slot=0x{slot:02x} db_id={rid} players={pcount}')
+            log('COMPOUND', f'inner sub=0x43 -> {mode} confirm slot=0x{slot:02x} db_id={rid} players={pcount}')
             resp = build_appspace_pkt(resp_data)
-            threading.Thread(target=lambda: send_rel(s, resp, f'← compound 0x43 {mode} confirm', to=3.0),
+            threading.Thread(target=lambda: send_rel(s, resp, f'<- compound 0x43 {mode} confirm', to=3.0),
                              daemon=True).start()
         else:
-            log('COMPOUND', 'inner sub=0x43 → no room yet, not responding')
+            log('COMPOUND', 'inner sub=0x43 -> no room yet, not responding')
         return
 
     # Compound-wrapped VNET::SendEnterToGame (inner type=0x82 sub=0xc8 = msg 200).
     # This run proved the Join sends the 200 INSIDE a compound (cmd=0x0212), not as a
-    # bare type=0x82 — so it was hitting "echo inner" below, bouncing the 200 back to the
-    # client as "in 200'40" → FA: "NET::MESSAGE with Unknown Type 200". NEVER echo it.
+    # bare type=0x82 - so it was hitting "echo inner" below, bouncing the 200 back to the
+    # client as "in 200'40" -> FA: "NET::MESSAGE with Unknown Type 200". NEVER echo it.
     # Instead resolve the room from the inner GameIndex (inner[5:9]) and enter game mode,
     # exactly like the direct type=0x82 path, so the 0x43 game-connect poll gets answered.
     if inner_type == 0x82 and inner_sub == 0xc8:
@@ -4217,25 +4239,25 @@ def handle_compound(s, outer_cmd, pl):
         s.nation = None                       # enters "In Menu" until a side is picked
         assign_player_slot(s, s.current_room)
         log('COMPOUND', f'SendEnterToGame (compound) pilot="{pname}" gidx=0x{game_idx:08x} '
-                        f'room={s.current_room} → GAME MODE, NOT echoed')
+                        f'room={s.current_room} -> GAME MODE, NOT echoed')
         # Same entry GRANT as the direct path: reply msg 201 (0xc9) JoinToGameAnswer.
         # GUARD (RE FUN_004f88f0): the JoinToGameAnswer handler asserts ClientID<0 on
         # entry, so a 2nd 201 while already granted crashes the client. Grant once/entry.
         if s.client_granted:
-            log('COMPOUND', 'JoinToGameAnswer 201 already granted this entry — suppressing duplicate')
+            log('COMPOUND', 'JoinToGameAnswer 201 already granted this entry - suppressing duplicate')
         else:
             s.client_granted = True
             send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
-                     f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
-                     f'PlayerIndex={s.player_index} → GRANT)', to=5.0)
-        # ── PLAYER-OBJECT LAYER (v184) ───────────────────────────────────────────
+                     f'<- JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+                     f'PlayerIndex={s.player_index} -> GRANT)', to=5.0)
+        # -- PLAYER-OBJECT LAYER (v184) -------------------------------------------
         # 62 advertises peers to the newcomer and the newcomer to peers. Both calls
         # SELF-GATE: with no peers in the room they send nothing, so a lone player's
         # entry is byte-identical to the known-good v182 path.
-        # msg 96 (ScoreTable) is DEFERRED — v183 sent it here unconditionally and it
+        # msg 96 (ScoreTable) is DEFERRED - v183 sent it here unconditionally and it
         # crashed arena-join (messages08.log): FUN_004f53b0 frees+reallocates the
         # host-side score-table object mid-entry, before the client's world is stood
-        # up, wedging it (3s stall → WinError 10054). A lone player has nothing to
+        # up, wedging it (3s stall -> WinError 10054). A lone player has nothing to
         # score; seed the board later, after full world-load, not during the grant.
         def _stand_up_player_objects(_s=s):
             push_player_roster_62(_s, reason='(on enter, compound)')
@@ -4243,11 +4265,11 @@ def handle_compound(s, outer_cmd, pl):
         threading.Thread(target=_stand_up_player_objects, daemon=True).start()
         return
 
-    # ── ARENA-SELECT DATA REQUESTS, compound-wrapped (inner type=0x52) ─────────
+    # -- ARENA-SELECT DATA REQUESTS, compound-wrapped (inner type=0x52) ---------
     # THE ARENA-LIST RELIABILITY BUG: msg 212 (sub=0xd4, GAME_DEF request) and msg 213
     # (sub=0xd5, player-info request) sometimes arrive compound-wrapped instead of
-    # direct. The old blanket inner_type==0x52 rule swallowed them → no GAME_DEF reply
-    # → empty description + disabled Join until the client happened to re-request
+    # direct. The old blanket inner_type==0x52 rule swallowed them -> no GAME_DEF reply
+    # -> empty description + disabled Join until the client happened to re-request
     # directly (tab away and back). Answer them here exactly like the direct path.
     # inner layout: inner[4]=sub, inner[5:9]=GameIndex LE.
     if inner_sub == 0xd4:
@@ -4261,52 +4283,52 @@ def handle_compound(s, outer_cmd, pl):
         handle_213_request(s, gidx, via=' (compound)')
         return
 
-    # Compound inner type=0x52 (sub=0xd7/0xd9): squad/team update — do NOT echo
+    # Compound inner type=0x52 (sub=0xd7/0xd9): squad/team update - do NOT echo
     if inner_type == 0x52:
-        log('COMPOUND', f'inner 0x52/0x{inner_sub:02x} (squad/team update) — not echoed')
+        log('COMPOUND', f'inner 0x52/0x{inner_sub:02x} (squad/team update) - not echoed')
         return
     # No-echo messages (see direct path NO_ECHO_SUBS): 0x20 = no-handler status; 0x03 =
-    # NET::OBJECT delete notify (echo → bounds-error crash); 0x45 (msg 69) =
-    # SCENE_TAG_MESSAGE — spawn-point selection notify. Its inbound handler asserts
+    # NET::OBJECT delete notify (echo -> bounds-error crash); 0x45 (msg 69) =
+    # SCENE_TAG_MESSAGE - spawn-point selection notify. Its inbound handler asserts
     # Length % sizeof(SCENE_TAG_MESSAGE::PACKED_INFO) == 0 (VNet_Rcv.cpp:1400), so
     # echoing the 2-byte select notify crashes the client (messages03.log).
-    # 0x4d (msg 77) = PLANE-PRELOAD COUNTS (handler 0x4f4080 → FUN_0047a6f0 sets the
+    # 0x4d (msg 77) = PLANE-PRELOAD COUNTS (handler 0x4f4080 -> FUN_0047a6f0 sets the
     # per-type count array). Echoing the client's 0x4d makes the handler parse garbage
-    # → junk counts → 'Preload existing planes' hits an unloaded type → index>=0 assert
-    # (Pln_Info.cpp:192, messages21 crash). Swallow it → count array stays null → preload
+    # -> junk counts -> 'Preload existing planes' hits an unloaded type -> index>=0 assert
+    # (Pln_Info.cpp:192, messages21 crash). Swallow it -> count array stays null -> preload
     # early-outs cleanly. Client does not block on it.
     if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d):
-        log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) — swallow')
+        log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) - swallow')
         return
-    # msg 31 (0x1f) compound-wrapped: ground-object damage report — consume, NEVER echo
+    # msg 31 (0x1f) compound-wrapped: ground-object damage report - consume, NEVER echo
     # (no client-side inbound handler for 31; echo raises 'Unknown Type 31'). v199.
     if inner_sub == 0x1f and getattr(s, 'entered_game', False):
         _handle_ground_damage_31(s, bytes(inner[5:]), via=' (compound)')
         return
-    # Echo-by-default (lobby AND in-game) — matches the session that reached flight
+    # Echo-by-default (lobby AND in-game) - matches the session that reached flight
     # (messages16). A blanket in-game swallow instead froze the world build at ~97%
     # (messages20), because the client waits for replies to some build/spawn messages.
     # Only the genuine fire-and-forget crashers are suppressed by the no-echo set above.
-    log('COMPOUND', f'unknown inner → echo inner')
-    threading.Thread(target=lambda: send_rel(s, inner, '← compound echo unknown inner', to=5.0), daemon=True).start()
+    log('COMPOUND', f'unknown inner -> echo inner')
+    threading.Thread(target=lambda: send_rel(s, inner, '<- compound echo unknown inner', to=5.0), daemon=True).start()
 
 
 GROUND_HP = {}   # (room_id, static-object idx) -> accumulated damage from msg 31 (v199, PvE part 1)
 
-# ─── PvE SCENE DESTROY (msg 36) ─────────────────────────────────────────────────
+# --- PvE SCENE DESTROY (msg 36) -------------------------------------------------
 # The authoritative destroy/state message the REAL server sent (2009 messages04):
-#   out 28 (hit) + out 31 (ground-damage report)  →  in 36 (SCENE DESTROY/STATE)
-#   → client: 'You have destroyed GER Birchwood'.
-# Handler LAB_004f9d90 wire = [0x24] then N×7-byte records:
+#   out 28 (hit) + out 31 (ground-damage report)  ->  in 36 (SCENE DESTROY/STATE)
+#   -> client: 'You have destroyed GER Birchwood'.
+# Handler LAB_004f9d90 wire = [0x24] then Nx7-byte records:
 #   [sceneIdx u16 LE][camp u8 (0xFF = neutralized/destroyed)][progress f32]
-# progress ≤ 0 flips the scene captured. Delivered via the in-game VNET dispatch
-# (FUN_004f18a0), which passes the TRUE length — so we frame with build_ingame_pkt
+# progress <= 0 flips the scene captured. Delivered via the in-game VNET dispatch
+# (FUN_004f18a0), which passes the TRUE length - so we frame with build_ingame_pkt
 # (Size == n), exactly like the live 'in 36'8' (1 record).
 MSG_SCENE_STATE_36 = 0x24
 SCENE_CAMP_NEUTRAL = 0xFF          # camp byte meaning 'neutralized / destroyed'
 
-# Per-terrain scene→owning-camp table. CONFIRMED from the msg-36 handler decompile
-# (0x4f9d90): the record's camp byte at +2 selects the client's message path — 0xFF forces
+# Per-terrain scene->owning-camp table. CONFIRMED from the msg-36 handler decompile
+# (0x4f9d90): the record's camp byte at +2 selects the client's message path - 0xFF forces
 # the GENERIC 'a bridge' text (msg 0xcb/203), while the scene's REAL camp (0..4) takes the
 # NAMED path (msg 0x81/129) that prints 'You have destroyed <owner> <SceneName>'. Camps
 # captured verbatim from the client's join-time scene table ('c <sceneIdx> <camp> <val> <name>').
@@ -4332,26 +4354,26 @@ SCENE_MAX_IDX = 65                 # raw scene-instance array is 0..65 on TRN02 
 
 # GATE: automatically decrement scene HP from msg 31 ev=0x05 and emit msg 36 on depletion.
 # OFF by default. STATUS (msgs23, 02-Jul): the camp-byte fix works (msg 36 now names a real
-# nation+building instead of 'a bridge'), BUT auto-destroy still hits the WRONG building —
+# nation+building instead of 'a bridge'), BUT auto-destroy still hits the WRONG building -
 # there are three distinct index spaces and we don't yet have the translation between them:
 #   A weapon-target (msg-31 ev=0x05 obj, 0..95+)  = the building the player shoots
 #   B display/valuable (join 'c' table, 0..59)     = the sorted list the player reads
 #   C raw scene-instance (msg-36 sceneIdx)          = what destroys, array [0xc87270]
 # We fire msg 36 with sceneIdx = weapon-obj (space A), but msg 36 indexes space C, so e.g.
 # shooting Front Airfield (A=40) destroys raw building C=40 ('Storage') on the wrong team.
-# The A→C map is built at terrain load into runtime arrays ([0xc85038] display list,
-# [0xc87270] raw array) and is exactly the table.goi objIdx→sceneIdx data the .q6 route
+# The A->C map is built at terrain load into runtime arrays ([0xc85038] display list,
+# [0xc87270] raw array) and is exactly the table.goi objIdx->sceneIdx data the .q6 route
 # targets. Leave OFF until that translation is obtained (per-building calibration or table.goi).
 AUTO_SCENE_DESTROY = False
-# ^ default OFF; `autopve on` flips it live for experiments. While the A→C translation is
+# ^ default OFF; `autopve on` flips it live for experiments. While the A->C translation is
 #   missing it will destroy the wrong building, so keep it off for normal play.
 
 def build_scene_destroy_36(records):
     """Build FA msg 36 (0x24) SCENE DESTROY/STATE. `records` = list of
-    (scene_idx:int, camp:int, progress:float). Wire: [0x24] + N×[u16 LE sceneIdx]
+    (scene_idx:int, camp:int, progress:float). Wire: [0x24] + Nx[u16 LE sceneIdx]
     [u8 camp][f32 progress]. Framed with build_ingame_pkt so the client's Size == the
     true byte count (the in-game VNET dispatch passes real length, NOT bc*16+1; the live
-    'in 36'8' = 1 record). camp 0xFF = neutralized/destroyed; progress ≤ 0 = captured."""
+    'in 36'8' = 1 record). camp 0xFF = neutralized/destroyed; progress <= 0 = captured."""
     body = bytearray([MSG_SCENE_STATE_36])
     for scene_idx, camp, progress in records:
         body += struct.pack('<HBf', scene_idx & 0xFFFF, camp & 0xFF, float(progress))
@@ -4368,23 +4390,23 @@ def broadcast_scene_36(room_id, records, reason=''):
     _desc = ', '.join(f'scene={i} camp=0x{c:02x} prog={p:g}' for i, c, p in records)
     for s in sess:
         threading.Thread(
-            target=lambda _s=s: send_rel(_s, pkt, f'← SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0),
+            target=lambda _s=s: send_rel(_s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0),
             daemon=True).start()
-    log('SCENE36', f'room {room_id}: msg 36 [{_desc}] → {len(sess)} session(s) {reason}')
+    log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(sess)} session(s) {reason}')
     return len(sess)
 
 def _handle_ground_damage_31(s, body, via=''):
-    """FA msg 31 (0x1f) — GROUND-OBJECT DAMAGE REPORT, client→server ONLY. The client's
+    """FA msg 31 (0x1f) - GROUND-OBJECT DAMAGE REPORT, client->server ONLY. The client's
     inbound dispatch slot for 31 (0xc81ed8 + 31*4 = 0xc81f54) is hard-zeroed in
-    FUN_004f1240, so 31 must NEVER be echoed or relayed to any client — an inbound 31
+    FUN_004f1240, so 31 must NEVER be echoed or relayed to any client - an inbound 31
     raises 'NET::MESSAGE with Unknown Type 31' (messages17, 01-Jul session).
-    Body = N × 6-byte records: [attacker ONumber u16 LE][target static-object idx u8]
+    Body = N x 6-byte records: [attacker ONumber u16 LE][target static-object idx u8]
     [event u8 (only 0x05 seen)][damage u16 LE]. Observed: strafing bursts dmg 92..1239 on
     objs 129/130 (fuel tanks, Bomber Airfield), one bomb = one msg with two records
     (splash over adjacent objects), player crashing INTO a fuel tank = obj 120 dmg 9976.
     v199: decode, log, accumulate per-object HP in GROUND_HP keyed by (room, obj).
     v200: when AUTO_SCENE_DESTROY is enabled, also drive per-scene HP (SCENE_HP) down and
-    emit msg 36 on depletion. GATED OFF until the objidx→sceneIdx mapping is confirmed —
+    emit msg 36 on depletion. GATED OFF until the objidx->sceneIdx mapping is confirmed -
     the raw obj index is used as a PROVISIONAL scene key only inside that gate, never sent
     to a client while the gate is off. Raw hex is logged so a live test can still falsify
     the field layout (2nd interpretation: [00][obj u16][05][dmg])."""
@@ -4400,14 +4422,14 @@ def _handle_ground_damage_31(s, body, via=''):
         key = (s.current_room, obj)
         GROUND_HP[key] = GROUND_HP.get(key, 0) + dmg
         recs.append(f'atk=0x{atk:04x} obj={obj} ev=0x{ev:02x} dmg={dmg} (total={GROUND_HP[key]})')
-        # live obj→scene probe: record ev=0x00 reconciliation objects against the armed scene
+        # live obj->scene probe: record ev=0x00 reconciliation objects against the armed scene
         probe_observe(s.current_room, obj, ev)
         # weapon-obj correlation: track ev=0x05 real weapon targets
         corr_observe(s.current_room, obj, ev, dmg)
         if AUTO_SCENE_DESTROY and ev == 0x05 and s.current_room is not None and 0 <= obj <= SCENE_MAX_IDX:
             # CONFIRMED (messages21, 02-Jul): the msg-31 ev=0x05 weapon-target `obj` byte IS
-            # the msg-36 sceneIdx, identity — single-target anchors obj59→scene59 (Tank
-            # Factory) and obj40→scene40 (Front Airfield) both matched the join scene table,
+            # the msg-36 sceneIdx, identity - single-target anchors obj59->scene59 (Tank
+            # Factory) and obj40->scene40 (Front Airfield) both matched the join scene table,
             # and bomb-splash bursts hit the physically-adjacent scenes. ev=0x00 is client
             # reconciliation (echoes our own destroys) and must NOT be counted here.
             scene_idx = obj
@@ -4429,13 +4451,13 @@ def _handle_ground_damage_31(s, body, via=''):
                           f'(weapon damage crossed threshold)')
 
 
-# ─── PvE OBJ→SCENE LIVE PROBE (no .q6 needed) ──────────────────────────────
-# The msg-31 objIdx→msg-36 sceneIdx mapping is captured live using the CLIENT as oracle:
+# --- PvE OBJ->SCENE LIVE PROBE (no .q6 needed) ------------------------------
+# The msg-31 objIdx->msg-36 sceneIdx mapping is captured live using the CLIENT as oracle:
 # when the client receives a msg-36 SCENE DESTROY for sceneIdx S, it emits ev=0x00
 # msg-31 RECONCILIATION records for the objects belonging to that scene's region
-# (observed last session: destroy 46/51 → client re-reported objs 44–65 with ev=0x00).
+# (observed last session: destroy 46/51 -> client re-reported objs 44-65 with ev=0x00).
 # So firing destroy(S) and recording the ev=0x00 objects that come back within a short
-# window yields sceneIdx→{objIdx}; inverting gives the objIdx→sceneIdx auto-PvE needs.
+# window yields sceneIdx->{objIdx}; inverting gives the objIdx->sceneIdx auto-PvE needs.
 # Everything here is inert unless a probe is armed from the console (`probe ...`).
 PROBE = {'active': False, 'scene': None, 'room': None, 'until': 0.0,
          'map': {}, 'sweep_thread': None, 'stop': False}
@@ -4445,7 +4467,7 @@ PROBE_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'objsc
 
 def _probe_terrain_for_room(room_id):
     """Terrain id for a room, from the rooms table (defaults to DEFAULT_TERRAIN). Used to pick
-    the right scene→camp table so msg-36 names the target instead of printing 'a bridge'."""
+    the right scene->camp table so msg-36 names the target instead of printing 'a bridge'."""
     try:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute("SELECT terrain FROM rooms WHERE room_id=?", (room_id,)).fetchone()
@@ -4505,7 +4527,7 @@ def probe_sweep(room, lo, hi, gap=3.0):
             log('PROBE', f'swept scene {sc} (room {room})')
             time.sleep(gap)
         n, path = probe_save()
-        log('PROBE', f'sweep done: {n} objIdx→sceneIdx entries saved to {path}')
+        log('PROBE', f'sweep done: {n} objIdx->sceneIdx entries saved to {path}')
     with PROBE_LOCK:
         PROBE['stop'] = False
     t = threading.Thread(target=_run, daemon=True)
@@ -4513,15 +4535,15 @@ def probe_sweep(room, lo, hi, gap=3.0):
     t.start()
 
 
-# ─── PvE WEAPON-OBJ → SCENE CORRELATION PROBE ─────────────────────────────
-# Auto-PvE needs weapon-target objIdx (msg-31 ev=0x05, e.g. 130) → msg-36 sceneIdx. The
+# --- PvE WEAPON-OBJ -> SCENE CORRELATION PROBE -----------------------------
+# Auto-PvE needs weapon-target objIdx (msg-31 ev=0x05, e.g. 130) -> msg-36 sceneIdx. The
 # destroy-sweep only exercises ev=0x00 reconciliation (scene-space 0..65), never the weapon
 # space, so it cannot yield this. This mode captures it by CORRELATION:
 #   1. `corr watch`      arm: every ev=0x05 record's obj is tracked with accumulating damage,
 #                        so `corr show` reveals which building you're actually hitting.
 #   2. strafe ONE building; its obj (e.g. 130) appears under `corr show` with rising dmg.
 #   3. `corr find <obj>` server sweeps destroy over candidate scenes; narrows which scene
-#                        silences that obj's ev=0x05 stream (noisy — a helper, not proof).
+#                        silences that obj's ev=0x05 stream (noisy - a helper, not proof).
 #   4. `corr map <obj> <scene>`  record an EYE-CONFIRMED anchor (you saw it blow up) to
 #                        weapon_map.json. This is the source of truth for auto-PvE.
 # Inert unless armed. Reuses broadcast_scene_36.
@@ -4553,13 +4575,13 @@ def corr_map_save(obj, scene):
 
 def corr_find(room, obj, lo=0, hi=59, gap=4.0):
     """Sweep destroy lo..hi; after each, note whether `obj` (recently active via ev=0x05)
-    stops producing new ev=0x05 — a candidate for the scene that removed it. Heuristic only;
+    stops producing new ev=0x05 - a candidate for the scene that removed it. Heuristic only;
     confirm by eye and record with `corr map`."""
     def _run():
         with CORR_LOCK:
             active = obj in CORR['last05']
         log('CORR', f'find obj={obj}: sweeping destroy {lo}..{hi} gap={gap}s '
-                    f'(obj {"active" if active else "NOT yet active — strafe it during the sweep!"})')
+                    f'(obj {"active" if active else "NOT yet active - strafe it during the sweep!"})')
         candidates = []
         for sc in range(lo, hi + 1):
             with CORR_LOCK:
@@ -4577,7 +4599,7 @@ def corr_find(room, obj, lo=0, hi=59, gap=4.0):
                 candidates.append(sc)
                 log('CORR', f'  candidate: obj {obj} went silent after destroy scene {sc}')
         log('CORR', f'find obj={obj} done. candidate scene(s): '
-                    f'{candidates or "none — strafe the target continuously during the sweep"}')
+                    f'{candidates or "none - strafe the target continuously during the sweep"}')
     with CORR_LOCK:
         CORR['stop'] = False
     t = threading.Thread(target=_run, daemon=True)
@@ -4602,41 +4624,41 @@ def _fire_server_confirm(s, via='', ident=None):
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
-    log('CONFIRM5', f'out 4 spawn{via} → ServerConfirm Number={number} ident={ident} ({_isrc})')
+    log('CONFIRM5', f'out 4 spawn{via} -> ServerConfirm Number={number} ident={ident} ({_isrc})')
     threading.Thread(target=lambda nn=number, ii=ident: send_reply(
         s, build_server_confirm_5(nn, ii),
-        f'← ServerConfirm 5 (Number={nn} ident={ii})', to=5.0), daemon=True).start()
+        f'<- ServerConfirm 5 (Number={nn} ident={ii})', to=5.0), daemon=True).start()
     if ADD_TEST_PLAYER:
         def _inject(_s=s):
             time.sleep(1.0)
             m62 = build_add_player_62([(1, 0, 'Test2', 0)])
             send_rel(_s, build_msg13(m62),
-                     '← msg 13 { 62 AddPlayer Test2 idx=1 camp=0 }', to=5.0)
+                     '<- msg 13 { 62 AddPlayer Test2 idx=1 camp=0 }', to=5.0)
             log('SIM13', 'injected remote player Test2 via msg 13{62}')
         threading.Thread(target=_inject, daemon=True).start()
 
 def _ingame_own_object_removed(s, tb, stored):
     """Shared handler for a msg-3 (sub 0x03) that removes the player's OWN plane while in the
-    arena — a death / crash / crashland (exit-to-HQ too; indistinguishable here). It arrives
+    arena - a death / crash / crashland (exit-to-HQ too; indistinguishable here). It arrives
     BOTH as a direct tb=0x42/0x52/0x32 message AND wrapped in an outer type=0x06 (the type-scan
     form). A CRASHLAND uses the WRAPPED form, so both call sites must route here or the crashland
-    respawn is never re-armed and its out 4 gets no ServerConfirm (Conductor error → dead engine
-    → CTD). Drops the dead plane on peers, stays in the arena, and re-arms obj_confirmed/flying
+    respawn is never re-armed and its out 4 gets no ServerConfirm (Conductor error -> dead engine
+    -> CTD). Drops the dead plane on peers, stays in the arena, and re-arms obj_confirmed/flying
     so the NEXT out 4 confirms a fresh object even when the crashland respawn skips its StartPlace.
     Idempotent via _left_world (cleared on the respawn's ServerConfirm)."""
     if (s.entered_game and not getattr(s, '_left_world', False)
             and s.my_obj_number is not None):
         s._left_world = True
         log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) = in-arena plane removal '
-                         f'(death/crashland/exit-to-HQ) → drop dead plane, stay in arena, re-arm confirm')
+                         f'(death/crashland/exit-to-HQ) -> drop dead plane, stay in arena, re-arm confirm')
         _killer = score_on_death(s, stored)   # credit killer + record death in DB (accumulating)
         broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer)
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
-        # still gets a ServerConfirm. A normal death's StartPlace also resets these — harmless.
+        # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.
         s.obj_confirmed = False; s.flying = False
     else:
-        log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) → swallow, no echo (guarded)')
+        log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) -> swallow, no echo (guarded)')
 
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
@@ -4653,7 +4675,7 @@ def handle_post_auth(s, cmd, pl):
     if (len(pl) > 8 and pl[8] == 0xcd) or sub == 0xcd:
         _handle_chat_pl(s, pl); return
 
-    # ── IN-ARENA CHAT (msg 20 / 0x14) ──────────────────────────────────────────
+    # -- IN-ARENA CHAT (msg 20 / 0x14) ------------------------------------------
     # Sent by the client as [0x14][channel:1][text\0]; channel 0=all,1=team,2=squadron.
     # The FA reliable type-scan cycles the OUTER type per message, so the same chat
     # arrives in different wrappers: DIRECT (sub=pl[4]=0x14, e.g. type=0xe2) or a
@@ -4670,9 +4692,9 @@ def handle_post_auth(s, cmd, pl):
         text    = bytes(pl[10:])
         reflect_chat_20(s, channel, text); return
 
-    # ── TEAM / SIDE SELECT (msg 68 / 0x44) ─────────────────────────────────────
-    # [0x44][nation:1][?:1]; nation 0..7 = side (US=0…), 0xff = leave. No incoming
-    # handler in FA.exe → never echo. Same wrapper variants as chat.
+    # -- TEAM / SIDE SELECT (msg 68 / 0x44) -------------------------------------
+    # [0x44][nation:1][?:1]; nation 0..7 = side (US=0...), 0xff = leave. No incoming
+    # handler in FA.exe -> never echo. Same wrapper variants as chat.
     if sub == 0x44:                                            # direct
         nation = pl[5] if len(pl) > 5 else 0xff
         handle_team_select(s, nation); return
@@ -4680,15 +4702,15 @@ def handle_post_auth(s, cmd, pl):
         nation = pl[9]
         handle_team_select(s, nation); return
 
-    # ── LEAVE ARENA / BACK TO LOBBY (msg 64 / 0x40) ────────────────────────────
-    # No inbound handler in FA.exe → never echo (echo → "Unknown Type 64"). Same
+    # -- LEAVE ARENA / BACK TO LOBBY (msg 64 / 0x40) ----------------------------
+    # No inbound handler in FA.exe -> never echo (echo -> "Unknown Type 64"). Same
     # wrapper variants as the others.
     if sub == 0x40:                                            # direct
         handle_leave_arena(s); return
     if sub == 0x00 and len(pl) > 8 and pl[8] == 0x40:          # type-scan double-wrap
         handle_leave_arena(s); return
 
-    # ── GROUND-WAR DAMAGE REPORT (msg 31 / 0x1f) — consume + decode, NEVER echo ────
+    # -- GROUND-WAR DAMAGE REPORT (msg 31 / 0x1f) - consume + decode, NEVER echo ----
     # Direct form (outer type rotates: 0x72/0xd2/... with sub at pl[4]) and the
     # type-scan double-wrap (sub=0x00, msg-id at pl[8]). Compound form is caught in
     # handle_compound. See _handle_ground_damage_31 for the wire layout + evidence.
@@ -4699,30 +4721,30 @@ def handle_post_auth(s, cmd, pl):
         _handle_ground_damage_31(s, bytes(pl[9:]), via=' (scan)')
         return
 
-    # ── NOTIFY MESSAGES, type-scan double-wrapped — must not be echoed ─────────
-    # 0x03 = NET::OBJECT delete notify (echo → client-side bounds-error crash),
-    # 0x20 = no-handler status (echo → "Unknown Type 32"). Direct variants are
+    # -- NOTIFY MESSAGES, type-scan double-wrapped - must not be echoed ---------
+    # 0x03 = NET::OBJECT delete notify (echo -> client-side bounds-error crash),
+    # 0x20 = no-handler status (echo -> "Unknown Type 32"). Direct variants are
     # swallowed by NO_ECHO_SUBS below; this catches the wrapped form before the
     # generic echo fallthrough re-sends the whole wrapper.
     if sub == 0x00 and len(pl) > 8 and pl[8] == 0x03:
         # Wrapped NET::OBJECT delete: a CRASHLAND death arrives as outer type=0x06 + inner 0x03,
         # so it MUST run the same in-arena removal path (re-arm the spawn-confirm), not be swallowed
-        # — otherwise the crashland respawn's out 4 gets no ServerConfirm and the engine stays dead.
+        # - otherwise the crashland respawn's out 4 gets no ServerConfirm and the engine stays dead.
         _ingame_own_object_removed(s, tb, stored)
         return
     if sub == 0x00 and len(pl) > 8 and pl[8] in (0x20, 0x45):
-        log('POST-AUTH', f'scan-inner sub=0x{pl[8]:02x} (notify, must not echo) → swallow')
+        log('POST-AUTH', f'scan-inner sub=0x{pl[8]:02x} (notify, must not echo) -> swallow')
         return
 
-    # ── FLY / START PLACE (msg 23 / 0x17) ──────────────────────────────────────
+    # -- FLY / START PLACE (msg 23 / 0x17) --------------------------------------
     # [0x17][AF][mid][N]; N=0xff = request. Reply is the GRANT (see
-    # handle_fly_start_place) — echoing the request back denies the spawn.
+    # handle_fly_start_place) - echoing the request back denies the spawn.
     if sub == 0x17 and len(pl) >= 8:                           # direct
         handle_fly_start_place(s, pl[5], pl[6], pl[7]); return
     if sub == 0x00 and len(pl) >= 12 and pl[8] == 0x17:        # type-scan double-wrap
         handle_fly_start_place(s, pl[9], pl[10], pl[11], via=' (scan)'); return
 
-    # ── OUT-4 SPAWN STATE, type-scan DOUBLE-WRAPPED (re-spawn / airfield change) ──
+    # -- OUT-4 SPAWN STATE, type-scan DOUBLE-WRAPPED (re-spawn / airfield change) --
     # The first spawn's out-4 is DIRECT (msg-id 0x04 @ pl[4], outer type 0x12), caught
     # later in the tb==0x12 block. On a RE-spawn the type-scan rotates the outer type
     # (seen: 0x1e) and double-wraps it: outer hdr | inner appspace hdr [bc][0x12] |
@@ -4741,31 +4763,31 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xe1:
                 pilots=db_get_pilots(s.account) if s.account else []
                 resp=build_e1_pilot_list(pilots)
-                threading.Thread(target=lambda:send_rel(s,resp,'← pilot list',to=5.0),daemon=True).start(); return
+                threading.Thread(target=lambda:send_rel(s,resp,'<- pilot list',to=5.0),daemon=True).start(); return
             if sub == 0xde:
                 def da_then_echo():
                     da=build_da_session()
-                    if not send_rel(s,da,'← 0xDA',to=5.0): return
-                    time.sleep(0.005); send_rel(s,stored,'← echo 0xde',to=5.0)
+                    if not send_rel(s,da,'<- 0xDA',to=5.0): return
+                    time.sleep(0.005); send_rel(s,stored,'<- echo 0xde',to=5.0)
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
             if sub in (0xce, 0xca, 0xcb):
                 if sub == 0xce:
                     active_rooms = db_get_open_rooms()
                     resp = build_ce_room_list(active_rooms)
                     raw_len = len(resp) - 4  # payload after vcncNet header
-                    log('CE', f'AppSpaceList: {len(active_rooms)} room(s) → {raw_len} bytes raw')
-                    label = f'← AppSpaceList ({len(active_rooms)} rooms, {raw_len}B)'
+                    log('CE', f'AppSpaceList: {len(active_rooms)} room(s) -> {raw_len} bytes raw')
+                    label = f'<- AppSpaceList ({len(active_rooms)} rooms, {raw_len}B)'
                 elif sub == 0xcb:
                     # GameList = THE ARENA LIST (confirmed via FUN_004f03b0).
                     # Respond with open rooms as arena records instead of empty.
                     active_rooms = db_get_open_rooms()
                     resp = build_gamelist(active_rooms)
                     raw_len = len(resp) - 4
-                    label = f'← GameList ({len(active_rooms)} arenas, {raw_len}B, fmt={GAMELIST_FORMAT})'
+                    label = f'<- GameList ({len(active_rooms)} arenas, {raw_len}B, fmt={GAMELIST_FORMAT})'
                 else:
                     names = {0xca:'ServerList'}
                     resp = build_empty_room_list(sub)
-                    label = f'← empty {names.get(sub, hex(sub))}'
+                    label = f'<- empty {names.get(sub, hex(sub))}'
                 threading.Thread(target=lambda:send_rel(s,resp,label,to=5.0),daemon=True).start()
                 # NOTE (v151): NO room echo here. List population is done entirely by
                 # the 0xcb GameList response above ([0xcb] + per arena [1 byte][name\0],
@@ -4778,28 +4800,28 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xcd:
                 _handle_chat_pl(s, pl); return
             if sub == 0xd2:
-                # 0xd2 = THE ARENA LIST request (real log: out 210'1 → in 210'1110).
+                # 0xd2 = THE ARENA LIST request (real log: out 210'1 -> in 210'1110).
                 # v164: push each room's GAME_DEF (212) FIRST so the client caches the
-                # arena's terrain, then send the list. (Was: list only → terrain 0 crash.)
+                # arena's terrain, then send the list. (Was: list only -> terrain 0 crash.)
                 active_rooms = db_get_open_rooms()
                 threading.Thread(
                     target=lambda: send_arenalist_with_gamedefs(
-                        s, active_rooms, f'← ArenaList 0xd2 ({len(active_rooms)} rooms)'),
+                        s, active_rooms, f'<- ArenaList 0xd2 ({len(active_rooms)} rooms)'),
                     daemon=True).start(); return
             # APPSPACE-type outer with inner 0x43 (e.g. [00120000|00120000]+43)
             # type=0x12 is used as the outer type by the retry counter in this case.
             if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0xd2 and not s.entered_game:
-                log('POST-AUTH','APPSPACE-scan sub=0xd2 → echo inner')
+                log('POST-AUTH','APPSPACE-scan sub=0xd2 -> echo inner')
                 threading.Thread(target=lambda: send_rel(s, build_appspace_pkt(bytes([0xd2])),
-                                 '← APPSPACE-scan echo 0xd2', to=3.0), daemon=True).start()
+                                 '<- APPSPACE-scan echo 0xd2', to=3.0), daemon=True).start()
                 return
             if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0x43:
                 now = time.time()
                 if now - s.last_43_ts >= 0.5:
                     s.last_43_ts = now
-                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
+                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                     if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-                        send_unrel(s, build_da_session_safe(), '← 0xDA re-attach RESEND (appspace 0x43 poll)')
+                        send_unrel(s, build_da_session_safe(), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
@@ -4807,11 +4829,11 @@ def handle_post_auth(s, cmd, pl):
                         pcount= db_room_player_count(rid)
                         slot  = room_slot or (rid & 0xFF)
                         rd = bytes([0x43,slot,0,0,0,pcount,0x01,0,0,0,0,0,0,0,0,0,0])
-                        log('POST-AUTH',f'APPSPACE-scan sub=0x43 → room confirm slot=0x{slot:02x} players={pcount}')
+                        log('POST-AUTH',f'APPSPACE-scan sub=0x43 -> room confirm slot=0x{slot:02x} players={pcount}')
                         resp = build_appspace_pkt(rd)
-                        threading.Thread(target=lambda:send_rel(s,resp,'← APPSPACE-scan 0x43',to=3.0),daemon=True).start()
-                    else: log('POST-AUTH','APPSPACE-scan sub=0x43 → no room yet')
-                else: log('POST-AUTH','APPSPACE-scan sub=0x43 → rate-limited')
+                        threading.Thread(target=lambda:send_rel(s,resp,'<- APPSPACE-scan 0x43',to=3.0),daemon=True).start()
+                    else: log('POST-AUTH','APPSPACE-scan sub=0x43 -> no room yet')
+                else: log('POST-AUTH','APPSPACE-scan sub=0x43 -> rate-limited')
                 return
             if sub == 0x43:
                 # 0x43 poll. In lobby mode this is the room-creation confirm; after
@@ -4822,10 +4844,10 @@ def handle_post_auth(s, cmd, pl):
                 # confirm and observe whether the client advances or wants a scene push next.
                 now = time.time()
                 if now - s.last_43_ts < 0.5:
-                    log('POST-AUTH', 'sub=0x43 → rate-limited, skipping')
+                    log('POST-AUTH', 'sub=0x43 -> rate-limited, skipping')
                     return
                 s.last_43_ts = now
-                _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
+                _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                 room_slot = getattr(s, 'room_slot', 0)
                 rooms = db_get_open_rooms()
                 if rooms and (s.current_room or room_slot):
@@ -4833,48 +4855,48 @@ def handle_post_auth(s, cmd, pl):
                     pcount = db_room_player_count(rid)
                     slot   = room_slot or (rid & 0xFF)
                     # data[6]=0x01 (lobby flag in creation); keep it for the first game-mode
-                    # test — if the client rejects it we'll vary this byte / the layout.
+                    # test - if the client rejects it we'll vary this byte / the layout.
                     resp_data = bytes([0x43, slot, 0x00, 0x00, 0x00, pcount, 0x01,
                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
                     mode = 'GAME' if s.entered_game else 'lobby'
-                    log('POST-AUTH', f'sub=0x43 {mode} confirm → slot=0x{slot:02x} '
+                    log('POST-AUTH', f'sub=0x43 {mode} confirm -> slot=0x{slot:02x} '
                         f'db_id={rid} players={pcount}')
                     resp = build_appspace_pkt(resp_data)
-                    threading.Thread(target=lambda:send_rel(s,resp,f'← 0x43 {mode} confirm',to=3.0),daemon=True).start()
+                    threading.Thread(target=lambda:send_rel(s,resp,f'<- 0x43 {mode} confirm',to=3.0),daemon=True).start()
                 else:
-                    log('POST-AUTH', 'sub=0x43 → no room, not responding (avoids null crash)')
+                    log('POST-AUTH', 'sub=0x43 -> no room, not responding (avoids null crash)')
                 return
             if sub == 0x60 and s.entered_game:
                 # Bare 0x60 = client REQUESTS the SCORE_TABLE (msg 96). Sent right
                 # after the FLY 23 StartPlace grant (messages09.log 06:51:00.782).
-                # v184 left it unanswered → client stalled in the 0x43 poll loop, the
+                # v184 left it unanswered -> client stalled in the 0x43 poll loop, the
                 # launch timer never started, CTD after ~20s. THIS is the correct,
-                # solicited send point for 96 — the v183 crash was sending it
+                # solicited send point for 96 - the v183 crash was sending it
                 # UNSOLICITED during entry, before the client's world existed.
-                log('SCORE96', 'bare 0x60 = ScoreTable request → answering msg 96 (small populated defs)')
+                log('SCORE96', 'bare 0x60 = ScoreTable request -> answering msg 96 (small populated defs)')
                 resp = build_score_table_96(object_groups=SCORE_DEFS_DEFAULT)   # 0..31 type slots,
                 #   points in `extra` (= score-def+0xc); ~321B so it fits a single reliable packet.
                 threading.Thread(target=lambda: send_rel(s, resp,
-                                 '← ScoreTable 96 (on request)', to=5.0), daemon=True).start()
+                                 '<- ScoreTable 96 (on request)', to=5.0), daemon=True).start()
                 return
             if sub == 0x66 and s.entered_game:
                 # Bare 0x66 (msg 102): function unknown (no inbound handler slot for
                 # 102; the client emits it right after team select). v185 answered it
-                # with a 62 roster INCLUDING the requester — FATAL (messages10.log):
+                # with a 62 roster INCLUDING the requester - FATAL (messages10.log):
                 # the msg 201 handler (FUN_004f88f0) already creates the LOCAL
                 # player's entry in the player table (FUN_004f3230 + insert, camp=-1),
-                # and a 62 record for an existing index DELETES + re-adds it — i.e. it
+                # and a 62 record for an existing index DELETES + re-adds it - i.e. it
                 # freed the live local player while the GamerClient still pointed at
-                # it → use-after-free → delayed CTD (~1.7s). Unanswered 0x66 is proven
-                # harmless (messages09: client chatted and flew fine). → swallow.
-                log('POST-AUTH', f'bare 0x66 from {s.current_pilot} → swallow '
+                # it -> use-after-free -> delayed CTD (~1.7s). Unanswered 0x66 is proven
+                # harmless (messages09: client chatted and flew fine). -> swallow.
+                log('POST-AUTH', f'bare 0x66 from {s.current_pilot} -> swallow '
                                  f'(unknown fn; harmless unanswered. self-62 barred by invariant)')
                 return
-            # msg 4 (0x04) = client's FULL object state at spawn — it arrives as type=0x12
+            # msg 4 (0x04) = client's FULL object state at spawn - it arrives as type=0x12
             # sub=0x04, so it MUST be caught HERE, before this block's catch-all return.
             # (messages33: with the check placed AFTER the tb==0x12 block the catch-all
-            # below swallowed msg 4 and ServerConfirm never fired → same ~50s freeze.) The
-            # first msg 4 after a StartPlace is the ServerConfirm (msg 5) trigger — the gate
+            # below swallowed msg 4 and ServerConfirm never fired -> same ~50s freeze.) The
+            # first msg 4 after a StartPlace is the ServerConfirm (msg 5) trigger - the gate
             # that stamps the global Number onto the client's plane and starts the sim loop.
             # msg 4/6 are the client's OWN state, never echoed.
             if s.entered_game and sub == 0x04:
@@ -4890,14 +4912,14 @@ def handle_post_auth(s, cmd, pl):
         # freeze the link (messages22). Lobby unaffected (entered_game False): pilot
         # create/rename/delete (0xe2/0xe3/0xe7) still echo normally.
         if s.entered_game and sub in (0x18, 0x53, 0x54, 0x06):
-            log('POST-AUTH', f'in-game telemetry type=0x{tb:02x} sub=0x{sub:02x} → swallow (no echo)')
+            log('POST-AUTH', f'in-game telemetry type=0x{tb:02x} sub=0x{sub:02x} -> swallow (no echo)')
             return
         # WRAPPED in-game telemetry: during rapid respawns the client sometimes emits its
-        # position/state in the extra-wrapped form `00 00 00 00 00 82 .. <inner@pl[8]>` — pl[1]
+        # position/state in the extra-wrapped form `00 00 00 00 00 82 .. <inner@pl[8]>` - pl[1]
         # then reads as sub=0x00, so the direct guard above misses it and it fell through to the
         # generic echo, which bounced it back as a reliable type=0x00. The client's Conductor
         # can't parse a type-0 reliable msg ("Server sent client something it doesn't understand
-        # (-102)"), stops ACKing, and the whole reliable channel dies — surfacing as "waiting
+        # (-102)"), stops ACKing, and the whole reliable channel dies - surfacing as "waiting
         # start place expired" + an empty plane list on the next respawn. Swallow it exactly like
         # the direct telemetry form. Requires pl[5]==0x82 AND an inner telemetry sub at pl[8]
         # (0x18/0x53/0x54/0x06) so it can never collide with the wrapped VNET::SendEnterToGame
@@ -4905,16 +4927,16 @@ def handle_post_auth(s, cmd, pl):
         # chat/team/leave double-wrap guards above.
         if (s.entered_game and sub == 0x00 and len(pl) > 8
                 and pl[5] == 0x82 and pl[8] in (0x18, 0x53, 0x54, 0x06)):
-            log('POST-AUTH', f'in-game telemetry (wrapped, inner=0x{pl[8]:02x}) → swallow (no echo)')
+            log('POST-AUTH', f'in-game telemetry (wrapped, inner=0x{pl[8]:02x}) -> swallow (no echo)')
             return
 
         # In-game COMBAT DAMAGE (msg 28 = sub 0x1c). The shooter's client does its OWN hit
         # detection and emits the per-bodypart hit records as a RELIABLE message ('out 28' /
         # 'You have hit ...'). It must be RELAYED to the other player(s) so the TARGET takes
         # the damage and can die. The old default ECHOED it back to the shooter, which then
-        # re-applied its own damage to its LOCAL copy of the target → over-killed a remote
-        # object it doesn't own → attacker CTD, while the target took nothing (server.log:
-        # every 'sub=0x1c → echo'; messages09: zero 'in 28'). Object ids are GLOBAL (the
+        # re-applied its own damage to its LOCAL copy of the target -> over-killed a remote
+        # object it doesn't own -> attacker CTD, while the target took nothing (server.log:
+        # every 'sub=0x1c -> echo'; messages09: zero 'in 28'). Object ids are GLOBAL (the
         # target id is identical on every client), so forward the bytes as-is, reliably, to
         # each flying peer; no remap/re-stamp needed.
         if s.entered_game and sub == 0x1c:
@@ -4923,9 +4945,9 @@ def handle_post_auth(s, cmd, pl):
                      if x is not s and getattr(x, 'flying', False)]
             for p in peers:
                 threading.Thread(target=lambda _p=p: send_rel(_p, stored,
-                                 f'← DAMAGE 28 relay ({s.current_pilot}→{_p.current_pilot})', to=3.0),
+                                 f'<- DAMAGE 28 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
                                  daemon=True).start()
-            log('DAMAGE28', f'{s.current_pilot} hit → relay to {len(peers)} peer(s) '
+            log('DAMAGE28', f'{s.current_pilot} hit -> relay to {len(peers)} peer(s) '
                             f'in room {s.current_room} ({len(stored)}B)')
             return
 
@@ -4940,7 +4962,7 @@ def handle_post_auth(s, cmd, pl):
             # A msg-3 that removes the player's OWN plane WHILE IN THE ARENA is a death
             # (crash / shot / crashland) OR an exit-to-HQ. Routed through the shared helper so the
             # DIRECT (tb=0x42/0x52/0x32) and the type-scan WRAPPED (outer 0x06) forms behave
-            # identically — a crashland uses the wrapped form (handled at the scan-inner call site).
+            # identically - a crashland uses the wrapped form (handled at the scan-inner call site).
             _ingame_own_object_removed(s, tb, stored)
             return
 
@@ -4950,7 +4972,7 @@ def handle_post_auth(s, cmd, pl):
                 new_name=name_raw.split(b'\x00')[0].decode('ascii',errors='replace')
                 if new_name:
                     slot=db_next_slot(s.account); db_ensure_pilot(new_name,s.account,slot)
-            threading.Thread(target=lambda:send_rel(s,stored,'← echo 0xe2',to=5.0),daemon=True).start(); return
+            threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe2',to=5.0),daemon=True).start(); return
 
         if tb == 0x42:
             if sub == 0xe3:
@@ -4961,14 +4983,14 @@ def handle_post_auth(s, cmd, pl):
                 nb = pname.encode() + b'\x00'
                 data[4:4+min(len(nb),29)] = nb[:29]
                 resp = build_typed_pkt(0x42, bytes(data), bc=2)
-                threading.Thread(target=lambda: send_rel(s, resp, '← delete success', to=5.0), daemon=True).start(); return
+                threading.Thread(target=lambda: send_rel(s, resp, '<- delete success', to=5.0), daemon=True).start(); return
             if sub == 0xe7:
                 old_raw = pl[8:40] if len(pl)>=40 else pl[8:]
                 new_raw = pl[40:72] if len(pl)>=72 else b''
                 old_name = old_raw.split(b'\x00')[0].decode('ascii', 'replace')
                 new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
                 if old_name and new_name and s.account: db_rename_pilot(old_name, new_name, s.account)
-                threading.Thread(target=lambda: send_rel(s, stored, '← echo rename', to=5.0), daemon=True).start(); return
+                threading.Thread(target=lambda: send_rel(s, stored, '<- echo rename', to=5.0), daemon=True).start(); return
             threading.Thread(target=lambda: send_rel(s, stored, 'echo type=0x42', to=5.0), daemon=True).start(); return
 
         if tb == 0x62 and sub == 0xe4:
@@ -4978,7 +5000,7 @@ def handle_post_auth(s, cmd, pl):
                 s.current_pilot = pname; s.current_slot = slot
                 log('POST-AUTH',f'Pilot selected: "{pname}" slot={slot}')
                 # NOTE (v151): NO room auto-restore. The real client never auto-joins
-                # a room on reconnect — the player lands on the tabbed menu and only
+                # a room on reconnect - the player lands on the tabbed menu and only
                 # sees rooms when they open the Arenas tab (via the 0xcb list). The old
                 # restore + 0x92 echo made the client believe it owned/occupied a room
                 # and start 0x43 polling, which confounded every list test. The room
@@ -4987,7 +5009,7 @@ def handle_post_auth(s, cmd, pl):
                 broadcast_player_join(pname, exclude_sess=s)
                 threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
                 threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
-            threading.Thread(target=lambda:send_rel(s,stored,'← echo 0xe4',to=5.0),daemon=True).start()
+            threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe4',to=5.0),daemon=True).start()
             return
 
         if tb == 0x01:
@@ -5003,7 +5025,7 @@ def handle_post_auth(s, cmd, pl):
                 s.closing=True
                 with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
                 return
-            # else: type-scan packet with inner data — fall through to generic echo
+            # else: type-scan packet with inner data - fall through to generic echo
 
         # type=0x92 sub=0xdc direct path (fallback; normally arrives via compound cmd=18)
         if tb == 0x92 and sub == 0xdc and len(pl) > 33:
@@ -5015,7 +5037,7 @@ def handle_post_auth(s, cmd, pl):
             room_id = db_create_room(creator, s.account or '', game_def, room_slot)
             s.current_room = room_id; s.room_slot = room_slot
             if creator:
-                if not PERSIST_ROOMS:              # one-room-per-creator — gated (see compound path)
+                if not PERSIST_ROOMS:              # one-room-per-creator - gated (see compound path)
                     _c = sqlite3.connect(DB_PATH)  # close stale rooms (direct)
                     _c.execute("UPDATE rooms SET status='closed' WHERE creator_pilot=? AND status='open' AND room_id!=?",
                                (creator, room_id))
@@ -5025,13 +5047,13 @@ def handle_post_auth(s, cmd, pl):
             broadcast_system(f'[{creator}] created a room', exclude_sess=s)
             # Echo to creator (existing behavior) + broadcast to all other sessions
             # so their arena lists show the new room.
-            threading.Thread(target=lambda:send_rel(s,stored,'← echo room create',to=5.0),daemon=True).start()
+            threading.Thread(target=lambda:send_rel(s,stored,'<- echo room create',to=5.0),daemon=True).start()
             threading.Thread(target=lambda:broadcast_room_creation(room_id, exclude_sess=s), daemon=True).start()
             return
 
-        # type=0x52: pilot/squad/team update packets (FA.exe → server only)
+        # type=0x52: pilot/squad/team update packets (FA.exe -> server only)
         # sub=0xd5 = pilot status (rank, score, faction)
-        # sub=0xd7 = team/squad name update (loops if echoed — FA.exe retries indefinitely)
+        # sub=0xd7 = team/squad name update (loops if echoed - FA.exe retries indefinitely)
         # sub=0xd9 = related team info (same issue)
         # DO NOT echo: echoing type=0x52 back to FA.exe causes infinite retry loops
         # and fills the squadron page with GAME_DEF garbage when triggered by wrong 0xce data.
@@ -5042,38 +5064,38 @@ def handle_post_auth(s, cmd, pl):
                 # GameIndex at pl[5:9] LE.
                 if len(pl) >= 9:
                     game_idx = int.from_bytes(pl[5:9], 'little')
-                    log('POST-AUTH', f'EnterArena sub=0xe0 GameIndex=0x{game_idx:08x} ({game_idx}) — accepted')
+                    log('POST-AUTH', f'EnterArena sub=0xe0 GameIndex=0x{game_idx:08x} ({game_idx}) - accepted')
                 else:
-                    log('POST-AUTH', f'EnterArena sub=0xe0 len={len(pl)} — accepted')
+                    log('POST-AUTH', f'EnterArena sub=0xe0 len={len(pl)} - accepted')
                 return
             if sub == 0xd7:
                 # sub=0xd7 = FUN_004f0570 "SetArena" (5 bytes: [0xd7][GameIndex 4B])
                 # Sets current arena on server. No response needed.
                 if len(pl) >= 9:
                     game_idx = int.from_bytes(pl[5:9], 'little')
-                    log('POST-AUTH', f'SetArena sub=0xd7 GameIndex=0x{game_idx:08x} — accepted')
+                    log('POST-AUTH', f'SetArena sub=0xd7 GameIndex=0x{game_idx:08x} - accepted')
                 else:
-                    log('POST-AUTH', f'SetArena sub=0xd7 len={len(pl)} — accepted')
+                    log('POST-AUTH', f'SetArena sub=0xd7 len={len(pl)} - accepted')
                 return
             if sub == 0xd4:
-                # FA message 212 — on-demand GAME_DEF request ("out 212'5"); see
+                # FA message 212 - on-demand GAME_DEF request ("out 212'5"); see
                 # handle_gamedef_request. pl[5:9] = GameIndex (LE).
                 game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
                 handle_gamedef_request(s, game_idx)
                 return
             if sub == 0xd5:
-                # FA message 213 — arena player-info request; see handle_213_request.
+                # FA message 213 - arena player-info request; see handle_213_request.
                 game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
                 handle_213_request(s, game_idx)
                 return
             else:
-                log('POST-AUTH', f'type=0x52 sub=0x{sub:02x} len={len(pl)} — accepted (not echoed)')
+                log('POST-AUTH', f'type=0x52 sub=0x{sub:02x} len={len(pl)} - accepted (not echoed)')
             return
 
-                # VNET::SendEnterToGame — DIRECT FORMAT: bc=2, type=0x82, cmd=0, sub=0xc8=200
+                # VNET::SendEnterToGame - DIRECT FORMAT: bc=2, type=0x82, cmd=0, sub=0xc8=200
         # FA.exe logs: "VNET::SendEnterToGame GameIndex=NNN" + "out 200'40"
         # Pilot name at pl[12:44] (32-byte null-padded, confirmed from capture).
-        # DO NOT echo this packet — server echoing type=0x82/sub=0xc8 causes FA.exe
+        # DO NOT echo this packet - server echoing type=0x82/sub=0xc8 causes FA.exe
         # to log "NET::MESSAGE with Unknown Type 200" and break the session.
         # After this, stop sending 0x43 responses; FA.exe will exit cleanly via type-scan.
         if tb == 0x82 and sub == 0xc8 and len(pl) >= 44:
@@ -5099,32 +5121,32 @@ def handle_post_auth(s, cmd, pl):
             s.entering_gidx = game_idx
             s.nation = None                   # enters "In Menu" until a side is picked
             assign_player_slot(s, s.current_room)
-            log('POST-AUTH', 'GAME MODE — will answer 0x43 game-connect poll (not echoing 200)')
+            log('POST-AUTH', 'GAME MODE - will answer 0x43 game-connect poll (not echoing 200)')
             # Send the real entry GRANT: msg 201 (0xc9) JoinToGameAnswer. ClientNumber and
-            # PlayerIndex are the room-scoped slot (both >= 0 → grant). This stops the
+            # PlayerIndex are the room-scoped slot (both >= 0 -> grant). This stops the
             # 0x43 poll and moves the client into the arena (handler FUN_004f88f0).
-            # GUARD (RE FUN_004f88f0): handler asserts ClientID<0 on entry — a 2nd 201
+            # GUARD (RE FUN_004f88f0): handler asserts ClientID<0 on entry - a 2nd 201
             # while already granted crashes the client. Grant once per entry.
             if s.client_granted:
-                log('POST-AUTH', 'JoinToGameAnswer 201 already granted this entry — suppressing duplicate')
+                log('POST-AUTH', 'JoinToGameAnswer 201 already granted this entry - suppressing duplicate')
             else:
                 s.client_granted = True
                 send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
-                         f'← JoinToGameAnswer 201 (ClientNumber={s.client_number} '
-                         f'PlayerIndex={s.player_index} → GRANT)', to=5.0)
-            # ── PLAYER-OBJECT LAYER (v184) ───────────────────────────────────────
+                         f'<- JoinToGameAnswer 201 (ClientNumber={s.client_number} '
+                         f'PlayerIndex={s.player_index} -> GRANT)', to=5.0)
+            # -- PLAYER-OBJECT LAYER (v184) ---------------------------------------
             # Now that the local player is granted, stand up the remote-player view:
-            #   1. msg 62 → tell the newcomer about every peer already in the room
-            #      (builds a REMOTE_PLAYER object for each — handler FUN_004fa5f0).
-            #   2. msg 62 → tell those peers about the newcomer (live join).
-            # Both 62 calls self-gate: no peers → nothing sent, so a lone player's
+            #   1. msg 62 -> tell the newcomer about every peer already in the room
+            #      (builds a REMOTE_PLAYER object for each - handler FUN_004fa5f0).
+            #   2. msg 62 -> tell those peers about the newcomer (live join).
+            # Both 62 calls self-gate: no peers -> nothing sent, so a lone player's
             # entry is byte-identical to the known-good v182 path.
             # Side/camp (msg 63) is NOT sent here: nation is still None ("In Menu")
-            # until the client picks a side, which drives handle_team_select → 63.
-            # msg 96 (ScoreTable) is DEFERRED — v183 sent it unconditionally here and
+            # until the client picks a side, which drives handle_team_select -> 63.
+            # msg 96 (ScoreTable) is DEFERRED - v183 sent it unconditionally here and
             # it crashed arena-join (messages08.log): FUN_004f53b0 frees+reallocates
             # the host-side score-table object mid-entry, before the client's world is
-            # stood up, wedging it (3s stall → WinError 10054). Seed the board after
+            # stood up, wedging it (3s stall -> WinError 10054). Seed the board after
             # full world-load, not during the grant.
             def _stand_up_player_objects(_s=s):
                 push_player_roster_62(_s, reason='(on enter)')
@@ -5133,11 +5155,11 @@ def handle_post_auth(s, cmd, pl):
             # Do NOT echo: echoing type=0x82/sub=0xc8 causes FA.exe "Unknown Type 200"
             return
 
-        # ── WRAPPED VNET::SendEnterToGame ─────────────────────────────────────────
+        # -- WRAPPED VNET::SendEnterToGame -----------------------------------------
         # Outer packet: bc=0, type=RETRY_COUNTER, cmd=0, sub=INNER_BC
         # Inner at pl[4:]: [inner_bc=0x02][inner_type=0x82][0x00][0x00][inner_sub=0xc8]...
-        # BUG HISTORY: was inside sub==0x00 && len<=16 gate → IMPOSSIBLE to trigger.
-        #   pl[4]=inner_bc=0x02 ≠ 0x00   AND   len(pl)=48 > 16.
+        # BUG HISTORY: was inside sub==0x00 && len<=16 gate -> IMPOSSIBLE to trigger.
+        #   pl[4]=inner_bc=0x02 != 0x00   AND   len(pl)=48 > 16.
         # FIX: check here with only pl[5]==0x82 and pl[8]==0xc8, ANY outer sub.
         if len(pl) >= 17 and pl[5] == 0x82 and pl[8] == 0xc8:
             pname_raw = pl[16:48] if len(pl) >= 48 else pl[16:]
@@ -5151,10 +5173,10 @@ def handle_post_auth(s, cmd, pl):
             else:
                 log('POST-AUTH', f'VNET::SendEnterToGame (WRAPPED) inner_bc=0x{sub:02x} GameIndex=0x{game_idx:08x} (no room)')
             s.entered_game = True
-            log('POST-AUTH', 'GAME MODE (wrapped VNET) — stopping 0x43, not echoing')
+            log('POST-AUTH', 'GAME MODE (wrapped VNET) - stopping 0x43, not echoing')
             return
 
-        # ── SCAN-INNER PACKET DETECTION ──────────────────────────────────────────
+        # -- SCAN-INNER PACKET DETECTION ------------------------------------------
         # FA.exe wraps APPSPACE sub-commands in type-scan outer packets:
         #   outer: bc=0, type=RETRY_COUNTER, cmd=0, sub=0x00
         #   inner at pl[4:]: inner[1]=type, inner[3]=cmd_lo, inner[4]=sub
@@ -5164,27 +5186,27 @@ def handle_post_auth(s, cmd, pl):
             inner3 = pl[7] if len(pl) > 7 else 0   # inner cmd low byte
             inner4 = pl[8] if len(pl) > 8 else 0   # inner sub
 
-            # Inner type=0x52 (pilot/squad status): accept silently — echoing causes loops
+            # Inner type=0x52 (pilot/squad status): accept silently - echoing causes loops
             if inner1 == 0x52:
-                log('POST-AUTH', f'scan-inner 0x52/0x{inner4:02x} — accepted silently')
+                log('POST-AUTH', f'scan-inner 0x52/0x{inner4:02x} - accepted silently')
                 return
 
-            # Inner sub=0xd2: pre-room signal retry via type-scan → echo it
+            # Inner sub=0xd2: pre-room signal retry via type-scan -> echo it
             if inner1 == 0x12 and inner4 == 0xd2 and not s.entered_game:
-                log('POST-AUTH','scan-inner sub=0xd2 → echo inner')
+                log('POST-AUTH','scan-inner sub=0xd2 -> echo inner')
                 threading.Thread(target=lambda: send_rel(s, build_appspace_pkt(bytes([0xd2])),
-                                 '← scan-inner echo 0xd2', to=3.0), daemon=True).start()
+                                 '<- scan-inner echo 0xd2', to=3.0), daemon=True).start()
                 return
 
-            # (VNET wrapped check moved OUT of this block — was dead code here
-            #  because inner bc=0x02 makes outer sub=0x02 ≠ 0x00, AND len=48 > 16)
+            # (VNET wrapped check moved OUT of this block - was dead code here
+            #  because inner bc=0x02 makes outer sub=0x02 != 0x00, AND len=48 > 16)
 
             # Inner APPSPACE sub=0x43: type-scan room confirm poll
             if inner1 == 0x12 and inner4 == 0x43:
                 now = time.time()
                 if now - s.last_43_ts >= 0.5:
                     s.last_43_ts = now
-                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll → 201 GRANT
+                    _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
@@ -5192,18 +5214,18 @@ def handle_post_auth(s, cmd, pl):
                         pcount= db_room_player_count(rid)
                         slot  = room_slot or (rid & 0xFF)
                         rd = bytes([0x43,slot,0,0,0,pcount,0x01,0,0,0,0,0,0,0,0,0,0])
-                        log('POST-AUTH',f'scan-inner sub=0x43 → room confirm slot=0x{slot:02x} players={pcount}')
+                        log('POST-AUTH',f'scan-inner sub=0x43 -> room confirm slot=0x{slot:02x} players={pcount}')
                         resp = build_appspace_pkt(rd)
-                        threading.Thread(target=lambda:send_rel(s,resp,'← scan-inner 0x43',to=3.0),daemon=True).start()
+                        threading.Thread(target=lambda:send_rel(s,resp,'<- scan-inner 0x43',to=3.0),daemon=True).start()
                     else:
-                        log('POST-AUTH','scan-inner sub=0x43 → no room yet')
+                        log('POST-AUTH','scan-inner sub=0x43 -> no room yet')
                 else:
-                    log('POST-AUTH','scan-inner sub=0x43 → rate-limited')
+                    log('POST-AUTH','scan-inner sub=0x43 -> rate-limited')
                 return  # never echo these
 
             # Inner vcncExitAppSpace (inner type=0x40, inner cmd=5)
             if inner1 == 0x40 and inner3 == 0x05:
-                log('POST-AUTH','scan-inner vcncExitAppSpace → exit reply')
+                log('POST-AUTH','scan-inner vcncExitAppSpace -> exit reply')
                 pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
                 if not send_rel(s,bytes(pl2),'exit appspace reply (scan)'):
                     s.closing=True
@@ -5211,38 +5233,38 @@ def handle_post_auth(s, cmd, pl):
                 return
 
         # Messages that must NEVER be echoed. Two kinds:
-        #  - 0x20 (msg 32): no inbound dispatch handler → echo logs "Unknown Type 32".
-        #  - 0x03 (msg 3): NET::OBJECT delete NOTIFY (client → server "I deleted object
+        #  - 0x20 (msg 32): no inbound dispatch handler -> echo logs "Unknown Type 32".
+        #  - 0x03 (msg 3): NET::OBJECT delete NOTIFY (client -> server "I deleted object
         #    N", e.g. `out 3'3` [03 00 80] right after the back-button teardown's
-        #    "del CLIENT Me 0"). Msg 3 DOES have an inbound handler — "Server require
-        #    delete object %i" — so echoing it back commands the CLIENT to delete a
+        #    "del CLIENT Me 0"). Msg 3 DOES have an inbound handler - "Server require
+        #    delete object %i" - so echoing it back commands the CLIENT to delete a
         #    bogus object id and crashes the engine: bounds error
         #    ARR<NET::OBJECT*,2048>[29696] (messages01.log, the post-leave crash).
-        # In-game telemetry (flight state etc.) is client→server only and has NO inbound
+        # In-game telemetry (flight state etc.) is client->server only and has NO inbound
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21}  # 0x4d=msg77 plane-preload counts (echo → index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index → ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03)
         if sub in NO_ECHO_SUBS:
-            log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) → swallow')
+            log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
-            log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (TRIM_RELIABLE_ECHOES) → swallow, no echo')
+            log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (TRIM_RELIABLE_ECHOES) -> swallow, no echo')
             return
         if sub == 0x3a and SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
             # Exit-context hangar plane-list: echo UNRELIABLY (no reliable-seq cost). Empty hangar
             # => client re-requests 0x3a => we re-echo. Normal hangar-entry 0x3a still reliable below.
-            log('POST-AUTH', 'cmd=0 sub=0x3a (exit hangar list) → echo UNRELIABLE')
+            log('POST-AUTH', 'cmd=0 sub=0x3a (exit hangar list) -> echo UNRELIABLE')
             send_unrel(s, stored, 'echo 0x3a (exit, UNREL)')
             return
 
-        # ── Per-side CATALOG FILTER (PLANE_FILTER_VIA_CATALOG): trim the echoed 0x3a plane
+        # -- Per-side CATALOG FILTER (PLANE_FILTER_VIA_CATALOG): trim the echoed 0x3a plane
         # list to the player's current side so each nation sees only its own aircraft, while
         # the GAME_DEF leaves every plane flyable (byte0=0x1f) so side-changes stay light.
         # UPLOAD 0x3a payload = [bc][T][00][00][0x3a][plane_id ...] (flat ONE byte per id);
         # appspace Size = bc*16 + (T>>4) covers the 0x3a sub byte + the ids. The client's
         # DOWNLOAD decoder reads (Size-1)/3 records of 3 BYTES [planeID][ushort], so we MUST
-        # re-encode the kept ids as 3-byte records (not 1-byte) — otherwise GE's 26 ids echo
+        # re-encode the kept ids as 3-byte records (not 1-byte) - otherwise GE's 26 ids echo
         # as Size=27 -> (27-1)/3 = 8 garbage records, dropping the tail bombers. Reframed via
         # build_ingame_pkt (Size == byte count). Only filters when ON A SIDE (0..4) and the
         # upload carries more than that side's planes; never emits EMPTY (would re-trip the
@@ -5256,42 +5278,42 @@ def handle_post_auth(s, cmd, pl):
                 if kept and len(kept) != len(ids):
                     rec = b''.join(struct.pack('<BH', i & 0xff, CATALOG_RECORD_USHORT & 0xffff) for i in kept)
                     fpkt = build_ingame_pkt(bytes([0x3a]) + rec)
-                    log('POST-AUTH', f'cmd=0 sub=0x3a → side {s.nation} catalog filtered {len(ids)}→{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)')
+                    log('POST-AUTH', f'cmd=0 sub=0x3a -> side {s.nation} catalog filtered {len(ids)}->{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)')
                     threading.Thread(target=lambda p=fpkt: send_reply(s, p, 'echo 0x3a (side-filtered, 3B)', to=5.0), daemon=True).start()
                     return
 
         # Echo-by-default for everything else (lobby AND in-game). The session that
         # reached flight (messages16) echoed in-game build/spawn messages; a blanket
-        # in-game swallow instead FROZE the world build at ~97% (messages20) — the client
+        # in-game swallow instead FROZE the world build at ~97% (messages20) - the client
         # waits for replies to some of them (e.g. the 0x3a plane list, compound 0x4d).
         # Only genuine fire-and-forget crashers are suppressed via NO_ECHO_SUBS above; if
         # a NEW type crashes on echo with "NET::MESSAGE Unknown Type N", add 0xN there.
         # msg 4 (client's OWN object state) must NEVER be echoed. The client's msg-4 RECEIVE
         # path rejects an echoed msg-4 as 'Unsupported message 4' and CORRUPTS its object list,
-        # so the next spawn's ServerConfirm is refused ('Confirm object N not found in list →
-        # send delete') and the fresh plane is deleted → dead engine / teardown. The normal
+        # so the next spawn's ServerConfirm is refused ('Confirm object N not found in list ->
+        # send delete') and the fresh plane is deleted -> dead engine / teardown. The normal
         # spawn out-4 (type=0x12) is ServerConfirmed earlier; a BAIL-OUT sends the parachute's
-        # out-4 as type=0xf2 sub=0x04, which lands here — swallow it, never echo. (messages04:
-        # bail → 'in 4'15' → 'Unsupported message 4' → respawn 260 'not found in list'.)
+        # out-4 as type=0xf2 sub=0x04, which lands here - swallow it, never echo. (messages04:
+        # bail -> 'in 4'15' -> 'Unsupported message 4' -> respawn 260 'not found in list'.)
         if sub == 0x04:
-            # msg-4 is the client's OWN object state — NEVER echo it (an echoed msg-4 is rejected as
+            # msg-4 is the client's OWN object state - NEVER echo it (an echoed msg-4 is rejected as
             # 'Unsupported message 4' and corrupts the object list). The plane spawn out-4 (type=0x12)
             # is ServerConfirmed earlier. A BAIL-OUT sends the PARACHUTE's out-4 as type=0xf2 sub=0x04:
             # the client allocates a fresh object Number for the parachute, so the server MUST consume
-            # one too — else its global Number counter runs one BEHIND the client's and the next
-            # respawn's ServerConfirm carries a stale Number → the client can't match it ('Confirm
-            # object 259 not found in list → send delete') and deletes the fresh plane (dead engine,
+            # one too - else its global Number counter runs one BEHIND the client's and the next
+            # respawn's ServerConfirm carries a stale Number -> the client can't match it ('Confirm
+            # object 259 not found in list -> send delete') and deletes the fresh plane (dead engine,
             # teardown). Consume a Number to stay in lock-step; send NO confirm and do NOT advance the
             # spawn ident (the parachute is not a ServerConfirmed spawn), and never echo.
             _pn = next_obj_number()
-            # v198: the client registers the parachute under the NEXT ident too — resync the
+            # v198: the client registers the parachute under the NEXT ident too - resync the
             # fallback ident counter from the parachute's own out-4 ident field (pl[5:7]) so the
             # counter path can never repeat v197's stale-ident confirm ('Confirm object 258 not
-            # found in list, send delete' → fresh plane deleted, dead engine after respawn).
+            # found in list, send delete' -> fresh plane deleted, dead engine after respawn).
             _pi = struct.unpack_from('<H', pl, 5)[0] if len(pl) >= 7 else None
             if _pi is not None:
                 s.spawn_ident_next = _pi + 1
-            log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object → consumed Number {_pn} '
+            log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object -> consumed Number {_pn} '
                              f'ident={_pi} (counters resynced), no echo/confirm')
             return
         # Generic fall-through echo. HARD GUARD: never echo a type=0x00 reliable message. The
@@ -5305,10 +5327,10 @@ def handle_post_auth(s, cmd, pl):
         # reliable packet. (0x4d=msg77 plane-preload is already a NO_ECHO sub in its direct form.)
         if tb == 0x00:
             _inner = pl[8] if len(pl) > 8 else 0
-            log('POST-AUTH', f'cmd=0 type=0x00 (wrapped, inner=0x{_inner:02x}) → swallow '
+            log('POST-AUTH', f'cmd=0 type=0x00 (wrapped, inner=0x{_inner:02x}) -> swallow '
                              f'(never echo a type-0 reliable msg; would -102 the client)')
             return
-        log('POST-AUTH',f'cmd=0 type=0x{tb:02x} sub=0x{sub:02x} → echo')
+        log('POST-AUTH',f'cmd=0 type=0x{tb:02x} sub=0x{sub:02x} -> echo')
         threading.Thread(target=lambda:send_reply(s,stored,f'echo type=0x{tb:02x}',to=5.0),daemon=True).start()
         return
 
@@ -5321,7 +5343,7 @@ def handle_post_auth(s, cmd, pl):
                 else:             pname = pl[14:].split(b'\x00')[0].decode('ascii','replace')
                 slot = db_get_pilot_slot(s.account, pname) or 0
                 s.current_pilot=pname; s.current_slot=slot
-        threading.Thread(target=lambda:send_rel(s,stored,'← echo cmd=546',to=5.0),daemon=True).start(); return
+        threading.Thread(target=lambda:send_rel(s,stored,'<- echo cmd=546',to=5.0),daemon=True).start(); return
 
     if cmd==3:
         time.sleep(0.05)
@@ -5334,17 +5356,17 @@ def handle_post_auth(s, cmd, pl):
         log('POST-AUTH','vcncExitAppSpace (cmd=5)')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s,bytes(pl2),'exit appspace reply'):
-            s.closing=True   # reply timed out → client gone, stop heartbeat
+            s.closing=True   # reply timed out -> client gone, stop heartbeat
             with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
     elif cmd==512:
         pilots=db_get_pilots(s.account) if s.account else []
         resp=build_e1_pilot_list(pilots)
-        threading.Thread(target=lambda:send_rel(s,resp,'← pilot list 512',to=5.0),daemon=True).start()
+        threading.Thread(target=lambda:send_rel(s,resp,'<- pilot list 512',to=5.0),daemon=True).start()
     elif cmd==530: pass
     else:
         if len(pl) >= 9: handle_compound(s, cmd, pl)
 
-# ─── Packet receiver ──────────────────────────────────────────────────────────
+# --- Packet receiver ----------------------------------------------------------
 
 def on_pkt(data, addr):
     s=get_s(addr)
@@ -5359,7 +5381,7 @@ def on_pkt(data, addr):
             pl=data[8:] if sz>8 else b''
             # Reconstruct the client's FULL 9-bit (mod-512) reliable seq. vcncNet's reliable
             # logic runs mod 512 (the 0x200 modulus in the ACK processor FUN_10006b0e) and its
-            # send-queue base does NOT wrap at 256 — but the wire seq byte (data[3]) is only 8-bit
+            # send-queue base does NOT wrap at 256 - but the wire seq byte (data[3]) is only 8-bit
             # and wraps 255->0. Below 256 the two agree, so ACKing the 8-bit value worked; but on
             # the 256th reliable msg of a session the client's base is 256 while data[3]=0, so an
             # ACK built from the 8-bit value carries the wrong next_exp, the client's cumulative
@@ -5372,7 +5394,7 @@ def on_pkt(data, addr):
             elif _prev_cs is not None and _prev_cs < 0x40 and cs >= 0xC0:    # rare backward wrap
                 s._rel_rx_hi = (getattr(s, '_rel_rx_hi', 0) ^ 1)
             cs9 = ((getattr(s, '_rel_rx_hi', 0) & 1) << 8) | cs
-            # — reliable-RX diagnostics —
+            # - reliable-RX diagnostics -
             _now=time.time()
             s._rel_rx_count=getattr(s,'_rel_rx_count',0)+1
             _dup=(cs==getattr(s,'_rel_rx_last_cs',None))
@@ -5387,7 +5409,7 @@ def on_pkt(data, addr):
             if getattr(s,'entered_game',False):
                 _dtag=f' DUP#{s._rel_rx_dups}(retransmit)' if _dup else ''
                 log('RELRX', f'{s.current_pilot} cs={cs} d0=0x{data[0]:02x} cmd={cv} sz={sz}{_dtag}')
-                _rec(s, 'C→S', 'RELRX',
+                _rec(s, 'C->S', 'RELRX',
                      f'cs={cs} cmd={cv} sz={sz}{_dtag} pl={binascii.hexlify(pl[:24]).decode()}')
             if cv==4:
                 s.session_id=pl[4:6] if len(pl)>=6 else b'\x00\x01'
@@ -5411,7 +5433,7 @@ def on_pkt(data, addr):
             _free_start_place(s)   # release start-place slot on disconnect
             with sl: sadrs.pop(addr,None); sids.pop(s.sid,None); return
         # CAPTURE (diagnostic): in-game packets that are neither reliable-data (pt=1)
-        # nor ack/disconnect (pt=0) — the UNRELIABLE flight-telemetry stream a flying
+        # nor ack/disconnect (pt=0) - the UNRELIABLE flight-telemetry stream a flying
         # client streams (currently dropped). Rate-limited hex sample of the payload
         # after the 8-byte VCNC header, so the entity/position format can be decoded
         # and relayed to other players in the room.
@@ -5422,7 +5444,7 @@ def on_pkt(data, addr):
             # reveals whether the sim was degrading (tick stalling / Number changing) or the
             # client froze instantly from a clean stream.
             _td = _rec_decode_telem(data)
-            _rec(s, 'C→S', 'UNREL',
+            _rec(s, 'C->S', 'UNREL',
                  f'sz={sz} {_td} hdr={hx(data[:8])} pl={hx(data[8:32])}')
         if CAPTURE_UNREL and s.entered_game:
             _now=time.time()
@@ -5433,7 +5455,7 @@ def on_pkt(data, addr):
         if RELAY_TELEMETRY and getattr(s,'flying',False) and s.current_room is not None:
             relay_telemetry(s, data)
 
-# ─── Web Server Bridge ────────────────────────────────────────────────────────
+# --- Web Server Bridge --------------------------------------------------------
 
 def get_existing_ticket(account_name: str) -> tuple:
     """Rebuilds the binary .vr1 ticket from database hex values."""
@@ -5477,8 +5499,8 @@ def _stall_watch():
             if rel_idle>=10.0 and unrel_idle<3.0 and not getattr(s,'_stall_warned',False):
                 s._stall_warned=True
                 with s._lock: pend=len(s._evts)
-                log('STALL-WATCH', f'⚠ {s.current_pilot}: reliable RX idle {rel_idle:.1f}s but '
-                                   f'unreliable active ({unrel_idle:.1f}s ago) — possible reliable '
+                log('STALL-WATCH', f'[warn] {s.current_pilot}: reliable RX idle {rel_idle:.1f}s but '
+                                   f'unreliable active ({unrel_idle:.1f}s ago) - possible reliable '
                                    f'stall | last_cs={getattr(s,"_rel_rx_last_cs",None)} '
                                    f'rel_rx={getattr(s,"_rel_rx_count",0)} dups={getattr(s,"_rel_rx_dups",0)} '
                                    f'pending_tx={pend} acks_in={getattr(s,"_ack_in_count",0)}')
@@ -5487,12 +5509,12 @@ def _stall_watch():
                     _p=_rec_dump(s, f'reliable stall (idle {rel_idle:.1f}s, last_cs='
                                     f'{getattr(s,"_rel_rx_last_cs",None)})')
                     if _p:
-                        log('REC', f'flight recorder dumped → {_p}')
+                        log('REC', f'flight recorder dumped -> {_p}')
 
-# ─── Main loop ────────────────────────────────────────────────────────────────
+# --- Main loop ----------------------------------------------------------------
 
 log('SERVER',f'Fighter Ace LAN Server v200 on {HOST}:{PORT}')
-# ── ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
+# -- ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
 #    so their camps/side block can be diffed against what a created room stores. The
 #    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
 #    prefix is skipped automatically. Read-only.
@@ -5535,13 +5557,13 @@ while running:
         # Windows post a stale ICMP port-unreachable, surfaced here on the NEXT recvfrom and
         # DISCARDING no real datagram of ours. SIO_UDP_CONNRESET(False) above normally
         # suppresses it; if one still slips through it is benign. Do NOT spam it as ERROR
-        # every heartbeat — rate-limit to one WARNING per 30s so a real error is still visible.
+        # every heartbeat - rate-limit to one WARNING per 30s so a real error is still visible.
         _wr = getattr(e, 'winerror', None)
         if _wr == 10054 or getattr(e, 'errno', None) in (10054,):
             _now = time.time()
             if _now - globals().get('_connreset_ts', 0.0) > 30.0:
                 globals()['_connreset_ts'] = _now
-                log('RX/DROP', 'WSAECONNRESET (10054) from a departed client — benign, suppressed for 30s')
+                log('RX/DROP', 'WSAECONNRESET (10054) from a departed client - benign, suppressed for 30s')
             continue
         log('ERROR', str(e)); continue
     except Exception as e: log('ERROR',str(e)); continue
@@ -5555,13 +5577,13 @@ while running:
     elif pt==0: _guarded(on_pkt, data, addr)
     else:
         # If a RELIABLE packet (control-dword pt==1) ever lands here it is being dropped
-        # WITHOUT an ACK → the client's reliable window wedges → stall. Always log these,
+        # WITHOUT an ACK -> the client's reliable window wedges -> stall. Always log these,
         # un-rate-limited, so the next stall is caught at the routing layer.
         _cpt = ((struct.unpack_from('>I',data,4)[0])>>29)&7 if sz>=8 else -1
         if _cpt==1:
-            log('RELDROP', f'⚠ reliable pkt NOT routed → dropped/un-ACKed '
+            log('RELDROP', f'[warn] reliable pkt NOT routed -> dropped/un-ACKed '
                            f'data0=0x{pt:02x} sz={sz} cs={data[3] if sz>3 else 0} {hx(data[:16])}')
-        # CAPTURE: packet matched by no route above — a candidate UNRELIABLE in-game
+        # CAPTURE: packet matched by no route above - a candidate UNRELIABLE in-game
         # telemetry datagram with an unexpected first byte. Rate-limited raw log only
         # (do NOT route to on_pkt: avoids misparsing telemetry as a reliable packet).
         elif CAPTURE_UNREL:

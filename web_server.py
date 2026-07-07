@@ -125,6 +125,27 @@ def is_user_admin(username):
     except:
         return False
 
+def arena_owner_account(room_id):
+    """Return the account_name that created a room, or '' if unknown."""
+    try:
+        conn = sqlite3.connect(SRV['db_path'])
+        rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+        if 'account_name' not in rcols:
+            conn.close(); return ''
+        row = conn.execute("SELECT COALESCE(account_name,'') FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        return (row[0] if row else '') or ''
+    except Exception:
+        return ''
+
+def user_can_edit_arena(username, room_id):
+    """A user may edit an arena if they are an admin OR they created it (account match)."""
+    if not username:
+        return False
+    if is_user_admin(username):
+        return True
+    return arena_owner_account(room_id) == username
+
 class WebInterfaceHandler(BaseHTTPRequestHandler):
     def get_current_user(self):
         cookie_header = self.headers.get('Cookie')
@@ -190,6 +211,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <div class="nav">
                     Logged in as <strong>{user}</strong> | 
                     <a href="/ladder" style="color:#17a2b8;">Ladder Board</a> |
+                    <a href="/my_arenas" style="color:#6f42c1;">My Arenas</a> |
                     {admin_link} 
                     <a href="/logout" style="color:#dc3545;">Logout</a>
                 </div>
@@ -371,7 +393,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
 
             user_html = ""
             for u_name, is_adm in users:
-                role = "👑 Admin" if is_adm else "Player"
+                role = "&#128081; Admin" if is_adm else "Player"
                 user_html += f"""
                 <tr>
                     <td><strong>{u_name}</strong> <br><small style="color:#666;">{role}</small></td>
@@ -409,14 +431,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_html(content)
 
         elif self.path.startswith('/admin/arena_settings'):
-            if not is_user_admin(user):
-                self.send_html("<h2>Access Denied</h2><p>Administrator privileges required.</p><a href='/admin'>&larr; Back</a>")
-                return
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
                 room_id = int(qs.get('room', ['0'])[0])
             except (ValueError, TypeError):
                 room_id = 0
+            # Admins may edit any arena; a regular player may edit only arenas they created.
+            if not user_can_edit_arena(user, room_id):
+                self.send_html("<h2>Access Denied</h2><p>You can only edit arenas you created.</p><a href='/my_arenas'>&larr; Back</a>")
+                return
             conn = sqlite3.connect(SRV['db_path'])
             rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
             sj_sel = "COALESCE(settings_json,'{}')" if 'settings_json' in rcols else "'{}'"
@@ -452,6 +475,34 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     + hesc(str(label)) + edited + '<br>'
                     + '<input type="number" step="1" name="s_' + hesc(str(key)) + '" value="'
                     + hesc(str(val)) + '" style="width:200px; padding:6px;"></label>')
+            # EvP AA/Flak sliders (0..6, map 1:1 onto the GAME_DEF AA-quality bytes). Stored in
+            # settings_json under their own keys; read per-arena by the game server at 212 serve.
+            EVP_SLIDERS = [
+                ('aa_quality',    'AA (anti-aircraft) quality', 6),
+                ('flak_quality',  'Flak quality',               1),
+                ('bomber_gunner', 'Bomber gunner quality',      3),
+                ('ship_aa',       'Ship AA quality',            1),
+                ('tank_aa',       'Tank AA quality',            1),
+            ]
+            evp_html = ""
+            for skey, slabel, sdefault in EVP_SLIDERS:
+                sval = cur.get(skey, sdefault)
+                try:
+                    sval = max(0, min(6, int(sval)))
+                except (ValueError, TypeError):
+                    sval = sdefault
+                sedited = ' &bull; <span style="color:#c60;">edited</span>' if skey in overrides else ''
+                evp_html += (
+                    '<label style="display:block; margin:14px 0; font-size:0.9em; color:#333;">'
+                    + hesc(str(slabel)) + sedited + '<br>'
+                    + '<input type="range" min="0" max="6" step="1" name="s_' + hesc(skey) + '" '
+                    + 'value="' + str(sval) + '" '
+                    + "oninput=\"this.nextElementSibling.textContent=this.value\" "
+                    + 'style="width:240px; vertical-align:middle;">'
+                    + '<span style="display:inline-block; width:1.5em; text-align:center; '
+                    + 'font-weight:bold; color:#2a7;">' + str(sval) + '</span>'
+                    + '<span style="color:#999; font-size:0.8em;"> (0 = off, 6 = strongest)</span>'
+                    + '</label>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -470,10 +521,55 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Arena settings</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">All values in <strong>feet</strong>. Leave a field blank to keep the value the arena was created with. Changes are written into the arena's GAME_DEF and take effect the next time the arena is entered (they are served fresh on entry).</p>
                     {fields_html}
+                    <h3>Enemy defences (EvP)</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Strength of the terrain's automatic anti-aircraft defences that fire at players (0 = off, 6 = strongest). Applied the next time the arena is entered.</p>
+                    {evp_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
                 </div>
+            """
+            self.send_html(content)
+
+        elif self.path == '/my_arenas':
+            # A logged-in player's own arenas (those they created). Admins get a link to the
+            # full admin panel instead. Reuses the same per-arena settings editor.
+            if not user:
+                self.send_response(302); self.send_header('Location', '/login'); self.end_headers(); return
+            conn = sqlite3.connect(SRV['db_path'])
+            rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+            cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
+            rows = []
+            if 'account_name' in rcols:
+                rows = conn.execute(
+                    "SELECT room_id, COALESCE(room_name,''), COALESCE(status,'open'), "
+                    "COALESCE(terrain,1), " + cat_sel + " FROM rooms WHERE account_name=? "
+                    "ORDER BY created_at DESC", (user,)).fetchall()
+            conn.close()
+            if rows:
+                items = ""
+                for rid, rname, status, terrain, category in rows:
+                    items += (
+                        '<div class="card" style="margin:10px 0;">'
+                        '<div style="display:flex; justify-content:space-between; align-items:center;">'
+                        '<div><strong>' + hesc(str(rname) or 'Unnamed') + '</strong>'
+                        '<br><small style="color:#888;">' + hesc(str(category))
+                        + ' &middot; ' + hesc(str(status)) + ' &middot; terrain ' + str(terrain)
+                        + ' &middot; id ' + str(rid) + '</small></div>'
+                        '<a href="/admin/arena_settings?room=' + str(rid) + '" class="btn-green" '
+                        'style="display:inline-block; width:auto; padding:8px 16px; text-decoration:none;">'
+                        '&#9881; Edit Settings</a>'
+                        '</div></div>')
+            else:
+                items = '<div class="card"><p style="color:#888;">You haven\'t created any arenas yet.</p></div>'
+            admin_extra = ('<p><a href="/admin" style="color:#28a745;">Go to full Admin Panel &rarr;</a></p>'
+                           if is_user_admin(user) else '')
+            content = f"""
+                <div class="nav"><a href="/">&larr; Home</a></div>
+                <h1>My Arenas</h1>
+                <p style="color:#666;">Arenas you created. Edit each one's settings, including enemy AA/Flak strength.</p>
+                {admin_extra}
+                {items}
             """
             self.send_html(content)
 
@@ -524,7 +620,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             
                 ticket_bytes, pid_hex = SRV['get_existing_ticket'](user)
                 # Tell the launcher the client path THIS account has stored, so it can
-                # save the ticket next to the right FA.exe and launch it — instead of
+                # save the ticket next to the right FA.exe and launch it - instead of
                 # relying on a path hard-coded in launcher.ini. Header must be latin-1
                 # safe (HTTP header), so we percent-safe it minimally.
                 try:
@@ -726,11 +822,13 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
         elif self.path == '/admin/arena_settings':
-            if not is_user_admin(user): return self.send_error(403)
             try:
                 rid = int(qs.get('room_id', ['0'])[0])
             except (ValueError, TypeError):
                 rid = 0
+            # Admins may edit any arena; a regular player may edit only arenas they created.
+            if not user_can_edit_arena(user, rid):
+                return self.send_error(403)
             room_name = qs.get('room_name', [''])[0].strip() or 'Unnamed'
             category  = qs.get('category', [''])[0].strip() or 'Custom Arenas'
             status    = qs.get('status', ['open'])[0].strip()
@@ -743,6 +841,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 if v != '':
                     try:
                         settings[key] = int(round(float(v)))
+                    except ValueError:
+                        pass
+            # EvP AA/Flak sliders (0..6). Always present (range inputs post a value), stored as
+            # ints clamped to 0..6 under their own keys; read per-arena by the game server.
+            for skey in ('aa_quality', 'flak_quality', 'bomber_gunner', 'ship_aa', 'tank_aa'):
+                v = qs.get('s_' + skey, [''])[0].strip()
+                if v != '':
+                    try:
+                        settings[skey] = max(0, min(6, int(round(float(v)))))
                     except ValueError:
                         pass
             if rid:
@@ -758,7 +865,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} "
                                   f"status={status} settings={settings}")
             self.send_response(302)
-            self.send_header('Location', '/admin')
+            self.send_header('Location', '/admin' if is_user_admin(user) else '/my_arenas')
             self.end_headers()
 
     def log_message(self, format, *args):
@@ -768,7 +875,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         # Suppress the harmless ConnectionResetError (WinError 10054) that occurs when
         # the FA launcher's embedded browser opens a download connection and then hands
         # off to its own WinINet fetch, abandoning the browser's half-opened socket.
-        # Nothing actually failed — the real ticket fetch succeeds on its own connection.
+        # Nothing actually failed - the real ticket fetch succeeds on its own connection.
         try:
             super().handle_one_request()
         except (ConnectionResetError, ConnectionAbortedError):
