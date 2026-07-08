@@ -2803,6 +2803,7 @@ class S:
         self.auth_done=False; self.post_auth_cmds=[]
         self.account=None; self.auth64=None; self.auth_payload=None
         self.current_pilot=None; self.current_slot=0; self.current_room=None; self.room_slot=0; self.last_43_ts=0.0; self.entered_game=False; self.in_game=False; self.client_granted=False
+        self.plane_type=PLANE_TYPE_ID   # v201: player's selected plane index (from out-4 byte[8]); default until first spawn
         # -- Per-room game state (multi-room: every player's runtime state is keyed
         # to the room they entered, so chat / roster / positions never cross rooms) --
         self.client_number=0      # assigned at the 201 grant, unique WITHIN the room
@@ -3228,12 +3229,13 @@ def send_create_object_for(src, dst, with_client=True):
                                 nation=(src.nation or 0),
                                 player_index=src.player_index,
                                 name=(src.current_pilot or 'Player'),
+                                plane_type=getattr(src, 'plane_type', PLANE_TYPE_ID),
                                 with_client=with_client)
     _form = 'client+object' if with_client else 'object-only'
     send_rel(dst, pkt, f'<- CreateObject 2 ({_form}: {src.current_pilot} St={src.client_number} '
                        f'PI={src.player_index} ONumber={src.my_obj_number} -> {dst.current_pilot})', to=3.0)
     log('CREATE2', f'create-object({_form}) {src.current_pilot} St={src.client_number} '
-                   f'ONumber=0x{src.my_obj_number:04x} plane={PLANE_TYPE_ID} -> {dst.current_pilot}')
+                   f'ONumber=0x{src.my_obj_number:04x} plane={getattr(src, "plane_type", PLANE_TYPE_ID)} -> {dst.current_pilot}')
     return True
 
 def build_delete_object_3(onumber=None, client_number=None, x=0.0, z=0.0):
@@ -4901,6 +4903,16 @@ def handle_post_auth(s, cmd, pl):
             # msg 4/6 are the client's OWN state, never echoed.
             if s.entered_game and sub == 0x04:
                 _ident = struct.unpack_from('<H', pl, 5)[0] if len(pl) >= 7 else None   # v198: client's ident
+                # v201: PLANE TYPE. The client's out-4 spawn carries its selected plane's
+                # index at payload byte[8] (the ordinal into the nation's plane list -
+                # F4F-3=0, P-39D=1, P-40C=2, ...). CONFIRMED from a 2-player capture where
+                # AC2E_Bigalon flew P-40C(idx2) on spawn-ident 0 and byte[8]=0x02, while
+                # Test2 flew F4F-3(idx0) with byte[8]=0x00 (ruling out the earlier
+                # ident/plane confound). Store it so send_create_object_for gives peers the
+                # RIGHT aircraft instead of the hardcoded P-39D.
+                if len(pl) >= 9:
+                    s.plane_type = pl[8]
+                    log('PLANE', f'{s.current_pilot} selected plane index {pl[8]} (out-4 byte[8])')
                 _fire_server_confirm(s, ident=_ident)   # DIRECT out-4; double-wrapped variant caught earlier
                 return
             return
