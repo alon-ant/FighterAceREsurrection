@@ -1,7 +1,145 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v200
+Fighter Ace LAN Server v212
 ===========================
+v212: NET-time - v211 core fix CONFIRMED WORKING, harmful re-anchor removed. run_192643 proved
+      v211 dropped the NTP clock offset from +245.8s to +0.75s (the client's 'Base' readout) and
+      the client now SLEWS small steps ('Slewed? YES') instead of hard-failing. The residual freeze
+      was v211's own 180s re-anchor: the mid-session SYNACK does NOT re-run the client's set-base
+      (that path is connect-only), so resetting beacon A->0 while the base stayed fixed dropped
+      server_time by ~elapsed and the client slewed ~100-180s and froze mid-slew (~57s after the
+      re-anchor). FIX: disable the re-anchor (NTP_REANCHOR_S huge). Beacon A now climbs as
+      elapsed-since-connect with offset ~0; sessions up to the 262s A-field wrap are clean. TODO:
+      the 262s wrap for longer continuous sessions still needs the correct mid-session base-update
+      mechanism (2009 ran for hours, so one exists - likely tied to the in-game WORLD_TIME re-init).
+v211:
+v211: NET-TIME NTP FIX (found via the HUD lag readout + full vcncNet disassembly). The 2009 HUD
+      showed 'L:0.19' (real lag); ours shows 'L:0.00, DL:0' - the client can't measure latency, and
+      the same broken time exchange causes the freeze. Disassembled the client's NTP path
+      (FUN_10007fc0 decode -> tSyncAddMeasurement offset calc @0x1000833d): the client anchors its
+      clock BASE from the SYNACK fa_s:fa_frac (set-base FUN_10007cef, ONCE), reconstructs
+      server_time = base + beaconA/1000 - beaconB/1000, and computes offset = ((pT2-pT1)+(pT3-pT4))/2,
+      lag = (pT4-pT1)-(pT3-pT2). We sent A as an ABSOLUTE phase (v207: (unix-FA_EPOCH)ms & 0x3FFFF),
+      so base+A did NOT equal server_now - it sat a constant ~246s off (the +245.8 'Base' in the
+      logs), and when the 18-bit A wrapped (262.143s) in-game the client saw a 262s offset step and
+      slewed to death (-261.76 'New offset' -> 'CRAP backward NET Time' -> freeze on first spawn).
+      FIX: A = ms ELAPSED since a per-session base anchor (s._ntp_epoch), so base+A == server_now
+      (offset ~0, real lag surfaces on the HUD), and re-anchor the base (resend SYNACK fa_s:fa_frac +
+      reset epoch, A->0) every NTP_REANCHOR_S=180s < 262s so elapsed never reaches the wrap. New
+      TX/REANCHOR log line marks each re-anchor. Supersedes the v205-210 phase/stamp attempts.
+v210:
+v210: THE NET-TIME FREEZE ROOT CAUSE - stale GAME_DEF CreationTime (found by comparing the
+      client's game-clock derivation against the 2009 logs). The client seeds its clock from the
+      GAME_DEF: WORLD_TIME::Init ss=CreationTimeSeconds, then each spawn Seconds = CreationTimeSeconds
+      + (StartTime - CreationTime)/1000, with StartTime on the NET-ms clock our SYNACK fa_s anchors.
+      In 2009 the arena's CreationTimeSeconds was contemporaneous with the session (~3 min old). OUR
+      arenas are PERSISTED in the DB, so the served CreationTimeSeconds was ~7.9 DAYS stale
+      (3991878344 vs connect fa_s ~3992558957, messages65). The client mixed a TODAY NET-ms clock
+      with a 7.9-day-old CreationTime; the growing inconsistency is what the per-respawn time re-fit
+      couldn't reconcile -> 'CRAP backward NET Time' -> freeze (the varying 262/392/544s jumps were
+      the per-session staleness, never a fixed wrap). FIX: build_lz_gamedef now stamps a FRESH
+      CreationTime(ms @off5)/CreationTimeSeconds(@off9) from fa_timestamp() at serve time, so every
+      arena looks freshly created 'now' on the same fa_s timeline - exactly like a live host.
+      Removed the v208/209 HQ-reentry SYNACK re-anchor (wrong cause). Kept v207 FA_EPOCH-phased A
+      (correct) and v206 1s beacons (harmless belt-and-suspenders; 2009 tolerated long gaps).
+v209:
+v209: HQ re-anchor CORRECTNESS (found by comparing v208 against the 2009 host logs). The 2009
+      base anchor (client 'CreationTimeSeconds') was IDENTICAL on connect (01:31) and on world
+      re-entry (03:04) = 3451426175 - i.e. the NET-time base is a FIXED connect constant that the
+      host replays verbatim, and the client derives elapsed time from its own clock on top of it.
+      v208 re-sent build_synack() which computes a FRESH fa_s each call, so an HQ re-entry would
+      have moved the base forward by the session-elapsed and jumped NET time. FIX: capture the
+      connect SYNACK's (fa_s, fa_frac) on the session (s.synack_base) and REPLAY it on HQ re-entry
+      via build_synack(fixed_fa=...). Also confirmed from 2009 that the client tolerates long
+      dead-air (a ~48s world-load with zero inbound FA msgs did NOT freeze), so the freeze was
+      never beacon-starvation - it was the phase/base anchoring (v207 + this). The 1s beacon
+      cadence (v206) is kept as belt-and-suspenders but is not what 2009 relied on.
+v208:
+v208: HQ-REENTRY FREEZE (the remaining case after v207). v207 fixed the wrap-during-flight freeze
+      - the client now flies THROUGH the 18-bit A_ms wrap during in-arena respawns (run_233934: it
+      survived A_ms 261898->4757 mid-flight). The last freeze is specifically the crash -> exit-to-HQ
+      -> change-plane -> re-fly path: the client tears down its world + NET-time state on the HQ
+      round-trip but the server never re-anchors the client's time BASE (set only from a SYNACK).
+      2009 ground truth: an HQ re-fly there produced a fresh 'Seconds=' time re-init (messages04);
+      ours did not (messages64) -> stale base + post-teardown offset re-fit drifted to 'CRAP backward
+      NET Time' ~40s after the re-fly (392s jump, tsBaseOffset drifting +80->+220 across sessions).
+      FIX: on the HQ round-trip re-entry ONLY (detected by entered_game==False at the fly-grant),
+      re-send the SYNACK base anchor + a fresh beacon so the client re-establishes NET time exactly
+      as at connect. In-arena respawns (entered_game stays True) are untouched. Logged as
+      TIME-REANCHOR. (Keeps v207 FA_EPOCH-phased A and v206 1s beacon cadence.)
+v207:
+v207: NET-TIME FREEZE - THE root-cause fix (phase alignment). v206 logging PROVED beacons flow
+      at 1s and that the freeze coincides EXACTLY with the beacon A_ms field wrapping the 18-bit
+      boundary (run_232813: A_ms 260529 -> 3389 on the ident=2 respawn = the 3rd re-entry the
+      user saw freeze). Root cause: the client anchors its NET-time BASE from the SYNACK fa_s
+      field, which is measured from FA_EPOCH (int(time.time())-FA_EPOCH), but v205/206 sent the
+      beacon A field as unix-ms & 0x3FFFF. Those two have DIFFERENT zero points, off by a constant
+      FA_EPOCH*1000 mod 2^18 = 121856 ms (~122s). The client computes NET time = base + A; the
+      ~122s phase skew plus the 262s wrap made a respawn re-fit land on the wrong absolute second
+      and snap time backward -> 'CRAP backward NET Time' -> freeze. FIX: A = (time.time()-FA_EPOCH)
+      *1000 & 0x3FFFF, so A shares FA_EPOCH's zero point with the base. base + A is now correct at
+      every sample and the 18-bit wrap is transparent across respawns. (v206's 1s beacon cadence
+      and in-game beacon logging are kept.)
+v206:
+v206: NET-TIME FREEZE, likely root cause + diagnostics. run_230020 (the run that MATCHED the
+      freeze test, same machine so no clock skew) logged only TWO time beacons the entire
+      session - both from the connect handshake. The in-game 5s keepalive beacon had no log
+      line, masking that the client got NO periodic NET-time correction while flying. The client
+      holds NET time = own_clock + server_offset and re-fits the offset on each respawn; with no
+      fresh beacon the 4th re-fly snapped the offset backward ~544s (client Time reverted to ~4s
+      after the FIRST spawn) -> 'CRAP backward NET Time' -> freeze. FIX: beat the in-game TIME
+      beacon every HEARTBEAT_INTERVAL=1s (was 5s) so the client re-anchors well inside the 18-bit
+      A-field wrap (~262s), and LOG it 1-in-5 (seq + A_ms) so the next test proves the cadence and
+      the values the client receives near any re-fit. Diagnostic-forward: if it still freezes, the
+      beacon log will show whether beacons flow (encoding bug) or stop (thread/gating bug).
+v205 (prior):
+v205: NET-TIME FREEZE, real fix (reverts v204's rebase, which made it worse). The freeze is the
+      client's 'CRAP!!! HUGE backward NET Time' meltdown: it anchors NET time at the SYNACK base
+      and advances by the beacon's A field (dword & 0x3FFFF = 18-bit ms, A/1000 = seconds; decoded
+      in vcncNet FUN_10007fc0). v202/203 sent A = (now - module_load_epoch)*1000, whose phase was
+      UNRELATED to the SYNACK base (which uses fa_timestamp/FA_EPOCH); the phase mismatch surfaced
+      as a ~262s backward jump each time A's 18-bit field wrapped -> freeze. v204 rebased A per
+      arena entry, which only swapped the 262s wrap jump for a session-elapsed (~290-327s) jump
+      (messages60) since it reset the counter mid-session. FIX: A = int(time.time()*1000) & 0x3FFFF
+      - server WALL-CLOCK unix ms, low 18 bits, the SAME clock fa_timestamp() anchors the base to,
+      so A and the base are phase-locked and the wrap is invisible to the client's high-order
+      reconstruction. Inherently monotonic; no per-session state, no rebasing. Removed v204's
+      per-session tsync_ms/tsync_rebase and the fly-grant rebase call.
+v204: TWO FIXES for the exit-to-HQ -> change-plane -> re-fly freeze (messages58, AC2E_Bigalon).
+      (1) NET-TIME WRAP FREEZE (the actual freeze). The beacon/time_reply A field is an 18-bit
+      ms counter that WRAPS every 262.143s. The client re-bases its clock-drift regression on
+      every arena (re-)entry; the wrap landed inside that fresh ~8-sample fit window on the second
+      re-fly -> a ~260s BACKWARD NET-time jump ('CRAP!!! HUGE backward NET Time difference of
+      260.324' in vcncnet...621.log) -> link death -> client froze at 09:28 while the time thread
+      spun. FIX: the ms counter is now PER-SESSION (S.tsync_ms) with its origin RE-BASED to now on
+      each arena entry (S.tsync_rebase, called from handle_fly_start_place), so it restarts near 0
+      exactly when the client re-fits -> the wrap can never fall in the window. build_beacon/
+      build_time_reply take the session; the module-global tsync_ms is the pre-session fallback.
+      (2) msg 14 REASSIGN echo. On respawn the client sends 'out 14' (Reassign obj owner); FA has
+      NO inbound in-game handler (slot 0xcbc1c8 unset), so our generic echo made it log 'Unsupported
+      message 14' and corrupt its object list. 0x0e added to NO_ECHO_SUBS -> swallowed (the respawn
+      CreateObject already re-binds the object on peers, so the reassign is redundant for us).
+v203: REAL SCORING (msg 33 ScoreEvent) - grounded in the 2009 live-host logs (messages04).
+      The kill flow there is: victim 'in 3'21' (MEC=5,EEC=3 = shot down by enemy) removes the
+      plane, then the host sends the KILLER a separate 'in 33'14' ScoreEvent (MEC=1,EEC=3) that
+      ticks its in-game scoreboard. Decoded FUN_004f9ad0/FUN_004f9b0f: payload
+      [0x21][b1][killer PlayerIndex:u16][Type=(EEC<<4)|MEC][9B]; points are computed client-side
+      from the local damage list (msg 33 is the trigger, not the amount). Added build_score_event_33
+      + send_score_event_to_killer, fired from the death handler after the scored delete. Ground
+      (PvE) score stays inline with the msg-36 scene-destroy ('You have destroyed X. Score:N',
+      per-target value from the object-type score table). DB accumulation (db_credit_kill) unchanged.
+v202: NAME TAGS + SCORE - object-record tag bit7 (0x80) = HUMAN-owned plane flag,
+      decoded from FUN_004f26b0 (CreateObject dispatcher, case 1/8 PLANE, test @0x4f2714):
+      bit7 SET -> lookup GamerClientScore[St] (FUN_004f2560 -> mgr@0xc822d8[St*4+0xc]) and
+      bind it to the NetPlane (FUN_00427530 -> plane+0x128) = pilot name tag renders and
+      kills attribute to the pilot's score. bit7 CLEAR (the pre-v202 bug) -> DRONE branch:
+      plane+0x128=0, no owner binding, NO name tag, no score attribution. The score slot
+      is created by the tag-0 client record leading the 83-byte first-spawn create and
+      PERSISTS on the peer, so object-only re-creates with bit7 are safe as well.
+      (Related, not yet wired: msg 88 AceOrRankChangedCB @0x4f4120 = [88][PlayerIndex u32]
+      [b5][b6] -> client+0x50=b5, client+0x30=b6 (rank/aces for the tag) - next step.)
+v201: remote plane TYPE fix - out-4 spawn byte[8] = selected plane ordinal, stored per
+      session and forwarded in the msg-2 object record byte[1] (was hardcoded P-39D).
 v200: PvE part 2 - SCENE-DESTROY (msg 36) builder + broadcast, and a live-validatable
       'destroy' console command. Grounded in the 2009 live-server logs (messages04): the
       real destroy loop is  out 28 (hit) + out 31 (ground-damage report) -> in 36 (server's
@@ -227,6 +365,15 @@ for _stream in (sys.stdout, sys.stderr):
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
+HEARTBEAT_INTERVAL = 1.0   # v206: seconds between in-game keepalive/TIME beacons. Was 5s, but the
+                           # client's NET-time offset drifts without a steady beacon stream (18-bit
+                           # A field wraps ~262s) -> respawn re-fit snaps backward -> freeze. 1s
+                           # keeps the client re-anchored well inside the wrap window.
+NTP_REANCHOR_S = 999999.0   # v212: re-anchor DISABLED (set huge). v211's mid-session SYNACK
+                           # re-anchor did not update the client base (set-base is connect-only), so
+                           # it just reset A and dropped server_time ~elapsed -> froze mid-slew. A now
+                           # climbs as elapsed-since-connect; the 262s wrap is a separate TODO. The
+                           # core v211 fix (offset ~0, real lag, client slews small steps) stands.
 # Diagnostic: capture the UNRELIABLE in-game packet stream (flight telemetry) that the
 # server otherwise drops. Rate-limited hex sample per session, so one flight reveals the
 # entity/position format we need to relay between players. Set False to silence.
@@ -1135,6 +1282,27 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     if not d or d[0] != 0x8a:
         log('GAMEDEF212', f'decompressed version=0x{(d[0] if d else 0):02x} (expected 0x8a)')
         return None, 0, 0
+    # v210: FRESH CREATION-TIME STAMP - the real fix for the 'CRAP backward NET Time' freeze.
+    # The GAME_DEF carries CreationTime (LE u32 ms @offset 5) and CreationTimeSeconds (LE u32 s
+    # @offset 9). The client seeds its game clock as WORLD_TIME::Init ss=CreationTimeSeconds, then
+    # every spawn computes Seconds = CreationTimeSeconds + (StartTime - CreationTime)/1000 where
+    # StartTime runs on the NET-ms clock our SYNACK fa_s anchors. For that to stay consistent the
+    # GAME_DEF's creation time MUST lie on the SAME live timeline as fa_s - which it did in 2009
+    # (messages04: the arena's CreationTimeSeconds was contemporaneous, ~3 min before the session).
+    # OUR arenas are PERSISTED in the DB, so the stored CreationTimeSeconds was ~7.9 DAYS stale
+    # (3991878344 vs a connect fa_s of ~3992558957). The client mixed a TODAY NET-ms clock with a
+    # 7.9-day-old CreationTime; the growing inconsistency is what the client's per-respawn time
+    # re-fit eventually couldn't reconcile -> the backward-NET-time jump -> freeze (varying jump
+    # sizes across sessions = the per-session stale-ness). fa_timestamp() already returns exactly
+    # this pair on the fa_s/FA_EPOCH timeline, so stamp it in so every served arena looks freshly
+    # created 'now', matching a live host. (Supersedes the v208/209 SYNACK re-anchor guesswork.)
+    _ct_s, _ct_frac = fa_timestamp()
+    # CreationTime(ms) = CreationTimeSeconds*1000 + fractional-ms, on the same fa_s timeline.
+    # fa_frac encodes the sub-second as (t%1)*0x10000 + 0x800, so ms_frac = (fa_frac-0x800)/0x10000*1000.
+    _ct_ms = (_ct_s * 1000 + int((_ct_frac - 0x800) / 0x10000 * 1000)) & 0xFFFFFFFF
+    if len(d) >= 13:
+        struct.pack_into('<I', d, 5, _ct_ms)     # CreationTime  (ms)
+        struct.pack_into('<I', d, 9, _ct_s)      # CreationTimeSeconds
     # FFA neutral-team guard: for Free-For-All rooms, rewrite the camps block to a 2-column
     # all-Neutral set (one flyable camp + forced Neutral, both labeled "Neutral") so the
     # side picker / 213 Nations box / roster show Neutral AND the player can still fly
@@ -1885,13 +2053,42 @@ for _a, _p, *_ in db_get_all_accounts():
 # MONOTONIC ms counter makes A/1000 advance at 1 s/s -> slope 0. Masked to the 18-bit
 # field (keeps B=0); wraps every 0x3FFFF ms ~= 262 s - the client re-bases from samples
 # far more often (every ~8 beacons), so the wrap never lands inside a fit window.
+# v204: the wrap DID melt down on arena RE-ENTRY (client re-fits its drift regression then);
+# v204's per-session rebase FIXED the wrap but reset the counter mid-session -> a DIFFERENT
+# backward jump (= session-elapsed). Both moved the value backward. REVERTED in v205.
+# v205 ROOT-CAUSE FIX: the client (vcncNet FUN_10007fc0) decodes A = dword & 0x3FFFF, takes
+# A/1000 as SECONDS, and ADDS it to a persistent base anchored from our SYNACK timestamp. A is
+# only 18 bits -> 262.143s range. The client reconstructs the HIGH-ORDER time from its OWN wall
+# clock and uses A only for the sub-262s phase; so A must be PHASE-ALIGNED to WALL-CLOCK ms, not
+# to elapsed-since-connect. Sending elapsed-ms (v202/203) drifts out of phase and wraps visibly
+# -> the ~262s 'CRAP backward NET Time' jump. Sending A = (unix_ms & 0x3FFFF) keeps the low 18
+# bits phase-locked to real wall-clock time, so the client's high-bit reconstruction always lands
+# on the correct absolute second and the wrap is invisible. This is inherently monotonic (never
+# resets, never needs rebasing) as long as the server & client wall clocks agree within ~131s.
 _TSYNC_T0 = time.time()
-def tsync_ms():
-    """Monotonically-advancing millisecond value for the beacon/time_reply A field."""
-    return int((time.time() - _TSYNC_T0) * 1000) & 0x3FFFF
+def tsync_ms(sess=None):
+    """A-field value for the beacon/time_reply: low 18 bits of ms ELAPSED since the session's NTP
+    base anchor (sess._ntp_epoch). The client reconstructs server_time = base + A/1000; with base =
+    the fa_s:fa_frac we anchored at _ntp_epoch, base + A == server_now, so the NTP clock offset is
+    ~0 (only the real network delay remains -> a truthful HUD 'L:' lag instead of the broken 0.00).
+    A is 18-bit and would wrap at 262.143s, but the heartbeat re-anchors the base (and resets
+    _ntp_epoch) every NTP_REANCHOR_S < 262s, so elapsed never reaches the wrap. Falls back to the
+    FA_EPOCH-absolute phase for the pre-session/SYN path where no session epoch exists yet.
+    History: v205/6 sent unix_ms&mask (122s phase skew); v207 sent (unix-FA_EPOCH)ms&mask (absolute
+    phase, a constant ~246s offset vs the client's elapsed-since-base -> the 262s wrap then slewed
+    to death). v211 sends elapsed-since-anchor + periodic re-anchor: offset ~0, no wrap."""
+    if sess is not None and getattr(sess, '_ntp_epoch', None) is not None:
+        return int((time.time() - sess._ntp_epoch) * 1000) & 0x3FFFF
+    return int((time.time() - FA_EPOCH) * 1000) & 0x3FFFF
 
-def build_synack():
-    fa_s, fa_frac = fa_timestamp()
+def build_synack(fixed_fa=None):
+    # v209: `fixed_fa` = (fa_s, fa_frac) to re-use the ORIGINAL connect-time base on a re-anchor.
+    # 2009 ground truth (messages04): CreationTimeSeconds was IDENTICAL on connect (01:31) and on
+    # world re-entry (03:04) = 3451426175 - the base is a FIXED connect constant, not a fresh
+    # timestamp. Re-sending a NEWER base on HQ re-entry would jump the client's NET time forward by
+    # the session-elapsed. So a re-anchor MUST replay the connect fa_s/fa_frac, not call
+    # fa_timestamp() again.
+    fa_s, fa_frac = fixed_fa if fixed_fa is not None else fa_timestamp()
     p = bytearray(84); p[2]=0x10
     struct.pack_into('>I',p,8,fa_s); struct.pack_into('>I',p,12,fa_frac)
     c=16
@@ -1911,16 +2108,16 @@ def build_synack():
                     (0x24,5000),(0x28,200),(0x2C,50),(0x30,100),(0x34,16),(0x38,16),(0x3C,100),
                     (0x40,RTT_RING_CAP)]:
         struct.pack_into('>I',p,c+off,val)
-    return bytes(p), fa_s
+    return bytes(p), fa_s, fa_frac
 
-def build_time_reply(cd):
+def build_time_reply(cd, sess=None):
     ti = struct.unpack_from('>H',cd,8)[0] if len(cd)>=10 else 0
-    ms=tsync_ms(); p=bytearray(144); p[0]=2; p[2]=0x80
+    ms=tsync_ms(sess); p=bytearray(144); p[0]=2; p[2]=0x80
     struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,STATUS_INDEX)
     struct.pack_into('>H',p,14,ti); return bytes(p)
 
-def build_beacon(seq, idx=0):
-    ms=tsync_ms(); p=bytearray(144); p[0]=2; p[1]=0x40; p[2]=0x80
+def build_beacon(seq, idx=0, sess=None):
+    ms=tsync_ms(sess); p=bytearray(144); p[0]=2; p[1]=0x40; p[2]=0x80
     struct.pack_into('<H',p,6,seq&0xFFFF); struct.pack_into('>I',p,8,ms&0x3FFFF)
     struct.pack_into('>H',p,12,STATUS_INDEX); struct.pack_into('>H',p,14,idx); return bytes(p)
 
@@ -2823,6 +3020,22 @@ class S:
         self.last_fired_at=0.0    # time.time() of this session's most recent DAMAGE28 (msg 28);
                                   #   used to attribute a peer's death to the most-recent shooter
         self.k_kills=0; self.k_deaths=0; self.k_score=0  # this-session tallies (DB holds the total)
+        self.synack_base=None     # v209: (fa_s, fa_frac) from the connect SYNACK; replayed verbatim
+                                  # on HQ re-entry so the client's NET-time base stays a fixed
+                                  # connect constant (matches 2009 CreationTimeSeconds behaviour)
+        # v211: NET-time NTP epoch. The client (vcncNet FUN_10007fc0 -> tSyncAddMeasurement) anchors
+        # its clock BASE from the SYNACK fa_s:fa_frac (set-base FUN_10007cef, ONCE), then reconstructs
+        # server_time = base + beacon_A/1000 - beacon_B/1000, and NTP-compares it to its local clock:
+        # offset = ((pT2-pT1)+(pT3-pT4))/2, lag L = (pT4-pT1)-(pT3-pT2). The beacon A field is 18-bit
+        # (wraps every 262.143s). For offset to stay ~0 (matching a live host's small real lag, e.g.
+        # 2009's 'L:0.19'), A must encode ELAPSED since the base anchor so base+A == server_now. But
+        # elapsed wraps at 262s -> the client, whose base is locked, then sees a 262s offset step and
+        # slews to death ('CRAP backward NET Time', the -261.76 offset in run_054615). FIX: A =
+        # elapsed-since-_ntp_epoch, and we RE-ANCHOR the base (resend a SYNACK-format fa_s:fa_frac and
+        # reset _ntp_epoch=now) every NTP_REANCHOR_S < 262s, so A resets to ~0 before it can wrap and
+        # base+A stays continuous. _ntp_epoch is the server wall-clock time of the last base anchor.
+        self._ntp_epoch = time.time()
+        self._ntp_last_reanchor = time.time()
         # -- Reliable-channel diagnostics (stall hunt) --
         self._rel_rx_time=0.0     # time of last reliable (pt=1) packet FROM this client
         self._unrel_rx_time=0.0   # time of last unreliable in-game packet FROM this client
@@ -3150,7 +3363,15 @@ RELAY_TICK_LEAD = 0
 # -- msg 2 CREATE-OBJECT (remote plane) --------------------------------------
 # Reversed from FA.exe: msg-2 dispatch LAB_007e4e00 + NetPlane ctor @0x4f2850.
 # Payload = [1 skip byte] + records.  Plane object record = 41 bytes:
-#   [0]      tag = (Type & 0xf) | ((nation & 7) << 4)
+#   [0]      tag = 0x80 | (Type & 0xf) | ((nation & 7) << 4)
+#            bit7 (0x80) = HUMAN-owned flag (FUN_004f26b0 'test al,al; jns' @0x4f2714):
+#            SET -> GamerClientScore[St] looked up (FUN_004f2560) + bound to the plane
+#            (FUN_00427530 -> plane+0x128): name tag renders, kills score to the pilot.
+#            CLEAR -> DRONE branch: plane+0x128=0 -> NO name tag, no score (pre-v202 bug).
+#            bit7 requires GamerClientScore[St] non-null (created by the tag-0 client
+#            record) else the create is rejected ('Trying to create network plane for
+#            Human') / null-deref @0x4f286b; the slot persists after first spawn, so
+#            object-only re-creates are safe.
 #   [1]      plane_type   (PLN_INFO id; FUN_004c46d0 lookup - MUST be valid or CTD)
 #   [2]      (unused by ctor)
 #   [3]      skin         -> NetPlane+0xb30
@@ -3165,10 +3386,11 @@ DEFAULT_SKIN       = 0
 
 def build_object_record(st, onumber, nation, plane_type, pos, skin):
     """41-byte PLANE object record (Type 1/8, HeaderSize 28 + 13-byte trailer).
-    tag=Type|nation @[0], PLN_INFO id @[1], skin @[3], 6xfloat32 pos/orient @[4:28],
+    tag=0x80|Type|nation @[0] (bit7=human-owned: name tag + score binding - v202),
+    PLN_INFO id @[1], skin @[3], 6xfloat32 pos/orient @[4:28],
     St (owner ClientNumber u16) @[28], ONumber u16 @[30]."""
     rec = bytearray(41)
-    rec[0] = (PLANE_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    rec[0] = 0x80 | (PLANE_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)   # v202: bit7 = HUMAN-owned
     rec[1] = plane_type & 0xff
     rec[3] = skin & 0xff
     px, py, pz = pos
@@ -3286,8 +3508,55 @@ def build_scored_delete_object_3(onumber, x=0.0, z=0.0):
     body += bytes(9)                               # filler -> entry = 12B (unused on MEC=5 path)
     return build_msg13(bytes(body))
 
+# -- msg 33 (0x21) SCORE-EVENT / kill credit ---------------------------------
+# v203. The AUTHORITATIVE kill-credit message the 2009 live host sent (messages04): after a
+# victim's 'in 3'21' delete (MEC=5,EEC=3 = shot down by enemy), the host sent the KILLER
+# a separate 'in 33'14' ScoreEvent. Decoded from FUN_004f9ad0 -> FUN_004f9b0f (ScoreEvent
+# handler, VNet_Rcv.cpp:0x364):
+#   payload (14B) = [0x21][b1][PlayerIndex:u16 LE][Type:u8][9B tail]
+#     * PlayerIndex @[2:4] -> FUN_004f2530 resolves the SCORED player (the killer). It is
+#       the killer's PlayerIndex, NOT an object number (the log's 'Number=%i' prints the
+#       resolved player's object, which is why the capture looked like the killer's obj).
+#     * Type @[4]:  MEC = Type & 0x0f  (LOW nibble),  EEC = Type >> 4  (HIGH nibble)
+#       -- opposite nibble order to msg 3's exit byte (msg3 = (MEC<<4)|EEC). The handler
+#       ASSERTS EEC in {2,3} on the MEC==1 branch, runs the kill-credit path, and sets
+#       killer_plane+0xbf = 1 (kill tallied). The awarded POINTS are NOT in the payload ->
+#       the killer's client computes them from its own local damage list (same source the
+#       scored-delete MEC=5 path uses); msg 33 is purely the TRIGGER.
+#     * b1 @[1] and the 9B tail are not read on the MEC=1/EEC=3 credit path -> zero filler.
+#   For a confirmed enemy-player kill: MEC=1, EEC=3 -> Type = (3<<4)|1 = 0x31.
+#   MEC/EEC codes (2009 ExitDataArrive/ScoreEvent census, messages04):
+#     MEC: 1=alive/credit 2=collision 5=shot-down-by-fire 9=crashed/ditched 10=disconnect
+#     EEC: 0=no-enemy(self/terrain) 3=enemy-player 12/13=other-cause 1/2/4=special
+# Framed standalone-reliable via build_ingame_pkt (the client routes the 0x21 id through the
+# VNET table exactly as it did inside the 2009 host's msg-13 batch).
+MSG_SCORE_EVENT_33 = 0x21
+
+def build_score_event_33(player_index, mec=1, eec=3):
+    """msg 33 ScoreEvent - credit a confirmed kill to `player_index` (the killer).
+    Type byte = (eec<<4)|mec; default 0x31 = MEC1/EEC3 = enemy-player kill credit."""
+    body = bytearray([MSG_SCORE_EVENT_33])
+    body += bytes([0x00])                                  # b1 (unused on credit path)
+    body += struct.pack('<H', player_index & 0xFFFF)       # killer PlayerIndex
+    body += bytes([((eec & 0xf) << 4) | (mec & 0xf)])      # Type: MEC low, EEC high
+    body += bytes(9)                                       # tail filler -> 14B ('in 33'14')
+    return build_ingame_pkt(bytes(body))
+
+def send_score_event_to_killer(killer, mec=1, eec=3):
+    """Send the killer an authoritative msg-33 ScoreEvent so its in-game scoreboard ticks
+    the kill (independent of whether its local damage list survived the relay). Reliable."""
+    if killer is None or getattr(killer, 'player_index', None) is None:
+        return
+    pkt = build_score_event_33(killer.player_index, mec=mec, eec=eec)
+    threading.Thread(target=lambda: send_rel(killer, pkt,
+                     f'<- SCORE_EVENT 33 (credit kill to {killer.current_pilot} '
+                     f'PI={killer.player_index}, MEC={mec} EEC={eec})', to=3.0), daemon=True).start()
+    log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} (MEC={mec},EEC={eec})')
+
 # -- Combat scoring constants ----------------------------------------
 KILL_SCORE_POINTS   = 100    # flat points for an air kill (global scoring); tune to taste
+SEND_SCORE_EVENT_33 = True   # send the authoritative msg-33 ScoreEvent to the killer (the
+                             # 2009 host's method) on top of the scored delete.
 SEND_SCORED_DELETE_TO_KILLER = True   # send the killer a score-tail delete so the kill
                                       #   registers in-game; toggle off for bare deletes.
 KILL_CREDIT_WINDOW  = 30.0   # s: credit the most-recent OTHER shooter within this window
@@ -3666,7 +3935,16 @@ def handle_fly_start_place(s, af, mid, n, via=''):
     old_af  = s.__dict__.get('sp_af')
     grant_n = _alloc_start_place(s, af, n)      # distinct spot per player on this airfield
     af_changed = (old_af is not None and old_af != af)
+    # v205: DO NOT rebase NET-time here. v204 called s.tsync_rebase() on every fly-grant, which
+    # reset the ms counter to 0 mid-session -> the client saw server time jump BACKWARD by the full
+    # session-elapsed (~290-327s in messages60) = the SAME 'CRAP backward NET Time' freeze, just
+    # caused by the reset instead of the 262s wrap. The NET-time counter must be strictly monotonic
+    # for the life of the connection; see build_beacon/tsync for the real (non-resetting) fix.
     s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
+    # v210 note: the v208/209 HQ-reentry SYNACK re-anchor was REMOVED - it chased the wrong cause.
+    # The freeze was the STALE persisted GAME_DEF CreationTime (fixed at serve time now, see
+    # build_lz_gamedef), not a missing base re-anchor. Re-sending a SYNACK mid-flight was an
+    # unnecessary perturbation. In-arena vs HQ re-entry no longer needs distinguishing here for time.
     s.entered_game = True                       # re-fly after exit-to-HQ stays IN the arena: re-arm
                                                 # the msg-4 spawn gate (handle_leave_arena cleared it),
                                                 # else the re-join out-4 is swallowed -> no ServerConfirm
@@ -3938,9 +4216,11 @@ def handle_syn(data, addr):
     else: log('SYN','WARNING: unknown account')
     with sl: sids[s.sid]=s; sadrs[addr]=s
     time.sleep(0.015)
-    synack,fa_s=build_synack(); sock.sendto(synack,addr); log('TX/SYNACK',f'FA_s=0x{fa_s:08X}')
+    _now = time.time(); s._ntp_epoch = _now; s._ntp_last_reanchor = _now  # v211: base<->epoch same instant
+    synack,fa_s,fa_frac=build_synack(); s.synack_base=(fa_s,fa_frac)   # v209: keep for HQ re-anchor
+    sock.sendto(synack,addr); log('TX/SYNACK',f'FA_s=0x{fa_s:08X}')
     time.sleep(0.025)
-    sock.sendto(build_beacon(s.nts(),0),addr); log('TX/BEACON','idx=0')
+    sock.sendto(build_beacon(s.nts(),0,sess=s),addr); log('TX/BEACON','idx=0')
     def sp():
         time.sleep(0.05)
         if not s.closing: sock.sendto(build_data(100,s.nsq()),s.addr); log('TX/SYS','cmd=100')
@@ -3954,8 +4234,9 @@ def login(s):
     s.auth_done=True
     def _hb():
         errors = 0
+        _hb_n = 0
         while not s.closing and not s.in_game:
-            time.sleep(5)
+            time.sleep(HEARTBEAT_INTERVAL)
             if not s.closing:
                 try:
                     if s.entered_game:
@@ -3966,8 +4247,36 @@ def login(s):
                         # received 11x 0xd3 over 60s and still hit FATALLOSTCONNECTION at
                         # exactly 60s after the last reliable packet = the ServerConfirm).
                         # A type-2 0x80 TIME beacon DOES reset it - early lobby survived a
-                        # ~19s no-reliable gap on TIME packets alone - so push one every 5s.
-                        sock.sendto(build_beacon(s.nts(), 0), s.addr)
+                        # ~19s no-reliable gap on TIME packets alone.
+                        # v206: this beacon is ALSO the client's NET-time offset source. The
+                        # client holds NET time = own_clock + server_offset and needs a STEADY
+                        # beacon stream to keep the offset locked; the beacon A field (18-bit ms,
+                        # wraps ~262s) is a small correction, so gaps longer than the wrap make
+                        # the correction ambiguous and a respawn re-fit can snap the offset
+                        # backward by ~session-elapsed (the 'CRAP backward NET Time' freeze;
+                        # run_230020 logged only 2 beacons the whole session -> froze on the 4th
+                        # re-fly). Beat at HEARTBEAT_INTERVAL (1s) so the client re-anchors well
+                        # inside the wrap window. Logged 1-in-5 to prove cadence without flooding.
+                        # v212: RE-ANCHOR DISABLED. v211's periodic SYNACK re-anchor did NOT update
+                        # the client's base mid-session (set-base only runs on the connect config
+                        # path), so resetting A->0 while the base stayed fixed made server_time drop
+                        # by ~elapsed -> a ~100-180s slew that froze mid-slew (run_192643: froze ~57s
+                        # after the 180s re-anchor). v211's CORE fix stands (offset 245.8s -> 0.75s,
+                        # client now Slews instead of hard-failing). Leaving the base un-reset: A =
+                        # elapsed-since-connect climbs monotonically; if it ever nears the 262s wrap
+                        # we handle it separately. Gate kept but effectively off (NTP_REANCHOR_S huge).
+                        if NTP_REANCHOR_S < 100000 and (time.time() - s._ntp_last_reanchor) >= NTP_REANCHOR_S:
+                            _rt = time.time(); s._ntp_epoch = _rt; s._ntp_last_reanchor = _rt
+                            _ra_synack, _ra_s, _ra_frac = build_synack()
+                            sock.sendto(_ra_synack, s.addr)
+                            log('TX/REANCHOR', f'NET-time base re-anchored FA_s=0x{_ra_s:08X} '
+                                               f'(epoch reset, A->0) ({s.current_pilot})')
+                        _bseq = s.nts()
+                        sock.sendto(build_beacon(_bseq, 0, sess=s), s.addr)
+                        _hb_n += 1
+                        if (_hb_n % 5) == 1:
+                            log('TX/BEACON', f'in-game seq={_bseq} A_ms={tsync_ms(s)} '
+                                             f'({s.current_pilot} n={_hb_n})')
                     else:
                         sock.sendto(bytes([0,0,0,0xd3]), s.addr)   # lobby heartbeat
                     errors = 0
@@ -4655,6 +4964,11 @@ def _ingame_own_object_removed(s, tb, stored):
                          f'(death/crashland/exit-to-HQ) -> drop dead plane, stay in arena, re-arm confirm')
         _killer = score_on_death(s, stored)   # credit killer + record death in DB (accumulating)
         broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer)
+        # v203: the 2009 host's AUTHORITATIVE credit - a separate msg-33 ScoreEvent to the
+        # killer (MEC=1,EEC=3), on top of the scored delete. Ticks the killer's in-game
+        # scoreboard even if its local damage list didn't survive the relay (N-player fights).
+        if _killer is not None and SEND_SCORE_EVENT_33:
+            send_score_event_to_killer(_killer, mec=1, eec=3)
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.
@@ -5256,7 +5570,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.)
         if sub in NO_ECHO_SUBS:
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
@@ -5385,7 +5699,7 @@ def on_pkt(data, addr):
     if not s: return
     sz=len(data)
     if sz==12 and (data[2]&0x80):
-        sock.sendto(build_time_reply(data),addr); return
+        sock.sendto(build_time_reply(data,sess=s),addr); return
     if sz>=8:
         dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
         if pt==1:
@@ -5525,7 +5839,7 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v200 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v212 on {HOST}:{PORT}')
 # -- ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
 #    so their camps/side block can be diffed against what a created room stores. The
 #    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
