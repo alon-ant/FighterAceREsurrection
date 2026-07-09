@@ -1,7 +1,81 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v212
+Fighter Ace LAN Server v215
 ===========================
+v215: THE REAL IN-GAME TIME KEEPER - STATUS packets (found via the user's session-timer clue). The
+      System Status window's session clock was stuck at 0:00; that window (bytes/sec, loss%, latency,
+      SESSION TIME) is fed by a two-way 'Game Status Message' STATUS exchange SEPARATE from the NTP
+      time sync, which WE NEVER DROVE (so all its fields read 0). Decoding it revealed the missing
+      mechanism: when the client processes a STATUS request it calls FUN_10007d13 ('STATUS Update
+      server base time'), which ADDS the packet's base-time increment to the NET-time BASE
+      (DAT_1001d0b0) via FUN_100079c4. That base is the value we'd PROVEN was otherwise connect-only
+      (set-base is gated behind a state-1 SYN the in-game dispatcher rejects). So the STATUS packet
+      is how the server ADVANCES the client's base mid-game - which defeats the 262s wrap of the
+      18-bit A field (base advances -> base+A tracks real time -> A's wrap stops mattering). This is
+      almost certainly how the 2009 server kept in-game time; our one-way NTP beacon was a wrong
+      substitute that wrapped and, during a resync, impersonated a ping reply (v214's freeze).
+      v215 adds build_status_request (DATA section, sub_type=4, base-increment @ wire 8, status
+      counters, seq) and sends one every STATUS_INTERVAL_S (2s) in-game with base-increment = elapsed
+      ms since the last STATUS. connid captured from the client's own packets (STATUS/CONNID log).
+      Beacon kept ON for now (belt-and-suspenders while we confirm STATUS works). SUCCESS SIGNAL:
+      client logs 'New server base time', the System Status session timer counts up (was 0:00), and
+      the flight survives past the old 262s wrap point. If confirmed, the beacon can be retired.
+v214:
+v214: TIME-SYNC PROTOCOL REWORK (full vcncNet decode). Built a complete model of the client's
+      time/heartbeat/connection layer from Ghidra:
+      - recv-thread loop (proc @0x10006357, spawned by FUN_1000630c): every ~125ms it runs the
+        time-sync scheduler FUN_100091b7(now), then recvfrom -> dispatcher FUN_100032da.
+      - CONNECT sync: vcncConnect (FUN_1000b084) calls IOCInitializeTimeSynchronization(level=2)
+        (FUN_10009407): a BLOCKING two-way sync - it sends 12-byte pings (FUN_100090e4, flag 0x40 ->
+        wire byte[2]=0x80) and needs 4 valid replies (d664=4); 33 pings w/ 0 replies -> d660=5 (FAIL)
+        -> then it REBINDS to a 'unique port' (FUN_100032b2) and retries. level 0 would instead set
+        d660=3, offset=0 (trust local clock) and never ping - but that's a client-side vcncOpen value
+        (DAT_1001f85c=2), not server-settable.
+      - IN-GAME: the scheduler resyncs (state 3->2, pings every 2s) whenever the last time sample
+        (d630) is staler than the drift window (d65c, 8s..17min). The two-way ping/reply is the
+        client's intended in-game time source AND its latency measurement (HUD 'L:').
+      - Our one-way beacon both (a) SUPPRESSED that resync (kept d630 fresh) and (b) wrapped at 262s.
+        v213 (no beacon) let the client resync, but its pings 'weren't received' -> sync FAIL -> -2
+        freeze.
+      ROOT-CAUSE CANDIDATE now fixed: on_pkt DROPPED packets from any addr not already in sadrs
+      (get_s -> None -> return, SILENTLY). If the client moved its source port (the sync-fail
+      'unique port' rebind, or NAT), its time pings arrived from an unknown addr and were dropped ->
+      no reply -> 33 pings/0 valid -> d660=5 -> freeze. v214 adds: (1) RAW_RX_LOG to log EVERY inbound
+      packet incl. unknown-addr ones, (2) _match_session_by_ip + port-move adoption so a 12-byte TIME
+      ping from a moved port is matched to its session by IP, adopted, and ANSWERED. Beacons kept ON
+      (IN_GAME_BEACON=True) for this diagnostic pass so we get a safe baseline while we see the raw
+      inbound stream. Next: with the port-drop fixed, retry no-beacon so the client self-resyncs.
+v213.1:
+v213.1: REVERTED v213's no-beacon experiment. It froze on the FIRST game entry (run_220823):
+      stopping the in-game beacons made the client's time sample go stale; it entered resync (sync
+      state 2) and sent its own pings, but those pings NEVER reached the server (zero 12-byte
+      data[2]&0x80 packets logged) and our sentinel keepalives weren't valid samples, so after ~33
+      pings/~66s the client hit 'No response from server' -> sync state 5 -> vcncGetTimeState -2 ->
+      game spun and froze. LESSON: the one-way TIME beacon is LOAD-BEARING - it is the client's sole
+      in-game time source; the client does NOT self-resync via raw two-way pings the way v213 assumed.
+      Back to IN_GAME_BEACON=True (v212 behaviour: survives to the 262s wrap). The wrap is still the
+      real problem; the resync path is not the answer. Kept the RX/TIMEPING ping-logging for future
+      diagnosis. build_keepalive/KEEPALIVE_S retained but dormant.
+v213:
+v213: NET-TIME FREEZE - the REAL fix (pure server-side), found via full Ghidra decode + the user's
+      key observation that the game transmits constantly but receives almost nothing in-game. The
+      client has a self-healing clock RESYNC (FUN_100091b7): when its last time sample (DAT_1001d630)
+      goes staler than its drift window (DAT_1001d65c), it drops to sync state 2 and sends 12-byte
+      two-way TIME PINGS (flag 0x40 -> wire byte[2]=0x80), and on the reply it CLEARS its sample ring
+      (FUN_10007c9c) and RE-BASELINES the offset from scratch (first sample accepted unconditionally,
+      FUN_100081be) - which absorbs ANY discontinuity (incl. the 262s A wrap) with no >32s slew, and
+      the round trip MEASURES latency (the HUD 'L:'). Our 1s one-way beacons kept DAT_1001d630 fresh,
+      so the client NEVER resynced -> the beacon's 18-bit A field wrapped at 262s as a raw step ->
+      'CRAP backward NET Time' freeze (confirmed on CLOUD too, ~10min/2 wraps in run 180604); and
+      one-way beacons have no round trip -> L:0.00/DL:0 even on cloud. FIX: IN_GAME_BEACON=False -
+      stop the one-way beacons entirely. No beacon => no A field => no 262s wrap; and the client's
+      native resync runs, re-baselining cleanly and measuring real latency. We already answer the
+      0x40 pings (on_pkt sz==12 & data[2]&0x80 -> build_time_reply; format verified vs FUN_10007f06:
+      A@8, STATUS_INDEX@12, echoed time-index@14). New RX/TIMEPING log marks in-game resync pings.
+      Also confirmed via Ghidra: the base (DAT_1001d0b0) is set ONLY by set-base (connect config),
+      and the in-game dispatcher (state 2) REJECTS SYN packets (the SYN flag bit IS the reject bit),
+      so a mid-session base re-anchor is impossible - the resync path is the client's intended way.
+v212:
 v212: NET-time - v211 core fix CONFIRMED WORKING, harmful re-anchor removed. run_192643 proved
       v211 dropped the NTP clock offset from +245.8s to +0.75s (the client's 'Base' readout) and
       the client now SLEWS small steps ('Slewed? YES') instead of hard-failing. The residual freeze
@@ -374,6 +448,29 @@ NTP_REANCHOR_S = 999999.0   # v212: re-anchor DISABLED (set huge). v211's mid-se
                            # it just reset A and dropped server_time ~elapsed -> froze mid-slew. A now
                            # climbs as elapsed-since-connect; the 262s wrap is a separate TODO. The
                            # core v211 fix (offset ~0, real lag, client slews small steps) stands.
+IN_GAME_BEACON = True      # v213.1: REVERTED to True. v213's no-beacon experiment FAILED WORSE -
+                           # the client does NOT self-resync via raw two-way pings in-game (the server
+                           # received ZERO 12-byte data[2]&0x80 pings in run_220823). With beacons off,
+                           # the client's in-game time sample went stale, it entered resync (sync
+                           # state 2), sent its own pings that never reached us, got no valid reply,
+                           # and after ~33 pings/~66s hit 'No response from server' -> sync state 5 ->
+                           # vcncGetTimeState returns -2 -> the game spun on -2 and froze on the FIRST
+                           # entry (worse than v212's 262s survival). So the one-way beacon IS load-
+                           # bearing: it's the client's sole in-game time source. Back to beacons ON;
+                           # the 262s wrap remains the real problem to solve via a different route.
+KEEPALIVE_S = 20.0         # v213: kept for reference (unused while IN_GAME_BEACON=True).
+RAW_RX_LOG = True          # v214 DIAGNOSTIC: log every raw inbound packet (addr + first 16 bytes),
+                           # including packets from unknown addresses that on_pkt used to drop
+                           # silently. Purpose: SEE whether the client's in-game time-sync pings
+                           # arrive from an unexpected source port (which would explain why v213's
+                           # no-beacon resync 'received nothing'). Verbose - turn off after diagnosis.
+STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS requests in-game. This
+                           # is the REAL in-game time keeper (found via the session-timer-stuck-at-
+                           # 0:00 clue): the client ADDs the packet's base-time increment to its NET
+                           # base (FUN_10007d13), which ADVANCES the base mid-game and defeats the
+                           # 262s wrap of the 18-bit A field; it also drives the System Status window
+                           # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
+STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
 # Diagnostic: capture the UNRELIABLE in-game packet stream (flight telemetry) that the
 # server otherwise drops. Rate-limited hex sample per session, so one flight reveals the
 # entity/position format we need to relay between players. Set False to silence.
@@ -2121,6 +2218,72 @@ def build_beacon(seq, idx=0, sess=None):
     struct.pack_into('<H',p,6,seq&0xFFFF); struct.pack_into('>I',p,8,ms&0x3FFFF)
     struct.pack_into('>H',p,12,STATUS_INDEX); struct.pack_into('>H',p,14,idx); return bytes(p)
 
+def build_keepalive(sess=None):
+    """v213: in-game connection keepalive that resets the client's 60s connection-alive timer
+    (vcncOpen DAT_1001f878=60000) WITHOUT feeding the NET-time base or suppressing the client's
+    self-healing resync. It's a TIME packet (p[2]=0x80) carrying a SENTINEL time-index 0xFFFF that
+    matches no pending ping. Two cases, both safe (verified in vcncNet FUN_10007f06):
+      - synced (sync state 3): the time handler early-exits (it only runs in state 1/2), so the
+        packet is ignored by the time layer entirely; but the packet dispatcher (FUN_100032da)
+        stamps DAT_10017be8 on EVERY received packet, resetting the 60s timer. Pure keepalive.
+      - mid-resync (state 2): the sentinel index fails the queue match (FUN_10007b0c), so it's
+        logged as a 'Duplicate time message' and dropped - no sample, no DAT_1001d630 update, no
+        wrapping-A applied. The client still resyncs off its OWN two-way pings (we answer those).
+    So this keeps the link alive across the ~60s window without re-introducing the 262s beacon wrap
+    or preventing the resync that re-baselines the clock and measures latency."""
+    p=bytearray(144); p[0]=2; p[2]=0x80
+    struct.pack_into('>I',p,8,tsync_ms(sess)&0x3FFFF)
+    struct.pack_into('>H',p,12,STATUS_INDEX)
+    struct.pack_into('>H',p,14,0xFFFF)   # sentinel time-index: matches no pending ping -> dropped
+    return bytes(p)
+
+def build_status_request(sess, base_incr_ms):
+    """v215: build a 'Game Status Message' / STATUS REQUEST packet - the REAL in-game time keeper.
+
+    Discovery (from the user's clue that the System Status window's session timer sits at 0:00):
+    the System Status window (bytes/sec, loss%, latency, SESSION TIME) is fed by a two-way STATUS
+    exchange that is SEPARATE from the NTP time sync. When the client receives a STATUS request it
+    runs FUN_100073a4 (updates those fields + the session clock) AND - critically - FUN_10007d13
+    ('STATUS Update server base time'), which ADDS base_incr_ms to the NET-time BASE (DAT_1001d0b0)
+    via FUN_100079c4. That base is the value we had proven was otherwise connect-only (set-base is
+    gated behind a state-1 SYN that's rejected in-game). So the STATUS packet is how the server
+    ADVANCES the client's base time mid-game - which defeats the 262s wrap of the 18-bit A field:
+    with the base advancing, base + A tracks real time and the wrap of A stops mattering. This is
+    almost certainly how the 2009 server kept in-game time; our one-way NTP beacon was a wrong
+    substitute that both wrapped and (during a resync) impersonated a ping reply.
+
+    Wire format (mirrors the client's own STATUS reply builder in FUN_100076c2 / FUN_100070c9):
+      bytes 0-1  : connection id (the value the client stamps in its own packets; captured per
+                   session as _status_connid, else fall back to the beacon-style 0x0240).
+      byte  2    : section-flags byte = 0x20 (DATA section; the dispatcher routes on byte[7] after
+                   ntohs == wire byte 2). (The client also sets 0x02 ACK; DATA alone suffices to
+                   reach the sub-type switch.)
+      byte  3    : 0.
+      bytes 4-7  : control dword (big-endian). Top 3 bits = DATA sub-type = 4 -> selects the STATUS
+                   handler FUN_100076c2. Low 9 bits of the header carry the status sequence; we also
+                   place the sequence where the client expects it.
+      bytes 8-11 : base-time increment in ms (big-endian) -> client ADDs to its base. THE KEY FIELD.
+      bytes 12-23: status counters (msgs sent/recvd, etc) used for the loss%/RTT/session calc. We
+                   feed monotonic sent/recv counts so the window shows sane values.
+    Length 36 (0x24) to match the client's STATUS packet size.
+    """
+    seq = sess._status_seq & 0x1FF
+    p = bytearray(36)
+    connid = sess._status_connid if sess._status_connid is not None else 0x0240
+    struct.pack_into('>H', p, 0, connid & 0xFFFF)
+    p[2] = 0x20                                    # DATA section flag (wire byte 2 == dispatcher byte[7])
+    p[3] = 0x00
+    ctrl = (4 << 29) | (seq << 20) | 0x80000       # sub_type 4 + seq + status bit (matches client)
+    struct.pack_into('>I', p, 4, ctrl & 0xFFFFFFFF)
+    struct.pack_into('>I', p, 8, base_incr_ms & 0xFFFFFFFF)   # base increment (ms) -> advances base
+    # status counters (wire 12-23): server msgs sent / recvd so far, then two spare u32s. These drive
+    # the loss%/RTT display; monotonic counts keep it sane.
+    struct.pack_into('>H', p, 12, sess.sq & 0xFFFF)          # msgs sent from server (approx)
+    struct.pack_into('>H', p, 14, sess.rx & 0xFFFF)          # msgs recvd by server
+    struct.pack_into('>I', p, 16, 0)
+    struct.pack_into('>I', p, 20, 0)
+    return bytes(p)
+
 def build_rel_ack(cid, seq=0, next_exp=None):
     # CUMULATIVE ACK -- ROOT-CAUSE FIX for the 3rd-reentry CTD.
     # Bit layout (matches vcncNet's own ACK builder FUN_10002a76 / router FUN_100032da):
@@ -3001,6 +3164,10 @@ class S:
         self.account=None; self.auth64=None; self.auth_payload=None
         self.current_pilot=None; self.current_slot=0; self.current_room=None; self.room_slot=0; self.last_43_ts=0.0; self.entered_game=False; self.in_game=False; self.client_granted=False
         self.plane_type=PLANE_TYPE_ID   # v201: player's selected plane index (from out-4 byte[8]); default until first spawn
+        self._status_seq=0              # v215: STATUS packet sequence (low 9 bits, increments each send)
+        self._status_connid=None       # v215: connection id observed from the client's own packets (wire bytes 0-1)
+        self._status_last=0.0          # v215: time of last STATUS request sent
+        self._status_base_epoch=None   # v215: server-time anchor for the base-increment we feed the client
         # -- Per-room game state (multi-room: every player's runtime state is keyed
         # to the room they entered, so chat / roster / positions never cross rooms) --
         self.client_number=0      # assigned at the 201 grant, unique WITHIN the room
@@ -4271,12 +4438,54 @@ def login(s):
                             sock.sendto(_ra_synack, s.addr)
                             log('TX/REANCHOR', f'NET-time base re-anchored FA_s=0x{_ra_s:08X} '
                                                f'(epoch reset, A->0) ({s.current_pilot})')
-                        _bseq = s.nts()
-                        sock.sendto(build_beacon(_bseq, 0, sess=s), s.addr)
-                        _hb_n += 1
-                        if (_hb_n % 5) == 1:
-                            log('TX/BEACON', f'in-game seq={_bseq} A_ms={tsync_ms(s)} '
-                                             f'({s.current_pilot} n={_hb_n})')
+                        # v213: in-game one-way TIME beacons are OFF by default (IN_GAME_BEACON=False).
+                        # See the flag's comment: the beacon is what wraps at 262s and it SUPPRESSES
+                        # the client's self-healing resync. With it off, the client resyncs via two-way
+                        # ping (we answer those in on_pkt) and re-baselines cleanly - no wrap, real lag.
+                        if IN_GAME_BEACON:
+                            _bseq = s.nts()
+                            sock.sendto(build_beacon(_bseq, 0, sess=s), s.addr)
+                            _hb_n += 1
+                            if (_hb_n % 5) == 1:
+                                log('TX/BEACON', f'in-game seq={_bseq} A_ms={tsync_ms(s)} '
+                                                 f'({s.current_pilot} n={_hb_n})')
+                        else:
+                            # v213: no beacon -> send a lightweight keepalive every KEEPALIVE_S to
+                            # reset the client's 60s connection-alive timer WITHOUT feeding the time
+                            # base or suppressing resync (build_keepalive: sentinel time-index).
+                            _now_hb = time.time()
+                            if (_now_hb - getattr(s, '_last_keepalive', 0.0)) >= KEEPALIVE_S:
+                                s._last_keepalive = _now_hb
+                                sock.sendto(build_keepalive(sess=s), s.addr)
+                                _hb_n += 1
+                                log('TX/KEEPALIVE', f'in-game (no-beacon, resync mode) '
+                                                   f'({s.current_pilot} n={_hb_n})')
+                        # v215: STATUS request - the real in-game time keeper. Send every
+                        # STATUS_INTERVAL_S with base-increment = elapsed ms since the last STATUS.
+                        # The client ADDs this to its NET base (FUN_10007d13) -> the base ADVANCES
+                        # in-game, tracking real time, so the 18-bit A field's 262s wrap no longer
+                        # matters. Also drives the System Status window (loss%, latency, SESSION
+                        # TIME). Success signal: client logs 'New server base time' and the session
+                        # timer starts counting up (was stuck at 0:00).
+                        if STATUS_PACKETS:
+                            _now_st = time.time()
+                            if s._status_base_epoch is None:
+                                s._status_base_epoch = _now_st
+                                s._status_last = _now_st
+                            if (_now_st - s._status_last) >= STATUS_INTERVAL_S:
+                                _incr_ms = int((_now_st - s._status_last) * 1000)
+                                s._status_last = _now_st
+                                s._status_seq = (s._status_seq + 1) & 0x1FF
+                                try:
+                                    sock.sendto(build_status_request(s, _incr_ms), s.addr)
+                                    _hb_n += 1
+                                    if (s._status_seq % 8) == 1:
+                                        log('TX/STATUS', f'in-game seq={s._status_seq} '
+                                                        f'base_incr={_incr_ms}ms '
+                                                        f'connid=0x{(s._status_connid or 0x0240):04x} '
+                                                        f'({s.current_pilot})')
+                                except OSError:
+                                    pass
                     else:
                         sock.sendto(bytes([0,0,0,0xd3]), s.addr)   # lobby heartbeat
                     errors = 0
@@ -5694,11 +5903,59 @@ def handle_post_auth(s, cmd, pl):
 
 # --- Packet receiver ----------------------------------------------------------
 
+def _match_session_by_ip(addr):
+    """v214: find a session whose IP matches addr[0] even if the PORT differs. The client can
+    move its source port mid-session - e.g. IOCInitializeTimeSynchronization's failure path rebinds
+    to a 'unique port' (FUN_100032b2) and retries, and NAT/rebind can also shift it. When that
+    happens the time-sync pings arrive from a new (ip, port) that isn't in sadrs, so the old code
+    silently dropped them (get_s -> None -> return) and the client got no reply -> sync FAIL (d660=5)
+    -> vcncGetTimeState -2 -> freeze. Matching by IP lets us still answer."""
+    with sl:
+        for a, sess in sadrs.items():
+            if a[0] == addr[0]:
+                return sess
+    return None
+
 def on_pkt(data, addr):
-    s=get_s(addr)
-    if not s: return
     sz=len(data)
+    # v214 DIAGNOSTIC: log EVERY raw inbound packet's addr + head, so we can SEE time-sync pings
+    # that arrive from an unexpected port (the old code dropped unknown-addr packets silently).
+    if RAW_RX_LOG:
+        _known = get_s(addr) is not None
+        log('RX/RAW', f'{addr[0]}:{addr[1]} sz={sz} head={data[:16].hex()} '
+                      f'{"known" if _known else "UNKNOWN-ADDR"}')
+    s=get_s(addr)
+    # v214: time-sync ping from a moved port -> match by IP and ADOPT the new addr into the session,
+    # so subsequent packets (and our replies) stay aligned. Only for the 12-byte TIME ping, which is
+    # safe to answer regardless of the reliable-channel state.
+    if s is None and sz==12 and (data[2]&0x80):
+        s = _match_session_by_ip(addr)
+        if s is not None:
+            _old = s.addr
+            with sl:
+                sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
+            log('RX/PORTMOVE', f'time-ping from {addr[0]}:{addr[1]} adopted into session '
+                               f'(was {_old[1]}) ({getattr(s,"current_pilot","?")})')
+    if not s: return
+    # v215: capture the connection id the client stamps in its own packets (wire bytes 0-1) so our
+    # STATUS request can carry the value the client expects. The 12-byte TIME pings carry it (e.g.
+    # 001e...); grab it once. Falls back to a beacon-style default in build_status_request if unseen.
+    if s._status_connid is None and sz >= 2 and (data[2] & 0x80) and sz == 12:
+        s._status_connid = struct.unpack_from('>H', data, 0)[0]
+        log('STATUS/CONNID', f'captured connid=0x{s._status_connid:04x} for STATUS packets '
+                             f'({getattr(s,"current_pilot","?")})')
     if sz==12 and (data[2]&0x80):
+        # 12-byte two-way TIME ping (client FUN_100090e4: flag 0x40 -> wire byte[2]=0x80). In the
+        # LOBBY this is the initial clock sync; IN-GAME (v213) it's the client's periodic RESYNC
+        # (FUN_100091b7 drops to sync state 2 when its last time sample goes stale). We reply with a
+        # fresh timestamp + echoed time-index so it re-baselines cleanly and measures round-trip
+        # latency (HUD 'L:'). Logged per session-phase so we can confirm the resync loop is running.
+        ti = struct.unpack_from('>H', data, 8)[0] if sz >= 10 else 0
+        s._tping_n = getattr(s, '_tping_n', 0) + 1
+        if getattr(s, 'entered_game', False):
+            if (s._tping_n % 4) == 1:
+                log('RX/TIMEPING', f'in-game RESYNC ping #{s._tping_n} ti={ti} '
+                                   f'-> reply A_ms={tsync_ms(s)} ({getattr(s,"current_pilot","?")})')
         sock.sendto(build_time_reply(data,sess=s),addr); return
     if sz>=8:
         dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
@@ -5839,7 +6096,7 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v212 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v215 on {HOST}:{PORT}')
 # -- ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
 #    so their camps/side block can be diffed against what a created room stores. The
 #    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
