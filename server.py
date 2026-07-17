@@ -1,7 +1,1057 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v215
+Fighter Ace LAN Server v276
 ===========================
+v276: AUTO-RESUPPLY base-change handling = treat like an HQ entry/respawn. On a base change (tab)
+      the plane transits to the new base (position changes ~10-20s), which correctly deferred the
+      resupply - but could leave it feeling stuck. A base change re-fires StartPlace (airfield
+      change 2->3) + a fresh ServerConfirm, i.e. it IS a respawn at the new base. v276 resets the
+      auto-resupply position tracking (last_pos/pos_static_since) on (a) ServerConfirm (every spawn/
+      respawn - HQ entry AND base change) and (b) a StartPlace airfield change, so the new base
+      starts a CLEAN static settle and the old base's transit deltas can't leak in. The plane still
+      settles ~2s after transit ends, now cleanly per-base. BLIND (TC gate = P2b).
+v275: AUTO-RESUPPLY WORKING - at_airfield scan-framing fix (the bug that broke all prior versions).
+v274: AUTO-RESUPPLY position-static gate (correct, but at_airfield never set due to scan framing).
+v273: AUTO-RESUPPLY via telemetry-absence (FAILED - type-7 keeps flowing when parked).
+v272: AUTO-RESUPPLY via plane_movement (FAILED - type-7 stops when idle, no position data parked).
+v271: AUTO-RESUPPLY proxy-event trigger (missed no-move-from-spawn; fired on touchdown roll).
+v270: AUTO-RESUPPLY engine-off trigger (only fired at spawn - client sends 5300 once).
+v269: AUTO-RESUPPLY over-tightened to post-flight only (WRONG - reverted).
+v268: AUTO-RESUPPLY settle-timer (worked but fired pre-takeoff at full loadout = no-op).
+v267: AUTO-RESUPPLY (P2a) - engine-edge trigger (FAILED - states arrive out of order).
+v266: msg-60 SUPPLY GRANT sender = the in-world REARM/REFUEL trigger (CONFIRMED WORKING).
+v265: `resupply` console command (msg-36 test lever - ruled out, msg-36 is destroy/capture).
+v264: SUPPLY capture widened (v263 watched the wrong sub numbers). The 2009 '59/60/40/73' are
+      CONDUCTOR (in-game world) channel numbers; on our reliable channel the spawn/land messages
+      show as different subs (seen: type=0x12 sub=0x60 sz=5 right after StartPlace/ServerConfirm;
+      a PREFIXED sub=0x40 we currently ignore). v264 logs EVERY reliable-channel message while the
+      pilot is in-arena and decodes the prefixed inner sub (pl[8]), so the real supply/repair flow
+      is visible instead of guessed. Still capture-only, no behaviour change.
+v263: SUPPLY/REPAIR capture instrumentation (Phase 2 start - resupply/repair on landing).
+      Adds _supply_msg_instrument to log the FULL bytes of inbound supply/repair messages
+      (msg 59/60/40/73 = 0x3b/0x3c/0x28/0x49) so their formats can be reversed from real captures.
+      2009 flow (messages04.log): InsertPlayer(OnGround) -> client out-59 (supply/startplace request)
+      -> server in-60 (grant) -> Repair PlnID:.. Full=1/0 (server-driven rearm via msg 40/73). As the
+      server we receive 0x3b and must reply 0x3c then send 40/73 to rearm. No behaviour change yet -
+      capture first, build the grant/repair replies from ground truth next (replay, don't author).
+      Gated by SUPPLY_MSG_INSTRUMENT.
+v262: BAIL CHUTE = NAMED FREEFALL (revert byte9 to 0). The stock parachuter ctor FUN_004a8c20 copies
+      the pilot NAME into the tag (+0x154) ONLY on the byte9==0 branch; byte9>=1 (deploy) writes a
+      numeric code instead - so a deployed chute structurally cannot carry the pilot name via create.
+      Since the real game named EVERY chute (user spec) and a 2009 SPECTATOR saw a bail as freefall
+      (the canopy deploy was owner-local), byte9=0 is the authentic, named bail: the pilot floats down
+      with their name+rank tag. The v261 [2:4] owner fix is kept (PARA_FIX_OWNER_REF) so the name
+      binds correctly. Trade: the remote won't see the canopy visibly OPEN (deploy is owner-local),
+      but a NAMED falling pilot matches the real spectator view. The "deployed AND named" case (needed
+      for TC cargo paratroopers, which are always deployed yet named) is separate work: those get their
+      name from the REMOTE_PLAYER bind path, not the ctor strcpy - to be built with the TC cargo drop.
+v261: PARACHUTER NAME TAG fix (deployed chute now shows the pilot name).
+      The deployed chute (v259 byte9=1) rendered but had NO name tag, unlike the old freefall chute.
+      RE of the master object factory FUN_004f26b0 (VNet.cpp) case 2 showed the name comes from a
+      BIND: it resolves record body[2:4] as an object number (FUN_004f2530 -> objtable[n]) to the
+      owner's GamerClientScore, then FUN_00427530 binds it to chute+0x128 = the name tag. The ctor's
+      strcpy fallback only fills the name for byte9==0 (freefall); byte9>=1 relies entirely on the
+      bind. Our record copied the bailing CLIENT's out-4 body verbatim, whose [2:4] holds that
+      client's LOCAL plane number - which does NOT match the peer-visible number the server assigned
+      the plane (log proof: [2:4]=0x0101=257 was BIGALON's own plane, not Test2's plane 256) -> the
+      peer's lookup missed -> no name. Fix (PARA_FIX_OWNER_REF): overwrite body[2:4] with the
+      peer-visible plane number src.my_obj_number so the bind resolves and the pilot name renders.
+      Matches the real game: every canopy (pilot/paratrooper/cargo) is named, killable, collidable.
+v260: ARENA ISOLATION fixes (cross-arena leakage) + no-team roster fix.
+      BUG B (real): after an arena SWITCH, current_room went stale so chat, telemetry and roster
+      kept scoping to the OLD arena -> peers in different arenas saw each other's chat, saw each
+      other in the 3D world, and a switched player still showed in the old arena's roster. Root:
+        (1) handle_leave_arena cleared entered_game but NEVER current_room; and
+        (2) the enter handler (sub=0xc8) only resolved a room 'if not current_room', so a switch
+            left current_room pointing at the old room.
+      Fix: handle_leave_arena now sets current_room=None; the enter handler ALWAYS resolves the
+      GameIndex->room and, if it differs from the current room, leaves the old arena cleanly
+      (player-leave + object-delete + db_room_leave) before switching. All broadcast paths already
+      scoped to get_sessions_in_room(current_room), so correct current_room = correct isolation.
+      BUG A (cosmetic): a player who hadn't picked a side showed under US in peers' rosters. Root:
+      build_add_player_62 encoded a None camp as 0 (=US). Fix (ADD_PLAYER_NOTEAM_NEUTRAL): encode
+      as 0xff so the handler maps it to camp=-1 (no side / In Menu) - the same encoding the client
+      gives its own local entry at grant. msg 63 still sets the real side on team-select.
+v259: ★ PARACHUTER DEPLOY located and made testable (create-time, one byte). ★
+      Deep RE this session found the master object factory FUN_004f26b0 (VNet.cpp). Its parachuter
+      case (type 2) calls the ctor as:
+          FUN_004a8c20( body[8], owner, *(body+4), (body[0]&0x70)>>4, body[9] )
+      so record body BYTE[9] = ctor param_6 = the DEPLOY / model selector:
+          0   = ParaTrooper, FREEFALL, no canopy  (the value the client's own out-4 body carries)
+          1   = ParaTrooper, canopy DEPLOYED  (net-create branch calls FUN_004a6780 -> 0x324=1)
+          >=2 = ParaCargo model, N troops, deployed
+      The deploy is a CREATE-TIME property, NOT a per-object update message: a parachuter IGNORES
+      both msg-7 (coord applier FUN_007e3a70, its vtable[+4] just returns size) and msg-12 (state
+      applier, its vtable[+0x14] is a stub). Proven by the 2009 spectator log: a remote parachuter
+      created ONCE, never updated, still deploys - so the deploy must be baked at create.
+      v259 adds PARA_DEPLOY_BYTE9 (default 1) to set body[9] in build_parachuter_record. Set 1 to
+      test whether the peer renders an OPEN canopy; None to keep the client's freefall value.
+      NOTE: for a fresh BAIL the chute should freefall first (byte9=0) then deploy on pilot input;
+      byte9=1 forces instant canopy. For the TC CARGO paratrooper drop, instant-deploy is CORRECT.
+v258: INSTRUMENTATION to find the parachuter descent + deploy mechanism (no behaviour change).
+      Established this session (dual-log analysis, Bigalon messages21 + Test2 server run):
+        * After bail, Test2 sends the server ONLY a byte-identical 36-byte keepalive - NOTHING about
+          the deploy, and it does NOT change when the chute deploys. Bigalon receives ZERO telemetry
+          for the plane OR chute during the whole descent. So the deploy is NOT a relayable client
+          message - the bailing client goes silent and the SERVER is authoritative for the pilotless
+          plane and the parachuter (confirmed by 2009: a spectator client sees other players' chutes
+          descend + delete cleanly, only possible if the server drives them).
+        * 'in 20' hypothesis (a poll?) TESTED and REJECTED: 1820 'in 20' vs only 8 'out 20' (227:1),
+          variable 13-129 byte payloads -> it's a SERVER->CLIENT state BROADCAST, not a poll, and its
+          'out 20' replies cluster around players ENTERING/JOINING -> msg 20 is ROSTER sync, probably
+          not the parachuter mechanism.
+        * During 2009 parachuter 975's descent the non-roster messages were 'in 30'5' (tiny, right
+          after create and again seconds later - the strongest per-object STATE/deploy candidate),
+          plus 'in 72'/'in 73'.
+      v258 logs the FULL bytes of msg 20 (MSG20 channel) and, while a parachuter is alive, every
+      watched in-game type 30/72/73/20/31/40 (PARAWATCH channel) with object-number hit detection.
+      Gated by MSG20_INSTRUMENT. Next test: bail + deploy the chute; the PARAWATCH lines will show
+      which message carries the deploy so we can drive it server-side.
+v257: TWO parachuter fixes, both from the v256 client log (messages20).
+      (1) *** THE v256 SERVER DELETE WAS DOUBLE-WRAPPED. *** _para_land sent
+          send_rel(peer, build_msg13(build_delete_object_3(...))) but build_delete_object_3 ALREADY
+          returns build_msg13(body). So the wire carried msg13(msg13(delete)); the client parsed the
+          inner as 'in 0'18' -> "ERROR: Unsupported message 0" -> the delete FAILED, and both the
+          plane (257) and the chute (258) went stale and were culled (bsr=0, dif~25000) instead of a
+          clean server delete (bsr=1). Now sends build_delete_object_3(...) directly (single wrap).
+      (2) SCORE PRIME. The chute-OPEN (canopy deploy) is NOT a network message - 2009 shows a
+          receiving client gets the create then nothing until the delete, and the canopy deploys via
+          the ParaTrooper's LOCAL physics (update FUN_004a6780 branches on the object's +0x2dc: <1 =
+          trooper free-fall, >=1 = canopy open). On the OWNER (Test2) it deploys; on the REMOTE
+          (Bigalon) the trooper falls but the canopy doesn't open. The one wire difference we can see:
+          2009 object-only parachuter creates are PRECEDED by 'in 25'46' score blocks; ours are bare.
+          So v257 sends the peer a msg-25 for the bailing pilot right before the create (PARA_PRIME
+          _SCORE, send_stat_block_25 now takes dst=). If the deploy binds to the score/identity, this
+          fixes it; if not, the next client log will show the canopy still falling without opening,
+          and we RE the exact +0x2dc setter.
+v256: THE REAL PARACHUTER LIFECYCLE - from the 2009 ground truth. This is a TC gameplay mechanic
+      (paratroopers dropped from cargo planes must descend and land), not cosmetic.
+      WHAT THE 2009 LOG PROVES about a real parachuter:
+        * Created object-only ('in 2'24'), model loads (ParaTrooperlod0.Q6).
+        * NO network telemetry EVER names the object again. The client FREE-FALLS the canopy locally
+          from the create-time seeded position (the ctor FUN_004a8c20 copies the owner plane's
+          position + a fall rate).
+        * The 'out 6'3' the client emits after the create is FIRE-AND-FORGET - 2009 never answers it
+          (zero 'in 6'), so it was never the render blocker (v254's msg-6 theory was wrong).
+        * The server ends the canopy with a type-3 "Server require delete object N" 5-21s later,
+          scaling with bail ALTITUDE. The client then removes it cleanly (DelObject, bsr=1).
+      WHAT WE WERE DOING WRONG (v254/v255): sending cloned plane telemetry. v255's instrumentation
+      proved the packets arrived at the client, but it can't map a type-7 plane packet to a type-2
+      parachuter object - it logged "Get coord for missing object 0" and ignored them, and then
+      CULLED the canopy as stale (bsr=0) at ~28s because we never sent the real delete.
+      v256 FIX:
+        * SEND_PARACHUTER_TELEM = False - no telemetry (wrong mechanism, actively harmful).
+        * PARA_SERVER_DELETE - after PARA_DESCENT_SECONDS the server sends the type-3 delete to peers,
+          exactly like 2009. This gives the canopy the proper lifecycle and stops the stale-cull.
+      The canopy is created + seeded + free-falls locally + landed by the server. If the 3D render is
+      still missing after this, the next lead is the score/identity binding: 2009 object-only
+      parachuter creates are preceded by 'in 25' score blocks that prime GamerClientScore[St]; ours
+      sends St with no accompanying 25. That is the next thing to add if needed.
+v255: INSTRUMENT the parachuter telemetry send. v254's clones were logged as "sent" but Bigalon's
+      client received ZERO of them (messages18: no 'in 7'/'in 8' after the bail, received bytes drop
+      to 0). The v254 log line printed whether or not a peer was actually found, so "8 sent" proved
+      only that the function RAN 8 times - not that any packet left the socket. v255 logs the real
+      per-peer sendto (byte count, destination addr, first bytes) and counts actual sends, so the
+      next test shows definitively whether the packets leave and where they go.
+      CONTEXT (confirmed this session): after Test2 bails he transmits only a static keepalive, so the
+      normal relay has nothing to forward and Bigalon goes silent ("received bytes -> 0") - that part
+      is expected. The parachuter clones were meant to fill that gap; they aren't arriving, and v255
+      is about finding out why (send path vs client rejection) with evidence instead of inference.
+v254: THE PARACHUTE BUG IS A SWALLOWED COORDINATE REQUEST - not the record. And the fix REPLAYS a
+      real packet instead of authoring one.
+      RE (this session) established the whole chain:
+        * msg 6 = the client's "send me coordinates for object N" request:
+              [bc=0][T=0x32][00][00][sub=0x06][ONumber LE]
+          The client emits it right after creating ANY net object (planes too).
+        * For a PLANE, coords arrive via normal telemetry relay -> positioned -> request satisfied.
+        * For the PARACHUTER, the client asks for object 258's coords, but 258 has no telemetry (the
+          bailing client sends only a static keepalive), AND our server SWALLOWS all msg 6. So the
+          request is never answered -> 'in 6' -> "Unsupported message 6" -> the canopy sits at
+          "Get coord for missing object 258", visible on radar but never rendered in 3D.
+        * The create RECORD was never the bug (v250/v251 fixed bytes that were already fine): the
+          create succeeds and the ctor FUN_004a8c20 even seeds the parachuter with the plane's
+          position when linked. It just never gets ONGOING coords.
+      THE FIX (v254): after creating the canopy on peers, answer the coord request by giving object
+      258 a telemetry stream - by CLONING the plane's last real type-7 packet and retargeting only
+      the ONumber (bytes 7:9). We author NOTHING: the 88-byte telemetry position encoding is only
+      partially understood (scattered smooth fields; the v243 '3x u16' was a crash-test approximation,
+      not the true format), and hand-building it is exactly the guess that CTD'd us five times. A
+      cloned packet is every-byte-valid because the bailing client produced it microseconds earlier.
+      A short burst (PARA_TELEM_BURST) covers a dropped packet.
+      RESULT: the canopy should appear at the plane's position (where the pilot jumped) and the
+      "Unsupported message 6" error should stop. It does NOT self-descend yet - the altitude field
+      isn't safely located, and inventing it would risk a CTD - so the canopy hovers at the jump
+      point until removed. That is a real improvement on invisible, and it cannot crash.
+      Gated by SEND_PARACHUTER_TELEM. If anything misbehaves, flip it off and we are back to v253
+      (radar contact, no 3D, no crash).
+v253: *** THE CREATE WAS NEVER THE PROBLEM. WE WERE CRASHING THE CLIENT WITH OUR OWN TICK. ***
+      Bigalon's client log settles three versions of guessing:
+            in 2'24
+            Receive create object 258
+            Create NetParachuter. St=0, ONumber=258
+            <<< LOAD OBJECT (PLANES/PARA/ParaTrooperlod0.Q6) >>>
+      The parachuter record PARSES PERFECTLY and the canopy IS BUILT. v251 was already correct. I
+      spent v250 and v251 fixing a record that was fine, because I never once looked at what happened
+      AFTER the create.
+      WHAT ACTUALLY KILLS IT, from the same log:
+            in 7'84   x11     <- normal telemetry, all session
+            in 7'118          <- ONE packet, the instant the canopy exists
+            Exception in Fighter Ace engine:  bounds error
+            class ARR<class NET::OBJECT *,2048>[20983] 0..2047
+      The ServerConfirm makes the bailing client start transmitting the parachuter. Its telemetry
+      packet grows 84 -> 118 bytes - a MULTI-OBJECT form we have never parsed - and relay_telemetry
+      blindly rewrites BYTE 5 of it with a conductor tick. The client reads that tick back as an
+      object index: 20983 is TICK-sized, not object-sized, and the object array is 2048 entries.
+      We crashed the peer with our own re-stamp.
+      FIXES:
+        1. TELEM_RESTAMP_MAX_LEN - re-stamp ONLY the form we understand (a packet naming the sender's
+           own PLANE, within the size we have always seen). Everything else is relayed BYTE-FOR-BYTE.
+           We do not rewrite bytes we cannot parse. That is the same discipline as v251's "copy the
+           client's record, don't author it" - I applied it to the record and not to the relay.
+        2. PARA_SEND_CONFIRM = False, PARA_SEND_CREATE = True. One variable at a time, given the
+           record so far. The canopy is now CREATED and VISIBLE on peers but does not move (its owner
+           is never told to transmit it). That cannot crash anyone, and it is a real improvement on
+           invisible.
+      NEXT: after a clean run, flip PARA_SEND_CONFIRM back on. The verbatim relay should now carry the
+      118-byte form safely, and the canopy should actually descend.
+v252: PARACHUTER OFF. Three failures means my MODEL is wrong, not just my bytes.
+      v248 = wrong record size. v250 = right size, invented contents. v251 = right size, the CLIENT'S
+      OWN verbatim body. Still CTD + a message-box loop. That third result is the informative one: if
+      copying the client's own bytes still kills the peer, then the record contents were probably
+      never the problem, and I have been fixing the wrong thing three times running.
+      SEND_PARACHUTER = False. The bail now behaves exactly as it did in v247 - consumed, no confirm,
+      no create: no parachute, but no crash, and kill credit still works (v247's object-keyed latch is
+      untouched).
+      WHAT I ACTUALLY DON'T KNOW, and should have isolated three attempts ago: we do TWO things at
+      bail time, and I have never established which one the client dies on.
+            1. ServerConfirm 5 for the parachuter object -> the BAILING client
+            2. create-object type 2                      -> the PEERS
+      New flags PARA_SEND_CONFIRM / PARA_SEND_CREATE split them, so the next test BISECTS instead of
+      guessing. That is the only responsible next step, and it needs one thing I do not have: the
+      CLIENT LOGS from the crash. Specifically whether the peer ever logs
+            "Receive create object 258"   /   "Create NetParachuter. St=..., ONumber=258"
+      If it does, the record parsed fine and the crash is downstream (the ctor, the score binding, or
+      the missing telemetry for an object that exists but never moves). If it does NOT, the record is
+      still being rejected in the loop and the size/shape is still wrong.
+      A message-BOX loop (not a silent crash) also suggests a repeating ASSERT rather than a wild
+      pointer - most likely "There is no GamerClientScore for Client=%i" (FUN_004f26b0, bit7 path),
+      which would point at the tag's human-owned bit or at St - NOT at the body bytes at all. That is
+      a hypothesis to TEST, not to ship.
+v251: *** STOP AUTHORING THE PARACHUTER RECORD. THE CLIENT ALREADY SENDS IT. ***
+      Two CTDs, both because I was inventing bytes. v250 fixed the SIZE (23 = HeaderSize 10 + 13,
+      proven from the type table at 0xa30c98 and matching the 2009 wire's `in 2'24`) - but the
+      CONTENTS were still my guesses, and the client died again, harder.
+      THE BAILING CLIENT HANDS US THE CORRECT BODY IN ITS OWN out-4. That payload is
+            [sub=4][ident u16][record BODY of HeaderSize bytes][2 trailing]
+      PROOF, from our own code: for a PLANE out-4, pl[8] is the PLN_INFO id - which is exactly the
+      `s.plane_type = pl[8]` this server has relied on since v201. pl[8] is body[1]. So the out-4
+      body IS the object-record body, for every type.
+      The real parachute body (run 083507) is:
+            82 80 00 01 00 00 00 00 00 00
+            [0] 0x82  tag: TYPE 2, human-owned, nation 0    <- I had 0x92 (wrong nation)
+            [1] 0x80                                        <- I had 0x00
+            [2:4] 256 = the PLANE's ONumber                 <- the ONE byte pair I got right
+            [9] 0     model                                 <- I had 1
+      Three of ten body bytes wrong. Any one could be the crash; guessing a fourth time would have
+      been indefensible.
+      SO: we now COPY the client's 10-byte body VERBATIM and append only the 13-byte trailer - the
+      one part the server legitimately owns, because only the server knows the object number it just
+      assigned (St @ [10], ONumber @ [12], rest zero).
+      This is the right shape for the whole subsystem: the client authors its own object, the server
+      assigns the number and relays it. Nothing is reverse-engineered that doesn't have to be.
+      (The v250 hand-built builder is left in place, renamed and inert, as dead code - safe to delete.)
+v250: *** THE PARACHUTER RECORD IS 23 BYTES, NOT 41. That CTD was mine. ***
+      v248 built the type-2 create-object as a 41-byte PLANE-shaped record. Test2 bailed and
+      AC2E_Bigalon's client died on the spot.
+      GROUND TRUTH, from the 2009 session log - real parachuters on a real host:
+            in 2'24                                       <- 24 bytes = 1 + a 23-BYTE record
+            Receive create object 993
+            Create NetParachuter. St=101, ONumber=993
+      and the arithmetic holds across every variant in that log:
+            plane, object-only            in 2'42   = 1 + 41
+            client + plane                in 2'83   = 1 + 41 + 41
+            PARACHUTER                    in 2'24   = 1 + 23
+            client + PARACHUTER           in 2'65   = 1 + 41 + 23      <- pins 23 exactly
+            client + plane + parachuter   in 2'106  = 1 + 41 + 41 + 23
+      THE BINARY CONFIRMS IT. The msg-2 record loop (LAB_007e4e00) reads a per-TYPE HeaderSize from a
+      table at 0xa30c98 and advances by HeaderSize + 13:
+            mov   al, [edi]                  ; rec[0] = tag
+            and   eax, 0xf                   ; TYPE = tag & 0x0f
+            mov   esi, [ebx*4 + 0xa30c98]    ; HeaderSize   (ebx = TYPE*3)
+            movzx eax, word ptr [esi+edi+2]  ; ONumber = *(u16*)(rec + HeaderSize + 2)
+            add   esi, edi                   ; param_1 = rec + HeaderSize   (the TRAILER)
+            push  edi                        ; param_2 = rec               (the BODY)
+            lea   edi, [edi + ebx + 0xd]     ; ADVANCE: rec += HeaderSize + 13
+      The table:  TYPE 0 (client) 35 -> 48 | TYPE 1/8 (plane) 28 -> 41 | TYPE 2 (PARACHUTER) 10 -> 23
+      So sending 41 made the loop advance 18 bytes too far and parse a bogus record out of the tail -
+      exactly the tag-0 bounds-crash the v187 comment warns about. It is also why "Create
+      NetParachuter" never appeared in the victim's log at all: the client died in the record LOOP,
+      before the type switch ever reached case 2.
+      AND St/ONumber are NOT at rec[28]/rec[30] (that is the PLANE's trailer offset) - the trailer
+      starts at HeaderSize, so for a parachuter they are at rec[10]/rec[12].
+      TWO THEORIES I HAD, BOTH WRONG, both now ruled out:
+        * message size / bc framing - the 42-byte object-only form is PROVEN fine
+          (in 13'45 -> in 2'42 -> "Create NetPlane").
+        * FUN_004f2530 bounds - it indexes a 2048-entry array by object number; 256/258 are in range.
+      bit7 (human-owned) is KEPT SET: that is what makes the handler bind GamerClientScore[St], which
+      is precisely what puts the PILOT's name and rank on the canopy instead of an aircraft tag. The
+      station already exists from the plane's client record, so the 'no GamerClientScore' assert
+      cannot fire.
+      Still not identified (left 0, harmless): rec[1], rec[4:8], rec[8]. If the canopy renders in the
+      wrong PLACE, those are the bytes to chase - the size and the tags are now settled.
+v249: *** OFFICIAL SCORING. Everything before this was invented, and it was badly wrong. ***
+      The user supplied the game's own published scoring page (facfs.com, revised 01/02/2001). Up to
+      v248 our scoring was a flat 100 per kill, a 50-point death, and a 13-step rank ladder I made up
+      with names the game has never had ('Recruit', 'Air Marshal'). All replaced with the real thing.
+
+      RANK - nine ranks, and the page's 1-based "Rank Value" is exactly our client rank index + 1.
+      Our own probes already proved that mapping: f0=5 rendered "Major" (Rank Value 6), f0=6 rendered
+      "Lieut. Colonel" (Rank Value 7), rank 0 renders "Cadet" (Rank Value 1).
+            idx  RankValue  Rank                   Score
+             0       1      Cadet                  0 -   999
+             1       2      Sergeant            1000 -  1999
+             2       3      Second Lieutenant   2000 -  3999
+             3       4      First Lieutenant    4000 -  5999
+             4       5      Captain             6000 -  9999
+             5       6      Major              10000 - 13999
+             6       7      Lieutenant Colonel 14000 - 21999
+             7       8      Colonel            22000 - 29999
+             8       9      Brigadier General  30000 - 46000
+      Our old thresholds were ~10x too generous: 3,583 points had AC2E_Bigalon wearing a Lt.Colonel's
+      rank when the real ladder makes that a 2nd Lieutenant.
+
+      AIR KILL = value of the plane you shot down + a RANK BONUS:
+            (target's rank value / attacker's rank value) x 100
+      So killing UP the ladder pays, and a General farming Cadets barely scores. Plane values are
+      Table 1 from the page (90-195 fighters, 145-650 bombers), keyed by name against PLANE_ROSTER;
+      FA4.20's later additions (jets etc.) are not in the 2001 table and are priced from their
+      nearest listed variant - clearly marked, and any name that fails to resolve is logged at boot.
+
+      LOSSES (the page's list): a plane destroyed costs its VALUE, and a dead pilot costs a further
+      100. So being shot down or crashing = -(plane + 100). A BAIL-OUT costs the plane only - the
+      pilot walked away. (The page counts a bail over ENEMY territory as a death; we cannot yet tell
+      friendly ground from enemy, so for now every bail is treated as friendly.)
+
+      ALSO RECORDED, not yet wired up:
+        * Table 2 ground/AI values (GROUND_TARGET_VALUES), and "bombs on a MOVING ground unit score
+          x4" (GROUND_BOMB_MULTIPLIER).
+        * The real ASSIST rule (ASSIST_DAMAGE_FRACTION = 0.20): "the kill is awarded to the attacker
+          who did the MOST damage; if another attacker did 20% or more, he is awarded an Assist."
+          This is exactly what the user asked for and needs per-attacker damage accumulation from
+          msg 28 - the next job.
+        * The page confirms the ACE rule we already had: five kills without dying = one Ace level.
+v248: *** THE PARACHUTER IS A SECOND OBJECT. Confirm it, and create it on peers. ***
+      The user's hint - "after bail out the plane object and pilot object are 2 separate entities;
+      the pilot object has the pilot name tag, rank etc., the aircraft has a plane type tag" - and
+      the RE agrees exactly. FUN_004f26b0 case 2 is literally "Create NetParachuter":
+            piVar12 = FUN_004f2530();          // record[2:4] as i16 -> the SCORE OBJECT
+            obj = FUN_004a8c20(rec[8], piVar12, *(u32*)(rec+4), (rec[0]&0x70)>>4, rec[9]);
+            FUN_004f1ef0(ONumber, FUN_004269a0());   // register the NAME under this ONumber
+      The ctor copies the pilot's NAME out of the owner object (owner+0x154) and binds its score - so
+      the parachuter's record POINTS AT THE PLANE'S OBJECT NUMBER, and that is where the name and
+      rank on the tag come from. rec[9] selects the model (0/1 ParaTrooper, >1 ParaCargo).
+      WE WERE DOING NEITHER HALF OF IT:
+        * The parachute's msg-4 was CONSUMED WITHOUT A ServerConfirm. A client only starts
+          transmitting an object once the server confirms it - so the bailing client had nothing to
+          send. THAT is the "stale telemetry": a static 36-byte keepalive, byte-for-byte identical
+          every 2 seconds, on a different outer header, carrying no position and no tick. It is not
+          the parachute - it is a client waiting on a confirm that never came.
+        * No create-object type 2 was ever sent, so peers had no object to render. "Create
+          NetParachuter" appears in NEITHER client's log, ever.
+      NOW: the parachute msg-4 gets a ServerConfirm, and a type-2 create-object goes out to every
+      peer, bound to the pilot's plane so the tag reads the pilot's name and rank.
+      *** AND THE TRAP THAT ALMOST CERTAINLY BROKE v197: the parachuter gets its OWN slot
+      (s.para_obj_number). A normal spawn-confirm reassigns my_obj_number / obj_confirmed / flying;
+      doing that for the parachute would make the server think the player's PLANE *is* the parachute,
+      and the real plane's later delete would then land on an object nobody owns - which is exactly
+      the reported v197 symptom ("Confirm object 258 not found in list, send delete" -> the FRESH
+      PLANE got deleted, dead engine after respawn). The plane's slot is never touched.
+      Also: the parachuter's own delete (pilot lands or is killed under the canopy) is relayed to
+      peers and does NOT run the plane's death path; and the crash-detection position history now
+      only tracks the PLANE's object number, so the canopy's drift can't be mistaken for a plane
+      still flying.
+      Gated by SEND_PARACHUTER - flip it to False to restore the old consume-and-ignore behaviour.
+      HONEST CAVEAT: record fields rec[4:8] and rec[8] are passed straight to the ctor and are not
+      yet identified; they are left 0. If the canopy renders in the wrong place or the wrong model,
+      those are the bytes to chase.
+v247: EVENT-BASED KILL ATTRIBUTION - the time windows are gone.
+      The user's point, and it is the right one: a kill is credited when the plane goes DOWN, but the
+      plane can take a very long time to get there. Bail out at 20,000 feet and the empty aircraft
+      glides for minutes. Any time window is therefore a GUESS about how long a plane takes to fall,
+      and a high-altitude kill will always be able to outlast it. v246's 180s BAIL_CREDIT_WINDOW was
+      the same mistake as v244's 30s one, just larger.
+      THE FIX: the attribution is a FACT, established the moment the VICTIM'S OWN CLIENT reports the
+      damage (msg 28 names both the victim and the hunter). So LATCH IT AGAINST THE OBJECT and hold
+      it until THAT OBJECT's delete-notify arrives. No clock anywhere.
+            PENDING_KILL[ONumber] = {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
+            set      : on every msg-28 damage report
+            marked   : on the bail (parachute msg-4) - only so the log explains itself
+            consumed : when the delete-notify for that object arrives (popped, so never double-counted)
+            dropped  : when a new spawn reuses that object number (numbers are recycled)
+      Attribution chain is now:
+            1. EXACT    - the hunter named in the exit entry (long-form deaths)
+            2. LATCHED  - the msg-28 damage report, held against the object. NO EXPIRY.
+            3. FALLBACK - most recent shooter within KILL_CREDIT_WINDOW. This one IS a guess, so a
+                          clock is appropriate; it only runs when 1 and 2 find nothing.
+      BAIL_CREDIT_WINDOW is removed entirely.
+
+      ON THE BAILED PLANE'S TELEMETRY - NOT FIXED, and it cannot be fixed by relaying: THERE IS
+      NOTHING TO RELAY. After the bail, Test2's client sends only a static keepalive, byte-for-byte
+      identical every 2 seconds, carrying no state at all:
+            before bail:  0014 0542 05420000 07 3de8 0001 fb45...   <- real telemetry, opcode 0x07
+            after  bail:  000007d10001001000000000000000000029003d  <- identical, every 2s, forever
+      So the straight-line glide on the peer's screen is dead reckoning over an empty channel.
+      LIKELY CAUSE (next job): a normal spawn goes out-4 -> ServerConfirm, and only THEN does the
+      client start transmitting that object. We CONSUME the parachute's msg-4 and never confirm it
+      ("no echo/confirm"), so the client is waiting on a confirm that never comes and transmits
+      nothing - which would explain the silence AND the invisible parachute in one stroke. Not done
+      here on purpose: the code comment records that a naive confirm (v197) produced
+      "Confirm object 258 not found in list, send delete" and DELETED THE FRESH PLANE on respawn.
+      That needs doing carefully and on its own.
+v246: *** THE BAILOUT DELETE WAS BEING EATEN BY A FRAMING BUG. ***
+      Test2 bailed; on his machine the empty plane flew into the ground; on Bigalon's it kept flying
+      straight until it timed out; Bigalon got no kill. Run 083507, 08:47:
+            08:47:24  DAMAGE28  Test2 damaged by obj 0x0101          (last_hit_by set - fine)
+            08:47:34  msg-4 parachute/bail -> consumed, no echo       (the bail)
+            08:47:57  [00000542|00420000] +03000150
+                      PEERDEL: delete for object 0x0042 - neither its own (0x0100) nor any
+                      peer's -> SWALLOW                               (<-- the plane's death, EATEN)
+      (1) THE FRAMING BUG. Reliable framing is [bc][T][00][00][sub][...], but when the packet's `cmd`
+          field is NON-ZERO the payload carries a 4-byte prefix - [counter u16][cmd u16 BE] - in
+          front of it:
+                normal  delete: [00 42 00 00 | 03 00 01 a0]
+                bailout delete: [00 00 05 42 | 00 42 00 00 | 03 00 01 50]   cmd=1346
+          The codebase already knew this in two places (the login reads pl[4:6]; handle_compound does
+          `inner = pl[4:]`) - but handle_compound only fires for a HARD-CODED WHITELIST of three cmds
+          (COMPOUND_CMDS = {530, 578, 4610}). cmd 1346 isn't on it, so the delete was parsed from the
+          wrong offset: ONumber read as 0x0042 instead of 0x0100, and v235's peer-object check then
+          correctly concluded it was "neither its own nor any peer's" and swallowed it.
+          FIX: re-frame prefixed DELETE-NOTIFIES from offset 4.
+          DELIBERATELY NOT GLOBAL: ~10% of reliable messages are prefixed and have been ignored for
+          the entire life of this server (they parse to sub=0x00 and match nothing). Turning them all
+          on at once is how you break a working lobby - one of them decodes to sub=0xd4 = LEAVE. Every
+          other prefixed message is now LOGGED (REFRAME channel) so the rest can be done one at a
+          time, on evidence.
+      (2) THE CREDIT WINDOW WAS TOO SHORT ANYWAY. A bailout is a DELAYED death: the pilot jumps and
+          the empty plane flies on until it hits the ground. Here the gap from the last hit to the
+          delete was 33 SECONDS - already past KILL_CREDIT_WINDOW (30s) - so even a correctly-parsed
+          delete would have found the attribution expired and credited nobody.
+          FIX: latch the attribution AT THE MOMENT OF THE BAIL (we see it as the parachute msg-4) and
+          honour it for BAIL_CREDIT_WINDOW (180s). New BAIL log channel. Cleared on every spawn.
+      STILL OPEN: the parachuting pilot is not visible to peers. We consume the parachute msg-4 and
+      never create the object on anyone else, so there is nothing to render. Needs a create-object
+      (msg 2) with the PARACHUTER record type - noted, not yet done.
+v245: *** THE IN-FLIGHT "NEW ACE" / "NEW RANK" FLASH - msg 88 was stealing its own announcement. ***
+      Aces now accumulate and display correctly, but the yellow on-screen message never fired. RE
+      explains it exactly.
+      msg 88's handler (FUN_004f4120) is a PURE SETTER:
+            found:  [eax+0x50] = byte[edi+5]   ; aces
+                    [eax+0x30] = byte[edi+6]   ; rank
+                    ret                        ; <- that's all. No event, no message.
+      THE FLASH LIVES IN msg 25's HANDLER (FUN_004f65a0), which has TWO PATHS:
+            [0xc6eb98] -> the local player's plane -> +0x128 -> their score object.
+            If that score object's PlayerIndex == the packet's, jump to 0x4f6637 = the ANNOUNCING
+            path; otherwise take the silent write path used for remote players.
+      On the announcing path it compares the INCOMING value with what is ALREADY in the score object
+      and only announces on an INCREASE:
+            aces:  byte[payload+0x13] > score+0x50  -> message 0x4b, 3000ms   ("you are an Ace")
+            rank:  byte[payload+0x05] > score+0x30  -> message 0x4c, 3000ms   (promotion)
+            ...and only THEN writes the stat block (call 0x4f4570 at 0x4f66ca).
+      (payload+5 = block[0] = f0 = rank; payload+0x13 = block[0x0e] = f8 = aces. Our own field map.)
+      SO: msg 88, arriving at the OWNER, silently bumped score+0x50/+0x30 to the new value - and msg
+      25 then found nothing left to announce. jle -> no flash. We were overwriting the very delta the
+      client needed to see.
+      FIX: send_ace_rank_88 now goes to PEERS ONLY, never to the player it is about. Peers still need
+      it (they never receive a msg 25 about somebody else), and the owner's update + announcement is
+      handled entirely by msg 25.
+      NOTE the flash only fires while FLYING (the announcing path needs a live plane at [0xc6eb98]).
+      That is exactly what was asked for - and it is also why the HQ push is harmless: at HQ there is
+      no plane, so msg 25 takes the silent path, priming the score object with the true rank/aces so
+      that the first in-flight push has nothing spurious to announce.
+v244: *** BAILOUT KILLS - the killer got nothing. Two bugs, both fixed. ***
+      Test2 bailed out under Bigalon's guns. Test2's client registered the kill in Bigalon's name and
+      announced it ("AC2E_Bigalon has destroyed You"), but Bigalon got NOTHING - not in the DB, not
+      on his screen. Run 075246, 08:02:11:
+            exit=0x50 -> MEC&0xf=5 SE=0, tb=0x42 (SHORT form)
+            -> "Test2 died (solo crash/crashland)"     ... with Bigalon 3 feet behind him.
+      A BAILOUT IS A NEW EXIT FORM: MEC nibble 5 says SHOT DOWN, but ScoreEvent is 0 (not 3), which
+      means a 3-BYTE entry - so unlike a normal kill (exit 0x53) it carries NO HUNTER FIELD. The wire
+      never names the killer.
+      BUG 1 - NO ATTRIBUTION. The victim's client knows exactly who did it (its log shows
+        "HitFrom(Number=256...)"), and THAT SAME HIT PASSED THROUGH US as msg 28, whose record is
+        [VictimNumber][HunterNumber][count]. We were parsing the victim and THROWING THE HUNTER AWAY.
+        Now stored as last_hit_by/last_hit_at, and used as attribution step 2 (still EXACT, not a
+        guess). The old "most recent shooter" fallback is now step 3 - and is no longer gated on
+        `scored`, which had made it unreachable for any short-form death in the first place.
+        Cleared on every spawn so a hunter from the previous life can never be credited.
+      BUG 2 - THE KILLER'S CLIENT WAS NEVER TOLD. The non-scored death branch DISCARDED
+        score_on_death()'s return value, so `_killer` stayed None and SEND_SCORED_DELETE_TO_KILLER
+        never fired. Even with a killer correctly identified, their client would still have seen
+        nothing. Now captured.
+      EXIT-CODE TABLE (all observed live):
+            0x53  MEC 5|SE 3   shot down by a player (long form, HUNTER present)
+            0x50  MEC 5|SE 0   BAILOUT - shot down, SHORT form, NO hunter          <-- NEW
+            0x2d  MEC 2|SE 13  shot down, other form
+            0x63  MEC 6|SE 3   killed by AA / AI (hunter=0xffff)
+            0xa0  MEC 26|SE 0  crash AND clean exit (told apart by v243's movement test)
+            0x90 / 0x11        re-fly / plane-swap
+v243: DEATHS BY AA/AI AND UNDAMAGED CRASHES NOW REGISTER.
+      (1) *** KILLED BY AA -> "Planes Lost to AI". *** Run 230703 gave us a NEW exit code straight
+          off the wire when flak got the user:
+                23:26:16  exit=0x63 -> MEC&0xf=6, SE=3, hunter=0xffff (no player)
+          The death itself already counted (deaths 29 -> 30, via the `scored` long-form path), but it
+          was booked against "Planes Lost" (f4) - the PLAYER column. MEC nibble 6 = killed by AA / AI
+          ground fire, so it belongs in "Planes Lost to AI" (f13). Added AI_KILL_MEC_NIBBLES = {6};
+          db_credit_kill(lost_to_ai=) picks the column. The HQ screen shows f4 + f13, so the TOTAL
+          was always right - but the breakdown is what the game actually tracks, and now it matches.
+      (2) *** THE UNDAMAGED CRASH FINALLY COUNTS. *** This was the known gap from v232: a crash and a
+          clean parked exit are BYTE-IDENTICAL (both MissExitCode 26 -> exit 0xa0) and neither emits
+          a msg 28, so the damage rule was blind to a plane flown into the ground with no enemy fire.
+          THE MISSING SIGNAL was in the telemetry all along: body[0:6] is a quantised world position
+          (3x u16). From run 230703, the last 4 seconds before each removal:
+                23:08:17  (4526, 64457, 3906) x8 samples, delta EXACTLY 0  -> parked on the runway
+                23:21:07  deltas +551 +572 +633 +647 +712 +791 per sample  -> IN FLIGHT = THE CRASH
+                23:29:08  (34787, 53731, 62007) x8 samples, delta 0        -> landed, parked
+          A parked plane reports movement of EXACTLY ZERO, sample after sample; a flying one moves by
+          hundreds per tick. Four orders of magnitude apart - a robust test, not a fudge.
+          relay_telemetry now keeps a CRASH_MOVEMENT_WINDOW_S (3s) position history per session, and
+          a removal counts as a death if the plane was DAMAGED **or** was still MOVING
+          (>= CRASH_MOVEMENT_MIN). The measured movement is LOGGED on every removal, so the threshold
+          can be tuned from real numbers if a slow taxi ever trips it. History is cleared on every
+          spawn so the previous sortie can't leak into the next one.
+v242: BOMBER SCORING + the duplicate-assist fix.
+      (1) *** FIGHTER SCORE vs BOMBER SCORE. *** FA splits the scoreboard two ways, and they key off
+          DIFFERENT aircraft:
+              what YOU were FLYING   -> Fighter Score  vs Bomber Score   (where the points land)
+              what you SHOT DOWN     -> Kills>Fighters vs Kills>Bombers  (the kill breakdown)
+          We were dumping everything into Fighter Score and kills_fighters, so a Lancaster sortie
+          scored as a fighter. The server already knew the aircraft - s.plane_type is the
+          PLANE_ROSTER id straight out of the spawn packet (out-4 byte[8]) - it just wasn't used.
+          NEW: BOMBER_PLANE_NAMES -> BOMBER_PLANE_IDS (resolved against PLANE_ROSTER at import, so a
+          typo is caught at startup rather than silently misclassifying), and is_bomber_plane().
+          db_apply_score_delta(bomber=) now picks the score column by the KILLER's aircraft, and
+          db_credit_kill(victim_is_bomber=) picks the kill column by the VICTIM's. RANK still comes
+          from the COMBINED total - it is one ladder. The death penalty comes off whichever score the
+          victim was flying for. Every kill now logs both classes and both aircraft names.
+      (2) *** "Fighters Assists" exactly tracked "Fighters Destroyed" - a DUPLICATE credit. ***
+          We were sending the killer TWO credit events for one kill: the exit-tail delete (which
+          carries the real HUNTER since v229 and credits the kill by itself) AND a separate msg-33
+          ScoreEvent. msg 33 was added in v203 when the kill wasn't registering at all; it has been
+          redundant ever since v229, and the client was almost certainly scoring the duplicate as an
+          ASSIST. An assist should only count when you damaged a target that SOMEONE ELSE killed.
+          SEND_SCORE_EVENT_33 = False. (Flip back to True if kill credit regresses.)
+v241: ACE NEVER FIRED - the streak had TWO sources of truth and we read the wrong one.
+      The ace rule counted a PER-SESSION `kills_since_death` that resets to 0 on every login, while
+      db_credit_kill (v240) maintains the real streak in the DB's `kills_in_a_row` column (+1 per
+      kill, 0 on death). So a streak already IN the DB - seeded by the admin, or carried over from an
+      earlier session - was silently ignored:
+            admin seeds kills_in_a_row = 3
+            two more kills -> DB goes 3 -> 4 -> 5   (correct)
+            session counter goes        0 -> 1 -> 2 (what the ace check actually looked at)
+            5 % 5 == 0 never tested -> NO ACE, no announcement, HUD stays "Ace: 0"
+      FIX: the DB column IS the streak. score_on_death now reads kills_in_a_row back out of the DB
+      (db_credit_kill has already incremented it by then) and awards the ace on THAT; the session
+      counter is demoted to a mirror kept in sync for logging. send_stat_block_25's session override
+      is removed for the same reason - it would report a LOWER streak than the truth and hide any
+      admin-seeded value. One source of truth.
+      Every kill now logs the running streak and when the next ace lands:
+            [ACE] AC2E_Bigalon kills in a row: 4 (next ace at 5)
+            [ACE] AC2E_Bigalon earned an ACE (5 kills in a row without dying) -> aces 0 -> 1
+      The new ace is pushed straight out on msg 88 (AceOrRankChangedCB) by the existing post-kill
+      re-state, so the in-game HUD "Ace:" counter updates and the client fires its announcement.
+      NOTE the in-flight screen's own "Kills In a Row" / "Aces" rows render BLANK - those are
+      client-session values it never populates. They are NOT what drives the ace: the server owns
+      that rule end to end, so the HUD/HQ figures are the ones to watch.
+v240: WEB ADMIN - every HQ Scores field is now editable (end-to-end test harness for msg 25).
+      The stat block is fully mapped, so each row the HQ career screen renders gets its own DB
+      column, and send_stat_block_25 is now a straight DB -> wire copy: whatever the admin saves is
+      exactly what the client renders.
+      NEW pilots columns (ALTER TABLE migration in init_db, same pattern as `aces`):
+        kills_fighters  kills_bombers  planes_lost  planes_lost_ai  kills_in_a_row
+        bomber_score    ai_fighters    ai_bombers   ai_ships  ai_tanks  ai_ground  ai_buildings
+      (existing rank / score / kills / deaths / aces keep their meaning; `score` IS the Fighter Score)
+      COLUMN -> msg-25 SLOT -> HQ ROW:
+        rank f0 u8 Rank | deaths f1 u16 Lost Pilots | kills_fighters f2 | kills_bombers f3
+        planes_lost f4 | kills f5 Kills | kills_in_a_row f7 u8 | aces f8 u8
+        score f9 FLOAT Fighter Score | bomber_score f10 FLOAT | ai_fighters f11 | ai_bombers f12
+        planes_lost_ai f13 | ai_ships f16 | ai_tanks f17 | ai_ground f18 | ai_buildings f19
+        (HQ's "Planes Lost" row shows f4 + f13.)
+      db_get_pilot_stat25() reads them all; db_credit_kill() keeps kills_fighters / planes_lost /
+      kills_in_a_row consistent automatically on every kill and death (dying resets the streak).
+      The web editor groups the fields exactly like the in-game screen (Overall Scores / Record vs.
+      Other Players / AI Units Destroyed) and prints each one's slot + wire type under the box; every
+      input is bounded to its slot's width so a typo cannot corrupt the packet.
+v239: *** THE HQ CAREER SCREEN IS DONE. Full field map, real stats, probe off. ***
+      Probe #2 answered the last two questions outright:
+        * Fighter Score read 1234 and Bomber Score read 5678 when we sent the FLOAT bit-patterns for
+          1234.0 / 5678.0 -> *** f9 and f10 are IEEE FLOATS, not ints. *** That is why probe #1's
+          ints 9/10 rendered as 0: int 9 reinterpreted as a float is 1.26e-44. build_stat_block_25
+          now packs those two slots with '<f'.
+        * "Planes Lost" read 184 - not any single marker. 184 = 91 + 93 = f4 + f13, the ONLY pair of
+          our six markers that sums to it. So the HQ "Planes Lost" row is a SUM: planes lost to
+          PLAYERS (f4, in the player region) + planes lost to AI (f13, in the AI region). That is
+          exactly why the in-flight screen carries both rows separately.
+      FINAL MAP of the msg-25 block (score+0x30, 20 dwords, FUN_004f4570):
+            f0  u8     Rank                    f1  u16   Lost Pilots  (deaths)
+            f2  u16    Kills > Fighters        f3  u16   Kills > Bombers
+            f4  u16    Planes Lost (players)   f5  u16   Kills (total)
+            f6  u16    ? (assists - not on HQ) f7  u8    Kills In A Row
+            f8  u8     Aces                    f9  FLOAT Fighter Score
+            f10 FLOAT  Bomber Score            f11 u16   AI Fighters
+            f12 u16    AI Bombers              f13 u16   Planes Lost to AI
+            f14 u16    ? (assists)             f15 u16   ? (assists)
+            f16 u16    Ships                   f17 u16   Tanks
+            f18 u16    Ground Units            f19 u16   Buildings
+      (f6/f14/f15 show nothing on the HQ screen - almost certainly the Assists rows that only appear
+      in-flight. Left at 0.)
+      STAT25_PROBE is now OFF and every mapped slot carries the pilot's REAL career from the DB:
+      rank, kills, deaths ("Lost Pilots"), planes lost, fighter score, aces, and the live
+      kills-in-a-row streak. The HQ Scores screen is now a true career screen.
+v238: *** THE HQ CAREER SCREEN IS MAPPED. msg 25 DRIVES IT. ***
+      With v237 pushing msg 25 when the HQ screen opens, the probe finally ran - and the HQ SCORES
+      screen's CAREER column came back FULL of our probe values. Sent f_i = i (f0=rank=5, f8=aces=0)
+      and read the mapping straight off the screen:
+            Rank              -> f0   (u8)    Lost Pilots      -> f1   (u16)
+            Kills > Fighters  -> f2   (u16)   Kills > Bombers  -> f3   (u16)
+            Kills             -> f5   (u16)   Kills In A Row   -> f7   (u8)
+            Aces              -> f8   (u8)    AI Fighters      -> f11  (u16)
+            AI Bombers        -> f12  (u16)   AI Ships         -> f16  (u16)
+            AI Tanks          -> f17  (u16)   AI Ground Units  -> f18  (u16)
+            AI Buildings      -> f19  (u16)
+      13 of 20 fields in one shot. The "Latest" column stayed 0 -> it is a SEPARATE block
+      (last-mission stats) that we do not set.
+      STAT25_MAP is now filled in, so the CONFIRMED slots carry the pilot's REAL career from the DB -
+      kills, deaths ("Lost Pilots"), rank, aces and the live kills-in-a-row streak now appear on the
+      HQ Scores screen for the first time.
+      TWO LOOSE ENDS, and probe #2 settles both in one pass (only the unknown slots carry markers):
+        * Fighter/Bomber Score read 0 even though ints 9/10 went into the two 32-bit slots (f9,f10).
+          int 9 reinterpreted as a FLOAT is 1.26e-44 -> renders as 0, which is exactly what we saw.
+          So f9/f10 are almost certainly FLOATS: probe #2 sends float bit patterns 1234.0 / 5678.0.
+        * "Planes Lost" showed 17 - the same value as AI Tanks (f17), so it is ambiguous. Probe #2
+          sets f17=97 and puts distinct markers in the remaining unknowns (f4=91 f6=92 f13=93 f14=94
+          f15=95); whichever number turns up in "Planes Lost" identifies its field.
+v237: *** THE "ALL 0" PROBE RESULT WAS A BROKEN TEST - msg 25 WAS NEVER SENT. ***
+      send_stat_block_25 / send_ace_rank_88 were only ever called from the SPAWN-INIT path (after a
+      plane's ServerConfirm). But the HQ SCORES screen is read AT HQ, BEFORE flying - the user's
+      screenshot even shows the "FLY LANCASTER" button. Checked both test runs:
+            run 112558 (v235):  CONFIRM5 = 0   STAT25 = 0   ACE88 = 0
+            run 113555 (v236):  CONFIRM5 = 0   STAT25 = 0   ACE88 = 0
+      NOT ONE PLANE SPAWN in either, so msg 25 never went on the wire and every row was 0 BY
+      CONSTRUCTION. The probe proved nothing; it never ran. (Same trap as v231, one level up: that
+      time I read the wrong screen, this time the message wasn't even sent.)
+      FIX: push_career_stats() - msg 88 (rank/aces) + msg 25 (stat block) - is now ALSO fired when
+      the client opens the HQ / hangar screen, which it announces with its 0x3a plane-catalog
+      request (SEND_CAREER_ON_HQ, debounced by CAREER_PUSH_DEBOUNCE_S). So the HQ Scores screen now
+      has the data BEFORE you fly. New CAREER log channel; STAT25/ACE88 lines will finally appear.
+v236: TWO THINGS, BOTH FROM THE USER'S HQ SCREENSHOT.
+      (1) *** msg 88 WAS UNICAST - peers never learned each other's rank. ***
+          Every client keeps a GamerClientScore for EVERY player (Test2's own log: "Create client 0,
+          (AC2E_Bigalon), PlayerIndex=0") and the msg-88 payload CARRIES the PlayerIndex, so the same
+          packet updates that player's record on ANY client. We only ever sent it to the owner
+          (send_rel(s, ...)), so every peer's copy stayed at rank 0. Hence "Bigalon's rank isn't
+          displayed correctly on Test2's screen - it loads rank 0, not 3", and the kill announcement
+          reading "GBR Cdt Test2" (rank 0). FIX: send_ace_rank_88 now BROADCASTS to every client in
+          the room, and a fresh spawn also (re)states every OTHER player's rank/aces so a joining
+          client doesn't show everyone as rank 0.
+      (2) *** I PROBED THE WRONG SCREEN. msg 25 is back on. ***
+          v231's probe was read on the IN-FLIGHT screen (Current Life / Current Game) - which is
+          session state the CLIENT computes - so it showed nothing and v233 wrote msg 25 off. The HQ
+          SCORES screen is a DIFFERENT consumer: it has "Latest | Career" columns, and it DISPLAYS
+          THE RANK. Rank is score+0x30 = exactly f0 of the msg-25 block, so that screen provably
+          reads the very structure msg 25 writes, and the other 19 fields should fill its rows.
+          The field WIDTHS from FUN_004f4570 line up with it almost row-for-row:
+              f0  u8      = Rank                      (CONFIRMED)
+              f7  u8      = small counter             (Kills In A Row?)
+              f8  u8      = Aces                      (CONFIRMED)
+              f9,f10 u32  = the ONLY 32-bit slots     -> Fighter Score / Bomber Score
+              f1..f6, f11..f19 u16 = Planes Lost, Lost Pilots, Kills/Fighters/Bombers, AI section
+          SEND_STAT_BLOCK_25=True, STAT25_PROBE=True (f_i = i; f0/f8 keep the real rank/aces).
+          *** READ THE HQ SCORES SCREEN, NOT THE IN-FLIGHT ONE: whichever row shows N is field N. ***
+v235: *** WE TOLD THE PEER TO DELETE THE VERY PLANE THAT VANISHED. ***
+      The msg-3 delete-notify is [.. sub=0x03][ONumber u16 LE][exit][tail...] - and
+      _ingame_own_object_removed NEVER CHECKED which object it names. It just assumed the sender's
+      own plane. Live proof (run 095012), 3 seconds after Test2 respawned from the kill:
+          Test2 -> [00320000|030101]   = "delete object 0x0101"
+      In that run Test2 was object 0x0100 and AC2E_Bigalon was 0x0101 - so this is TEST2'S CLIENT
+      DROPPING BIGALON'S PLANE from its own world (a routine peer-view cleanup). We read it as
+      Test2's own plane removal and:
+         1. broadcast DELETE3 for TEST2's object (0x0100) to Bigalon -> Bigalon's client dutifully
+            deleted Test2 -> *** TEST2 DISAPPEARED FROM THE GAME WORLD ***
+         2. cleared Test2's `flying` flag -> the telemetry relay stopped as well.
+      The real kill's delete 3s earlier correctly named 0x0100 (Test2's own), which is why the
+      handler had always seemed to work - it was right by luck whenever the client only ever deleted
+      its own plane.
+      FIX: read the ONumber at stored[5:7] and compare with s.my_obj_number BEFORE doing anything.
+        * matches  -> the sender's own plane: existing death/exit path, unchanged.
+        * a PEER's -> the sender dropped that peer from its world. Do NOT touch the sender's plane.
+                      Discard the sender's addr from that peer's _created_peers so the relay
+                      RE-CREATES the peer's object on it (otherwise the sender would never see that
+                      peer again). New PEERDEL log channel.
+        * nobody's -> swallow and log.
+      This also fixes the mirror bug nobody had noticed: a client dropping a peer used to silently
+      never get that peer re-created.
+v234: *** TELEMETRY OPCODE 0x08 - the 'remote plane disappeared' bug. ***
+      The flying-state update is [bc][T][00][00][OPCODE][tick u16][ONumber u16][state...] and the
+      client emits TWO forms with an IDENTICAL header:
+            0x07 -> one position sample            (sz 98)
+            0x08 -> the same + one extra 9B sample (sz 107)
+      relay_telemetry only ever matched 0x07. Live proof (run 092257) - the exact moment it broke:
+            09:35:52.845   05 62 00 00 07 f1c4 0101 ...   <- relayed
+            09:35:53.387   05 f2 00 00 08 6bc4 0101 ...   <- SILENTLY DROPPED
+      From that instant AC2E_Bigalon's telemetry was not recognised at all, and TWO things failed -
+      together they are exactly the reported symptom:
+        1. His updates stopped reaching Test2.
+        2. Worse: we harvest each player's CONDUCTOR TICK from their telemetry and use it to
+           re-stamp what we relay TO them. Bigalon's tick FROZE at 13868 and never advanced, so we
+           kept relaying Test2's telemetry stamped with a DEAD tick. Bigalon's client saw Test2's
+           updates as ever-more-stale and dropped them -> TEST2 VANISHED FROM HIS WORLD, ~3 minutes
+           after the freeze, with nothing in the log saying a word.
+      This was NOT a v233 regression - the 0x07-only filter is old; it just needed the client to
+      switch forms mid-flight to expose it. Both forms have the tick at [5:7] and ONumber at [7:9],
+      so 0x08 relays exactly like 0x07 and the extra block is forwarded verbatim.
+      FIX: TELEM_OPCODES = (0x07, 0x08).
+      HARDENING: never re-stamp with a stale tick. If a peer's last_telem_time is older than
+      STALE_TICK_WARN_S (3s) we log a loud STALE-TICK warning and leave the sender's own tick in
+      place rather than poisoning the packet. A frozen conductor tick can never again fail silently.
+v233: SCORING SUBSYSTEM FINALISED. Cleanup + the one improvement the RE handed us for free.
+      (1) EXACT KILL ATTRIBUTION. The victim's own client NAMES ITS KILLER: the delete-notify exit
+          entry carries the HUNTER object number at entry+3 (proven live - Test2's shot-down entry
+          `01 01 | 53 | 00 01 ...` -> hunter 0x0100 = 256 = Bigalon). score_on_death now credits the
+          pilot who owns that object, which is correct for ANY number of players. The old
+          'most-recent shooter within KILL_CREDIT_WINDOW' guess survives only as a fallback for when
+          no hunter is present. Both paths are logged (attribution: EXACT / FALLBACK).
+      (2) msg 25 + PROBE OFF (SEND_STAT_BLOCK_25=False, STAT25_PROBE=False). The probe did its job:
+          it PROVED the scores screen consumes only f0 (rank, score+0x30) and f8 (aces, score+0x50)
+          from the 20-dword block; f1..f19 display nothing. So msg 25 cannot drive the per-life
+          counters, and sending it would only zero 18 score fields we never identified, for no gain
+          (msg 88 already sets rank+aces). Code + findings kept, disabled.
+      (3) took_damage is now cleared on EVERY spawn unconditionally. It was nested inside the
+          SEND_ACE_RANK_88 block, so turning that flag off would have latched the damage flag and
+          made every clean exit count as a death again.
+
+      WHERE THE SUBSYSTEM LANDED (honest):
+        WORKS - DB career scoring (kills/deaths/score), the 13-rank ladder (rank displays and updates
+                in-game), server-authoritative live aces (5 kills without dying; death wipes them),
+                correct death counting (damaged exit = death, clean ground exit = not), and the
+                in-game KILL ANNOUNCEMENT by name ('AC2E_Bigalon destroyed GBR Cdt Test2').
+        KNOWN LIMITATION - the numeric per-life 'Current Life / Current Game' HUD counters. Full RE
+                established these are computed by the CLIENT's mission-scoring code from its own
+                damage bookkeeping. No server->client message sets them: msg 25 does rank+aces only,
+                and both ExitDataArrive (MEC=5) and ScoreEvent (MEC=1) route to FUN_00478640, which
+                is announcement-only. The victim's hit list IS populated (its client logs
+                'HitFrom(Number=256 ... Value=425)') but its exit serialises Hits=0 after the
+                damage-share/age filter. Under the server-only constraint these counters appear
+                genuinely unreachable. Documented, not worked around.
+        ALSO KNOWN - a solo crash of an UNDAMAGED plane emits no msg 28, so the server can't see it
+                and won't count it. Closing that needs the telemetry damage-percentage field.
+v232: FALSE DEATHS ON A CLEAN EXIT - fixed properly, and an admission about the previous approach.
+      *** A CRASH AND A CLEAN GROUND EXIT ARE IDENTICAL ON THE WIRE. *** Proven from the logs:
+        - Both send MissExitCode 26 (the client's OWN untruncated log says so for both), and MEC is
+          truncated to 4 bits in (MEC<<4)|SE anyway, so 26 and 10 collapse to the same nibble.
+        - Both are followed 1ms later by the same sub=0x3a plane-catalog request.
+        - NEITHER produces a leave-arena event: exit-to-HQ sends NO msg 64. Run 081106 contains ZERO
+          back-to-lobby events.
+      So v225-v231's "defer the death 4s and cancel if they leave the arena" could NEVER cancel -
+      there was no leave to observe. Every exit confirmed as a death and the count climbed forever.
+      That heuristic was wrong from the start; it only ever appeared to work by luck.
+      THE REAL RULE (as the user described it, and as the client implements it) is about DAMAGE, not
+      the exit code: exit while DAMAGED and it counts as a death - the game even warns you - while
+      sitting undamaged on the ground and exiting is clean and silent.
+      FIX: track damage from the one signal we actually have. msg 28's record is
+      [VictimNumber i16][HunterNumber i16][count u8]+count*9B (HitToPlaneCB, FUN_004f3820), so the
+      relay now marks the VICTIM's session took_damage=True; it is cleared on every fresh spawn. A
+      solo MEC-26 exit then counts as a death only if the plane was damaged. A SHOT-DOWN (the long
+      form, which names the HUNTER outright) is unambiguous and still always counts.
+      The DEATH_CONFIRM_DELAY deferral is removed entirely.
+      KNOWN GAP (stated honestly): a solo crash of an UNDAMAGED plane - flying into the ground with
+      no enemy fire - produces no msg 28, so the server cannot see it and will not count it. Closing
+      that needs the plane's damage percentage out of the telemetry stream (the HUD's
+      "Approx.Damage"), which is the next thing to decode.
+v231: CALIBRATING THE STAT BLOCK + two fixes from the v230 probe run.
+      (1) *** f0 IS THE RANK. *** FUN_004f65a0 does `lea ebx,[ebp+0x30]` before calling FUN_004f4570,
+          so the 20 fields are the dwords at score+0x30 .. score+0x7c. msg 88 (FUN_004f4120) writes
+          score+0x30 = rank and score+0x50 = aces, therefore:
+                f0 -> score+0x30 == RANK   (CONFIRMED the hard way: v230 put deaths=22 into f0 and
+                                            the client announced the highest rank - it clamps >12)
+                f8 -> score+0x50 == ACES   (0x30 + 8*4 = 0x50)
+          Two slots down, eighteen to go - so v231 adds a PROBE mode (STAT25_PROBE): every unmapped
+          slot is sent the value of its own index (f1=1, f2=2 ... f19=19) while f0/f8 keep the pilot's
+          REAL rank/aces. One look at the scoreboard then maps the entire block: whichever row reads
+          N is field N. Set STAT25_PROBE=False once STAT25_MAP is filled in.
+      (2) FALSE 'lost plane' on EXIT-TO-HQ: v229 added MEC nibble 0x2 to DEATH_MEC_NIBBLES on a guess
+          (it appeared in the 0x2d exit of a kill). But EXIT-TO-HQ also uses MEC 2, so parking an
+          undamaged plane and leaving was logged as a lost plane. REMOVED - the 0x2d kill is caught
+          by the `scored` (>=14B) check before that set is ever consulted, so nothing is lost.
+v230: *** FOUND THE SCOREBOARD SETTER - msg 25 (0x19), server->client. ***
+      The killer's client log (messages94) proved every earlier piece works: on a kill it logs
+      "ExitDataArrive. Number=257. MEC=5, EEC=3. (Test2)", then "AC2E_Bigalon destroyed ... Test2"
+      (kill recognised + announced by name), then "ScoreEvent. Number=0. MEC=1, EEC=3." (v224 msg-33
+      decoding correctly). BUT the counters never moved - because BOTH the ExitDataArrive MEC=5 branch
+      AND the ScoreEvent MEC=1 branch only call FUN_00478640 (the ANNOUNCEMENT). Neither writes a
+      displayed counter.
+      THE ACTUAL SETTER is dispatch slot 25 (0x19) -> FUN_004f65a0 (registered at 0x4f14bd:
+      mov [0xc81f3c],0x4f65a0; (0xc81f3c-0xc81ed8)/4 = 25). It matches the GamerClientScore by
+      PlayerIndex, then FUN_004f4570(score+0x30, payload+5) unpacks 20 FIELDS straight into the score
+      object - THE Current Life / Current Game stat table. We never sent it, so the columns were
+      always blank no matter what else we fixed.
+      Wire: [0x19][PlayerIndex u32 LE] + 41-byte packed block (u8,6xu16,2xu8,2xu32,9xu16).
+      v230 adds build_stat_block_25 / send_stat_block_25 (DB-backed) and sends it at spawn and after
+      each kill/death, alongside msg 88. Reconciles with v220: the client's inbound 'out 25' is a
+      SHORT 7-byte notify (still swallowed - echoing it caused the garbage-ace announcements); the
+      41-byte SERVER->CLIENT msg 25 is the setter, a different direction of the same id.
+      The exact slot->stat mapping (STAT25_MAP) is a first guess from the manual's row order; the plan
+      is to read the HUD and correct it from what actually moves.
+v229: *** THE EXIT TAIL IS NOT FILLER - it carries the HUNTER. This is why kills never registered. ***
+      Live capture of Test2 being shot down by Bigalon (run 073215):
+          [00e20000|03010153] +00010000000000000c00
+            03 | 01 01 | 53 | 00 01 | 00 00 | 00 00 00 00 | 0c
+           sub   id=257  exit  ^^^^^                         PPT type
+                                HUNTER = 0x0100 = 256 = Bigalon's object!
+      The victim's client TELLS US who killed it, at entry+3. And ExitDataArrive calls FUN_004f8d10
+      on EVERY 12-byte form BEFORE the MEC switch, and that parser READS the tail:
+          entry+0 u16 id | entry+2 u8 exit | entry+3 u16 HUNTER | entry+5 u16 | entry+7 u32 |
+          entry+11 u8 PPT type
+      v228 (and build_scored_delete_object_3 long before it) ZERO-FILLED those 9 bytes, on the false
+      claim that "the tail isn't read on the MEC=5 path". So the killer's client received hunter=0
+      and had nothing to credit. The kill was announced at best, never counted.
+      FIX: relay the victim's ORIGINAL entry VERBATIM. It sits at stored[5:5+size] in the client's own
+      delete-notify ([sub 0x03][id u16][exit][tail...]), and now goes to EVERY peer including the
+      killer - the special zero-filled 'scored delete' is demoted to a fallback for when no real entry
+      is available. Entry length still comes from EXIT_EEC_ENTRY_SIZE so the parse loop can't desync.
+      ALSO: the real SHOT-DOWN exit codes are finally known - 0x53 (MEC 5 | EEC 3) and 0x2d (MEC 2 |
+      EEC 0xd) - so MEC nibbles 5 and 2 join 0xa (crash) in DEATH_MEC_NIBBLES. The EXITTAIL/POST-AUTH
+      logs now print the decoded hunter id.
+v228: *** EXIT-TAIL DELETE - the in-game statistics feed. ***
+      Decoded ExitDataArrive (FUN_004f8f20, the object's vtable+0x10). Two facts settle everything:
+        1. The type-3 handler (FUN_007e3bb0) only CALLS ExitDataArrive when the entry carries MORE
+           THAN 2 BYTES after the object id. Our peer delete was a BARE [id:2] - so the method was
+           SKIPPED, the plane silently vanished, and NO statistics were ever touched. That is why
+           kills, deaths and planes-lost all stayed 0 in the HUD / Current Life / Current Game.
+        2. ExitDataArrive decodes EEC = b & 0xf, MEC = b >> 4, and RETURNS THE ENTRY SIZE, chosen
+           by EEC:  0/1 -> 3,  2 -> 4,  3/4/5/7/8/9 -> 12,  0xc -> 4,  0xd -> 13,  0xe -> 6.
+           The size we send MUST match or its parse loop desyncs and walks off the entry (peer CTD).
+           On the 12-byte forms MEC then selects: 4 -> kill announcement (with names);
+           5/6/0xb -> FUN_00478640, the MISSION EVENT that drives scoring.
+      FIX: build_exit_delete_object_3() emits [03][X f32=0][Z f32=0][id u16][EXIT byte][filler], with
+      the length taken from EXIT_EEC_ENTRY_SIZE (the handler's own table). The victim's REAL exit
+      byte - (MissExitCode << 4) | ScoreEvent, straight off its own delete-notify - is threaded from
+      _ingame_own_object_removed into broadcast_object_delete_3 and sent to ALL peers.
+      Broadcast to everyone (not just a guessed killer) is deliberate: on the MEC 5/6/0xb branch each
+      client credits the kill from its OWN local damage list, so every peer must see the exit.
+      The killer still gets the proven 0x53 SCORED delete; an unknown EEC falls back to the bare
+      delete rather than risk a desync. New knob EXIT_TAIL_DELETE_TO_PEERS, new EXITTAIL log channel.
+v227: DECODED the delete-notify's trailing byte properly. It is NOT a bitfield - it is exactly the
+      byte Msn_Exit.cpp (FUN_0045d930) builds:   EXIT = (MissExitCode << 4) | ScoreEvent
+      (MEC is truncated to 4 bits on the wire, so the nibble is MissExitCode & 0xf.)
+        0xa0 -> MEC&0xf=0xa, SE=0 : MissExitCode 26 = CRASH. (26<<4)&0xff == 0xa0, an exact match
+                                    for the client's own "MissExitCode=26, ScoreEvent=0" log. DEATH.
+        0x11 -> MEC&0xf=0x1, SE=1 : re-fly / plane swap. PROVEN in run 070240 - the player was ALONE
+                                    in the arena (so it cannot be a shot-down) and the StartPlace
+                                    request arrives 22ms BEFORE the removal.          NOT a death.
+      v225 gated on "bit 0x80 set", which gave the right answer for a crash but only by coincidence
+      (0xa0/0x80 happen to have bit 7). v227 classifies on the MEC nibble (DEATH_MEC_NIBBLES) and
+      LOGS the decode for every removal, so unseen codes - notably a real SHOT-DOWN MEC, still never
+      observed - can be read straight out of the logs and added.
+      The 4s deferral stays: a crash and an EXIT-TO-HQ carry the SAME byte (both MEC 26) and differ
+      only by what follows, so the solo death is confirmed only if the player stays in the arena.
+      ALSO CONFIRMED (Msn_Exit.cpp): when IsDelete=1 the client does NOT send msg 33 at all - the
+      exit data is stored via NetworkBody::SetBody (FUN_0045caf0) and rides as the AddData BODY of
+      the DELETE message. That is why run 070240 contains ZERO type=0x21 messages: msg 33 only goes
+      on the wire when IsDelete==0. So the v226 ExitEvent relay will rarely/never fire for crashes,
+      and the in-game stat feed must instead come from the exit tail carried on the DELETE.
+v226: *** RELAY THE EXIT-EVENT (msg 33) - why NOTHING (kills, deaths, planes lost) ever ticked. ***
+      Found the client's OWN sender for msg 33: Msn_Exit.cpp, FUN_0045d930. It emits
+        DAT_00c82350 = 0x21 -> [0x21][AddData][Number u16][(MissExitCode << 4)|ScoreEvent][nHits +
+        8-byte hit records: [u16][u32][i16 damage share]]
+      Two consequences:
+        (a) It packs the type byte as (MEC << 4) | ScoreEvent - INDEPENDENTLY CONFIRMING the v224
+            nibble order (MEC high, EEC low). v224 was right.
+        (b) msg 33 IS THE EXIT-EVENT, and it carries a HITS LIST: the dying plane reports who hit it
+            and each hitter's damage share. That list is FA's kill-attribution mechanism, and the
+            receiving handler (0x004f9ae0) is what ticks each client's Current Life / Current Game
+            statistics.
+      v222 added 0x21 to NO_ECHO_TYPES to stop it being blind-ECHOED to the SENDER (that echo fed the
+      client its own 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds CTD). That was
+      right - but "don't echo to the sender" is NOT "don't relay to the peers", and we were dropping
+      it entirely. So NO client ever received an ExitEvent and NO stat pipeline ever ran, which is
+      exactly why kills, deaths AND planes-lost were all stuck at 0 in the HUD and session stats.
+      FIX: RELAY_EXIT_EVENT_33 - relay the message VERBATIM to every other player in the room (never
+      back to the sender). New EXIT33 log channel dumps the raw bytes so the exact field layout can
+      be confirmed from the next run.
+v225: FALSE DEATHS - one crash was being counted THREE times. v222 made every own-plane removal a
+      death; it isn't. The msg-3 delete-notify payload ends in a REASON byte
+      ([.. 0x03][ONumber u16 LE][REASON]) and run 004058 shows three distinct cases for what the
+      user reported as a SINGLE crash:
+        00:42:19  reason=0xa0  -> the real crash                                    (count it)
+        00:44:07  reason=0x11  -> RESPAWN handoff: the client drops its old plane as it takes a
+                                  new one. The StartPlace GRANT lands in the SAME MILLISECOND
+                                  (log lines 1146 -> 1148).                          (NOT a death)
+        00:44:24  reason=0xa0  -> EXIT-TO-HQ: identical on the wire to a crash, but followed ~3s
+                                  later by 'back to lobby' (00:44:27.756).           (NOT a death)
+      FIX: bit 0x80 of the reason byte = plane DESTROYED (0xa0/0x80 set; 0x11/0x22 clear), so the
+      respawn handoff is now never a death. A solo DESTROY is still ambiguous (crash vs exit-to-HQ
+      look the same at that instant and differ only by what FOLLOWS), so its death credit is
+      DEFERRED by DEATH_CONFIRM_DELAY (4s) and CANCELLED if the player leaves the arena in that
+      window. A respawn does NOT cancel it - a genuine death respawns ~2s later, so cancelling on
+      respawn would erase every real death. A SHOT-DOWN (long >=14B scored form) is unambiguous and
+      is still credited immediately. New knobs: DEATH_DESTROY_BIT, COUNT_EXIT_TO_HQ_AS_DEATH,
+      DEATH_CONFIRM_DELAY. New DEATH log channel shows deferred / CONFIRMED / CANCELLED.
+v224: *** msg-33 ScoreEvent NIBBLES WERE SWAPPED - this is why kills never showed in the HUD /
+      in-game statistics. *** Decoded the handler (0x004f9ae0, VNet_Rcv.cpp; it logs
+      "ScoreEvent. Number=%i. MEC=%i, EEC=%i."):
+          [0]=0x21  [2:4]=u16 PlayerIndex  [4]=TYPE byte: HIGH nibble = MEC, LOW nibble = EEC
+      We were emitting ((eec<<4)|mec), so MEC=1/EEC=3 went out as 0x31 and the client decoded it as
+      MEC=3, EEC=1 - the exact swap. EEC==1 is the ANNOUNCE-ONLY branch: it asserts MEC in {2,3}
+      (which 3 satisfied, so it never even errored), prints the kill message via string 0x83, then
+      JUMPS PAST the scoring code. So every kill produced at most a chat announcement and NEVER
+      reached the mission-event/stat path - kills stayed 0 in the HUD forever.
+      FIX: emit ((mec<<4)|eec). With MEC=1/EEC=3 the type byte is now 0x13, which takes EEC!=1 ->
+      FUN_004f8d10 -> MEC==1 -> FUN_00478640(mission event 0x26) + score_obj+0x2fc=1. MEC=1 matches
+      the client's own scored exit ("MissExitCode=1, ScoreEvent=1" for a shot-down vs 26 for a solo
+      crash). New tunables SCORE33_MEC / SCORE33_EEC, and both the log line and the TX label now
+      print the resulting type byte so the wire value can be checked at a glance.
+      VERIFY IN THE CLIENT LOG: the killer's messagesNN.log should now contain
+      "ScoreEvent. Number=<PI>. MEC=1, EEC=3." - previously that line never appeared at all.
+v223: RANK LADDER (score -> rank) + death score penalty. Kills add points, deaths subtract them, and
+      the RANK is recomputed from the new score and re-stated to the client via msg 88.
+      RESEARCH (FA.exe + the official Fighter Ace manual, "The Scores Screen" p64):
+        * POINTS PER ACTION already come from msg 96 SCORE_TABLE
+          (ARR<FA3::SCORE::DYNAMIC_OBJECT_SCORE_DEF,256>, records [obj_type][score][kills][?]) which
+          the SERVER supplies - the manual confirms the mission log "details the number of points you
+          received for each action". So per-target point values are ours (build_score_table_96).
+        * RANK IS SERVER-AUTHORITATIVE. Rank is an INDEX 0..12 (13 ranks); the client hard-clamps it
+          (FUN_00428770: `if (0xc < rank) rank = 0xc`) and renders the NAME ITSELF from its own
+          localized string array (table 0xbf666c, stride 8 -> string index 0x303 + 2*i, via
+          PARR<char const*>::operator[]); those strings aren't even in FA.exe. An exhaustive scan of
+          .data/.rdata found NO score->rank threshold table in the client - the original VR-1 host
+          computed rank and pushed it in msg 88's rank byte. So WE define the ladder and only ever
+          send the INDEX. RANK_NAMES here are cosmetic (logs/web admin) only.
+        * The manual CONFIRMS the v222 ace rule verbatim: "Kills In A Row - enemy planes destroyed in
+          secession without having your pilot killed or captured" and "Aces - For each five 'Kills In
+          A Row', you are awarded one 'Ace'."
+      NEW: RANK_THRESHOLDS[13] (min career score per rank), RANK_NAMES[13] (cosmetic),
+      DEATH_SCORE_PENALTY (default 50), rank_for_score(score) -> 0..12, and db_apply_score_delta()
+      which adds/subtracts points (floored at 0), recomputes the rank and persists both. score_on_death
+      now calls db_credit_kill with points=0 (counters only) and routes ALL score changes through
+      db_apply_score_delta, so points are never double-added. Promotions/demotions are logged (RANK).
+v222: DEATHS NOW COUNT + SERVER-AUTHORITATIVE LIVE ACE RULE.
+      (1) THE BUG: score_on_death() opened with `if len(death_payload) < 14: return`. A SOLO CRASH
+          arrives as the SHORT 8-byte delete-notify (tb=0x42 sub=0x03, [00420000|030001a0]) - only
+          a shot-down-by-someone death uses the 14-byte form. So every self-crash was DISCARDED:
+          no death counted, ace status untouched ('I crashed, it should have taken my ace - it
+          didn't'). Now BOTH forms count as a death for the victim; only the KILLER-attribution
+          needs the long form.
+      (2) LIVE ACE RULE, server-authoritative (LIVE_ACE_TRACKING): FA awards an ace for
+          ACE_KILLS_PER (5) kills WITHOUT dying, and DYING WIPES YOUR ACES. The server now owns
+          this end-to-end: the DB `aces` column is the single source of truth (seeded by the web
+          admin editor), a per-session `kills_since_death` streak counter drives the awards
+          (db_set_pilot_aces), and every change is re-stated to the client via msg 88 - pushed on
+          daemon threads so the blocking reliable send never stalls the RX path.
+      (3) NO_ECHO_TYPES: msg 33 (0x21) SCORE-EVENT arrives with its id in the TYPE byte and
+          sub=0x00, so the sub-byte NO_ECHO_SUBS check never matched it and it was being
+          BLIND-ECHOED ('cmd=0 type=0x21 sub=0x00 -> echo', run 104546) despite 0x21 already being
+          listed there. Added a TYPE-byte guard; the client's own score report is now consumed, not
+          reflected (same class of bug as msg 25 in v220).
+      STILL OPEN: kills/deaths/planes-lost are not yet STATED to the client's score object (msg 88
+      carries only aces+rank), so those scoreboard columns remain blank - the setter for the score
+      object's kill/death counters is the remaining Project A item.
+v221: STORED ACE STATUS. Added an `aces` column to the pilots table (INTEGER, default 0, with an
+      ALTER-TABLE migration for existing DBs) and exposed it in the web admin Pilot Stats editor.
+      db_get_pilot_career() now returns (score, kills, deaths, rank, aces) and send_ace_rank_88()
+      pushes the STORED ace value instead of deriving it from kills (pilot_aces()). Rationale: FA's
+      LIVE ace status is a CLIENT-side session rule - 5 kills without dying, reset on death - which
+      the server must not try to compute or persist. What the server owns is the pilot's PERSISTENT
+      career ace standing, which msg 88 states authoritatively (score obj +0x50, a u8; rank is +0x30).
+      pilot_aces()/ACE_KILLS_PER are retained but no longer used by the 88 sender.
+v220: SCORING - fix the bogus 'new Ace Status'/'new Rank' announcements on team-change reentry, by
+      NOT echoing msg 25 (0x19). Root cause found from Test2's client log (messages46) + our server
+      log: the client sends msg 25 (0x19) = an ace/rank/score STATE REPORT (client->server, fire-and-
+      forget). It arrives compound-wrapped (and sometimes direct); msg 25 was NOT in the no-echo set,
+      so it fell through to the 'unknown inner -> echo inner' default. The echoed 'in 25'7' made the
+      client re-ingest its OWN report as authoritative and re-evaluate ace/rank against its current
+      (garbage/stale at a team-change spawn) stat state -> the bogus announcements. The EVENT fires on
+      the same log line as the echoed 'in 25'7', only when it lands right after InsertPlayer (spawn) -
+      exactly the 'sometimes garbage, sometimes clean' the user reported. Fix: add 0x19 to BOTH the
+      compound no-echo set and the direct-path NO_ECHO_SUBS. msg 25 is consumed, never echoed.
+      This is the culmination of Project A (Steps 1-3): the two scoreboards were identified
+      (GAMER_CLIENT personal + CAMP_SCORE_PRODUCTION_DATA[8] nation), the score object was found to
+      be zeroed at creation (so garbage was NOT uninitialised memory), and the true trigger was our
+      own echo of the client's msg-25 report. Also retained: v218/v219 spawn-time msg 88 (sets
+      aces/rank once the object exists) + DB career plumbing.
+v219:
+v219: SCORING - push the pilot's REAL career aces/rank from the DB, at the TEAM/ROOM change (not just
+      at spawn), and never zero it. v218 proved msg 88 works (it reset Test2's aces to 0), but the
+      garbage + the client's 'new ace status' announcement (29 aces) fire AT THE TEAM CHANGE, before
+      the spawn-time 88 lands. The client's GamerClientScore object PERSISTS across a team change and
+      its aces (+0x50) / rank (+0x30) are written ONLY by msg 88, so unless the server states them at
+      the transition the client announces whatever uninitialised memory it holds.
+      v219: (a) new db_get_pilot_career() -> (score, kills, deaths, rank) + pilot_aces() (career
+      kills // ACE_KILLS_PER); (b) send_ace_rank_88 now RE-READS the DB career values every send
+      instead of taking hardcoded zeros - a team or room change RESTORES the pilot's real standing
+      rather than wiping it; (c) new _push_career_stats_88() fired on BOTH team-change branches (join
+      and leave) as well as the existing spawn hook.
+      STILL OPEN: kills / deaths / lost-planes / lost-pilots garbage. Those are NOT simple score-
+      object fields (they're computed via score-object methods FUN_004269a0 / FUN_00428360), so msg 88
+      does not touch them. Re-test to see whether fixing the aces/rank timing also settles them, or
+      whether they need their own authoritative setter (deeper RE - scope before committing).
+v218:
+v218: SCORING - fix the garbage aces/rank on the scoreboard (msg 88 AceOrRankChangedCB). Test2
+      swapping USA->GBR and re-entering showed garbage stats (e.g. '96 Aces', bogus rank). Root
+      cause (decompiled FA.exe FUN_004f4120): the score object's aces (score+0x50) and rank
+      (score+0x30) fields are written ONLY by msg 88 (VNET table 0xc81ed8 slot 88), which we never
+      sent - so they held whatever the freshly-allocated GamerClientScore object had. Added
+      build_ace_rank_88 / send_ace_rank_88 (wire: [0x58][PlayerIndex u32][aces u8][rank u8], wrapped
+      in a msg-13 batch) and send an authoritative 88 (aces=0, rank=0) on each spawn from
+      _fire_server_confirm (after the score station exists). Toggle SEND_ACE_RANK_88. NOTE: this
+      fixes ACES/RANK only; the kills / lost-planes / lost-pilots garbage (other score-object
+      offsets) is a separate init still to be traced (step 2b) if the test shows it persists.
+v217.2:
+v217.2 (STEP 2 of 2): with the SYNACK cap fix (step 1) confirmed stable, flip RTT_SAMPLING=True to
+      re-enable client-side RTT sampling. The ring is now genuinely bounded at 32 (cfg[0x40] finally
+      delivered at packet byte 88), so next_exp=seq+1 samples RTT each ACK safely and the System
+      Status / HUD latency becomes a live moving average over the last 32 samples (jitters like 2009)
+      instead of frozen at the connect value. This is what v216 attempted; it crashed only because
+      the cap wasn't reaching the client (the byte-88 misalignment fixed in step 1). TEST FOCUS:
+      multiple game-world reentries (the old CTD trigger) - confirm NO CTD while latency now moves.
+      Instant revert available: RTT_SAMPLING=False falls back to the stable frozen-latency behavior.
+v217:
+v217 (STEP 1 of 2): FIX the SYNACK config byte-alignment so the RTT ring cap actually reaches the
+      client. Root cause of the re-entry CTD (and of v216's immediate crash): the client copies its
+      68-byte net-config from SYN-section+0x10 = WIRE BYTE 24, so it reads the RTT-ring CAPACITY from
+      cfg[0x40] = packet BYTE 88. Our config block is written at byte 16 (8 bytes early) and the
+      packet was only 84 bytes, so byte 88 was OUT OF BOUNDS -> the client used 0/garbage as the cap
+      -> the RTT sample ring was unbounded and, once a sample was taken, overran the 32-slot region
+      into the delivery-callback pointer (ring index 64 == struct+0xcc) -> CTD. v215 avoided it only
+      by suppressing sampling (next_exp=seq+2); v216 re-enabled sampling onto the unbounded ring and
+      crashed on the first sample.
+      FIX (minimal, protects the v215 baseline): extend the SYNACK 84 -> 92 bytes and write the RTT
+      cap (32) at the TRUE location, packet byte 88 == cfg[0x40]. The existing config block at byte
+      16 is left BYTE-FOR-BYTE UNCHANGED, so the only value the client now sees differently is the
+      cap (out-of-bounds 0 -> 32). STEP 1 keeps RTT_SAMPLING=False, so this change is INERT (the ring
+      never advances) - its sole purpose is to confirm the 92-byte SYNACK doesn't disturb connect and
+      the game stays as stable as v215. STEP 2 will flip RTT_SAMPLING=True now that the ring is truly
+      bounded, to get real-time latency without the CTD.
+v216.1:
+v216.1: REVERTED v216's RTT-sampling attempt (RTT_SAMPLING=False). Re-enabling sampling via
+      next_exp=seq+1 REGRESSED: CTD on the 4th respawn AND latency still L:0.00 on both machines - so
+      it re-armed the RTT-ring overflow without even producing live latency. The RTT_RING_CAP=32 in
+      the SYNACK config does not bound the sampler ring the way the isolated FUN_10006f55 index-wrap
+      implied. Back to the stable v215 behavior: latency frozen (cosmetic) but NO CTD. Real-time
+      latency will need a route that does NOT advance that ring. Baseline restored = v215/v216.1.
+v216:
+v216: REAL-TIME LATENCY - re-enabled RTT sampling (was frozen since the CTD fix). The System Status
+      'latency' had been fixed at its connect-time value because our build_rel_ack used next_exp=seq+2,
+      which deliberately SUPPRESSED the client's RTT sampling to avoid the old 3rd-reentry CTD (the
+      RTT ring overflowing at index 64 into the delivery-callback pointer at +0x2042c). That CTD is
+      now structurally impossible: v209's RTT_RING_CAP=32 (SYNACK config) makes the sampler
+      (FUN_10006f55) wrap the ring index at 32, so ring writes stay in struct 0x4c..0x8c, far below
+      the index-64 callback slot. With sampling safe, next_exp=seq+1 lets the client take an RTT
+      sample per ACK; the displayed latency is a moving average over the last 32 samples, so it
+      JITTERS in real time like 2009 (instead of a frozen number). Single toggle RTT_SAMPLING=True;
+      set False for an instant revert to the frozen-but-safe v215 behavior. Everything else is
+      identical to the stable v215 baseline. TEST FOCUS: multiple game-world reentries (the old CTD
+      trigger) - confirm NO CTD returns while latency now moves.
+v215:
 v215: THE REAL IN-GAME TIME KEEPER - STATUS packets (found via the user's session-timer clue). The
       System Status window's session clock was stuck at 0:00; that window (bytes/sec, loss%, latency,
       SESSION TIME) is fed by a two-way 'Game Status Message' STATUS exchange SEPARATE from the NTP
@@ -471,6 +1521,18 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
 STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
+                           # (v217 step 1) is confirmed stable - the RTT ring is finally bounded at 32
+                           # (cfg[0x40] now correctly delivered at packet byte 88), so slot writes
+                           # wrap at index 32, well before the index-64 delivery-callback slot that
+                           # caused the CTD. build_rel_ack's next_exp = seq+1 lets the client's
+                           # same-packet RTT lookup HIT -> a sample is taken each ACK -> the displayed
+                           # latency becomes a moving average over the last 32 samples (FUN_10006f55)
+                           # -> it jitters in real time like 2009 (instead of frozen at connect).
+                           # This is exactly what v216 tried, but v216 crashed because the cap was
+                           # never actually reaching the client (the byte-88 misalignment); with v217
+                           # step 1 fixing that, sampling is now genuinely safe. Set False to instantly
+                           # revert to the frozen-but-safe behavior if a CTD somehow recurs.
 # Diagnostic: capture the UNRELIABLE in-game packet stream (flight telemetry) that the
 # server otherwise drops. Rate-limited hex sample per session, so one flight reveals the
 # entity/position format we need to relay between players. Set False to silence.
@@ -518,11 +1580,49 @@ def init_db():
             score        INTEGER NOT NULL DEFAULT 0,
             kills        INTEGER NOT NULL DEFAULT 0,
             deaths       INTEGER NOT NULL DEFAULT 0,
+            aces         INTEGER NOT NULL DEFAULT 0,
             squadron     TEXT    NOT NULL DEFAULT '',
             rights       INTEGER NOT NULL DEFAULT 1,
             slot_index   INTEGER NOT NULL DEFAULT 1
         );
     ''')
+    # MIGRATION: CREATE TABLE IF NOT EXISTS won't add a column to a pre-existing pilots table,
+    # so add `aces` explicitly if it's missing. Stored ace status is the value msg 88 puts in the
+    # score object's aces field (+0x50, a u8). NOTE: the CLIENT also awards ace status live during
+    # a session by its own rule (5 kills without dying, reset on death) - that's session state we
+    # neither compute nor persist. This column is the pilot's PERSISTENT/career ace standing that
+    # the server states authoritatively at spawn/transition.
+    pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+    if 'aces' not in pcols:
+        conn.execute("ALTER TABLE pilots ADD COLUMN aces INTEGER NOT NULL DEFAULT 0")
+        log('DB', 'pilots: added missing `aces` column (default 0)')
+    # v240: one column per HQ Scores row. The msg-25 stat block (score+0x30) is now fully mapped
+    # (see STAT25_MAP), so every row the HQ career screen renders gets its own column - which makes
+    # the web admin editor a complete end-to-end test harness for the stat block.
+    #    column           msg-25 field        HQ Scores row
+    #    rank             f0   u8             Rank
+    #    deaths           f1   u16            Lost Pilots
+    #    kills_fighters   f2   u16            Kills > Fighters
+    #    kills_bombers    f3   u16            Kills > Bombers
+    #    planes_lost      f4   u16            Planes Lost (players)   [screen shows f4 + f13]
+    #    kills            f5   u16            Kills (total)
+    #    kills_in_a_row   f7   u8             Kills In A Row
+    #    aces             f8   u8             Aces
+    #    score            f9   FLOAT          Fighter Score
+    #    bomber_score     f10  FLOAT          Bomber Score
+    #    ai_fighters      f11  u16            AI Fighters
+    #    ai_bombers       f12  u16            AI Bombers
+    #    planes_lost_ai   f13  u16            Planes Lost to AI       [screen shows f4 + f13]
+    #    ai_ships         f16  u16            Ships
+    #    ai_tanks         f17  u16            Tanks
+    #    ai_ground        f18  u16            Ground Units
+    #    ai_buildings     f19  u16            Buildings
+    for _c in ('kills_fighters', 'kills_bombers', 'planes_lost', 'planes_lost_ai',
+               'kills_in_a_row', 'bomber_score', 'ai_fighters', 'ai_bombers',
+               'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings'):
+        if _c not in pcols:
+            conn.execute(f"ALTER TABLE pilots ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
+            log('DB', f'pilots: added missing `{_c}` column (default 0) [msg-25 stat block]')
     conn.commit(); conn.close()
 
 def db_upsert_account(acct, pid, f45, ab):
@@ -580,16 +1680,56 @@ def db_next_slot(acct):
     row = conn.execute("SELECT MAX(slot_index) FROM pilots WHERE account_name=?", (acct,)).fetchone()
     conn.close(); return (row[0] or 0) + 1
 
-def db_credit_kill(killer_name, victim_name, points):
+def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, lost_to_ai=False):
     """Accumulate a combat result into persistent pilot stats (global scoring).
-    Killer (if any) gains +1 kill and +points score; victim gains +1 death. Each
-    UPDATE is additive so scores carry across games/sessions."""
+
+    v240: also maintains the columns the HQ Scores screen renders, so they stay consistent with
+    kills/deaths automatically:
+      killer -> kills_in_a_row +1
+      victim -> deaths +1, a plane lost, kills_in_a_row reset to 0
+    v242: the kill is broken down by WHAT WAS SHOT DOWN - `victim_is_bomber` picks kills_bombers vs
+    kills_fighters, so "Kills > Fighters" + "Kills > Bombers" always adds up to "Kills".
+    (Which SCORE the points land in is a separate question - that depends on what the KILLER was
+    flying - and is handled by db_apply_score_delta(bomber=...).)
+    v243: `lost_to_ai` sends the loss to planes_lost_ai (msg-25 f13, "Planes Lost to AI") instead of
+    planes_lost (f4), which is where an AA/flak kill belongs. The HQ screen shows f4 + f13, so the
+    total is right either way - but the breakdown is what the game actually tracks.
+    Columns are added conditionally so an un-migrated DB still works.
+    """
     conn = sqlite3.connect(DB_PATH)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
     if killer_name:
-        conn.execute("UPDATE pilots SET kills=kills+1, score=score+? WHERE pilot_name=?",
-                     (points, killer_name))
+        sets, args = ['kills=kills+1', 'score=score+?'], [points]
+        _kcol = 'kills_bombers' if victim_is_bomber else 'kills_fighters'
+        if _kcol in have:
+            sets.append(f'{_kcol}={_kcol}+1')
+        if 'kills_in_a_row' in have:
+            sets.append('kills_in_a_row=kills_in_a_row+1')
+        args.append(killer_name)
+        conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", args)
     if victim_name:
-        conn.execute("UPDATE pilots SET deaths=deaths+1 WHERE pilot_name=?", (victim_name,))
+        sets = ['deaths=deaths+1']
+        _lcol = 'planes_lost_ai' if lost_to_ai else 'planes_lost'
+        if _lcol in have:
+            sets.append(f'{_lcol}={_lcol}+1')
+        if 'kills_in_a_row' in have:
+            sets.append('kills_in_a_row=0')          # dying breaks the streak
+        conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
+    conn.commit(); conn.close()
+
+def db_set_pilot_aces(name, aces):
+    """v222: SET the pilot's ace status to an absolute value (not additive).
+
+    Ace status is SERVER-AUTHORITATIVE and lives in the DB, which is the single source of truth the
+    admin editor writes and msg 88 states to the client. FA's rule is a LIVE one - ACE_KILLS_PER
+    (5) kills WITHOUT dying earns an ace, and DYING WIPES YOUR ACES - so this is called with 0 on
+    death and with the incremented value when a kill completes a 5-kill streak.
+    """
+    if not name:
+        return
+    aces = min(max(int(aces), 0), 255)   # msg-88 aces field is a u8 (score obj +0x50)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE pilots SET aces=? WHERE pilot_name=?", (aces, name))
     conn.commit(); conn.close()
 
 def db_get_pilot_stats(name):
@@ -597,6 +1737,35 @@ def db_get_pilot_stats(name):
     row = conn.execute("SELECT score,kills,deaths FROM pilots WHERE pilot_name=?",
                        (name,)).fetchone()
     conn.close(); return row   # (score,kills,deaths) or None
+
+def db_get_pilot_career(name):
+    """The pilot's PERSISTENT career stats for the in-game scoreboard.
+    Returns (score, kills, deaths, rank, aces) - defaults to zeros for an unknown pilot.
+
+    These are the AUTHORITATIVE values the server pushes to the client (msg 88 for aces/rank).
+    `aces` is now STORED (v221) rather than derived from kills: FA's live ace status is a CLIENT-side
+    session rule (5 kills without dying, reset on death) which the server must not try to compute -
+    so the DB holds the pilot's persistent/career ace standing, which we state authoritatively.
+    A team change or room change must NOT reset a pilot's real standing - it is RE-READ from the DB
+    and re-pushed, so the career numbers survive the transition.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+    acol = 'aces' if 'aces' in pcols else '0'
+    row = conn.execute(f"SELECT score,kills,deaths,rank,{acol} FROM pilots WHERE pilot_name=?",
+                       (name,)).fetchone()
+    conn.close()
+    if not row:
+        return (0, 0, 0, 0, 0)
+    return (row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0, row[4] or 0)
+
+def pilot_aces(kills):
+    """v219: derive the ACE count from career kills. FA's 'ace' status is a kill milestone; the
+    score object's aces field (score+0x50, set only by msg 88) is a small u8 counter. Until the
+    exact 2009 rule is confirmed, use the classic threshold: 5 kills = 1 ace 'star', i.e. aces =
+    kills // 5, clamped to a byte. Adjust ACE_KILLS_PER if the real rule turns out different."""
+    return min(max(int(kills) // ACE_KILLS_PER, 0), 255) if ACE_KILLS_PER > 0 else 0
+
 
 # --- Terrain table & GAME_DEF terrain extraction ------------------------------
 #
@@ -884,6 +2053,48 @@ PLANE_ROSTER = [
 ]
 
 # Historical default. Edit freely for events; unlisted planes -> USA (camp 0).
+# -- v242: AIRCRAFT CLASS (fighter vs bomber) ----------------------------------
+# FA splits the scoreboard two ways, and they key off DIFFERENT aircraft:
+#     Fighter Score / Bomber Score   -> what YOU were FLYING when you earned the points
+#     Kills > Fighters / > Bombers   -> what you SHOT DOWN
+# The server already knows both: s.plane_type is the PLANE_ROSTER id straight out of the spawn
+# packet (out-4 byte[8]), so a kill can be attributed to the right pair of columns.
+# Ids below are indices into PLANE_ROSTER. Bombers/attackers/transports cluster in blocks (56-80,
+# 83-90, 104-108) with a few stragglers. EDIT FREELY - this is a judgement call on the borderline
+# airframes and is meant to be tuned, not treated as gospel:
+#   * Included as BOMBERS: level/dive/torpedo bombers, dedicated attackers (IL-2, IL-10, Ju-87,
+#     FW-190F-8) and transports (C-47, Dakota, Li-2, Ju-52, L2D2).
+#   * Left as FIGHTERS: fighter-bombers on fighter airframes (Bf-109 /B variants, Hurr-IID,
+#     Typhoon) and heavy fighters (Bf-110).
+# Anything not listed is a FIGHTER.
+BOMBER_PLANE_NAMES = {
+    # level / dive / torpedo bombers
+    "B-25D", "B-25J", "TBF-1c", "A-20Gu", "A-20Gs", "B-17G", "B-29", "Dauntless", "SBD-2",
+    "Mosquito_B_IV", "Mosquito_B_IX", "Mosquito_FB_VI", 'Mosquito_"Tse-Tse"',
+    "Avenger_II", "DB-7B", "Mitchell_II", "Mitchell_III", "Lancaster",
+    "Pe-8", "Pe-2", "Tu-2", "Tu-4",
+    "Ju-88", "Do-217E-2", "Do-217J-1", "He-111",
+    "D3A", "G5N1", "G4M2", "B5N2", "Ki-67",
+    # dedicated ground-attack
+    "IL-2", "IL-10", "Ju-87D-3", "Ju-87G-2", "FW-190F-8",
+    # transports
+    "C-47A", "Dakota_Mk.II", "Li-2", "Ju-52/3m", "L2D2",
+}
+# Resolve names -> PLANE_ROSTER ids once at import. Deriving from names (rather than hard-coding
+# numbers) keeps this correct if the roster is ever reordered, and makes a typo obvious: any name
+# that doesn't resolve is logged at startup instead of silently classing a bomber as a fighter.
+BOMBER_PLANE_IDS = {i for i, n in enumerate(PLANE_ROSTER) if n in BOMBER_PLANE_NAMES}
+_unmatched = BOMBER_PLANE_NAMES - set(PLANE_ROSTER)
+
+def is_bomber_plane(plane_id):
+    """v242: True if this PLANE_ROSTER id is a bomber / attacker / transport.
+    Used twice per kill: the KILLER's aircraft picks Fighter Score vs Bomber Score, and the
+    VICTIM's picks Kills>Fighters vs Kills>Bombers."""
+    try:
+        return int(plane_id) in BOMBER_PLANE_IDS
+    except (TypeError, ValueError):
+        return False
+
 PLANE_TEAMS = {
     1: [  # Great Britain
         "Hurr-Ia","Spit-Ia","Martlet_I","Tomahawk","Hurr-IIC","Spit-Vb_F","Hurr-IID","Kittyhawk",
@@ -1915,6 +3126,39 @@ def console_handler():
                             else:
                                 camp = scene_camp(_probe_terrain_for_room(rid), sidx)
                             broadcast_scene_36(rid, [(sidx, camp, prog)], reason='(console destroy)')
+            elif cmd == 'resupply':
+                # resupply [flags] [amount] [amount2] [b1] [b2]  - v266: send msg 60 (0x3c) SUPPLY
+                # GRANT to trigger the client's in-world REARM/REFUEL (no despawn). Defaults:
+                # flags=0x04 (the rearm/refuel path in the handler), amounts=0xffff (max fuel/ammo).
+                # The rearm is CLIENT-LOCAL and the client doesn't send msg 59 in our setup, so we
+                # push msg 60 proactively. TEST: park + fire some ammo + engine off, then run
+                # `resupply` -> the client should refuel/rearm in place. If nothing happens, iterate
+                # the framing (b1/b2 bytes, flags bits) from the client log - the exact header bytes
+                # between the type and the flags aren't pinned yet.
+                #  (v265 note: msg-36 was the WRONG vehicle - it destroyed a scene + docked score.
+                #   msg-60 flags&4 is the actual rearm path, RE'd from handler 0x5581c0.)
+                args = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    flags = int(args[0], 0) if len(args) > 0 else 0x04
+                    amount = int(args[1], 0) if len(args) > 1 else 0xffff
+                    amount2 = int(args[2], 0) if len(args) > 2 else 0xffff
+                    b1 = int(args[3], 0) if len(args) > 3 else 0
+                    b2 = int(args[4], 0) if len(args) > 4 else 0
+                except ValueError:
+                    log('CONSOLE', 'resupply: all args must be ints. '
+                                   'Usage: resupply [flags=4] [amount=65535] [amount2=65535] [b1=0] [b2=0]')
+                else:
+                    rooms = {x.current_room for x in get_all_sessions()
+                             if getattr(x, 'entered_game', False) and x.current_room is not None}
+                    if not rooms:
+                        log('CONSOLE', 'resupply: no in-game players to send to')
+                    for rid in rooms:
+                        n = broadcast_supply_grant_60(rid, flags=flags, amount=amount,
+                                                      amount2=amount2, b1=b1, b2=b2,
+                                                      reason='(console resupply - rearm/refuel)')
+                        log('CONSOLE', f'resupply: sent msg 60 (flags=0x{flags:02x} amt={amount} '
+                                       f'amt2={amount2} b1={b1} b2={b2}) to {n} player(s) in room {rid}. '
+                                       f'Park + deplete + engine off -> watch for in-place rearm.')
             elif cmd == 'probe':
                 # probe <sceneIdx>            fire one destroy + capture ev=0x00 reconciliation
                 # probe sweep [lo] [hi] [gap]  walk a scene range, building the whole map
@@ -2092,6 +3336,7 @@ def console_handler():
                 log('CONSOLE', 'gen <name>  - generate ticket for new account')
                 log('CONSOLE', 'list        - show all accounts and their pilots')
                 log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
+                log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
                 log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
             else: log('CONSOLE', f'Unknown command "{cmd}". Type "help".')
         except Exception:
@@ -2186,25 +3431,40 @@ def build_synack(fixed_fa=None):
     # the session-elapsed. So a re-anchor MUST replay the connect fa_s/fa_frac, not call
     # fa_timestamp() again.
     fa_s, fa_frac = fixed_fa if fixed_fa is not None else fa_timestamp()
-    p = bytearray(84); p[2]=0x10
+    p = bytearray(92); p[2]=0x10          # v217: 84 -> 92 bytes so the true cfg+0x40 (byte 88) fits
     struct.pack_into('>I',p,8,fa_s); struct.pack_into('>I',p,12,fa_frac)
     c=16
-    # The client memcpy's 0x44 (68) bytes of this body (from packet+0x10) into its net-config
-    # struct at vcncNet 0x10020300 and ntohl's each dword. cfg+0x40 (== packet byte 80) is the
-    # RTT-sample RING CAPACITY: it sizes the ring array at struct+0x4c (0x100203ac) and is the
-    # divisor in the sampler FUN_10006f55 (`div [esi+0x48]`). We previously left byte 80 = 0, so
-    # the client got cap=0 -> (a) div-by-zero in the sampler and (b) an unbounded ring whose
-    # writes can reach the delivery-callback pointer at 0x1002042c (exactly 64 u16 slots past the
-    # array start). The `next_exp=seq+2` ACK fix normally suppresses sampling, but a client cs
-    # RESET on each world re-entry misaligns it for a few packets and lets a sample slip through
-    # -> div-by-zero -> CTD. That is the plane-independent "~3rd re-entry" crash. Sending a valid
-    # cap <= 64 makes the ring correctly sized: no div-by-zero, and slot writes stop BEFORE the
-    # callback. 32 is conservative (half the safe region) and matches the scale of neighbours.
-    RTT_RING_CAP = 32   # cfg+0x40; must be 1..64 (64 = array ends right before the callback ptr)
+    # v217 CORRECTION of a long-standing byte-alignment error. The client copies 0x44 (68) bytes of
+    # net-config into its struct at 0x10020300, but the copy SOURCE is the SYN section base + 0x10.
+    # Traced precisely (dispatcher lea ebx,[esi+0xc]=wire byte 8 for a SYN-only packet; RecvSYNReply
+    # FUN_10003cd3 then `add esi,0x10`): the config source is WIRE BYTE 24, so the client's cfg[k] =
+    # our packet byte (24 + k). The RTT-sample RING CAPACITY is cfg[0x40] = packet BYTE 88 - NOT byte
+    # 80 as an earlier note assumed. Our config block below is written at c=16, i.e. 8 bytes EARLIER
+    # than where the client reads it, so cfg[0x40] fell on packet byte 88 which was PAST the old
+    # 84-byte packet -> the client read 0/garbage as the cap -> the RTT ring was effectively
+    # unbounded and, once a sample was taken, its slot writes ran past the 32-slot region into the
+    # delivery-callback pointer (ring index 64 == struct+0xcc) -> CTD. This is the real mechanism
+    # behind the "~Nth re-entry" crash AND why v216's next_exp=seq+1 (which re-enables sampling)
+    # crashed immediately: with no valid cap, the very first sample overflowed.
+    #
+    # MINIMAL FIX (chosen to protect the stable v215 baseline): leave the existing config block at
+    # c=16 BYTE-FOR-BYTE UNCHANGED (so every field the client currently reads at cfg[0x00..0x38] is
+    # identical to what it has always seen), and ADDITIONALLY write the RTT cap at the TRUE location
+    # (packet byte 88 == cfg[0x40]). The packet is extended to 92 bytes so byte 88-91 exist and the
+    # client's 68-byte copy (bytes 24..91) is fully covered. Net effect: exactly ONE value the client
+    # sees changes - cfg[0x40] goes from out-of-bounds 0/garbage to a valid 32 - and nothing else.
+    # With a real cap the ring is bounded at 32 (< the index-64 callback slot), so RTT sampling is
+    # finally safe to enable (RTT_SAMPLING, step 2). While RTT_SAMPLING=False this fix is inert (the
+    # ring never advances), so step 1 just proves the 92-byte SYNACK doesn't disturb connect.
+    RTT_RING_CAP = 32   # cfg+0x40 == packet byte 88; must be 1..64 (64 = array ends right before the callback ptr)
     for off,val in [(0,30),(0x14,8),(0x18,5000),(0x1C,10),(0x20,30000),
                     (0x24,5000),(0x28,200),(0x2C,50),(0x30,100),(0x34,16),(0x38,16),(0x3C,100),
                     (0x40,RTT_RING_CAP)]:
         struct.pack_into('>I',p,c+off,val)
+    # v217: the cap at the TRUE offset (packet byte 88 = client cfg[0x40]). This is the field that
+    # actually reaches the client's ring sizer; the c=16 copy above lands it at byte 80 (client
+    # cfg[0x38]) which is a DIFFERENT field, so we must also write it here.
+    struct.pack_into('>I', p, 24 + 0x40, RTT_RING_CAP)   # == byte 88
     return bytes(p), fa_s, fa_frac
 
 def build_time_reply(cd, sess=None):
@@ -2307,7 +3567,15 @@ def build_rel_ack(cid, seq=0, next_exp=None):
     # removal stays correct (we only ever clear base..seq; the +1 lives in a cosmetic tracker);
     # the ring head never advances, so the callback is never overwritten. RTT estimation is
     # lost, which is harmless on LAN.
-    if next_exp is None: next_exp = (seq + 2) & 0x1FF
+    # v216: the next_exp choice controls whether the client SAMPLES RTT for this ACK:
+    #   seq+1 -> cumulative loop clears base..seq-1, leaves seq; the same-packet RTT lookup HITS
+    #            -> a sample is taken -> the (now capped) RTT ring advances -> REAL-TIME latency.
+    #   seq+2 -> the loop clears seq itself first; the same-packet lookup MISSES (duplicate path)
+    #            -> NO sample -> frozen latency (the pre-v216 CTD-avoidance behavior).
+    # Either way send-queue removal stays correct (we only ever clear base..seq). RTT sampling is
+    # now safe because the ring is capped at 32 (RTT_RING_CAP in the SYNACK config), so the ring
+    # index wraps well before the index-64 delivery-callback slot that caused the old CTD.
+    if next_exp is None: next_exp = (seq + (1 if RTT_SAMPLING else 2)) & 0x1FF
     p=bytearray(8); p[0]=0; p[1]=cid&0xFF; p[2]=2
     struct.pack_into('>I',p,4,(seq<<20)|0x00020000|((next_exp&0x1FF)<<8)); return bytes(p)
 
@@ -2799,6 +4067,7 @@ def _pad_to_bc_boundary_len(payload_len):
 MSG_ADD_PLAYER_62      = 0x3e
 MSG_CHANGE_PLAYER_63   = 0x3f
 MSG_SCORE_TABLE_96     = 0x60
+MSG_ACE_RANK_88        = 0x58   # v218: AceOrRankChangedCB (VNET table 0xc81ed8 slot 88).
 MSG_SERVER_CONFIRM_5   = 0x05    # in-game ServerConfirm (post-takeoff sim-loop gate)
 SERVERCONFIRM_READY    = True    # build_ingame_pkt (floored bc) -> client Size=5 -> 1 record
 ADD_TEST_PLAYER        = False   # was True (fake Test2 roster test). OFF now: with a REAL
@@ -2945,7 +4214,13 @@ def build_add_player_62(records):
     data = bytearray([0x3e])                                  # MSG_ADD_PLAYER_62
     for rec in records:
         pidx, camp, name = rec[0], rec[1], rec[2]
-        if camp is None: camp = 0          # player not in a side yet -> side 0; msg 63 corrects it
+        if camp is None:
+            # v260: a player who hasn't picked a side. Sending camp=0 encoded them as US, so no-team
+            # players showed under US in every peer's roster until they chose a team (Bug A). The
+            # handler FUN_004fa5f0 maps camp>=9 -> camp=-1 (no side), which is the SAME 'In Menu'
+            # encoding the client gives its own local entry at grant (FUN_004f88f0, camp=-1). So send
+            # 0xff -> the peer shows them as neutral/In Menu, not US. msg 63 still sets the real side.
+            camp = 0xff if ADD_PLAYER_NOTEAM_NEUTRAL else 0
         field = rec[3] if len(rec) > 3 else 0
         nb = name.encode('latin1', 'replace')[:31] + b'\x00'  # asciiz, capped
         data += struct.pack('<I', pidx & 0xFFFFFFFF)
@@ -3027,6 +4302,342 @@ def build_score_table_96(nation_scores=None, object_groups=None):
     log('SCORE96', f'ScoreTable nation_scores={ns} real_groups={n_real_groups} '
                    f'pad_group(N={N}, recs={pad_recs})')
     return build_appspace_pkt_exact(bytes(data))
+
+MSG_STAT_BLOCK_25 = 0x19
+
+# v230: field order of the 20-dword stat block (score+0x30), as FUN_004f4570 unpacks it. The wire
+# types are fixed by that function (u8/u16/u32 at the offsets below); the MEANING of each slot is
+# mapped to the manual's Scores Screen row order and refined empirically by reading the HUD. Only a
+# few are known-for-sure yet, so unknowns are sent as 0. Indices 0..19 correspond to param_1[0..0x13].
+STAT25_FIELD_TYPES = ['u8','u16','u16','u16','u16','u16','u16','u8','u8','u32','u32',
+                      'u16','u16','u16','u16','u16','u16','u16','u16','u16']
+
+def build_stat_block_25(player_index, fields):
+    """FA msg 25 (0x19) SERVER->CLIENT - the full Current Life / Current Game stat table.
+
+    Handler FUN_004f65a0 (dispatch slot 25): scans the GamerClientScore slots for +0x24 ==
+    PlayerIndex, then FUN_004f4570(score+0x30, payload+5) unpacks 20 fields straight into the score
+    object. THIS is the message that actually fills the scoreboard - msg 88 only sets aces (+0x50)
+    and rank (+0x30-as-rank... separate). We never sent it, which is why kills/deaths/planes-lost
+    stayed blank no matter what else we did.
+
+    Wire: [0x19][PlayerIndex u32 LE] + packed block (offsets relative to block start = payload+5):
+        +0x00 u8  f0     +0x01 u16 f1   +0x03 u16 f2   +0x05 u16 f3   +0x07 u16 f4
+        +0x09 u16 f5     +0x0b u16 f6   +0x0d u8  f7    +0x0e u8  f8
+        +0x0f u32 f9     +0x13 u32 f10
+        +0x17 u16 f11 .. +0x27 u16 f19  (nine u16)
+    `fields` is a list of 20 ints (missing/short -> 0). Values are clamped to each slot's width.
+
+    NB the client's own 'out 25' is a short 7-byte NOTIFY in the other direction - unrelated, still
+    swallowed (echoing it caused the v220 garbage-ace announcements). This is the SERVER->CLIENT set.
+    """
+    f = list(fields) + [0] * (20 - len(fields))
+    def u8(i):  return bytes([int(f[i]) & 0xff])
+    def u16(i): return struct.pack('<H', int(f[i]) & 0xffff)
+    def u32(i):
+        # v239: slots 9 and 10 are FLOATS (Fighter Score / Bomber Score), not integers. PROVEN:
+        # probe #1 wrote int 9 there and the HQ screen read 0 - because int 9 reinterpreted as a
+        # float is 1.26e-44. Probe #2 wrote the float bit-pattern for 1234.0 and the screen read
+        # 1234. So pack these two as IEEE floats; everything else stays a plain u32.
+        if i in STAT25_FLOAT_SLOTS:
+            return struct.pack('<f', float(f[i]))
+        return struct.pack('<I', int(f[i]) & 0xffffffff)
+    block  = u8(0)
+    block += b''.join(u16(i) for i in range(1, 7))     # f1..f6
+    block += u8(7) + u8(8)
+    block += u32(9) + u32(10)
+    block += b''.join(u16(i) for i in range(11, 20))   # f11..f19
+    assert len(block) == 0x29, f'stat block is {len(block)}B, expected 41'
+    data = bytearray([MSG_STAT_BLOCK_25])
+    data += struct.pack('<I', player_index & 0xFFFFFFFF)
+    data += block
+    return bytes(data)
+
+# v231: WHERE THE BLOCK LANDS - two slots are already known for certain.
+# FUN_004f65a0 does `lea ebx,[ebp+0x30]` then FUN_004f4570(ebx, payload+5), so the 20 fields are the
+# dwords at score+0x30 .. score+0x7c. Cross-referencing msg 88 (FUN_004f4120), which writes
+# score+0x30 = rank and score+0x50 = aces:
+#       f0  -> score+0x30  == RANK      (CONFIRMED: v230 put deaths=22 in f0 and the client
+#                                        announced the highest rank - it clamps >12 to 12)
+#       f8  -> score+0x50  == ACES      (same arithmetic: 0x30 + 8*4 = 0x50)
+# Everything else is still unmapped. Rather than guess, PROBE: write a distinct value into every
+# slot in one go and read the scoreboard - whichever row shows 3 is f3, and so on. f0/f8 are
+# excluded from the probe and always carry the pilot's REAL rank/aces so we don't corrupt them.
+# v236: PROBE BACK ON - AIMED AT THE RIGHT SCREEN THIS TIME.
+# The v231 probe was read on the IN-FLIGHT screen (Current Life / Current Game) and showed nothing,
+# so msg 25 was written off. That was the WRONG SCREEN: those two columns are session state the
+# client computes itself. The HQ SCORES screen is a different consumer entirely - it has
+# "Latest | Career" columns, and it DISPLAYS THE RANK. Rank lives at score+0x30, which is exactly
+# f0 of this block - so that screen demonstrably reads the very structure msg 25 writes, and the
+# other 19 fields should drive its rows.
+# Field WIDTHS are fixed by FUN_004f4570 and line up with the HQ screen beautifully:
+#     f0 u8   = Rank                (CONFIRMED)
+#     f7 u8   = a small counter     (Kills In A Row?)
+#     f8 u8   = Aces                (CONFIRMED)
+#     f9,f10 u32 = the only 32-bit slots -> Fighter Score / Bomber Score (only scores need 32 bits)
+#     f1..f6, f11..f19 u16 = Planes Lost, Lost Pilots, Kills/Fighters/Bombers, and the AI section
+# Probe sends f_i = i into every unmapped slot; f0/f8 keep the pilot's REAL rank/aces.
+# READ THE HQ SCORES SCREEN (not the in-flight one): whichever row shows N is field N.
+STAT25_PROBE = True          # <- set False once STAT25_MAP is calibrated from the HQ screen
+STAT25_PROBE_BASE = 0        # probe value for slot i = STAT25_PROBE_BASE + i  (f1=1, f2=2, ... f19=19)
+
+# ==== v238: THE HQ CAREER SCREEN IS MAPPED (probe #1 result, run 11:45) ====
+# The probe finally ran (v237 pushes msg 25 when the HQ screen opens) and the HQ SCORES screen's
+# CAREER column came back FULL of our probe values. msg 25 DOES drive it. Sent f_i = i (f0=rank=5,
+# f8=aces=0) and read straight off the screen:
+#     HQ row (Career)      shows   field
+#     Rank                 Major     f0    (rank 5)          u8   CONFIRMED
+#     Lost Pilots            1       f1                      u16  CONFIRMED
+#     Kills > Fighters       2       f2                      u16  CONFIRMED
+#     Kills > Bombers        3       f3                      u16  CONFIRMED
+#     Kills                  5       f5                      u16  CONFIRMED
+#     Kills In A Row         7       f7                      u8   CONFIRMED
+#     Aces                   0       f8    (real aces)       u8   CONFIRMED
+#     AI Fighters           11       f11                     u16  CONFIRMED
+#     AI Bombers            12       f12                     u16  CONFIRMED
+#     AI Ships              16       f16                     u16  CONFIRMED
+#     AI Tanks              17       f17                     u16  CONFIRMED
+#     AI Ground Units       18       f18                     u16  CONFIRMED
+#     AI Buildings          19       f19                     u16  CONFIRMED
+# The "Latest" column stayed 0 -> it is a SEPARATE block (last-mission stats) we don't set.
+# STILL OPEN (probe #2 resolves both):
+#   * Fighter Score / Bomber Score read 0 even though we put 9/10 in the two u32 slots (f9,f10).
+#     Reinterpreting int 9 as a FLOAT gives 1.26e-44, which renders as 0 - so f9/f10 are almost
+#     certainly FLOATS. Probe #2 sends float bit-patterns (1234.0 / 5678.0) to prove it.
+#   * "Planes Lost" showed 17, the same value as AI Tanks (f17) - ambiguous. Probe #2 sets f17=97
+#     and puts distinct markers in the remaining unknowns (f4,f6,f13,f14,f15) to find its real home.
+STAT25_MAP = {
+    # ============ FULLY MAPPED from the two HQ probes (v238/v239) ============
+    'rank':            0,   # u8     Rank
+    'deaths':          1,   # u16    "Lost Pilots"  (manual: times killed or captured)
+    'kills_fighters':  2,   # u16    Kills > Fighters
+    'kills_bombers':   3,   # u16    Kills > Bombers
+    'planes_lost':     4,   # u16    Planes Lost TO PLAYERS   -- HQ shows f4 + f13
+    'kills':           5,   # u16    Kills (total)
+    'kills_in_a_row':  7,   # u8     Kills In A Row
+    'aces':            8,   # u8     Aces
+    'fighter_score':   9,   # FLOAT  Fighter Score   (proven: float 1234.0 -> screen read 1234)
+    'bomber_score':   10,   # FLOAT  Bomber Score    (proven: float 5678.0 -> screen read 5678)
+    'ai_fighters':    11,   # u16    AI Fighters Destroyed
+    'ai_bombers':     12,   # u16    AI Bombers Destroyed
+    'planes_lost_ai': 13,   # u16    Planes Lost TO AI        -- HQ shows f4 + f13
+    'ai_ships':       16,   # u16    Ships
+    'ai_tanks':       17,   # u16    Tanks
+    'ai_ground':      18,   # u16    Ground Units
+    'ai_buildings':   19,   # u16    Buildings
+    # STILL UNMAPPED: f6, f14, f15 - they show NOTHING on the HQ screen, so they are almost certainly
+    # the ASSISTS rows (Fighters Assists / Bombers Assists / Ship Assists) which appear only on the
+    # IN-FLIGHT screen. Harmless; left at 0.
+}
+STAT25_FLOAT_SLOTS = (9, 10)   # Fighter/Bomber Score are FLOATS, not ints. PROVEN: probe #1 put int
+                               # 9 there and the screen read 0 - because int 9 reinterpreted as a
+                               # float is 1.26e-44. Probe #2 sent the float bit-pattern for 1234.0
+                               # and the screen read 1234.
+
+# ---- PROBE: DONE. Both probes have been read; the block is fully mapped. ----
+STAT25_PROBE = False
+STAT25_PROBE_UNKNOWN = {4: 91, 6: 92, 13: 93, 14: 94, 15: 95, 17: 97}   # kept for reference
+STAT25_PROBE_SCORE_AS_FLOAT = True
+STAT25_PROBE_F9  = 1234.0
+STAT25_PROBE_F10 = 5678.0
+
+def db_get_pilot_stat25(name):
+    """v240: read every column that feeds the msg-25 stat block (the HQ Scores career screen).
+    Returns a dict keyed by STAT25_MAP's keys, so send_stat_block_25 is a straight copy. Missing
+    columns read as 0, so this is safe on an un-migrated DB."""
+    keys = ('rank', 'deaths', 'kills_fighters', 'kills_bombers', 'planes_lost', 'kills',
+            'kills_in_a_row', 'aces', 'score', 'bomber_score', 'ai_fighters', 'ai_bombers',
+            'planes_lost_ai', 'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings')
+    out = {k: 0 for k in keys}
+    if not name:
+        return out
+    conn = sqlite3.connect(DB_PATH)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
+    cols = [k for k in keys if k in have]
+    if cols:
+        sel = ', '.join(f'COALESCE({c},0)' for c in cols)
+        row = conn.execute(f"SELECT {sel} FROM pilots WHERE pilot_name=?", (name,)).fetchone()
+        if row:
+            for c, v in zip(cols, row):
+                out[c] = v or 0
+    conn.close()
+    # 'score' is the FIGHTER score (msg-25 f9). Alias it so STAT25_MAP's key names line up.
+    out['fighter_score'] = out.pop('score')
+    return out
+
+def send_stat_block_25(s, reason='', dst=None):
+    """Fill the HQ SCORES screen's CAREER column from the DB via msg 25.
+
+    v240: EVERY row of that screen now has its own DB column (see init_db), and STAT25_MAP maps each
+    one to its slot in the 20-dword block. So this is a straight copy: whatever the web admin editor
+    stores is exactly what the client renders - which makes the editor a complete end-to-end test
+    harness for the stat block.
+    v241: kills_in_a_row comes straight from the DB too - db_credit_kill maintains it (+1 per kill,
+    0 on death), so it is the one true streak. No session counter is consulted.
+    """
+    if not SEND_STAT_BLOCK_25 or getattr(s, 'player_index', None) is None:
+        return
+    pilot = getattr(s, 'current_pilot', None)
+    st = db_get_pilot_stat25(pilot)
+    fields = [0] * 20
+
+    def put(key, val):
+        idx = STAT25_MAP.get(key)
+        if idx is not None:
+            fields[idx] = val
+
+    # Straight copy, DB column -> stat-block slot. The client clamps rank >12 to 12; aces is a u8.
+    # v241: NO session override for kills_in_a_row. The DB column IS the streak - db_credit_kill
+    # increments it on every kill and zeroes it on every death - and overriding it with the
+    # per-session counter (which starts at 0 each login) would report a LOWER streak than the truth
+    # and hide any value seeded by the admin. One source of truth.
+    for _k, _v in st.items():
+        put(_k, _v)
+    put('rank', min(max(int(st['rank']), 0), 12))
+    put('aces', min(max(int(st['aces']), 0), 255))
+
+    # ---- PROBE (off; both probes have been read and the block is fully mapped) ----
+    if STAT25_PROBE:
+        for _i, _v in STAT25_PROBE_UNKNOWN.items():
+            fields[_i] = _v
+        if STAT25_PROBE_SCORE_AS_FLOAT:
+            fields[9]  = STAT25_PROBE_F9
+            fields[10] = STAT25_PROBE_F10
+
+    pkt = build_msg13(build_stat_block_25(s.player_index, fields))
+    _target = dst if dst is not None else s          # v257: allow sending s's block to a peer
+    threading.Thread(target=lambda: send_rel(_target, pkt,
+                     f'<- msg 25 stat block ({pilot}) {reason}', to=3.0), daemon=True).start()
+    if STAT25_PROBE:
+        log('STAT25', f'PROBE -> {pilot} PI={s.player_index}: markers {STAT25_PROBE_UNKNOWN}, '
+                      f'f9/f10 = FLOAT {STAT25_PROBE_F9}/{STAT25_PROBE_F10}. {reason}')
+    else:
+        log('STAT25', f'career -> {pilot} PI={s.player_index}: rank={fields[0]} '
+                      f'kills={fields[5]} (F{fields[2]}/B{fields[3]}) lostpilots={fields[1]} '
+                      f'planeslost={fields[4]}+{fields[13]} fscore={fields[9]} bscore={fields[10]} '
+                      f'aces={fields[8]} streak={fields[7]} '
+                      f'ai=F{fields[11]}/B{fields[12]}/S{fields[16]}/T{fields[17]}/'
+                      f'G{fields[18]}/Bld{fields[19]} {reason}')
+
+def push_career_stats(s, reason='', delay=0.4):
+    """v237: state the pilot's authoritative career to the client - msg 88 (rank/aces) + msg 25 (the
+    20-dword stat block at score+0x30).
+
+    *** WHY THIS EXISTS: the v236 probe read "all 0" because NOTHING WAS EVER SENT. ***
+    Both messages were only ever pushed from the SPAWN-INIT path (after a plane's ServerConfirm).
+    But the HQ SCORES screen is read AT HQ, BEFORE you fly - the screenshot even shows the
+    "FLY LANCASTER" button. Neither test run contained a single plane spawn (CONFIRM5 = 0), so msg 25
+    never went on the wire at all and every row was 0 by construction. That was a broken test, not a
+    negative result.
+    Pushed on a daemon thread (send_rel blocks for its ACK).
+    """
+    def _go(_s=s):
+        if delay:
+            time.sleep(delay)
+        try:
+            if SEND_ACE_RANK_88:
+                send_ace_rank_88(_s, reason=reason)
+            send_stat_block_25(_s, reason=reason)
+        except Exception as e:
+            log('CAREER', f'[warn] career push failed for {getattr(_s, "current_pilot", "?")}: {e}')
+    threading.Thread(target=_go, daemon=True).start()
+
+def plane_movement(s):
+    """v243: how far has this pilot's plane moved over the last CRASH_MOVEMENT_WINDOW_S seconds?
+
+    Returns the total |delta| summed across the three quantised position axes. A PARKED plane
+    reports EXACTLY 0, sample after sample (verified across three separate parked exits in run
+    230703); a plane in flight moves by hundreds per tick. So this is what separates a CRASH from a
+    clean exit - the exit packet itself cannot, since both send MissExitCode 26.
+    Returns 0 when there's no evidence, which is the conservative answer (treat as parked).
+    """
+    hist = getattr(s, '_pos_hist', None)
+    if not hist or len(hist) < 2:
+        return 0
+    total = 0
+    for i in range(1, len(hist)):
+        a, b = hist[i - 1][1], hist[i][1]
+        total += sum(abs(b[k] - a[k]) for k in range(3))
+    return total
+
+def plane_was_flying(s):
+    """True if the plane was airborne//in motion when it was removed (see plane_movement)."""
+    return plane_movement(s) >= CRASH_MOVEMENT_MIN
+
+def build_ace_rank_88(player_index, aces=0, rank=0):
+    """FA msg 88 (0x58) - AceOrRankChangedCB (VNET table 0xc81ed8 slot 88, handler FUN_004f4120).
+
+    Wire (7 bytes): [0x58][PlayerIndex:u32 LE][aces:u8][rank:u8]. The handler scans the 512
+    GamerClientScore slots (mgr@0xc822d8[i*4+0xc]) for the one whose +0x24 == PlayerIndex, then
+    writes score+0x50 = aces and score+0x30 = rank. These two fields are set ONLY by this message,
+    so if we never send it they hold whatever was in the freshly-allocated score object -> the
+    '96 Aces' / bogus-rank garbage on Test2's scoreboard after a team-swap re-entry. Sending an
+    authoritative 88 (aces=0, rank=<sane>) on spawn/re-entry initialises them cleanly.
+
+    Returns the RAW 7-byte sub-message (msg-id + record) for wrapping in a msg-13 batch, exactly
+    like build_add_player_62 - the VNET dispatch is reached the same way (13 -> per-submessage
+    dispatch through 0xc81ed8). The handler matches by PlayerIndex, so the score object must ALREADY
+    exist (created by the client record in the first-spawn create) or the handler logs
+    'AceOrRankChangedCB. PlayerIndex=%i not found' and no-ops - hence we send it AFTER the spawn is
+    confirmed, not before.
+    """
+    data = bytearray([MSG_ACE_RANK_88])
+    data += struct.pack('<I', player_index & 0xFFFFFFFF)
+    data += bytes([aces & 0xff, rank & 0xff])
+    return bytes(data)
+
+def send_ace_rank_88(s, reason='', aces=None, rank=None):
+    """v219: push the pilot's AUTHORITATIVE aces/rank to their client via msg 88.
+
+    Values are RE-READ FROM THE DB (db_get_pilot_career) every time, so a team change or room change
+    RESTORES the pilot's real career standing rather than zeroing it. The client's GamerClientScore
+    object persists across those transitions and its aces (+0x50) / rank (+0x30) fields are written
+    ONLY by msg 88 - so if we don't state them, the client keeps whatever uninitialised memory was
+    there and announces a bogus ace status at the transition (the '29 Aces' Test2 saw on USA->GBR).
+
+    Pass explicit aces/rank to override the DB (e.g. for testing); otherwise they're derived from
+    the pilot's career kills/rank. Safe no-op if the player has no assigned index yet.
+    """
+    if getattr(s, 'player_index', None) is None:
+        return
+    pilot = getattr(s, 'current_pilot', None)
+    if aces is None or rank is None:
+        _score, _kills, _deaths, _rank, _aces = db_get_pilot_career(pilot) if pilot else (0, 0, 0, 0, 0)
+        if aces is None:
+            # v221: use the STORED career ace status (u8). Do NOT derive it from kills - the live
+            # ace rule (5 kills without dying, reset on death) is the CLIENT's own session logic.
+            aces = min(max(int(_aces), 0), 255)
+        if rank is None:
+            rank = _rank
+    pkt = build_msg13(build_ace_rank_88(s.player_index, aces=aces, rank=rank))
+    # *** v245: PEERS ONLY - never send a player their OWN msg 88. ***
+    # msg 88's handler (FUN_004f4120) is a PURE SETTER - it writes score+0x50 (aces) and score+0x30
+    # (rank) and returns. No event, no message, nothing on screen.
+    # The YELLOW IN-FLIGHT FLASH comes from msg 25's handler (FUN_004f65a0), which has TWO paths:
+    #     [0xc6eb98] -> plane -> +0x128 -> score obj; if its PlayerIndex == the packet's, jump to
+    #     the ANNOUNCING path at 0x4f6637 - otherwise take the silent write path.
+    # On the announcing path it compares the INCOMING value against what's ALREADY in the score
+    # object and only announces on an INCREASE:
+    #     aces: byte[payload+0x13] > score+0x50  -> show message 0x4b for 3000ms  ("you're an Ace")
+    #     rank: byte[payload+0x05] > score+0x30  -> show message 0x4c for 3000ms  (promotion)
+    #     ...and only THEN does it write the block.
+    # So if msg 88 reaches the OWNER first, it silently bumps score+0x50/+0x30 to the new value and
+    # msg 25 arrives to find nothing left to announce -> the flash never fires. msg 88 was stealing
+    # its own announcement.
+    # Peers still need it (they never receive a msg 25 about somebody else), so it goes to everyone
+    # EXCEPT the owner, and msg 25 does the owner's update AND the announcement.
+    _targets = [t for t in (get_sessions_in_room(s.current_room)
+                            if getattr(s, 'current_room', None) is not None else [])
+                if t is not s]
+    _label = (f'<- AceOrRank 88 (PI={s.player_index} aces={aces} rank={rank})'
+              f'{(" " + reason) if reason else ""}')
+    for _t in _targets:
+        threading.Thread(target=lambda _x=_t: send_rel(_x, pkt, _label, to=3.0),
+                         daemon=True).start()
+    log('ACE88', f'AceOrRank -> {pilot} PI={s.player_index} aces={aces} rank={rank} '
+                 f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room}; the owner '
+                 f'gets it via msg 25 so the in-flight announcement can fire {reason}')
+
 
 # msg-96 = per-object-type point RULES; FUN_004f53b0 FREES the client's own loaded table and
 # rebuilds from ours, so we MUST supply valid defs or a kill reads uninitialised memory
@@ -3164,6 +4775,13 @@ class S:
         self.account=None; self.auth64=None; self.auth_payload=None
         self.current_pilot=None; self.current_slot=0; self.current_room=None; self.room_slot=0; self.last_43_ts=0.0; self.entered_game=False; self.in_game=False; self.client_granted=False
         self.plane_type=PLANE_TYPE_ID   # v201: player's selected plane index (from out-4 byte[8]); default until first spawn
+        self.para_obj_number=None       # v248: the PARACHUTER's object number after a bail. This is a
+                                        # SECOND object alongside my_obj_number (the plane) - the plane
+                                        # keeps its aircraft-type tag and flies on pilotless, while the
+                                        # parachuter carries the pilot's name + rank. Keeping them in
+                                        # separate slots is essential: reusing my_obj_number for the
+                                        # parachute is what made the plane's later delete land on an
+                                        # object nobody owned.
         self._status_seq=0              # v215: STATUS packet sequence (low 9 bits, increments each send)
         self._status_connid=None       # v215: connection id observed from the client's own packets (wire bytes 0-1)
         self._status_last=0.0          # v215: time of last STATUS request sent
@@ -3180,6 +4798,15 @@ class S:
         self.obj_confirmed=False  # ServerConfirm sent for the current spawn? (reset per StartPlace)
         self.my_obj_number=None   # server-assigned object Number for this player's plane
         self.flying=False         # set once ServerConfirm sent (sim loop should start)
+        # -- v267 auto-resupply state (P2a) --
+        self.at_airfield=None     # AF ident the player is parked at (from StartPlace 0x17), else None
+        self.engine_on=None       # last engine state (type=0x22 sub=0x53: 1=on, 0=off), None=unknown
+        self.parked_since=None    # v268: time.time() when the settle timer started, else None
+        self.stationary_since=None # v272: time.time() the plane's ground speed hit 0, else None
+        self.last_pos=None        # v274: last quantised position seen by the resupply poll
+        self.pos_static_since=None # v274: time.time() the position last changed (static clock)
+        self.has_flown=False      # v269: engine has run since spawn -> a later shutdown = real landing
+        self.last_resupply_at=0.0 # time.time() of the last auto-resupply grant (debounce)
         self.last_telem_tick=None # this player's most recent conductor tick (telemetry[5:7]);
         self.last_telem_time=0.0  # used to re-stamp packets we RELAY *to* this player so the
                                   # tick lands on THEIR clock (small +delta = smooth interp)
@@ -3627,6 +5254,196 @@ def send_create_object_for(src, dst, with_client=True):
                    f'ONumber=0x{src.my_obj_number:04x} plane={getattr(src, "plane_type", PLANE_TYPE_ID)} -> {dst.current_pilot}')
     return True
 
+def build_parachuter_record(body, st, onumber, owner_obj=None):
+    """23-byte PARACHUTER object record (Type 2) = the CLIENT'S OWN 10-byte body + a 13-byte trailer.
+
+    *** NOTHING HERE IS INVENTED ANY MORE. *** Two CTDs came from me authoring these bytes. The
+    bailing client already sends the correct body in its parachute out-4, and we simply copy it.
+
+    The out-4 payload is  [sub=4][ident u16][record BODY of HeaderSize bytes][2 trailing].
+    Proof: for a PLANE out-4, pl[7] is the tag (0x91 = human|type1|nation1) and pl[8] is the PLN_INFO
+    id - which is exactly the `s.plane_type = pl[8]` this server has relied on since v201. So the
+    out-4 body IS the object-record body. For a parachute (HeaderSize 10) the real body is:
+
+        82 80 00 01 00 00 00 00 00 00
+        [0] 0x82  tag: TYPE 2, human-owned, nation 0   (I had guessed 0x92 - wrong nation)
+        [1] 0x80                                        (I had guessed 0x00 - wrong)
+        [2:4] i16 = the PLANE's ONumber -> FUN_004f2530 -> score obj -> PILOT NAME + RANK
+        [9] 0     model                                 (I had guessed 1 - wrong)
+
+    Three wrong bytes out of ten; any one of them could be the crash. So: copy the body verbatim and
+    only append the trailer, which is the one part the SERVER owns (the client cannot know the object
+    number the server will assign).
+
+    Trailer (13 bytes, starts at HeaderSize - see the record loop at LAB_007e4e00):
+        [10:12] St       (owner ClientNumber u16)
+        [12:14] ONumber  (the parachuter's number, assigned by us)
+        [14:23] zero
+    """
+    b = bytes(body)[:PARACHUTER_HEADER_SIZE]
+    b = b + b'\x00' * (PARACHUTER_HEADER_SIZE - len(b))       # defensive: always exactly HeaderSize
+    if PARA_DEPLOY_BYTE9 is not None and len(b) > 9:
+        # v259: body[9] -> ctor param_6 (deploy/model). 0=freefall, 1=deployed canopy, >=2=cargo.
+        _bb = bytearray(b); _bb[9] = PARA_DEPLOY_BYTE9 & 0xFF; b = bytes(_bb)
+        log('PARA', f'record body[9] set to {PARA_DEPLOY_BYTE9} (deploy/model selector) '
+                    f'-> body={hx(b)}')
+    if PARA_FIX_OWNER_REF and owner_obj is not None and len(b) > 3:
+        # v261: body[2:4] is the OWNER object number the factory (FUN_004f26b0 case 2) resolves via
+        # FUN_004f2530 -> objtable[n] -> the owner's GamerClientScore, then FUN_00427530 binds it to
+        # chute+0x128 = the NAME TAG. The bailing client's out-4 body carries ITS OWN LOCAL plane
+        # number here (e.g. 0x0101), which does NOT match the peer-visible number the server assigned
+        # the plane -> the peer's lookup hits the wrong/empty slot -> no name. (byte9==0 masked this
+        # via the ctor's strcpy fallback; byte9>=1 skips that, exposing it.) Overwrite [2:4] with the
+        # PEER-VISIBLE plane object number (src.my_obj_number) so the bind resolves and the pilot name
+        # renders on the deployed canopy - matching the real game (every chute is named).
+        _bb = bytearray(b); struct.pack_into('<H', _bb, 2, owner_obj & 0xffff); b = bytes(_bb)
+        log('PARA', f'record body[2:4] set to owner plane 0x{owner_obj & 0xffff:04x} '
+                    f'(name bind) -> body={hx(b)}')
+    rec = bytearray(b) + bytearray(13)
+    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 0, st & 0xffff)        # St      @ [10]
+    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 2, onumber & 0xffff)   # ONumber @ [12]
+    return bytes(rec)
+
+def send_parachuter_telemetry(src):
+    """v254: give the parachuter object a POSITION by CLONING the plane's last real telemetry packet
+    and retargeting only the ONumber field to the parachuter.
+
+    *** We author NOTHING. *** The type-7 telemetry packet is 88 bytes and its position encoding is
+    not fully reverse-engineered (the smooth fields are scattered - likely unaligned floats or a
+    bit-packed form; the v243 '3x u16' was a good-enough approximation for a crash MOVEMENT test but
+    is NOT the true field). Hand-building it is exactly the guess that CTD'd the client five times on
+    the create record. So instead we take the PLANE's most recent real telemetry - a packet the
+    bailing client itself produced microseconds earlier, every byte valid - and change only bytes
+    [7:9], the ONumber, to the parachuter's number. That answers the client's 'get coord for object
+    258' request with a real, self-consistent position at the plane's location.
+
+    Result: the canopy appears at the plane's position (correct - that's where the pilot jumped). It
+    does not descend on its own yet (that needs the altitude field, which we haven't safely located),
+    but a static-then-removed canopy at the right place is a real improvement on invisible, and it
+    cannot crash - every byte is one the client already accepted.
+    """
+    if not SEND_PARACHUTER_TELEM:
+        return
+    tel = getattr(src, 'last_plane_telem', None)
+    pnum = getattr(src, 'para_obj_number', None)
+    if not tel or pnum is None or len(tel) < 9:
+        return
+    relayed = bytearray(tel)
+    struct.pack_into('<H', relayed, 7, pnum & 0xffff)      # ONLY change: ONumber -> parachuter
+    _sent = 0
+    for p in get_sessions_in_room(src.current_room):
+        if p is src or not getattr(p, 'flying', False):
+            continue
+        # re-stamp the tick to the recipient's clock, exactly like a normal relay (known-safe form)
+        rt = getattr(p, 'last_telem_tick', None)
+        outb = bytearray(relayed)
+        if rt is not None:
+            struct.pack_into('<H', outb, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
+        seq = getattr(p, '_relay_seq', 0) & 0xFF
+        p._relay_seq = seq + 1
+        pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(outb)
+        try:
+            sock.sendto(pkt, p.addr)
+            _sent += 1
+            log('PARA', f'  -> sent {len(pkt)}B to {p.current_pilot}@{p.addr} '
+                        f'onum=0x{pnum:04x} pkt={hx(pkt[:20])}...')
+        except OSError as e:
+            log('PARA', f'  -> sendto FAILED to {p.current_pilot}@{p.addr}: {e}')
+    log('PARA', f'telemetry for parachuter 0x{pnum:04x} ({src.current_pilot}) cloned from the '
+                f'plane\'s last packet -> room {src.current_room}, {_sent} peer(s) sent')
+
+def send_parachuter_create_for(src, dst):
+    """Tell dst to create the NetParachuter for src's bailed-out pilot. The record is the client's own
+    out-4 body plus our trailer, so the tag shows the PILOT's name and rank (the body points at the
+    pilot's plane, which resolves the score object) rather than an aircraft type.
+
+    v257: optionally PRIME the pilot's score block first. The 2009 ground truth shows object-only
+    parachuter creates ('in 2'24') preceded by one or two 'in 25'46' score blocks - our bare create
+    ('in 13'27 { in 2'24 }') has none. The parachuter's deploy/canopy state may depend on a valid
+    score binding, so we send dst a msg-25 for src's pilot immediately before the create. Gated by
+    PARA_PRIME_SCORE so it can be turned off if it makes no difference."""
+    body = getattr(src, 'para_body', None)
+    if not body or getattr(src, 'para_obj_number', None) is None:
+        return False
+    if PARA_PRIME_SCORE:
+        try:
+            send_stat_block_25(src, reason=f'(parachuter prime -> {dst.current_pilot})', dst=dst)
+        except Exception as _e:
+            log('PARA', f'score-prime skipped: {_e}')
+    rec = build_parachuter_record(body, st=src.client_number, onumber=src.para_obj_number,
+                                  owner_obj=src.my_obj_number)
+    pkt = build_msg13(bytes([0x02]) + rec)      # -> the client logs  in 2'24
+    send_rel(dst, pkt, f'<- CreateObject 2 (PARACHUTER: {src.current_pilot} '
+                       f'ONumber=0x{src.para_obj_number:04x} -> {dst.current_pilot})', to=3.0)
+    log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
+                f'ONumber=0x{src.para_obj_number:04x} rec={len(rec)}B '
+                f'body={hx(bytes(body))} -> {dst.current_pilot}')
+    return True
+    """23-byte PARACHUTER object record (Type 2). *** SIZE PROVEN FROM THE BINARY. ***
+
+    v248 sent a 41-byte PLANE-shaped record here and it CTD'd the peer. The msg-2 record loop
+    (LAB_007e4e00) shows exactly why - every record is [HeaderSize bytes of body][13-byte trailer],
+    and HeaderSize is looked up PER TYPE from a table at 0xa30c98 (stride 3 dwords):
+
+        mov   al, [edi]                    ; rec[0] = tag
+        and   eax, 0xf                     ; TYPE = tag & 0x0f
+        lea   ebx, [eax + eax*2]           ; TYPE * 3
+        mov   esi, [ebx*4 + 0xa30c98]      ; HeaderSize
+        movzx eax, word ptr [esi+edi+2]    ; ONumber = *(u16*)(rec + HeaderSize + 2)
+        add   esi, edi                     ; param_1 = rec + HeaderSize   (the TRAILER)
+        push  edi                          ; param_2 = rec               (the BODY)
+        call  ...                          ; -> FUN_004f26b0(trailer, body)
+        lea   edi, [edi + ebx + 0xd]       ; ADVANCE: rec += HeaderSize + 13
+
+    The table reads:  TYPE 0 (client) = 35 -> 48   TYPE 1/8 (plane) = 28 -> 41
+                      TYPE 2 (PARACHUTER) = 10 -> *** 23 ***
+    and 23 is exactly what the 2009 session log shows on the wire ('in 2'24' = 1 + 23; and
+    'in 2'65' = 1 + 41 + 23 for a client+parachuter pair). Sending 41 meant the loop advanced 18
+    bytes too far and parsed a bogus record out of the tail -> the documented tag-0 bounds-crash.
+
+    LAYOUT (body 10 + trailer 13):
+        [0]      tag = 0x80 | Type(2) | nation<<4.  bit7 = HUMAN-owned: the handler looks up
+                 GamerClientScore[St] and binds it, which is what puts the PILOT'S NAME and RANK on
+                 the canopy instead of an aircraft tag. (The station already exists from the plane's
+                 client record, so the 'no GamerClientScore' assert can't fire.)
+        [2:4]    i16 OWNER OBJECT NUMBER -> FUN_004f2530() -> the score object. The ctor
+                 (FUN_004a8c20) copies the pilot's name from owner+0x154 and binds the score.
+        [9]      model: 0/1 = ParaTrooper, >1 = ParaCargo. The 2009 log always loads
+                 PLANES\PARA\ParaTrooperlod0.Q6, so 1.
+        [10:12]  St (owner ClientNumber, u16)   <- TRAILER starts at HeaderSize, NOT at 28
+        [12:14]  ONumber (u16) - the PARACHUTER's own number
+        [14:23]  rest of the trailer, zero
+    [1], [4:8] and [8] are passed to the ctor but not yet identified; left 0.
+    """
+    rec = bytearray(PARACHUTER_HEADER_SIZE + 13)              # 10 + 13 = 23
+    rec[0] = 0x80 | (PARACHUTER_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    struct.pack_into('<h', rec, 2, owner_obj & 0x7fff)        # must be >= 0 or the score is skipped
+    rec[9] = model & 0xff
+    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 0, st & 0xffff)        # St      @ [10]
+    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 2, onumber & 0xffff)   # ONumber @ [12]
+    return bytes(rec)
+
+def _dead_v250_send_parachuter_create_for(src, dst):
+    # *** DEAD CODE - superseded by send_parachuter_create_for above (v251). ***
+    # Renamed rather than deleted only because it is a 60-line block and surgical deletion over a
+    # flaky filesystem link is riskier than leaving it inert. It is never called. Safe to delete.
+    """Tell dst to create the NetParachuter for src's bailed-out pilot, bound to src's PLANE object
+    so the tag shows the pilot's name and rank (not the aircraft type). Without this the peer has no
+    object to render and the parachute is simply invisible - which is exactly what was happening:
+    "Create NetParachuter" appears in NEITHER client's log, ever."""
+    if getattr(src, 'para_obj_number', None) is None or src.my_obj_number is None:
+        return False
+    rec = build_parachuter_record(st=src.client_number, onumber=src.para_obj_number,
+                                  nation=(src.nation or 0), owner_obj=src.my_obj_number)
+    pkt = build_msg13(bytes([0x02]) + rec)          # object-only form; the station already exists
+    send_rel(dst, pkt, f'<- CreateObject 2 (PARACHUTER: {src.current_pilot} '
+                       f'ONumber=0x{src.para_obj_number:04x} owner-plane=0x{src.my_obj_number:04x} '
+                       f'-> {dst.current_pilot})', to=3.0)
+    log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
+                f'ONumber=0x{src.para_obj_number:04x} bound to plane 0x{src.my_obj_number:04x} '
+                f'-> {dst.current_pilot}')
+    return True
+
 def build_delete_object_3(onumber=None, client_number=None, x=0.0, z=0.0):
     """In-game msg type 3 (object/client DELETE) - handler FUN_007e3bb0 @ 0x7e3bb0.
     Drops the rendered NetPlane from the in-game OBJECT table (ARR<NET::OBJECT*,2048>
@@ -3675,6 +5492,65 @@ def build_scored_delete_object_3(onumber, x=0.0, z=0.0):
     body += bytes(9)                               # filler -> entry = 12B (unused on MEC=5 path)
     return build_msg13(bytes(body))
 
+# -- v228: EXIT-TAIL DELETE (generalised) --------------------------------------
+# FUN_007e3bb0 (the type-3 handler) only calls an object's ExitDataArrive (vtable+0x10 =
+# FUN_004f8f20) when the entry carries MORE THAN 2 BYTES after the id. Our BARE delete is exactly
+# [id:2], so the method is skipped -> the plane vanishes and NO statistics are touched. That is the
+# in-game stat feed we were missing.
+#
+# ExitDataArrive decodes the exit byte as  EEC = b & 0xf,  MEC = b >> 4  and - crucially - RETURNS
+# THE ENTRY SIZE, chosen by EEC. The size we send MUST match, or the handler's parse loop desyncs
+# and walks off the entry (peer CTD). The table below is lifted straight from its switch:
+EXIT_EEC_ENTRY_SIZE = {
+    0x0: 3,  0x1: 3,          # -> MEC switch: 1/7 and 8/0xc do announce + effects
+    0x2: 4,
+    0x3: 12, 0x4: 12, 0x5: 12, 0x7: 12, 0x8: 12, 0x9: 12,   # parse exit struct, then MEC:
+                                                            #   4        -> kill announcement (names)
+                                                            #   5,6,0xb  -> FUN_00478640 MISSION EVENT
+    0xc: 4,
+    0xd: 13,
+    0xe: 6,
+}
+
+def build_exit_delete_object_3(onumber, exit_byte, entry=None, x=0.0, z=0.0):
+    """v229: a type-3 delete carrying the victim's REAL EXIT ENTRY, so every recipient runs
+    ExitDataArrive AND can attribute the kill.
+
+    *** v229 - THE TAIL IS NOT FILLER. *** v228 (and build_scored_delete_object_3 before it) zero-
+    filled the 9 tail bytes on the claim that "the tail isn't read on the MEC=5 path". That was
+    WRONG. ExitDataArrive calls FUN_004f8d10 on EVERY 12-byte form BEFORE the MEC switch, and that
+    parser reads the tail:
+        entry+0 u16 : the exiting object's id
+        entry+2 u8  : EXIT byte = (MissExitCode << 4) | ScoreEvent
+        entry+3 u16 : *** the HUNTER - the object number that killed it *** (0xffff = none)
+        entry+5 u16 : (0xffff = none)
+        entry+7 u32 :
+        entry+11 u8 : PPT type (low 5 bits)
+    Live proof - Test2 shot down by Bigalon (run 073215):
+        03 | 01 01 | 53 | 00 01 | 00 00 | 00 00 00 00 | 0c
+             id=257  exit  ^^^^^ hunter = 0x0100 = 256 = Bigalon's object
+    We were sending zeros there, so the killer's client saw hunter=0 and had nothing to credit.
+    THAT is why a kill never registered.
+
+    So: pass the victim's ORIGINAL entry bytes through verbatim. `entry` is taken straight out of
+    the client's own delete-notify ([sub 0x03][id u16][exit][tail...]) and re-emitted after the
+    [03][X][Z] header the type-3 handler expects. The entry length still has to agree with what
+    ExitDataArrive returns for this EEC (EXIT_EEC_ENTRY_SIZE) or its parse loop desyncs -> peer CTD.
+    Falls back to a zeroed tail only if the caller has no real entry.
+    """
+    size = EXIT_EEC_ENTRY_SIZE.get(exit_byte & 0xf)
+    if size is None or size < 3:
+        return None                                  # unknown EEC -> don't risk a desync
+    body = bytearray([0x03])
+    body += struct.pack('<ff', x, z)                 # X/Z = 0 -> silent removal, no death effect
+    if entry is not None and len(entry) >= size:
+        body += bytes(entry[:size])                  # the victim's REAL entry (hunter intact)
+    else:
+        body += struct.pack('<H', onumber & 0x7fff)  # fallback: id + exit + zero tail
+        body += bytes([exit_byte & 0xff])
+        body += bytes(size - 3)
+    return build_msg13(bytes(body))
+
 # -- msg 33 (0x21) SCORE-EVENT / kill credit ---------------------------------
 # v203. The AUTHORITATIVE kill-credit message the 2009 live host sent (messages04): after a
 # victim's 'in 3'21' delete (MEC=5,EEC=3 = shot down by enemy), the host sent the KILLER
@@ -3699,75 +5575,735 @@ def build_scored_delete_object_3(onumber, x=0.0, z=0.0):
 # VNET table exactly as it did inside the 2009 host's msg-13 batch).
 MSG_SCORE_EVENT_33 = 0x21
 
-def build_score_event_33(player_index, mec=1, eec=3):
+# v224: msg-33 ScoreEvent codes. TYPE byte = (MEC << 4) | EEC (MEC high, EEC low - see the handler
+# at 0x004f9ae0). MEC = MissExitCode, EEC = ExitEventCode.
+#   EEC MUST NOT BE 1: EEC==1 is the announce-only branch (asserts MEC in {2,3}, prints the kill
+#   message and jumps past the scoring code) - that swap is exactly what broke kill counting.
+#   MEC then selects the mission event: 1 -> event 0x26 + score_obj+0x2fc=1 (a shot-down kill,
+#   matching the client's own "MissExitCode=1, ScoreEvent=1" scored exit); 4 -> event 0x26;
+#   5 -> event 0x25. Tune here if the HUD still doesn't tick.
+SCORE33_MEC = 1              # -> type byte 0x13 with EEC=3
+SCORE33_EEC = 3
+
+# v226: RELAY the client's own msg-33 EXIT-EVENT to the other players in the room.
+# Msn_Exit.cpp (FUN_0045d930) shows the dying plane's ExitEvent carries a HITS LIST - who hit it and
+# each hitter's damage share - which is how FA attributes a kill. The receiving handler (0x004f9ae0)
+# is what ticks each client's Current Life / Current Game statistics. We were SWALLOWING it (v222's
+# NO_ECHO_TYPES), so no client ever ran its stat pipeline -> kills, deaths and planes-lost all stuck
+# at 0. Relay it verbatim to the peers; NEVER echo it back to the sender (the sender re-ingesting its
+# own 0xFFFF object index is the ARR<NET::OBJECT*,2048>[65535] bounds CTD).
+RELAY_EXIT_EVENT_33 = True
+
+# v228: carry the victim's EXIT TAIL on the type-3 delete sent to peers. The type-3 handler
+# (FUN_007e3bb0) only calls ExitDataArrive (FUN_004f8f20) when the entry has >2 bytes after the id,
+# so a BARE delete removes the plane and touches NO statistics. With the tail, each recipient runs
+# its stat pipeline (and on the MEC 5/6/0xb branch credits the kill from its OWN damage list).
+# The entry size is derived from EEC via EXIT_EEC_ENTRY_SIZE - the handler's own table - because a
+# size mismatch desyncs its parse loop and CTDs the peer. Set False to fall back to bare deletes.
+EXIT_TAIL_DELETE_TO_PEERS = True
+
+def build_score_event_33(player_index, mec=None, eec=None):
     """msg 33 ScoreEvent - credit a confirmed kill to `player_index` (the killer).
-    Type byte = (eec<<4)|mec; default 0x31 = MEC1/EEC3 = enemy-player kill credit."""
+
+    WIRE (confirmed from the handler at 0x004f9ae0, VNet_Rcv.cpp):
+        [0]   0x21 msg id
+        [1]   unused
+        [2:4] u16 LE PlayerIndex   <- handler: movzx eax, word[payload+2] -> score-obj-by-PI getter
+        [4]   TYPE byte: HIGH nibble = MEC, LOW nibble = EEC
+        [5:]  tail (>=9B): +5 u16, +7 u16, +9 u32 objnum, +13 PPT-type byte. Total 14B.
+    The handler logs it as "ScoreEvent. Number=%i. MEC=%i, EEC=%i." - grep the client log for that
+    line to confirm what it actually decoded.
+
+    *** v224 BUG FIX - THE NIBBLES WERE SWAPPED ***
+    We used to emit ((eec<<4)|mec). The handler does:
+        cl = type & 0x0f   -> EEC     (LOW  nibble)
+        al = type >> 4     -> MEC     (HIGH nibble)
+    so our MEC=1/EEC=3 went out as 0x31 and the client read it as MEC=3, EEC=1 - the exact swap.
+    EEC==1 is the ANNOUNCE-ONLY branch (it asserts MEC in {2,3}, prints the kill message via
+    string 0x83 and then JUMPS PAST the scoring code). That is why a kill produced at most a chat
+    line and NEVER incremented the HUD / in-game statistics.
+
+    The scoring path needs EEC != 1, and then MEC selects the mission event:
+        MEC==1 -> vtable[+0x14] check, then FUN_00478640(event 0x26) and score_obj+0x2fc = 1
+        MEC==4 -> FUN_00478640(event 0x26)
+        MEC==5 -> FUN_00478640(event 0x25)
+    MEC=1 matches the client's own scored exit (its log shows "MissExitCode=1, ScoreEvent=1" for a
+    shot-down, vs MissExitCode=26 for a solo crash), so MEC=1/EEC=3 -> type byte 0x13 is the
+    enemy-player kill credit.
+    """
+    mec = SCORE33_MEC if mec is None else mec
+    eec = SCORE33_EEC if eec is None else eec
     body = bytearray([MSG_SCORE_EVENT_33])
     body += bytes([0x00])                                  # b1 (unused on credit path)
     body += struct.pack('<H', player_index & 0xFFFF)       # killer PlayerIndex
-    body += bytes([((eec & 0xf) << 4) | (mec & 0xf)])      # Type: MEC low, EEC high
+    body += bytes([((mec & 0xf) << 4) | (eec & 0xf)])      # TYPE: MEC high, EEC low  (v224: was swapped)
     body += bytes(9)                                       # tail filler -> 14B ('in 33'14')
     return build_ingame_pkt(bytes(body))
 
-def send_score_event_to_killer(killer, mec=1, eec=3):
+def send_score_event_to_killer(killer, mec=None, eec=None):
     """Send the killer an authoritative msg-33 ScoreEvent so its in-game scoreboard ticks
     the kill (independent of whether its local damage list survived the relay). Reliable."""
     if killer is None or getattr(killer, 'player_index', None) is None:
         return
+    mec = SCORE33_MEC if mec is None else mec
+    eec = SCORE33_EEC if eec is None else eec
     pkt = build_score_event_33(killer.player_index, mec=mec, eec=eec)
     threading.Thread(target=lambda: send_rel(killer, pkt,
                      f'<- SCORE_EVENT 33 (credit kill to {killer.current_pilot} '
-                     f'PI={killer.player_index}, MEC={mec} EEC={eec})', to=3.0), daemon=True).start()
-    log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} (MEC={mec},EEC={eec})')
+                     f'PI={killer.player_index}, MEC={mec} EEC={eec} -> type=0x{((mec & 0xf) << 4) | (eec & 0xf):02x})',
+                     to=3.0), daemon=True).start()
+    log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} '
+                   f'(MEC={mec},EEC={eec} -> type byte 0x{((mec & 0xf) << 4) | (eec & 0xf):02x})')
 
 # -- Combat scoring constants ----------------------------------------
 KILL_SCORE_POINTS   = 100    # flat points for an air kill (global scoring); tune to taste
-SEND_SCORE_EVENT_33 = True   # send the authoritative msg-33 ScoreEvent to the killer (the
-                             # 2009 host's method) on top of the scored delete.
+ACE_KILLS_PER       = 5      # v219: career kills per 'ace' (classic 5-kill ace). Used by pilot_aces()
+                             # to derive the msg-88 aces value from the DB career kills. Set 0 to
+                             # always report 0 aces.
+SEND_ACE_RANK_88    = True   # v219: send an authoritative msg-88 (AceOrRankChangedCB) with the pilot's
+                             # REAL career aces/rank READ FROM THE DB. The score object's aces (+0x50)
+                             # and rank (+0x30) are set ONLY by msg 88; without it they hold
+                             # uninitialised memory -> the garbage '96 Aces'/bogus-rank on the
+                             # scoreboard after a team-swap re-entry. Sent on spawn AND on team/room
+                             # change, because the client's score object PERSISTS across those
+                             # transitions and re-announces its (garbage) ace status at the change.
+                             # NOTE: a team/room change must NOT zero a pilot's real score - we
+                             # RE-READ the career values from the DB and re-push them. Set False to
+                             # disable.
+SEND_SCORE_EVENT_33 = False  # v242: OFF. This sent the killer a SECOND, separate credit event
+                             #   (msg-33 ScoreEvent) on top of the exit-tail delete. It was added
+                             #   back in v203 when the kill wasn't registering AT ALL - but v229 made
+                             #   the exit entry carry the real HUNTER, so ExitDataArrive now credits
+                             #   the kill on its own. Two events for one kill is almost certainly why
+                             #   "Fighters Assists" tracked "Fighters Destroyed" exactly: the client
+                             #   scored the kill once and the duplicate as an assist. An assist should
+                             #   only count when you DAMAGED a target that SOMEONE ELSE killed.
+                             #   Flip back to True if kill credit regresses.
+SEND_PARACHUTER_TELEM = False # v256: OFF. Telemetry is the WRONG mechanism for a parachuter and
+                             #   was actively harmful. v255 proved the client receives our cloned
+                             #   plane-telemetry but can't map it to the type-2 canopy object -> it
+                             #   logs "Get coord for missing object 0" and ignores it. The 2009 ground
+                             #   truth shows a real parachuter gets NO telemetry at all - it is created
+                             #   with a seeded position and FREE-FALLS locally on each client. So we
+                             #   send none. See PARA_SERVER_DELETE for the real lifecycle.
+PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does - a type-3 "Server
+                             #   require delete object N" after the descent completes. Without it the
+                             #   client culls the canopy as a stale/disconnected object (bsr=0) at
+                             #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
+                             #   when it 'lands'. This is the same delete path we use for planes.
+PARA_DESCENT_SECONDS = 20    # v256: how long the canopy free-falls before the server lands it. The
+                             #   2009 log shows 5-21s scaling with bail ALTITUDE; 20s is a safe
+                             #   fixed value for now (a high bail). TODO: derive from the plane's
+                             #   last-known altitude once the type-7 altitude field is located.
+PARA_PRIME_SCORE    = True   # v257: send the peer a msg-25 score block for the bailing pilot right
+                             #   before the parachuter create, matching the 2009 wire ('in 25'46'
+                             #   blocks precede object-only parachuter creates). May be what lets the
+                             #   remote canopy bind identity and DEPLOY (open) rather than just fall.
+                             #   Set False if it makes no difference.
+MSG20_INSTRUMENT    = False  # v258: log the FULL bytes of every in-game msg-20 (type 0x14). 2009
+                             #   showed 'in 20' is a SERVER->CLIENT entity-state broadcast (1820x,
+                             #   13-129 bytes, only 8 client replies - not a poll). We capture it to
+                             #   learn the state format that must drive the pilotless plane + the
+                             #   parachuter descent/deploy after a bail. Pure logging, no behaviour
+                             #   change. Set False once the format is understood.
+PARA_DEPLOY_BYTE9   = 0      # v259: record body byte[9] = ctor param_6 = the parachuter DEPLOY/model
+                             #   selector. RE'd from the master object factory FUN_004f26b0 case 2:
+                             #     FUN_004a8c20(body[8], owner, *(body+4), (body[0]&0x70)>>4, body[9])
+                             #   ctor param_6 = body[9] drives model + canopy:
+                             #     0    = ParaTrooper, FREEFALL, no canopy (the client's own body value)
+                             #     1    = ParaTrooper, canopy DEPLOYED (net-create -> FUN_004a6780 sets
+                             #            0x324=1); name-tag code flips 0x63 -> 0x70
+                             #     >=2  = ParaCargo model, N troops, deployed
+                             #     None = leave the client's body byte[9] untouched (freefall)
+                             #   The deploy is a CREATE-TIME property, NOT a per-object update msg -
+                             #   parachuters ignore both msg-7 (coord) and msg-12 (state). Set to 1 to
+                             #   TEST whether the peer renders an OPEN canopy.
+PARA_FIX_OWNER_REF   = True   # v261: overwrite parachuter record body[2:4] with the PEER-VISIBLE plane
+                             #   object number (src.my_obj_number) so the factory name-bind resolves
+                             #   the owner and the pilot NAME renders on the chute. The client's own
+                             #   out-4 body carries its LOCAL plane number there, which doesn't match
+                             #   the number the server assigned the plane on the peer -> no name.
+                             #   Needed for byte9>=1 (deployed) chutes, which skip the ctor's name
+                             #   fallback. Matches the real game: every canopy (pilot/paratrooper/
+                             #   cargo) is named. Set False to revert to the verbatim client body.
+ADD_PLAYER_NOTEAM_NEUTRAL = True  # v260: encode a no-team player's AddPlayer-62 camp as 0xff (handler
+                             #   -> camp=-1 'no side' / In Menu) instead of 0 (=US). Fixes Bug A: a
+                             #   player who hasn't picked a side showed under US in peers' rosters until
+                             #   they chose a team. msg 63 still sets the real side on team-select.
+                             #   Set False to revert to the old camp=0 behaviour if -1 mis-buckets.
+PARA_TELEM_BURST    = 8      # v254 (unused in v256; kept for the disabled telemetry path)
+PARA_TELEM_INTERVAL = 0.5    #   ...spaced this many seconds apart (covers a dropped packet or a
+                             #   late create; stops early if the parachuter is removed).
 SEND_SCORED_DELETE_TO_KILLER = True   # send the killer a score-tail delete so the kill
                                       #   registers in-game; toggle off for bare deletes.
-KILL_CREDIT_WINDOW  = 30.0   # s: credit the most-recent OTHER shooter within this window
+SEND_PARACHUTER     = True   # *** v253: BACK ON - and this time we KNOW what was crashing. ***
+                             #   Bigalon's client log settles it. The CREATE WAS NEVER THE PROBLEM:
+                             #       in 2'24
+                             #       Receive create object 258
+                             #       Create NetParachuter. St=0, ONumber=258
+                             #       <<< LOAD OBJECT (PLANES/PARA/ParaTrooperlod0.Q6) >>>
+                             #   v251's record parses perfectly and the canopy gets built. I spent
+                             #   three versions fixing a record that was fine by the end of the second.
+                             #   THE CRASH IS IN THE TELEMETRY THAT FOLLOWS. The ServerConfirm makes
+                             #   the bailing client start transmitting the canopy, its telemetry packet
+                             #   grows from 84 to 118 bytes, and OUR RELAY REWRITES BYTE 5 OF IT with a
+                             #   conductor tick - into a layout we have never parsed. The client then
+                             #   reads that tick back as an object index:
+                             #       Exception in Fighter Ace engine: bounds error
+                             #       class ARR<class NET::OBJECT *,2048>[20983] 0..2047
+                             #   20983 is TICK-sized, not object-sized. We crashed it with our own
+                             #   re-stamp, not with the parachuter record.
+PARA_SEND_CONFIRM   = False  # v253: OFF - this is the one that kills the client. Confirming the
+                             #   parachuter makes its owner transmit it, and that bigger telemetry
+                             #   form is what we then corrupt. v253 also stops re-stamping unknown
+                             #   forms (TELEM_RESTAMP_MAX_LEN), but I am NOT switching both back on at
+                             #   once - one variable at a time, given the record so far.
+                             #   Consequence: the canopy is CREATED and VISIBLE on peers, but does not
+                             #   move (its owner never transmits it). That is a real improvement over
+                             #   "invisible", and it cannot crash anyone.
+                             #   Turn this on ONLY after a clean run, to test whether the verbatim
+                             #   relay now carries the canopy safely.
+PARA_SEND_CREATE    = True   # v253: ON - proven safe by Bigalon's own log (the object is built and
+                             #   the ParaTrooper model loads).
+_SEND_PARACHUTER_TELEM_v254_DEAD = True # v256: DEAD - superseded by SEND_PARACHUTER_TELEM=False above.
+                             #   CLONING the plane's last real telemetry packet and retargeting only
+                             #   the ONumber. This answers the client's msg-6 'get coord for object
+                             #   258' request (which we were swallowing -> 'Unsupported message 6' ->
+                             #   canopy never rendered). Every byte is a real packet the client made
+                             #   microseconds earlier - nothing is authored, so it cannot CTD. The
+                             #   canopy appears at the plane's position; it does not self-descend yet
+                             #   (altitude field not safely located). Flip False to disable.
+                             #   Two CTDs came from me AUTHORING the parachuter record. v250 fixed the
+                             #   SIZE (23 = HeaderSize 10 + 13, proven from the type table at 0xa30c98
+                             #   and matching the 2009 wire's `in 2'24`) but the CONTENTS were still my
+                             #   guesses - and three of the ten body bytes were wrong.
+                             #   THE CLIENT SENDS US THE CORRECT BODY. Its parachute out-4 is
+                             #   [sub=4][ident u16][record BODY of HeaderSize bytes][2 trailing]:
+                             #       82 80 00 01 00 00 00 00 00 00
+                             #   (tag 0x82 = type2|human|nation0 - I had 0x92; [1] = 0x80 - I had 0;
+                             #    model [9] = 0 - I had 1; only [2:4] = the plane's ONumber was right)
+                             #   So we now COPY the body verbatim and append only the 13-byte trailer,
+                             #   which is the one part the server owns (it assigns the object number).
+                             #   Flip to False to disable parachutes entirely.
+                             #   v248 built the parachuter as a 41-byte PLANE-shaped record. It is
+                             #   23 BYTES. The msg-2 record loop (LAB_007e4e00) reads a per-TYPE
+                             #   HeaderSize from a table at 0xa30c98 and advances by HeaderSize + 13:
+                             #       TYPE 0 (client)      HeaderSize 35 -> 48
+                             #       TYPE 1/8 (plane)     HeaderSize 28 -> 41
+                             #       TYPE 2 (PARACHUTER)  HeaderSize 10 -> 23   <<<
+                             #   The 2009 session log agrees exactly: 'in 2'24' = 1 + 23, and
+                             #   'in 2'65' = 1 + 41 + 23 (a client + parachuter pair).
+                             #   Sending 41 made the loop advance 18 bytes too far and parse a bogus
+                             #   record out of the tail -> the documented tag-0 bounds-crash. That is
+                             #   also why "Create NetParachuter" never appeared in the victim's log:
+                             #   it died in the record LOOP, before the type switch ever ran.
+                             #   St/ONumber live in the TRAILER at rec[10]/rec[12] - not rec[28]/[30].
+                             #   Flip to False to disable parachutes entirely.
+PARACHUTER_OBJ_TYPE  = 2     # create-object Type nibble (FUN_004f26b0 case 2 = "Create NetParachuter")
+PARACHUTER_HEADER_SIZE = 10  # from the type table at 0xa30c98; record = HeaderSize + 13 = 23
+SEND_STAT_BLOCK_25  = True   # v236: BACK ON. msg 25 (0x19) writes 20 dwords at score+0x30 via
+                             #   FUN_004f65a0 -> FUN_004f4570. v233 disabled it because the probe
+                             #   showed nothing - but that was read on the IN-FLIGHT screen, which is
+                             #   client-computed session state. The HQ SCORES screen (Latest/Career)
+                             #   DOES display the rank, i.e. score+0x30 = f0 of this very block, so it
+                             #   reads this structure and the other 19 fields should fill its rows.
+SEND_CAREER_ON_HQ   = True   # v237: also push msg 88 + msg 25 whenever the client opens the HQ /
+                             #   hangar screen (its 0x3a plane-catalog request). Previously both were
+                             #   sent ONLY from the plane-spawn path, so reading HQ -> SCORES without
+                             #   flying first showed 0 everywhere simply because nothing had ever been
+                             #   sent. That - not a real negative - is why the v236 probe read all 0:
+                             #   neither test run contained a single plane spawn.
+CAREER_PUSH_DEBOUNCE_S = 2.0 # don't re-push more often than this (the hangar re-requests 0x3a a lot)
+KILL_CREDIT_WINDOW  = 30.0   # s: LAST-RESORT fallback only - credit the most-recent OTHER shooter
+                             #   within this window. This one is a GUESS, so a clock is appropriate.
 
-def score_on_death(victim, death_payload):
-    """Persist a respawn-death into the DB (accumulating, global scoring).
+# ── v247: EVENT-BASED KILL ATTRIBUTION (no time windows) ──────────────────────
+# The kill belongs to whoever the VICTIM'S OWN CLIENT says hit it, and that fact is established the
+# MOMENT THE VICTIM REPORTS THE DAMAGE (msg 28) - not when the wreck finally reaches the ground.
+# Those two moments can be minutes apart: bail out at 20,000 feet and the empty plane glides for a
+# very long time. v246 latched the attribution but still EXPIRED IT ON A TIMER, which is the wrong
+# model - any window is just a guess about how long a plane takes to fall, and a high-altitude kill
+# will always be able to outlast it.
+# So the latch is keyed to the OBJECT and held until THAT OBJECT's delete-notify arrives. No clock.
+#   set     : on every msg-28 damage report  (victim object -> hunter object)
+#   marked  : on the bail (parachute msg-4)  - purely so the log can say why
+#   consumed: when the delete-notify for that object number arrives
+#   dropped : when the object number is reused by a new spawn (numbers are recycled)
+PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
 
-    The 14-byte 'shot-down' death form (wire sz=18) is a SCORED kill; the short
-    8-byte crash/exit form is not. FA does NOT put the killer on the wire - the
-    death packet carries 0xFFFFFFFF (the damaged plane finished on the ground) and
-    the victim never transmits the killer it computed locally (FUN_00428380 stores
-    it only in its own plane). So the server attributes the kill to the most-recent
-    OTHER pilot in the room who relayed a DAMAGE28 (msg 28) within KILL_CREDIT_WINDOW:
-    exact for a 1v1 duel, a good approximation for N-player (proper msg-28 target
-    parsing is a future refinement)."""
-    if len(death_payload) < 14:
-        return                                  # short crash/exit form - not a scored kill
-    now = time.time(); killer = None; best = 0.0
-    for p in get_sessions_in_room(victim.current_room):
-        if p is victim:
-            continue
-        t = getattr(p, 'last_fired_at', 0.0)
-        if t and (now - t) <= KILL_CREDIT_WINDOW and t > best:
-            best = t; killer = p
+# -- v227: which own-plane removals actually count as a DEATH -------------------
+# The trailing byte of the msg-3 delete-notify ([.. 0x03][ONumber u16 LE][EXIT byte]) is NOT a
+# bitfield - it is the very byte Msn_Exit.cpp builds (FUN_0045d930):
+#       EXIT = (MissExitCode << 4) | ScoreEvent
+# (MEC is truncated to 4 bits on the wire, so the nibble is MissExitCode & 0xf.)
+# DECODED FROM LIVE RUNS:
+#   0xa0 -> MEC nibble 0xa, SE 0 : MissExitCode 26 = CRASH.  (26<<4)&0xff == 0xa0 - exact match
+#                                  with the client's own "MissExitCode=26, ScoreEvent=0" log.  DEATH.
+#   0x11 -> MEC nibble 0x1, SE 1 : re-fly / plane swap. Proven in run 070240: the player was ALONE
+#                                  in the arena (so it cannot be a shot-down) and the StartPlace
+#                                  request arrives 22ms BEFORE this removal.               NOT a death.
+#   0x22 -> MEC nibble 0x2, SE 2 : seen, not yet characterised.                            not a death.
+#   0x80 -> MEC nibble 0x8, SE 0 : seen, not yet characterised.                            not a death.
+# v225 gated on "bit 0x80 set" which happened to give the right answer for a crash, but that was a
+# coincidence of 0xa0/0x80 rather than the real semantics. Classify on the MEC nibble instead, and
+# log the decode for every removal so new codes (notably a real SHOT-DOWN MEC, still unobserved) can
+# be identified from the logs and added here.
+DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6}   # MissExitCode & 0xf values that mean the pilot actually died
+                                      #   0xa = MissExitCode 26  -> CRASH (solo)
+                                      #   0x5 = SHOT DOWN by a player (exit byte 0x53).
+                                      #   0x6 = KILLED BY AA / AI. New in v243, straight off the wire:
+                                      #         exit 0x63 -> MEC&0xf=6, SE=3, hunter=0xffff (no player).
+                                      #         Run 230703 23:26:16 - flak got the user.
+AI_KILL_MEC_NIBBLES = {0x6}           # ...and of those, the ones inflicted by AI/ground fire rather
+                                      # than by another player. A loss here goes to "Planes Lost to AI"
+                                      # (msg-25 f13) instead of "Planes Lost" (f4). The HQ screen adds
+                                      # the two, so the total is right either way - but the breakdown
+                                      # is what the game actually tracks.
+
+# -- v243: WAS THE PLANE FLYING WHEN IT WAS REMOVED? ---------------------------
+# THE PROBLEM: an undamaged CRASH and a clean PARKED EXIT are byte-identical on the wire (both
+# MissExitCode 26 -> exit byte 0xa0), and neither produces a msg 28, so the v232 damage rule can't
+# see the crash at all. That's why flying into the ground never counted.
+# THE SIGNAL: the telemetry carries a quantised world position at body[0:6] (3x u16). Straight from
+# run 230703, the last 4 seconds before each removal:
+#     23:08:17  (4526, 64457, 3906) x8 samples, delta EXACTLY 0   -> parked on the runway
+#     23:21:07  deltas +551 +572 +633 +647 +712 +791 per sample   -> IN FLIGHT -> this is the crash
+#     23:29:08  (34787, 53731, 62007) x8 samples, delta 0         -> landed, parked
+# A parked plane reports movement of EXACTLY ZERO, sample after sample; a flying one moves by
+# hundreds per tick. The separation is enormous, so this is a robust test and not a fudge.
+CRASH_MOVEMENT_WINDOW_S = 3.0   # look back this far when asking "was it moving?"
+CRASH_MOVEMENT_MIN      = 64    # total |delta| across the 3 axes over the window. Parked = 0, so
+                                #   anything above idle jitter means airborne. The measured value is
+                                #   LOGGED on every removal, so tune it from real numbers if a slow
+                                #   taxi ever trips it.
+COUNT_EXIT_TO_HQ_AS_DEATH = False
+DEATH_CONFIRM_DELAY = 4.0    # s: a crash and an EXIT-TO-HQ carry the SAME byte (both MEC 26), so the
+                             #   solo death credit is deferred and cancelled if the player leaves the
+                             #   arena inside this window. Must exceed the observed removal ->
+                             #   back-to-lobby gap (~2.8s). A respawn does NOT cancel it (a genuine
+                             #   death respawns ~2s later).
+LIVE_ACE_TRACKING   = True   # v222: SERVER-AUTHORITATIVE ace status. FA's rule is a LIVE one -
+                             #   ACE_KILLS_PER (5) kills WITHOUT dying earns an ace, and DYING WIPES
+                             #   YOUR ACES. The server owns it end-to-end: the DB `aces` column is the
+                             #   single source of truth (seeded via the web admin editor), a per-session
+                             #   `kills_since_death` streak counter drives the awards, and every change
+                             #   is re-stated to the client with msg 88. Set False to freeze aces at
+                             #   whatever the DB holds (no live awards, no reset-on-death).
+
+# -- v223: RANK LADDER (score -> rank index) ----------------------------------
+#
+# WHY THE SERVER OWNS THIS. Reverse-engineering + the official manual agree:
+#   * Rank is an INDEX 0..12 (13 ranks). The client hard-clamps it: FUN_00428770 does
+#     `if (0xc < rank) rank = 0xc` before looking the name up.
+#   * The rank NAME is rendered BY THE CLIENT from its own localized string array (table at
+#     0xbf666c, stride 8 -> string index 0x303 + 2*i, via PARR<char const*>::operator[]). The
+#     strings are not even in FA.exe. => We only ever send the INDEX; the client prints the name.
+#     The RANK_NAMES below are therefore ONLY for our logs and the web admin - purely cosmetic.
+#   * An exhaustive scan of .data/.rdata found NO score->rank threshold table anywhere in the
+#     client. The original VR-1 host computed rank and pushed it in msg 88's rank byte
+#     (AceOrRankChangedCB). So the ladder is ours to define.
+#   * Manual (Scores Screen): "Rank - Your pilot's rank. Some arenas are restricted to pilots of
+#     certain ranks, to keep competition fair."
+#
+# RANK_THRESHOLDS[i] = the minimum career score to hold rank i. Must be ascending, 13 entries
+# (index 0..12). Rank is recomputed from score after every kill/death and re-stated via msg 88.
+# ***** SUPERSEDED BY v249 ***** The invented ladder that used to live here - 13 made-up steps, with
+# names like 'Recruit' and 'Air Marshal' that the game has never had, and a flat 50-point death - is
+# gone. The REAL ladder, plane values and kill formula are defined immediately below, straight from
+# the game's own published scoring page.
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OFFICIAL FIGHTER ACE SCORING  (facfs.com/scoring, revised 01/02/2001)
+# ══════════════════════════════════════════════════════════════════════════════
+# Everything below v249 is straight from the game's own published scoring page. Up to v248 all of
+# this was INVENTED (a flat 100 per kill, a 50-point death, and a 13-step rank ladder I made up),
+# and it was badly wrong - our thresholds were about 10x too generous, which is why 3,583 points had
+# AC2E_Bigalon wearing Lt.Colonel's rank when the real ladder makes that a 2nd Lieutenant.
+#
+# RANK. The page lists nine ranks with a 1-based "Rank Value". The CLIENT's rank index is that value
+# MINUS ONE - proven by our own probes: we sent f0=5 and the client rendered "Major" (Rank Value 6),
+# f0=6 rendered "Lieut. Colonel" (Rank Value 7), and rank 0 renders "Cadet" (Rank Value 1).
+#       idx  RankValue  Rank                    Score
+#        0       1      Cadet                   0 -   999
+#        1       2      Sergeant             1000 -  1999
+#        2       3      Second Lieutenant    2000 -  3999
+#        3       4      First Lieutenant     4000 -  5999
+#        4       5      Captain              6000 -  9999
+#        5       6      Major               10000 - 13999
+#        6       7      Lieutenant Colonel  14000 - 21999
+#        7       8      Colonel             22000 - 29999
+#        8       9      Brigadier General   30000 - 46000
+RANK_THRESHOLDS = [0, 1000, 2000, 4000, 6000, 10000, 14000, 22000, 30000]
+RANK_NAMES = [   # cosmetic only (logs / web admin) - the CLIENT prints its own localized name
+    'Cadet', 'Sergeant', 'Second Lieutenant', 'First Lieutenant', 'Captain',
+    'Major', 'Lieutenant Colonel', 'Colonel', 'Brigadier General',
+]
+RANK_VALUE = lambda idx: max(1, min(len(RANK_THRESHOLDS), int(idx) + 1))   # the page's 1-based value
+
+# AIR-TO-AIR KILL = value of the plane you shot down  +  a RANK BONUS:
+#     "Target-pilot's rank value is divided by the attacker-pilot's rank value, then multiplied
+#      by 100.  Example: (Capt / LtCol) x 100 = score bonus."
+# So killing UP the ladder pays; farming Cadets as a General barely does.
+RANK_BONUS_SCALE = 100
+
+# LOSING POINTS (the page's list, verbatim):
+#     Crash .............................. lose the cost of the plane
+#     Pilot death ........................ lose 100 points
+#     Crash-land in friendly territory ... lose 1/2 the cost of the plane
+#     Crash-land in enemy territory ...... lose 100 points PLUS the cost of the plane
+#     Bail out over friendly territory ... lose the cost of the plane
+# They are separate EVENTS that combine: a plane destroyed costs its value, and a dead pilot costs a
+# further 100. (Bailing out over ENEMY territory counts as a death - the page says so under "Pilot
+# Deaths" - but we cannot yet tell friendly from enemy ground, so a bail costs the plane only.)
+PILOT_DEATH_PENALTY = 100    # "Pilot death: Lose 100 points"
+
+# TABLE 1 - the value of each aircraft. Straight from the page where it lists the plane; FA 4.20 has
+# 121 aircraft and the 2001 table covers about half, so the rest are reasoned from their nearest
+# listed variant and marked. Values are the points the KILLER gains and the OWNER loses.
+PLANE_VALUE_NAMES = {
+    # ---------- verbatim from the official table ----------
+    'P-40C': 95, 'P-39D': 130, 'P-47D': 165, 'P-38G': 170, 'F4U-1c': 195, 'F4U-4': 195,
+    'F6F-3': 190, 'P-51D': 160, 'P-38L': 180, 'TBF-1c': 310, 'A-20Gu': 350, 'A-20Gs': 350,
+    'B-25J': 350, 'B-17G': 600,
+    'Hurr-IIC': 130, 'Typhoon': 175, 'Spit-Vb_LF': 135, 'Spit-Vb_F': 135, 'Spit-IXc': 170,
+    'Spit-IXe': 170, 'Spit-XIV': 180, 'Tempest': 185, 'Mosquito_B_IV': 300,
+    'Mosquito_FB_VI': 350, 'Lancaster': 550,
+    'I-16': 100, 'LaGG-3': 130, 'La-5FN': 130, 'La-7': 160, 'Yak-1b': 130, 'Yak-3': 150,
+    'Yak-9U': 155, 'P-39Q': 150, 'IL-2': 180, 'Pe-8': 650, 'Tu-2': 350,
+    'Bf-109E-4/B': 115, 'Bf-109F-4/B': 135, 'Bf-109G-6/R2': 145, 'Bf-109G-6/R6': 145,
+    'Bf-109K-4': 175, 'FW-190A-4/U3': 150, 'FW-190A-8/R6': 160, 'FW-190A-8/R3': 160,
+    'FW-190A-8/R2': 160, 'FW-190D-9': 165, 'Ju-88': 300, 'Ju-87D-3': 180, 'Ju-87G-2': 180,
+    'Do-217E-2': 500, 'Do-217J-1': 500,
+    'A6M2': 115, 'A6M5a': 125, 'Ki-43-IIa': 150, 'Ki-61': 150, 'J2M3': 155, 'N1K2-J': 160,
+    'Ki-84-1a': 165, 'Ki-84-1c': 165, 'G4M2': 360, 'B5N2': 250, 'Ki-67': 360, 'D3A': 145,
+    # ---------- NOT in the 2001 table (FA4.20 additions); nearest listed variant ----------
+    'P-40E-1': 100, 'Tomahawk': 90, 'Kittyhawk': 95, 'Kittyhawk-Ia': 95,   # P-40 family (B=90, C=95)
+    'F4F-3': 120, 'F4F-4': 125, 'Martlet_I': 120,                          # Wildcat family
+    'F4U-1a': 180, 'F4U-4C': 195,                                          # Corsair family
+    'Hurr-Ia': 110, 'Hurr-IIb': 130, 'Hurr-IID': 130,                      # Hurricane family
+    'Spit-Ia': 120, 'Seafire': 150,                                        # Spitfire family
+    'Mosquito_B_IX': 300, 'Mosquito_"Tse-Tse"': 350, 'Mitchell_II': 350, 'Mitchell_III': 350,
+    'Avenger_II': 310, 'DB-7B': 350, 'B-25D': 350, 'Dauntless': 200, 'SBD-2': 200, 'B-29': 700,
+    'MiG-3': 130, 'Yak-9UT': 155, 'Pe-2': 300, 'Tu-4': 600, 'IL-10': 200, 'Li-2': 200,
+    'He-111': 350, 'Ju-52/3m': 200, 'FW-190F-8': 160, 'FW-190D-12': 170,
+    'Bf-109E-1/B': 115, 'Bf-110C-4': 200, 'Bf-110G-2': 200, 'Ta-152H-1': 185, 'HA-200': 90,
+    'A6M7': 130, 'Ki-100': 160, 'Ki-44-IIc': 150, 'Ki-44-IIc37': 150, 'G5N1': 400,
+    'C-47A': 200, 'Dakota_Mk.II': 200, 'L2D2': 200,
+    # jets / post-war - no 2001 values exist at all; priced as top-end fighters
+    'Me-262A-1': 250, 'Me-163B': 200, 'J9Y': 250, 'MiG-15bis': 250, 'MiG-9': 230,
+    'F-86E': 250, 'Meteor_F1': 230, 'Tunnan': 230, 'Ouragan': 220, 'DH.100': 220,
+    'FH-1_Phantom': 220, 'Pulqui': 220,
+}
+PLANE_VALUE_DEFAULT_FIGHTER = 150   # anything unlisted (shouldn't happen; logged at startup)
+PLANE_VALUE_DEFAULT_BOMBER  = 300
+
+# TABLE 2 - ground/AI targets. "The score you receive for destroying these units is equal to its cost
+# value. If using bombs destroys a moving ground unit, the score is quadrupled." Recorded now so the
+# numbers are here when ground scoring is wired up; nothing consumes this yet.
+GROUND_TARGET_VALUES = {
+    'ammo_bunker': 100, 'hardened_ammo_bunker': 150, 'large_ammo_bunker': 120,
+    'fuel_tank': 50, 'hardened_fuel_tank': 100,
+    'ammo_factory': 300, 'fuel_factory': 450, 'plane_factory': 300, 'tank_factory': 300,
+    'smokestack': 20,
+    'barracks': 50, 'church': 100, 'hangar': 150, 'headquarters': 100, 'house': 20,
+    'rail_yard': 150, 'shed': 10,
+    'truck': 10, 'tank_min': 35, 'tank_max': 85,
+}
+GROUND_BOMB_MULTIPLIER = 4   # "If using bombs destroys a moving ground unit, the score is quadrupled"
+
+# ASSISTS (not yet implemented - see the changelog): "the kill is awarded to the attacker who did the
+# MOST damage. If the other attacker did 20% OR MORE damage as well, he will be awarded an Assist."
+# That is the real rule the user described, and it needs per-attacker damage accumulation from msg 28.
+ASSIST_DAMAGE_FRACTION = 0.20
+
+DEATH_SCORE_PENALTY = 50     # DEPRECATED by v249 - superseded by PILOT_DEATH_PENALTY + plane cost.
+                             # Left defined so any stale reference still resolves.
+
+def plane_value(plane_id):
+    """v249: the official point value of an aircraft (Table 1). This is what a killer GAINS for
+    shooting it down and what its owner LOSES for losing it."""
+    try:
+        name = PLANE_ROSTER[int(plane_id)]
+    except (TypeError, ValueError, IndexError):
+        return PLANE_VALUE_DEFAULT_FIGHTER
+    v = PLANE_VALUE_NAMES.get(name)
+    if v is not None:
+        return v
+    return (PLANE_VALUE_DEFAULT_BOMBER if is_bomber_plane(plane_id)
+            else PLANE_VALUE_DEFAULT_FIGHTER)
+
+def kill_score(victim_plane_id, victim_rank, killer_rank):
+    """v249: the OFFICIAL air-to-air kill score.
+           value of the plane  +  (target rank value / attacker rank value) * 100
+    Rank VALUE is the page's 1-based number, i.e. our 0-based rank index + 1. Killing UP the ladder
+    pays; a General farming Cadets barely scores. Returns (total, base, bonus) for logging.
+    """
+    base  = plane_value(victim_plane_id)
+    bonus = int(round(RANK_VALUE(victim_rank) / RANK_VALUE(killer_rank) * RANK_BONUS_SCALE))
+    return base + bonus, base, bonus
+
+def rank_for_score(score):
+    """v223: map a career score onto a rank INDEX 0..12 using RANK_THRESHOLDS.
+    Returns the highest rank whose threshold the score has reached. Clamped to the client's
+    hard ceiling of 12 (FUN_00428770)."""
+    try:
+        sc = int(score)
+    except (TypeError, ValueError):
+        return 0
+    rank = 0
+    for i, need in enumerate(RANK_THRESHOLDS):
+        if sc >= need:
+            rank = i
+        else:
+            break
+    return min(max(rank, 0), 12)
+
+def db_apply_score_delta(name, delta, bomber=False):
+    """v223/v242: add `delta` points to a pilot's career score, recompute their RANK, persist both.
+
+    v242: FA keeps TWO scores - Fighter Score and Bomber Score - and which one you feed depends on
+    WHAT YOU WERE FLYING when you earned the points, not on what you shot down. So `bomber` selects
+    the column (`bomber_score` vs `score`). RANK is computed from the COMBINED total, since it is a
+    single ladder.
+    Returns (new_total, new_rank, old_rank) so the caller can log a promotion/demotion.
+    """
+    if not name:
+        return (0, 0, 0)
+    conn = sqlite3.connect(DB_PATH)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
+    _col = 'bomber_score' if (bomber and 'bomber_score' in have) else 'score'
+    _bs  = 'COALESCE(bomber_score,0)' if 'bomber_score' in have else '0'
+    row = conn.execute(f"SELECT COALESCE(score,0), {_bs}, COALESCE(rank,0) "
+                       f"FROM pilots WHERE pilot_name=?", (name,)).fetchone()
+    if not row:
+        conn.close(); return (0, 0, 0)
+    f_score, b_score, old_rank = row[0] or 0, row[1] or 0, row[2] or 0
+    if _col == 'bomber_score':
+        b_score = max(0, b_score + int(delta))          # never negative
+    else:
+        f_score = max(0, f_score + int(delta))
+    new_total = f_score + b_score
+    new_rank = rank_for_score(new_total)
+    if 'bomber_score' in have:
+        conn.execute("UPDATE pilots SET score=?, bomber_score=?, rank=? WHERE pilot_name=?",
+                     (f_score, b_score, new_rank, name))
+    else:
+        conn.execute("UPDATE pilots SET score=?, rank=? WHERE pilot_name=?",
+                     (f_score, new_rank, name))
+    conn.commit(); conn.close()
+    return (new_total, new_rank, old_rank)
+
+def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
+    """Persist a death into the DB and apply the LIVE ace rule (server-authoritative).
+
+    KILLER ATTRIBUTION (v233 - now EXACT):
+    The victim's own client names its killer. The delete-notify's exit ENTRY carries the HUNTER
+    object number at entry+3 (proven live: Test2's shot-down entry was
+    `01 01 | 53 | 00 01 | ...` -> hunter = 0x0100 = 256 = Bigalon's object). So when we have it we
+    credit the pilot who actually owns that object - correct for any number of players.
+    Only if the hunter is absent/unresolvable do we fall back to the old heuristic (the most recent
+    OTHER pilot who relayed a msg-28 within KILL_CREDIT_WINDOW), which is exact for a 1v1 duel but
+    only an approximation in an N-player furball.
+
+    TWO DEATH FORMS, BOTH COUNT:
+      * long >=14B 'shot-down' form  -> a SCORED kill: victim dies, a killer is credited.
+      * short 8B crash/exit form     -> a SOLO death: victim dies, NO killer.
+    The victim ALWAYS dies; only the KILLER-attribution needs the long form.
+
+    LIVE ACE RULE (FA's own, confirmed by the manual): ACE_KILLS_PER (5) kills WITHOUT dying earns an
+    ace; DYING WIPES YOUR ACES. The DB `aces` column is the single source of truth, a per-session
+    `kills_since_death` streak drives the awards, and every change is re-stated via msg 88.
+    """
+    scored = len(death_payload) >= 14        # long form = shot down by someone
+    killer = None
+    # v249: capture the victim's object and whether they BAILED **before** the attribution step pops
+    # the latch. A bail costs the plane only - the pilot walked away - whereas dying in the cockpit
+    # costs a further 100.
+    _vo0 = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+    _bailed = bool((PENDING_KILL.get(_vo0) or {}).get('why') == 'bail') if _vo0 is not None else False
+
+    # 1) EXACT: the victim's exit entry named its killer (long form only).
+    if hunter_obj is not None and hunter_obj > 0 and hunter_obj != 0xffff:
+        for p in get_sessions_in_room(victim.current_room):
+            if p is not victim and getattr(p, 'my_obj_number', None) == hunter_obj:
+                killer = p
+                log('KILL', f'attribution: EXACT - victim named hunter obj 0x{hunter_obj:04x} '
+                            f'-> {p.current_pilot}')
+                break
+
+    # 2) v247: THE LATCH - the victim's own client already told us who hit it (msg 28), and we held
+    # that against the OBJECT. This is the path that credits a BAILOUT, and it has NO clock: the
+    # empty plane can glide for ten minutes from 20,000 feet and the kill still belongs to whoever
+    # shot it down. Consumed here, so it can never be double-counted.
+    if killer is None:
+        _vo = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+        _pk = PENDING_KILL.pop(_vo, None) if _vo is not None else None
+        if _pk:
+            _hb = _pk['killer']
+            for p in get_sessions_in_room(victim.current_room):
+                if p is not victim and getattr(p, 'my_obj_number', None) == _hb:
+                    killer = p
+                    log('KILL', f'attribution: LATCHED ({_pk["why"]}) - obj 0x{_hb:04x} hit '
+                                f'obj 0x{_vo:04x} {time.time() - _pk["at"]:.1f}s ago and the plane '
+                                f'has now gone down -> {p.current_pilot}')
+                    break
+            if killer is None:
+                log('KILL', f'attribution: latch for obj 0x{_vo:04x} named obj 0x{_hb:04x}, but no '
+                            f'session owns that object any more -> no credit')
+
+    # 3) FALLBACK: most-recent shooter inside the credit window. Weakest of the three - a guess, not
+    #    a fact - so it only runs when the first two find nothing.
+    #    v244: no longer gated on `scored`. That gate meant a SHORT-form death (i.e. a bailout) could
+    #    never be attributed at all, which is exactly how Bigalon lost his 3rd kill.
+    if killer is None:
+        now = time.time(); best = 0.0
+        for p in get_sessions_in_room(victim.current_room):
+            if p is victim:
+                continue
+            t = getattr(p, 'last_fired_at', 0.0)
+            if t and (now - t) <= KILL_CREDIT_WINDOW and t > best:
+                best = t; killer = p
+        if killer is not None:
+            log('KILL', f'attribution: FALLBACK - nothing named a hunter, crediting the most recent '
+                        f'shooter {killer.current_pilot} (within {KILL_CREDIT_WINDOW}s)')
+
+    # ---- VICTIM: always dies. Count it and break the ace streak. ----
     victim.k_deaths = getattr(victim, 'k_deaths', 0) + 1
+    victim.kills_since_death = 0
+
+    # v242: AIRCRAFT CLASS decides which columns this kill feeds - and the two questions have
+    # DIFFERENT answers:
+    #   what the KILLER was flying -> Fighter Score  vs Bomber Score   (points)
+    #   what the VICTIM was flying -> Kills>Fighters vs Kills>Bombers  (the kill breakdown)
+    # s.plane_type is the PLANE_ROSTER id straight from the spawn packet, so we already know both.
+    _victim_bomber = is_bomber_plane(getattr(victim, 'plane_type', None))
+    _killer_bomber = is_bomber_plane(getattr(killer, 'plane_type', None)) if killer else False
+
+    # v243: WHO took the plane down - a player, or AA / AI ground fire?
+    # The exit code says so outright: MEC nibble 6 (exit byte 0x63, hunter=0xffff) is an AA/AI kill,
+    # seen live in run 230703 when flak got the user. Those losses belong in "Planes Lost to AI"
+    # (f13), not "Planes Lost" (f4). Anything with no creditable player killer AND an AI exit code
+    # counts as lost-to-AI; a solo crash keeps the ordinary player-side column.
+    _exitb = death_payload[7] if len(death_payload) > 7 else 0
+    _mec   = (_exitb >> 4) & 0xf
+    _lost_to_ai = (killer is None) and (_mec in AI_KILL_MEC_NIBBLES)
+
     if killer is not None:
         killer.k_kills = getattr(killer, 'k_kills', 0) + 1
         killer.k_score = getattr(killer, 'k_score', 0) + KILL_SCORE_POINTS
-        db_credit_kill(killer.current_pilot, victim.current_pilot, KILL_SCORE_POINTS)
+        db_credit_kill(killer.current_pilot, victim.current_pilot, 0,
+                       victim_is_bomber=_victim_bomber)          # counters only
+    else:
+        db_credit_kill(None, victim.current_pilot, 0, lost_to_ai=_lost_to_ai)
+        log('DEATH', f'{victim.current_pilot} lost a plane to '
+                     f'{"AA/AI ground fire" if _lost_to_ai else "no creditable shooter"} '
+                     f'(exit=0x{_exitb:02x}, MEC&0xf={_mec}) -> '
+                     f'{"planes_lost_ai" if _lost_to_ai else "planes_lost"} +1')
+
+    # ---- v249: OFFICIAL SCORING. Points are no longer a flat 100 per kill and 50 per death.
+    #   KILL  = value of the plane you shot down  +  (target rank value / your rank value) x 100
+    #   LOSS  = the cost of your plane, and a further 100 if the PILOT died
+    # The points land in the FIGHTER or BOMBER score depending on what the KILLER was flying (v242);
+    # rank is recomputed from the COMBINED total, since it is a single ladder.
+    if killer is not None and killer.current_pilot:
+        _ks = db_get_pilot_stat25(killer.current_pilot)
+        _vs = db_get_pilot_stat25(victim.current_pilot) if victim.current_pilot else {'rank': 0}
+        _pts, _base, _bonus = kill_score(getattr(victim, 'plane_type', None),
+                                         int(_vs.get('rank', 0)), int(_ks.get('rank', 0)))
+        killer.k_score = getattr(killer, 'k_score', 0) + _pts
+        _sc, _rk, _old = db_apply_score_delta(killer.current_pilot, _pts, bomber=_killer_bomber)
+        _pn = (PLANE_ROSTER[killer.plane_type]
+               if isinstance(getattr(killer, 'plane_type', None), int)
+               and 0 <= killer.plane_type < len(PLANE_ROSTER) else '?')
+        _vn = (PLANE_ROSTER[victim.plane_type]
+               if isinstance(getattr(victim, 'plane_type', None), int)
+               and 0 <= victim.plane_type < len(PLANE_ROSTER) else '?')
+        log('SCORE', f'{killer.current_pilot} +{_pts} = {_base} ({_vn}) + {_bonus} rank bonus '
+                     f'[{RANK_NAMES[min(int(_vs.get("rank",0)), len(RANK_NAMES)-1)]} / '
+                     f'{RANK_NAMES[min(int(_ks.get("rank",0)), len(RANK_NAMES)-1)]}] '
+                     f'-> {"BOMBER" if _killer_bomber else "FIGHTER"} score (flying {_pn}) '
+                     f'| total {_sc}')
+        if _rk != _old:
+            _nm = RANK_NAMES[_rk] if 0 <= _rk < len(RANK_NAMES) else '?'
+            log('RANK', f'{killer.current_pilot} PROMOTED rank {_old} -> {_rk} ({_nm}) '
+                        f'at score {_sc}')
+
+    # The victim loses the cost of their aircraft, and a further 100 if the PILOT died. A BAIL-OUT
+    # costs the plane only - the pilot walked away (over friendly ground at least; the page counts a
+    # bail over ENEMY territory as a death, but we cannot yet tell friendly ground from enemy).
+    if victim.current_pilot:
+        _plane_cost = plane_value(getattr(victim, 'plane_type', None))
+        _loss = _plane_cost + (0 if _bailed else PILOT_DEATH_PENALTY)
+        _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
+        log('SCORE', f'{victim.current_pilot} -{_loss} = {_plane_cost} (plane)'
+                     f'{"" if _bailed else f" + {PILOT_DEATH_PENALTY} (pilot death)"}'
+                     f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
+        if _rk != _old:
+            _nm = RANK_NAMES[_rk] if 0 <= _rk < len(RANK_NAMES) else '?'
+            log('RANK', f'{victim.current_pilot} DEMOTED rank {_old} -> {_rk} ({_nm}) '
+                        f'at score {_sc}')
+
+    # DYING WIPES THE VICTIM'S ACES (live rule, server-authoritative).
+    if LIVE_ACE_TRACKING and victim.current_pilot:
+        _prev = db_get_pilot_career(victim.current_pilot)[4]
+        db_set_pilot_aces(victim.current_pilot, 0)
+        if _prev:
+            log('ACE', f'{victim.current_pilot} DIED -> aces {_prev} -> 0 (streak reset)')
+
+    # ---- KILLER: every ACE_KILLS_PER kills WITHOUT dying earns an ace. ----
+    if killer is not None and LIVE_ACE_TRACKING and killer.current_pilot:
+        # *** v241: THE STREAK LIVES IN THE DB, NOT IN THE SESSION. ***
+        # db_credit_kill has just incremented `kills_in_a_row` (and zeroed the victim's), so that
+        # column IS the current run. We used to count a SEPARATE per-session `kills_since_death`
+        # that reset to 0 on every login, so any streak already in the DB - whether seeded by the
+        # admin or carried over from an earlier session - was silently ignored. With
+        # kills_in_a_row=3 seeded, two more kills took the DB to 5 (correct) but the session counter
+        # only reached 2, so the ace never fired. Two sources of truth, and we were reading the
+        # wrong one. Now there is only one.
+        _st = db_get_pilot_stat25(killer.current_pilot)
+        _streak = int(_st['kills_in_a_row'])
+        killer.kills_since_death = _streak          # session mirror, kept in sync for logging
+        if ACE_KILLS_PER > 0 and _streak and _streak % ACE_KILLS_PER == 0:
+            _a = int(_st['aces'])
+            db_set_pilot_aces(killer.current_pilot, _a + 1)
+            log('ACE', f'{killer.current_pilot} earned an ACE '
+                       f'({_streak} kills in a row without dying) -> aces {_a} -> {_a + 1}')
+        else:
+            _next = ((_streak // ACE_KILLS_PER) + 1) * ACE_KILLS_PER if ACE_KILLS_PER else 0
+            log('ACE', f'{killer.current_pilot} kills in a row: {_streak} '
+                       f'(next ace at {_next})')
+
+    vs = db_get_pilot_stats(victim.current_pilot) or (0, 0, 0)
+    if killer is not None:
         ks = db_get_pilot_stats(killer.current_pilot) or (0, 0, 0)
-        vs = db_get_pilot_stats(victim.current_pilot) or (0, 0, 0)
         log('KILL', f'{killer.current_pilot} destroyed {victim.current_pilot} '
                     f'(+{KILL_SCORE_POINTS}) | {killer.current_pilot}: '
                     f'score={ks[0]} kills={ks[1]} deaths={ks[2]} | '
                     f'{victim.current_pilot}: score={vs[0]} kills={vs[1]} deaths={vs[2]}')
     else:
-        db_credit_kill(None, victim.current_pilot, 0)   # death with no creditable shooter
-        vs = db_get_pilot_stats(victim.current_pilot) or (0, 0, 0)
-        log('KILL', f'{victim.current_pilot} died (no creditable shooter) | '
-                    f'{victim.current_pilot}: score={vs[0]} kills={vs[1]} deaths={vs[2]}')
+        _why = 'no creditable shooter' if scored else 'solo crash/crashland'
+        log('KILL', f'{victim.current_pilot} died ({_why}) | {victim.current_pilot}: '
+                    f'score={vs[0]} kills={vs[1]} deaths={vs[2]}')
+
+    # Re-state the authoritative aces/rank to both parties so the change shows immediately.
+    # Sent on daemon threads: send_ace_rank_88 -> send_rel blocks for its ACK (to=3.0), and
+    # score_on_death runs on the packet-RX path - a blocking send here would stall reception.
+    if SEND_ACE_RANK_88:
+        def _restate(_sess, _reason):
+            try:
+                send_ace_rank_88(_sess, reason=_reason)
+                send_stat_block_25(_sess, reason=_reason)   # v230: refresh the scoreboard counters too
+            except Exception as e:
+                log('ACE88', f'[warn] post-death/kill 88 failed: {e}')
+        threading.Thread(target=_restate, args=(victim, '(death: aces wiped)'), daemon=True).start()
+        if killer is not None:
+            threading.Thread(target=_restate, args=(killer, '(kill)'), daemon=True).start()
+
     return killer   # credited shooter (or None) -> caller sends it the SCORED delete
 
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
-                              followup_pkt=None, followup_label='', killer=None):
+                              followup_pkt=None, followup_label='', killer=None,
+                              exit_byte=None, exit_entry=None):
     """Remove s's NetPlane (object + client station) from every peer in the room.
 
     clear_peer_created: True for exit-to-HQ (we wiped our whole world, so peers must
@@ -3788,10 +6324,33 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
     # 'delete object 640'). Object-delete alone removes the rendered NetPlane from world +
     # minimap; msg-63 REMOVE (in handle_leave_arena) clears the roster.
     pkt = build_delete_object_3(onumber=s.my_obj_number, client_number=None)
-    # The KILLER alone gets a score-tail delete (credits the kill in-game); everyone else
-    # gets the proven bare delete. Isolating it to one recipient bounds any CTD risk.
+    # v228: EXIT-TAIL DELETE. FUN_007e3bb0 only calls ExitDataArrive when the entry has >2 bytes
+    # after the id, so our BARE delete silently removed the plane and touched NO statistics - that
+    # is why kills / deaths / planes-lost never ticked in-game. Send every peer a delete carrying
+    # the victim's REAL exit byte ((MEC<<4)|ScoreEvent, straight off the client's own delete-notify)
+    # with the entry size EEC demands, so each client runs its stat pipeline. On the MEC 5/6/0xb
+    # branch the credit is computed from each client's OWN damage list, so this is broadcast to all
+    # peers rather than to a guessed killer.
+    epkt = None
+    if EXIT_TAIL_DELETE_TO_PEERS and exit_byte is not None:
+        epkt = build_exit_delete_object_3(s.my_obj_number, exit_byte, entry=exit_entry)
+        if epkt is not None:
+            _hunter = (struct.unpack_from('<H', exit_entry, 3)[0]
+                       if (exit_entry is not None and len(exit_entry) >= 5) else None)
+            log('EXITTAIL', f'{s.current_pilot} delete carries exit=0x{exit_byte:02x} '
+                            f'(MEC={exit_byte >> 4} EEC={exit_byte & 0xf}, '
+                            f'entry={EXIT_EEC_ENTRY_SIZE.get(exit_byte & 0xf)}B'
+                            + (f', hunter=0x{_hunter:04x}' if _hunter is not None else ', synthesised')
+                            + ') -> all peers')
+        else:
+            log('EXITTAIL', f'{s.current_pilot} exit=0x{exit_byte:02x} has an unknown EEC '
+                            f'({exit_byte & 0xf}) - no size in the handler table, sending bare delete')
+    # v229: the killer no longer gets a special ZERO-FILLED scored delete - that was the bug. The
+    # real entry (with the HUNTER object id at +3) is what lets a client attribute the kill, so the
+    # killer gets the same verbatim exit entry as everybody else. spkt is kept only as a fallback
+    # for the case where we somehow have no real entry to relay.
     spkt = (build_scored_delete_object_3(s.my_obj_number)
-            if (killer is not None and SEND_SCORED_DELETE_TO_KILLER) else None)
+            if (killer is not None and SEND_SCORED_DELETE_TO_KILLER and epkt is None) else None)
     _dlabel = (f'<- DeleteObject 3 ({s.current_pilot} ONumber=0x{s.my_obj_number:04x} '
                f'St={s.client_number}) {reason}')
     s.__dict__.pop('_created_peers', None)   # re-entry must re-create us on peers
@@ -3825,9 +6384,17 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # v191: send the type-3 DELETE then the optional followup (msg-63 REMOVE) on ONE
         # thread, in that order, so DELETE always gets the lower reliable seq -> a flying peer
         # tears down the NetPlane BEFORE its REMOTE_PLAYER is freed (no dangling-plane CTD).
+        # v229: EVERY peer (killer included) gets the victim's VERBATIM exit entry - it carries the
+        # HUNTER object id at +3, which is what a client needs to attribute the kill. Zero-filling
+        # that tail (v228 and earlier) is exactly why kills never registered.
         _is_killer = (sess is killer and spkt is not None)
-        _delpkt = spkt if _is_killer else pkt
-        _dl2 = (_dlabel + ' [SCORED->killer]') if _is_killer else _dlabel
+        if epkt is not None:
+            _delpkt = epkt
+            _dl2 = _dlabel + f' [EXIT-ENTRY 0x{exit_byte:02x}]' + (' [killer]' if sess is killer else '')
+        elif _is_killer:
+            _delpkt, _dl2 = spkt, _dlabel + ' [SCORED->killer, synthesised]'
+        else:
+            _delpkt, _dl2 = pkt, _dlabel
         def _send(_s=sess, _del=_delpkt, _dl=_dl2, _fu=followup_pkt, _fl=followup_label):
             send_rel(_s, _del, _dl, to=3.0)
             if _fu is not None:
@@ -3835,6 +6402,40 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         threading.Thread(target=_send, daemon=True).start()
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
                    f'-> peers in room {s.current_room} {reason}')
+
+# -- v234: TELEMETRY OPCODES -------------------------------------------------
+# The flying-state object update is [bc][T][00][00][OPCODE][tick u16][ONumber u16][state...].
+# The client emits TWO forms and they are byte-identical in the header:
+#     0x07 -> one position sample     (e.g. sz=98)
+#     0x08 -> the SAME thing plus one extra 9-byte sample block (e.g. sz=107)
+# Live capture (run 092257), same object 0x0101, same tick and ONumber offsets:
+#     05 62 00 00 07 f1c4 0101 ...   <- 0x07
+#     05 f2 00 00 08 6bc4 0101 ...   <- 0x08
+# We only ever matched 0x07. At 09:35:52 AC2E_Bigalon's client switched to emitting 0x08, so the
+# relay stopped recognising his telemetry ENTIRELY. Two things then broke, and together they are
+# exactly the reported bug ('Test2 disappeared from Bigalon's game, telemetry stopped'):
+#   1. Bigalon's updates were no longer forwarded to Test2.
+#   2. Worse - we harvest each player's CONDUCTOR TICK from their telemetry and use it to re-stamp
+#      the packets we relay TO them. Bigalon's tick froze at 13868 and never advanced, so we kept
+#      relaying Test2's telemetry re-stamped with a DEAD tick. Bigalon's client saw Test2's updates
+#      as ever-more-stale and dropped them -> TEST2 VANISHED from his world.
+# Since the header (tick @5:7, ONumber @7:9) is identical, 0x08 relays exactly like 0x07 - the extra
+# block is opaque payload we forward verbatim.
+TELEM_OPCODES = (0x07, 0x08)
+TELEM_RESTAMP_MAX_LEN = 100  # v253: only re-stamp the telemetry FORM WE KNOW. The single-object
+                             #   plane packet has always been <= ~100 bytes. Once a pilot bails and
+                             #   also owns a parachuter, the packet grows (Bigalon saw his inbound
+                             #   telemetry go 84 -> 118 bytes the moment the canopy existed) and its
+                             #   layout is NOT the one we parse. Writing our tick into byte 5 of that
+                             #   bigger packet made the client read a TICK where it expected an object
+                             #   index:
+                             #       Exception in Fighter Ace engine: bounds error
+                             #       class ARR<class NET::OBJECT *,2048>[20983] 0..2047
+                             #   20983 is tick-sized, not object-sized. Anything outside the known
+                             #   form is now relayed BYTE-FOR-BYTE. We do not rewrite bytes we cannot
+                             #   parse - that is the same mistake as hand-authoring the record.
+STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (the failure above was
+                             #   silent for ~3 minutes; never let a frozen tick go unnoticed again)
 
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
@@ -3850,7 +6451,8 @@ def relay_telemetry(src, data):
     _telem = None
     for _off in (0, 4):
         c = pl[_off:]
-        if len(c) >= 9 and c[2] == 0 and c[3] == 0 and c[4] == 0x07 and (c[1] & 0x0f) == 0x02:
+        if (len(c) >= 9 and c[2] == 0 and c[3] == 0
+                and c[4] in TELEM_OPCODES and (c[1] & 0x0f) == 0x02):
             _telem = c
             break
     if _telem is None:
@@ -3860,6 +6462,30 @@ def relay_telemetry(src, data):
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
     src.last_telem_time = time.time()
+    # v243: and the quantised world POSITION (body[0:6] = 3x u16, i.e. pl[9:15]). This is what tells
+    # a CRASH apart from a clean parked exit - the two are byte-identical in the exit packet, so the
+    # only way to know the plane was flying is to look at whether it was actually moving.
+    if len(pl) >= 15:
+        try:
+            # v248: only track the PLANE's position. After a bail the parachuter transmits under its
+            # own object number, and letting the canopy's drift feed the crash test would be
+            # measuring the wrong body entirely.
+            _onum_t = int.from_bytes(pl[7:9], 'little')
+            if _onum_t == getattr(src, 'my_obj_number', None):
+                _p = struct.unpack_from('<HHH', pl, 9)
+                _now = time.time()
+                _hist = src.__dict__.setdefault('_pos_hist', [])
+                _hist.append((_now, _p))
+                _cut = _now - CRASH_MOVEMENT_WINDOW_S
+                while _hist and _hist[0][0] < _cut:
+                    _hist.pop(0)
+                # v254: keep the PLANE's most recent COMPLETE telemetry packet. If this pilot bails,
+                # we clone this exact packet for the parachuter (retargeting only the ONumber) so the
+                # canopy gets a valid position from a byte-for-byte real packet - never a hand-built
+                # one. See send_parachuter_telemetry.
+                src.last_plane_telem = bytes(pl)
+        except struct.error:
+            pass
     peers = [x for x in get_sessions_in_room(src.current_room)
              if x is not src and getattr(x, 'flying', False)]
     if not peers:
@@ -3891,7 +6517,22 @@ def relay_telemetry(src, data):
         relayed = bytearray(pl)
         rt = p.last_telem_tick
         if rt is not None:
-            struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
+            # v234: NEVER re-stamp with a DEAD tick. If we stop recognising a peer's telemetry, their
+            # last_telem_tick freezes; re-stamping with it makes every relayed packet look
+            # progressively staler to that peer until its client drops the object outright (this is
+            # precisely how Test2 vanished from Bigalon's world - Bigalon's tick froze at 13868 for
+            # ~3 minutes and nothing said a word). Warn loudly, and leave the sender's own tick in
+            # place rather than poisoning the packet with a stale one.
+            _age = time.time() - getattr(p, 'last_telem_time', 0.0)
+            if _age > STALE_TICK_WARN_S:
+                if not getattr(p, '_stale_tick_warned', False):
+                    p._stale_tick_warned = True
+                    log('STALE-TICK', f'[warn] {p.current_pilot} conductor tick FROZEN at {rt} '
+                                      f'({_age:.1f}s old) - not re-stamping. Their telemetry is no '
+                                      f'longer being recognised; peers will lose sight of objects.')
+            else:
+                p._stale_tick_warned = False
+                struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
         seq = getattr(p, '_relay_seq', 0) & 0xFF
         p._relay_seq = seq + 1
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
@@ -3988,6 +6629,17 @@ def handle_team_select(s, nation):
         # a reliable retransmit of the same join finds s.nation already set -> no re-send.
         if _changed and s.current_room is not None:
             broadcast_player_change_63(s, nation, op=CP_OP_CAMP, reason='(team join)')
+
+# NOTE (Project A): the v219 _push_career_stats_88 team-change pushes were REVERTED - they were
+# no-ops. msg 88 matches the client's score object by score+0x24 == PlayerIndex, and that object is
+# only created/linked at msg 201 game-entry (FUN_00441110), NOT at team-select time - so a team-
+# change 88 found no match and did nothing (confirmed: v219 'no change'). The real fix is the
+# LOGIN/ENTRY-TIME FULL-STAT LOAD (the client allocates its score object with operator new and never
+# loads the stat fields -> uninitialised garbage). That load message is being reverse-engineered
+# separately (see notes.md Project A). The spawn-time send_ace_rank_88 hook is kept (it does set
+# aces/rank once the object exists post-spawn), and the DB career-read plumbing is retained for the
+# eventual full-stat load.
+
 
 def _find_room_by_gidx(game_idx):
     """Resolve an open room by its 32-bit GameIndex (LE int). Matches the per-room
@@ -4203,6 +6855,20 @@ def handle_leave_arena(s):
                 threading.Thread(target=lambda _s=sess: send_rel(_s, rem_pkt, rem_label, to=3.0),
                                  daemon=True).start()
     s.entered_game = False
+    # v260: ARENA ISOLATION - clear current_room on leave so a subsequent arena JOIN resolves the
+    # new arena fresh. Previously current_room kept pointing at the OLD room, and the enter handler
+    # only resolved a room 'if not s.current_room', so an arena SWITCH left current_room stale ->
+    # chat/telemetry/roster kept scoping to the old room -> cross-arena leakage (peers in different
+    # arenas saw each other's chat, roster and 3D planes). The leave broadcast above already ran
+    # while current_room was still valid, so it's safe to clear now.
+    s.current_room = None
+    s.room_slot = None
+    # v225: this is the exit-to-HQ / back-to-lobby leave. If a solo plane-destroy was credited a
+    # few seconds ago and is still sitting on its deferred timer, THAT removal was this exit - not
+    # a crash - so cancel the death. (A genuine crash respawns instead of leaving, so its timer
+    # fires normally.) Without this, bailing out of the arena counted as a death: one crash logged
+    # three deaths in run 004058.
+    _cancel_pending_death(s, '(left arena -> exit-to-HQ, not a crash)')
     # ARENA-CHANGE CTD (messages39): the leaving client runs 'del CLIENT Me 0' + 'del
     # CLIENT <n>' for EVERY peer - it destroys its whole world, including all peer
     # NET::CLIENT stations. So on re-entry every peer must be re-created client+object,
@@ -4817,7 +7483,13 @@ def handle_compound(s, outer_cmd, pl):
     # -> junk counts -> 'Preload existing planes' hits an unloaded type -> index>=0 assert
     # (Pln_Info.cpp:192, messages21 crash). Swallow it -> count array stays null -> preload
     # early-outs cleanly. Client does not block on it.
-    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d):
+    # 0x19 (msg 25) = ACE/RANK/SCORE STATE REPORT (client->server, fire-and-forget). Echoing it
+    # back makes the client re-ingest its OWN report as authoritative and RE-EVALUATE ace/rank
+    # against its current (garbage/stale at a team-change spawn) stat state -> bogus
+    # 'Congratulations! new Ace Status' + 'new Rank' announcements (Test2 log messages46: the EVENT
+    # fires on the same line as the echoed 'in 25'7', only when it lands right after InsertPlayer -
+    # hence 'sometimes garbage, sometimes clean'). Consume, NEVER echo. v220.
+    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x19):
         log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) - swallow')
         return
     # msg 31 (0x1f) compound-wrapped: ground-object damage report - consume, NEVER echo
@@ -4898,6 +7570,48 @@ def build_scene_destroy_36(records):
     for scene_idx, camp, progress in records:
         body += struct.pack('<HBf', scene_idx & 0xFFFF, camp & 0xFF, float(progress))
     return build_ingame_pkt(bytes(body))
+
+# --- msg 60 (0x3c) SUPPLY GRANT = the in-world REARM/REFUEL trigger --------------------
+# RE'd from the client's msg-60 handler FUN @ 0x5581c0 (reliable dispatch slot 0xc81fc8):
+#   edi = raw msg buffer; local player = [0xc6eb98] -> plane obj (esi).
+#   edi+3 = FLAGS byte. Observed bits:
+#     &1  -> plane vtable[+0x20](1/0) at esi+0x1f4 (enable a supply/ready state)
+#     &2  -> call 0x4ebfa0(plane) + [esi+0x4e8]           (resource/ammo path)
+#     &4  -> call 0x4eba80(plane) [restores ordnance block esi+0xaf0..0xb04] + 0x4ec5c0
+#            [fuel esi+0x500] + 0x4c8690  = THE REARM/REFUEL PATH (fuel + ammo restore)
+#     &10/&20 -> alt paths; &20 reads word[edi+6]
+#   edi+4 = u16 -> fild -> float  (a fuel/supply AMOUNT)
+#   edi+6 = u16 -> a second AMOUNT (ammo?)
+# So a msg-60 with flags&4 makes the client REARM/REFUEL IN PLACE - no despawn. Since the rearm is
+# client-local and the client does NOT send msg 59 in our setup, we send msg 60 PROACTIVELY to
+# trigger the rearm (e.g. from the `resupply` console command when the player is parked+depleted).
+# WIRE (best-effort from the handler read-map): body = [0x3c][b1][b2][flags u8][u16 amt][u16 amt2].
+# b1/b2 (between type and flags) are not yet pinned - start at 0 and iterate from the client log.
+MSG_SUPPLY_GRANT_60 = 0x3c
+
+def build_supply_grant_60(flags=0x04, amount=0xffff, amount2=0xffff, b1=0, b2=0):
+    """Build FA msg 60 (0x3c) SUPPLY GRANT. flags=0x04 = the rearm/refuel path (restore fuel+ammo
+    in place). amount/amount2 = the u16 fuel/ammo amounts the handler reads at body+4/+6. b1/b2 =
+    the two bytes between the type and the flags (handler reads flags at edi+3), not yet pinned -
+    default 0, adjust from the live client response. Framed with build_ingame_pkt (real Size)."""
+    body = bytes([MSG_SUPPLY_GRANT_60, b1 & 0xff, b2 & 0xff, flags & 0xff]) \
+         + struct.pack('<HH', amount & 0xffff, amount2 & 0xffff)
+    return build_ingame_pkt(body)
+
+def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff,
+                              b1=0, b2=0, reason=''):
+    """Send a msg-60 SUPPLY GRANT (rearm/refuel) to every player in `room_id`. Returns the count."""
+    if room_id is None:
+        return 0
+    pkt = build_supply_grant_60(flags, amount, amount2, b1, b2)
+    sess = get_sessions_in_room(room_id)
+    _desc = f'flags=0x{flags:02x} amt={amount} amt2={amount2} b1={b1} b2={b2}'
+    for s in sess:
+        threading.Thread(
+            target=lambda _s=s: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
+            daemon=True).start()
+    log('SUPPLY60', f'room {room_id}: msg 60 [{_desc}] -> {len(sess)} session(s) {reason}')
+    return len(sess)
 
 def broadcast_scene_36(room_id, records, reason=''):
     """Send a msg-36 SCENE DESTROY/STATE to every player currently in `room_id`.
@@ -5142,12 +7856,53 @@ def _fire_server_confirm(s, via='', ident=None):
         _isrc = 'counter fallback'   #       Counter kept only as fallback for a too-short out-4.
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
+    # v276: a spawn/respawn (HQ entry OR base change) starts the plane fresh at a base. Reset the
+    # auto-resupply position tracking so the new spawn starts a CLEAN static settle - the old
+    # object's transit/wind-down position deltas must not leak into the new base's stationary check.
+    s.last_pos = None; s.pos_static_since = None
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
     log('CONFIRM5', f'out 4 spawn{via} -> ServerConfirm Number={number} ident={ident} ({_isrc})')
     threading.Thread(target=lambda nn=number, ii=ident: send_reply(
         s, build_server_confirm_5(nn, ii),
         f'<- ServerConfirm 5 (Number={nn} ident={ii})', to=5.0), daemon=True).start()
+    # v219: state the pilot's REAL career aces/rank on the client scoreboard. Those score-object
+    # fields (score+0x50 aces, score+0x30 rank) are written ONLY by msg 88; if we never send it they
+    # hold whatever the score object had -> the garbage aces/rank seen after a team-swap re-entry.
+    # Values are RE-READ FROM THE DB each time (never zeroed), so a spawn/team/room change restores
+    # the pilot's true career standing. The score object exists once the create-object's client
+    # record has registered the station, which is in place by the time the spawn is ServerConfirmed.
+    # v233: a fresh plane is UNDAMAGED. Clear the damage flag on EVERY spawn, unconditionally - the
+    # "exited damaged -> death" rule must only ever see damage taken in THIS life. (This was nested
+    # inside the SEND_ACE_RANK_88 block, so turning that flag off would silently leave took_damage
+    # latched and make every clean exit count as a death again.)
+    s.took_damage = False
+    # v243: and a fresh plane hasn't moved yet. Drop the old life's position history so the
+    # "was it flying?" crash test can't be fooled by the PREVIOUS sortie's movement.
+    s.__dict__.pop('_pos_hist', None)
+    # v244: and nobody has hit this plane yet. Clear the last-hit attribution so a hunter from the
+    # PREVIOUS life can never be credited with a kill in this one.
+    # v247: object numbers are RECYCLED, so a latch left over from a previous plane that happened to
+    # carry this number must not be inherited by the new one. Drop it.
+    PENDING_KILL.pop(getattr(s, 'my_obj_number', None), None)
+    # v248: a fresh plane means the previous life's parachuter (if any) is history.
+    s.para_obj_number = None
+    if SEND_ACE_RANK_88:
+        def _send88(_s=s):
+            time.sleep(0.5)
+            send_ace_rank_88(_s, reason='(spawn init)')
+            # v230/v236: msg 25 writes the 20-dword block at score+0x30 - the SAME block whose f0 is
+            # the rank the HQ Scores screen displays. So it should drive that screen's Latest/Career
+            # rows too (the in-flight Current Life/Current Game screen is client-computed and does
+            # NOT read it - that was the wrong screen to probe).
+            send_stat_block_25(_s, reason='(spawn init)')
+            # v236: (re)state EVERY OTHER player's rank/aces as well. A client only learns a peer's
+            # rank if we send that peer's msg 88 to it - without this a freshly-joined client shows
+            # every other pilot as rank 0 ('Cdt').
+            for _p in get_sessions_in_room(_s.current_room):
+                if _p is not _s:
+                    send_ace_rank_88(_p, reason='(peer refresh for new spawn)')
+        threading.Thread(target=_send88, daemon=True).start()
     if ADD_TEST_PLAYER:
         def _inject(_s=s):
             time.sleep(1.0)
@@ -5157,27 +7912,155 @@ def _fire_server_confirm(s, via='', ident=None):
             log('SIM13', 'injected remote player Test2 via msg 13{62}')
         threading.Thread(target=_inject, daemon=True).start()
 
+def _cancel_pending_death(s, why=''):
+    """v225: cancel a deferred solo-death credit (see _ingame_own_object_removed)."""
+    t = getattr(s, '_pending_death', None)
+    if t is not None:
+        try:
+            t.cancel()
+        except Exception:
+            pass
+        s._pending_death = None
+        log('DEATH', f'{s.current_pilot} pending death CANCELLED {why}'.rstrip())
+
 def _ingame_own_object_removed(s, tb, stored):
     """Shared handler for a msg-3 (sub 0x03) that removes the player's OWN plane while in the
-    arena - a death / crash / crashland (exit-to-HQ too; indistinguishable here). It arrives
-    BOTH as a direct tb=0x42/0x52/0x32 message AND wrapped in an outer type=0x06 (the type-scan
-    form). A CRASHLAND uses the WRAPPED form, so both call sites must route here or the crashland
-    respawn is never re-armed and its out 4 gets no ServerConfirm (Conductor error -> dead engine
-    -> CTD). Drops the dead plane on peers, stays in the arena, and re-arms obj_confirmed/flying
-    so the NEXT out 4 confirms a fresh object even when the crashland respawn skips its StartPlace.
-    Idempotent via _left_world (cleared on the respawn's ServerConfirm)."""
+    arena. It arrives BOTH as a direct tb=0x42/0x52/0x32 message AND wrapped in an outer type=0x06
+    (the type-scan form). A CRASHLAND uses the WRAPPED form, so both call sites must route here or
+    the crashland respawn is never re-armed and its out 4 gets no ServerConfirm (Conductor error ->
+    dead engine -> CTD). Drops the dead plane on peers, stays in the arena, and re-arms
+    obj_confirmed/flying. Idempotent via _left_world (cleared on the respawn's ServerConfirm).
+
+    *** v225: NOT EVERY OWN-PLANE REMOVAL IS A DEATH. ***
+    v222 made this credit a death unconditionally, which triple-counted: one crash logged THREE
+    deaths. The payload is [.. sub=0x03][ONumber u16 LE][REASON byte], and the three cases are:
+
+      REASON 0xa0 / 0x80 (bit 0x80 SET)   = the plane was DESTROYED  -> a real loss.
+      REASON 0x11 / 0x22 (bit 0x80 CLEAR) = plane removed WITHOUT being destroyed. This is the
+            RESPAWN handoff: the client drops its old plane as it takes a new one. In run
+            004058 the StartPlace GRANT arrives in the SAME MILLISECOND as the 0x11 removal
+            (log lines 1146 -> 1148). NEVER a death.
+
+    Destroyed (0xa0) still covers two situations that are IDENTICAL on the wire at this instant -
+    a genuine crash, and EXIT-TO-HQ (bailing out of the arena). They only differ by what happens
+    NEXT: a crash is followed by a respawn, while an exit-to-HQ is followed ~3s later by the
+    back-to-lobby leave (run 004058: removal 00:44:24.974 -> 'back to lobby' 00:44:27.756).
+    So a SOLO destroy is credited on a short DEFERRED timer and CANCELLED if the player leaves the
+    arena inside the window. A respawn does NOT cancel it (a real death is followed by a respawn
+    ~2s later, so cancelling on respawn would erase every genuine death).
+    A SHOT-DOWN (the long >=14B scored form) is never ambiguous and is credited immediately.
+    """
     if (s.entered_game and not getattr(s, '_left_world', False)
             and s.my_obj_number is not None):
+        # *** v235: WHICH OBJECT IS THIS DELETE ACTUALLY ABOUT? ***
+        # The delete-notify is [.. sub=0x03][ONumber u16 LE][exit][tail...], so the object it names
+        # is stored[5:7]. This handler ALWAYS assumed it was the sender's OWN plane and never
+        # checked - which is how Test2 vanished from Bigalon's world (run 095012):
+        #     Test2 sent  [00320000|030101]  = "delete object 0x0101"  = BIGALON's plane,
+        #     a routine peer-view cleanup on Test2's side.
+        # We took it as Test2's own removal and BROADCAST A DELETE FOR TEST2'S OBJECT (0x0100) TO
+        # BIGALON - so Bigalon's client dutifully deleted Test2 - then cleared Test2's `flying` flag
+        # so the relay stopped too. We told the peer to delete the very plane the message was
+        # protecting. Verify the ONumber before touching anything.
+        _onum = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
+        # v248: the PARACHUTER is a second object owned by this same session. Its delete means the
+        # pilot has landed / been killed under the canopy - it is NOT the plane going down, so it
+        # must not run the death path. Pass it on to peers so the canopy disappears there too.
+        if _onum is not None and _onum == getattr(s, 'para_obj_number', None):
+            log('PARA', f'{s.current_pilot} parachuter 0x{_onum:04x} removed (landed or killed) '
+                        f'-> relaying the delete to peers; the plane (0x{s.my_obj_number:04x}) is '
+                        f'unaffected')
+            _pdel = build_delete_object_3(onumber=_onum, client_number=None)
+            for _peer in get_sessions_in_room(s.current_room):
+                if _peer is not s:
+                    threading.Thread(target=send_rel, args=(_peer, _pdel,
+                                     f'<- delete PARACHUTER 0x{_onum:04x} ({s.current_pilot})'),
+                                     kwargs={'to': 3.0}, daemon=True).start()
+            s.para_obj_number = None
+            return
+        if _onum is not None and _onum != s.my_obj_number:
+            # NOT the sender's own plane. Find whose it is.
+            _peer = next((p for p in get_sessions_in_room(s.current_room)
+                          if p is not s and getattr(p, 'my_obj_number', None) == _onum), None)
+            if _peer is not None:
+                # The sender dropped this PEER's object from its world. Forget that we ever created
+                # it there, so the telemetry relay re-creates it on the next update - otherwise the
+                # sender would never see that peer again.
+                _cp = _peer.__dict__.get('_created_peers')
+                if _cp is not None:
+                    _cp.discard(s.addr)
+                log('PEERDEL', f'{s.current_pilot} dropped PEER object 0x{_onum:04x} '
+                               f'({_peer.current_pilot}) from its world -> re-arm create for that '
+                               f'peer. NOT a removal of {s.current_pilot}\'s own plane.')
+            else:
+                log('PEERDEL', f'{s.current_pilot} sent a delete for object 0x{_onum:04x} which is '
+                               f'neither its own (0x{s.my_obj_number:04x}) nor any peer\'s -> swallow')
+            return
+
         s._left_world = True
+        exitb = stored[7] if len(stored) > 7 else 0
+        mec_nib = (exitb >> 4) & 0xf     # MissExitCode & 0xf  (Msn_Exit: (MEC << 4) | ScoreEvent)
+        se      = exitb & 0xf            # ScoreEvent / exit form (0..5)
+        scored  = len(stored) >= 14      # long form = shot down by someone
+        is_death = mec_nib in DEATH_MEC_NIBBLES
+        # v229: the client's delete-notify is [.. sub=0x03][id u16][exit][tail...] starting at
+        # stored[4], so the ExitDataArrive ENTRY (id + exit + tail, with the HUNTER at +3) is
+        # exactly stored[5:5+size]. Relay it VERBATIM - zero-filling that tail is what stopped
+        # kills registering.
+        _esz = EXIT_EEC_ENTRY_SIZE.get(se)
+        exit_entry = (bytes(stored[5:5 + _esz])
+                      if (_esz and len(stored) >= 5 + _esz) else None)
+        _hunter = (struct.unpack_from('<H', exit_entry, 3)[0]
+                   if (exit_entry is not None and len(exit_entry) >= 5) else None)
         log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) = in-arena plane removal '
-                         f'(death/crashland/exit-to-HQ) -> drop dead plane, stay in arena, re-arm confirm')
-        _killer = score_on_death(s, stored)   # credit killer + record death in DB (accumulating)
-        broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer)
+                         f'(exit=0x{exitb:02x} -> MEC&0xf={mec_nib} SE={se}, '
+                         f'{"DEATH" if (is_death or scored) else "not a death"}'
+                         f'{", scored" if scored else ""}'
+                         + (f', hunter=0x{_hunter:04x}' if _hunter is not None else '')
+                         + ') -> drop plane, stay in arena, re-arm confirm')
+
+        _killer = None
+        if scored:
+            # Shot down - unambiguous (the entry names the HUNTER). Always a death.
+            _killer = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
+        elif is_death:
+            # v232: A CRASH AND A CLEAN GROUND EXIT ARE IDENTICAL ON THE WIRE - both MissExitCode 26,
+            # both followed by the same 0x3a catalog request, neither producing a leave event. So the
+            # exit packet alone can never tell them apart.
+            # Two independent signals settle it, and a death needs only ONE of them:
+            #   (a) DAMAGE  - msg 28 marked this plane (cleared on every fresh spawn). That is the
+            #       client's own rule: exit while damaged and it counts as a death, and the game even
+            #       warns you. But msg 28 only ever carries PLAYER-inflicted damage.
+            #   (b) v243 MOVEMENT - was the plane actually FLYING when it was removed? A parked plane
+            #       reports EXACTLY zero movement, sample after sample; a flying one moves by hundreds
+            #       per tick. This is what finally catches the UNDAMAGED CRASH (fly into the ground,
+            #       no enemy fire, no msg 28) - which the damage rule alone was blind to.
+            _damaged = bool(getattr(s, 'took_damage', False))
+            _move    = plane_movement(s)
+            _flying  = _move >= CRASH_MOVEMENT_MIN
+            if _damaged or _flying or COUNT_EXIT_TO_HQ_AS_DEATH:
+                _why = ('DAMAGED' if _damaged else '') + ('+' if _damaged and _flying else '') \
+                       + (f'IN FLIGHT (movement={_move})' if _flying else '')
+                log('DEATH', f'{s.current_pilot} {_why} at removal (MEC&0xf={mec_nib}) '
+                             f'-> counts as a death')
+                # v244: CAPTURE the killer here too. This branch used to DISCARD score_on_death's
+                # return value, so even when a killer was identified, _killer stayed None and the
+                # SCORED DELETE was never sent to them - which is why Bigalon's client never
+                # registered the bailout kill even though Test2's client announced it.
+                _killer = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
+            else:
+                log('DEATH', f'{s.current_pilot} exited UNDAMAGED and PARKED (MEC&0xf={mec_nib}, '
+                             f'movement={_move}) -> clean exit, NOT a death')
+        else:
+            log('DEATH', f'{s.current_pilot} plane removed with exit=0x{exitb:02x} '
+                         f'(MEC&0xf={mec_nib} SE={se}) -> re-fly/plane-swap, NOT a death')
+
+        broadcast_object_delete_3(s, reason='(death)', clear_peer_created=False, killer=_killer,
+                                  exit_byte=exitb, exit_entry=exit_entry)
         # v203: the 2009 host's AUTHORITATIVE credit - a separate msg-33 ScoreEvent to the
-        # killer (MEC=1,EEC=3), on top of the scored delete. Ticks the killer's in-game
-        # scoreboard even if its local damage list didn't survive the relay (N-player fights).
+        # killer, on top of the scored delete. v224: MEC/EEC nibbles fixed (type byte 0x13).
         if _killer is not None and SEND_SCORE_EVENT_33:
-            send_score_event_to_killer(_killer, mec=1, eec=3)
+            send_score_event_to_killer(_killer)
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.
@@ -5185,14 +8068,235 @@ def _ingame_own_object_removed(s, tb, stored):
     else:
         log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) -> swallow, no echo (guarded)')
 
+def _msg20_instrument(s, variant, channel, text, pl):
+    """v258: capture the RAW bytes of every in-game msg-20 (type 0x14) AND the other message types
+    that correlate with a parachuter's descent in the 2009 log.
+
+    Findings so far (2009 messages04.log):
+      * 'in 20' is a SERVER->CLIENT broadcast (1820x, 13-129 bytes, only 8 client replies - NOT a
+        poll). Its 'out 20' replies cluster around players ENTERING/JOINING - so msg 20 is largely
+        ROSTER/player-state sync, probably NOT the parachuter mechanism.
+      * During parachuter 975's descent the non-roster messages were 'in 30'5' (tiny, appears right
+        after create and again seconds later - a strong per-object STATE/deploy candidate), plus
+        'in 72'/'in 73'. These are logged separately by _ingame_msg_instrument.
+    Pure logging, no behaviour change.
+    """
+    if not MSG20_INSTRUMENT:
+        return
+    body = bytes(text)
+    printable = sum(1 for b in body if 32 <= b < 127 or b in (9, 10, 13))
+    ratio = (printable / len(body)) if body else 1.0
+    kind = 'CHAT?' if ratio >= 0.75 else 'BINARY/STATE?'
+    onums = []
+    for i in range(0, len(body) - 1):
+        v = int.from_bytes(body[i:i + 2], 'little')
+        if v in (getattr(s, 'my_obj_number', -1) or -1,
+                 getattr(s, 'para_obj_number', -1) or -1):
+            onums.append(f'@{i}=0x{v:04x}')
+    _bail = 'BAILED' if getattr(s, 'para_obj_number', None) is not None else 'normal'
+    log('MSG20', f'{s.current_pilot} [{variant}] ch={channel} len={len(body)} {kind} '
+                 f'ratio={ratio:.2f} state={_bail}'
+                 + (f' objs[{",".join(onums)}]' if onums else '')
+                 + f' full_pl={hx(bytes(pl))}')
+
+# v258: the in-game message types that correlated with a parachuter's descent in the 2009 log.
+# 0x1e=30 (tiny per-object state, the deploy candidate), 0x48=72, 0x49=73, 0x14=20 (roster).
+PARA_WATCH_TYPES = {0x1e, 0x48, 0x49, 0x14, 0x1f, 0x28}
+
+def _ingame_msg_instrument(s, sub, pl):
+    """v258: while a bail is in progress (parachuter alive), dump the FULL bytes of any watched
+    in-game message type, so we can find the one that carries the parachuter descent + deploy state.
+    Only fires when this pilot has an active parachuter, to keep the log focused."""
+    if not MSG20_INSTRUMENT or getattr(s, 'para_obj_number', None) is None:
+        return
+    if sub not in PARA_WATCH_TYPES:
+        return
+    body = bytes(pl)
+    pnum = getattr(s, 'para_obj_number', None)
+    mine = getattr(s, 'my_obj_number', None)
+    hits = [f'@{i}=0x{int.from_bytes(body[i:i+2],"little"):04x}'
+            for i in range(len(body) - 1)
+            if int.from_bytes(body[i:i + 2], 'little') in (pnum, mine)]
+    log('PARAWATCH', f'{s.current_pilot} type=0x{sub:02x}({sub}) len={len(body)} '
+                     f'para=0x{(pnum or 0):04x}'
+                     + (f' objhits[{",".join(hits)}]' if hits else '')
+                     + f' pl={hx(body)}')
+
+# v263: SUPPLY/REPAIR message capture. The 2009 flow at spawn/land is:
+#   InsertPlayer(OnGround) -> client 'out 59'19' (supply/startplace request) -> server 'in 60'8'
+#   (grant) -> 'Repair PlnID:.. Full=1/0, Load:..' (server-driven rearm/refuel via msg 40'38 / 73'39).
+# As the SERVER we RECEIVE 0x3b (59) from the client and must reply 0x3c (60), then send 40/73 to
+# rearm. We don't author those bytes - we capture the client's real request first (replay method).
+# This logs the FULL bytes of any inbound supply/repair-related sub so we can reverse the format.
+SUPPLY_MSG_INSTRUMENT = True   # v264: log ALL reliable-channel messages while a plane is in-arena,
+                              #   decoding the prefixed inner sub too, so the real spawn/land/supply/
+                              #   repair flow is visible (the 2009 '59/60/40/73' are CONDUCTOR numbers;
+                              #   our reliable subs differ - seen: sub=0x60 sz=5 at spawn, prefixed 0x40).
+                              #   Set False once the supply/repair messages are identified.
+SUPPLY_WATCH_SUBS = None       # None = log everything (in-arena); or a set to filter
+
+# v267 P2a: auto-resupply. When the player parks at an airfield and shuts the engine off, the server
+# sends the proven msg-60 supply grant (full repair + rearm). BLIND for all arenas for now - the TC
+# per-airfield supply gate is P2b.
+AUTO_RESUPPLY = True
+AUTO_RESUPPLY_DEBOUNCE = 5.0   # seconds; fire at most once per this window per player
+AUTO_RESUPPLY_SETTLE = 2.0     # seconds stationary (ground speed 0) before the resupply fires
+AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval for the stationary check
+
+def _supply_msg_instrument(s, sub, cmd, pl):
+    """v264: capture the spawn/land/supply/repair message flow. Logs every reliable-channel message
+    once the pilot is in-arena (entered_game), decoding the PREFIXED inner sub (pl[8]) for cmd!=0
+    messages - the 2009 supply flow (in 59/60/40/73) is on the CONDUCTOR numbering; on our reliable
+    channel the spawn/supply msgs appear as different subs (e.g. type=0x12 sub=0x60 sz=5 at spawn, a
+    prefixed sub=0x40). Logging everything in-arena lets us spot the real supply/repair messages
+    instead of guessing their numbers."""
+    if not SUPPLY_MSG_INSTRUMENT:
+        return
+    if not getattr(s, 'entered_game', False):
+        return
+    body = bytes(pl)
+    # decode the prefixed inner sub for cmd!=0 messages (real sub is at pl[8], type at pl[5])
+    _prefixed = (cmd and len(body) >= 9 and not (body[2] == 0 and body[3] == 0)
+                 and body[6] == 0 and body[7] == 0)
+    _inner_type = body[5] if _prefixed and len(body) > 5 else (body[1] if len(body) > 1 else 0)
+    _inner_sub = body[8] if _prefixed and len(body) > 8 else sub
+    if SUPPLY_WATCH_SUBS is not None and _inner_sub not in SUPPLY_WATCH_SUBS and sub not in SUPPLY_WATCH_SUBS:
+        return
+    log('SUPPLY-CAP', f'{s.current_pilot} cmd=0x{cmd:04x} '
+                      f'{"PFX " if _prefixed else ""}type=0x{_inner_type:02x} sub=0x{_inner_sub:02x} '
+                      f'len={len(body)} flying={getattr(s,"flying",False)} pl={hx(body)}')
+
+def _auto_resupply_check(s, sub, pl):
+    """v272: gate the auto-resupply on ACTUAL GROUND SPEED = 0, not proxy events. v271 used
+    StartPlace/engine/heartbeat signals, which (a) missed a plane that never moved from spawn (no
+    new signal) and (b) fired on touchdown while still rolling. v272 uses plane_movement(s) (the
+    quantised-position delta already tracked for crash detection): a stationary plane reports
+    EXACTLY 0. This fn just maintains at_airfield + a 'moving' observation; the actual fire decision
+    is made by a background poll (_resupply_poll) that checks movement==0 for AUTO_RESUPPLY_SETTLE
+    seconds. Cancelled implicitly by movement (position changes) or takeoff/despawn."""
+    if not AUTO_RESUPPLY:
+        return
+    if not getattr(s, 'entered_game', False):
+        return
+    body = bytes(pl)
+    # takeoff / despawn clears the parked-airfield association
+    if sub == 0x53 and len(body) >= 6 and (body[5] & 1) == 1:   # engine ON
+        s.at_airfield = None
+        return
+    if sub == 0x03:                                             # despawn / exit-to-HQ
+        s.at_airfield = None
+        return
+    # StartPlace request/notify -> we're at an airfield slot. Two framings:
+    #   direct:  sub(pl[4]) = 0x17/0x18, AF ident at body[5]
+    #   scan:    sub(pl[4]) = 0x00, inner 0x17/0x18 at pl[8], AF ident at body[9] (type-scan wrap)
+    _new_af = None
+    if sub in (0x17, 0x18) and len(body) >= 8:
+        _new_af = body[5]
+    elif sub == 0x00 and len(body) >= 12 and body[8] in (0x17, 0x18):
+        _new_af = body[9]
+    if _new_af is not None:
+        # v276: a base change (tab) re-fires StartPlace + a fresh ServerConfirm, i.e. it's a respawn
+        # at the new base. Treat it like an HQ entry: reset the position/static tracking so the new
+        # base starts a CLEAN settle (the transit drift from the old base won't leak in / block it).
+        if _new_af != getattr(s, 'at_airfield', None):
+            s.last_pos = None
+            s.pos_static_since = None
+        s.at_airfield = _new_af
+
+def _resupply_poll_loop():
+    """v274: background poll gating resupply on POSITION being STATIC (ground speed 0). type-7 keeps
+    flowing when parked (it doesn't reliably stop), but the position field pl[9:15] is IDENTICAL
+    every sample while stationary (verified run 135816: (1611,24009,3858) x25). So we track the
+    plane's own last position + when it last CHANGED; if the position hasn't changed for
+    AUTO_RESUPPLY_SETTLE seconds while at an airfield, the plane is stationary -> fire the msg-60
+    grant. Self-contained: reads last_plane_telem (the last full type-7 packet, saved on every relay)
+    so it doesn't depend on the _pos_hist window. Debounced. BLIND for all arenas (TC gate = P2b)."""
+    while True:
+        try:
+            time.sleep(AUTO_RESUPPLY_POLL)
+            if not AUTO_RESUPPLY:
+                continue
+            now = time.time()
+            for s in list(get_all_sessions()):
+                if not getattr(s, 'entered_game', False):
+                    continue
+                if getattr(s, 'at_airfield', None) is None or s.current_room is None:
+                    s.last_pos = None; s.pos_static_since = None
+                    continue
+                # read the plane's current quantised position from the last full type-7 packet
+                tel = getattr(s, 'last_plane_telem', None)
+                pos = None
+                if tel and len(tel) >= 15:
+                    try:
+                        pos = struct.unpack_from('<HHH', tel, 9)
+                    except struct.error:
+                        pos = None
+                if pos is None:
+                    continue                     # no position yet -> can't judge
+                prev = getattr(s, 'last_pos', None)
+                if prev is None or pos != prev:
+                    # position changed (or first sample) -> moving; reset the static clock
+                    s.last_pos = pos
+                    s.pos_static_since = now
+                    continue
+                # position unchanged since last poll -> still; how long has it been static?
+                static_for = now - getattr(s, 'pos_static_since', now)
+                if static_for < AUTO_RESUPPLY_SETTLE:
+                    continue
+                if now - getattr(s, 'last_resupply_at', 0.0) < AUTO_RESUPPLY_DEBOUNCE:
+                    continue
+                s.last_resupply_at = now
+                broadcast_supply_grant_60(
+                    s.current_room, flags=0x04, amount=0xffff, amount2=0xffff,
+                    reason=f'(auto-resupply: {s.current_pilot} stationary at AF={s.at_airfield})')
+                log('RESUPPLY', f'{s.current_pilot} position static {static_for:.1f}s at '
+                                f'AF={s.at_airfield} (pos={pos}) -> auto msg-60 grant (blind)')
+        except Exception:
+            logx('RESUPPLY', 'poll loop error')
+
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
     sub=pl[4] if len(pl)>4 else 0
+    # *** v246: PREFIXED (cmd != 0) MESSAGES ARE FRAMED 4 BYTES LATER. ***
+    # The reliable framing is [bc][T][00][00][sub][...]. But when the packet's `cmd` field is
+    # NON-ZERO, the payload carries a 4-byte prefix - [counter u16][cmd u16 BE] - in FRONT of it.
+    # The codebase already knew this in two places: the login path reads pl[4:6], and
+    # handle_compound does `inner = pl[4:]`. But handle_compound only fires for a HARD-CODED
+    # WHITELIST of three cmds (COMPOUND_CMDS = {530, 578, 4610}), so every OTHER cmd!=0 message is
+    # parsed from the WRONG OFFSET.
+    # That silently ATE THE BAILOUT DELETE (run 083507 @ 08:47:57, cmd=1346 / 0x0542):
+    #       normal  delete: [00 42 00 00 | 03 00 01 a0]
+    #       bailout delete: [00 00 05 42 | 00 42 00 00 | 03 00 01 50]
+    # We read the ONumber as 0x0042 instead of 0x0100, so v235's peer-object check concluded it was
+    # "neither its own nor any peer's" and SWALLOWED the whole thing -> the shooter got no kill, and
+    # the peer was never told to remove the plane, so it flew on until the client gave up on it.
+    # DELIBERATELY NOT RE-FRAMING GLOBALLY: ~10% of reliable messages are prefixed and have been
+    # ignored for the entire life of this server (they parse to sub=0x00 and match no handler).
+    # Switching them all on at once is exactly how you break a working lobby - one of them decodes
+    # to sub=0xd4 = LEAVE. So re-frame the DELETE, which is the demonstrated bug, and LOG every
+    # other prefixed message so the rest can be tackled one at a time, on evidence.
+    _pfx = (cmd and cmd not in COMPOUND_CMDS and len(pl) >= 9
+            and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0)
+    if _pfx:
+        _isub = pl[8]
+        if _isub == 0x03:                       # delete-notify - the one we know is broken
+            log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED delete-notify '
+                           f'[{hx(bytes(pl[:4]))}] -> re-framing from offset 4 '
+                           f'(was mis-read as ONumber 0x{int.from_bytes(bytes(pl[5:7]),"little"):04x})')
+            pl = pl[4:]
+            bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
+        else:
+            log('REFRAME', f'[note] {s.current_pilot} cmd=0x{cmd:04x} is a PREFIXED message we are '
+                           f'NOT re-framing (inner type=0x{pl[5]:02x} sub=0x{_isub:02x}). It has '
+                           f'always been ignored; logged for review.')
     log('POST-AUTH',f'cmd={cmd}(0x{cmd:04x}) type=0x{tb:02x} sub=0x{sub:02x} bc={bc}(p3={bc*16+1}) sz={len(pl)}')
     stored=bytes(pl)
     _h4=hx(stored[:4]) if len(stored)>=4 else hx(stored)
     _d4=hx(stored[4:8]) if len(stored)>=8 else (hx(stored[4:]) if len(stored)>4 else '')
     log('RX/REL/PL', f'  [{_h4}|{_d4}] +{hx(stored[8:8+80]) if len(stored)>8 else ""}')
+    _ingame_msg_instrument(s, sub, stored)     # v258: dump watched types while a parachuter is alive
+    _supply_msg_instrument(s, sub, cmd, stored)  # v263: capture supply/repair msgs (59/60/40/73)
+    _auto_resupply_check(s, sub, stored)         # v267: auto msg-60 resupply on park+engine-off
 
     if cmd in COMPOUND_CMDS:
         handle_compound(s, cmd, pl); return
@@ -5211,10 +8315,12 @@ def handle_post_auth(s, cmd, pl):
     if sub == 0x14:                                            # direct
         channel = pl[5] if len(pl) > 5 else 0
         text    = bytes(pl[6:]) if len(pl) > 6 else b''
+        _msg20_instrument(s, 'direct', channel, text, pl)
         reflect_chat_20(s, channel, text); return
     if sub == 0x00 and len(pl) > 10 and pl[8] == 0x14:         # type-scan double-wrap
         channel = pl[9]
         text    = bytes(pl[10:])
+        _msg20_instrument(s, 'typescan', channel, text, pl)
         reflect_chat_20(s, channel, text); return
 
     # -- TEAM / SIDE SELECT (msg 68 / 0x44) -------------------------------------
@@ -5476,6 +8582,37 @@ def handle_post_auth(s, cmd, pl):
         # each flying peer; no remap/re-stamp needed.
         if s.entered_game and sub == 0x1c:
             s.last_fired_at = time.time()   # stamp shooter for kill attribution on a peer's death
+            # v232/v244: DAMAGE TRACKING. The msg-28 record is [VictimNumber i16][HunterNumber i16]
+            # [count u8] + count*9B (HitToPlaneCB, FUN_004f3820). Two things come out of it:
+            #   * the VICTIM is marked DAMAGED - that (with v243's movement test) separates a real
+            #     death from a clean exit. The client's own rule: exit while damaged and it counts.
+            #   * v244: WHO HIT THEM. We were parsing the victim and THROWING THE HUNTER AWAY - but
+            #     it is the only way to credit a BAILOUT kill. A bailout's delete-notify is the SHORT
+            #     form (exit 0x50: MEC nibble 5 = shot down, but ScoreEvent 0 -> a 3-byte entry with
+            #     NO hunter field), so the victim never names its killer on the wire. Its own client
+            #     knows perfectly well - Test2's log says "HitFrom(Number=256...)" and announces
+            #     "AC2E_Bigalon has destroyed You" - it just doesn't tell us. Recording the hunter
+            #     here gives us the same fact, exactly.
+            try:
+                _victim_num = struct.unpack_from('<h', stored, 5)[0]
+                _hunter_num = struct.unpack_from('<h', stored, 7)[0]
+                for _p in get_sessions_in_room(s.current_room):
+                    if getattr(_p, 'my_obj_number', None) == _victim_num:
+                        _p.took_damage = True
+                        _p.last_damaged_at = time.time()
+                        if _hunter_num and _hunter_num > 0 and _hunter_num != _victim_num:
+                            # v247: LATCH THE KILL AGAINST THE OBJECT, with no expiry. The victim's
+                            # own client has just told us who hit it - that is a FACT, and it stays
+                            # true no matter how long the plane takes to come down.
+                            PENDING_KILL[_victim_num] = {'killer': _hunter_num,
+                                                         'at': time.time(), 'why': 'damage'}
+                        log('DAMAGE28', f'{_p.current_pilot} (obj 0x{_victim_num:04x}) is now DAMAGED '
+                                        f'by obj 0x{_hunter_num & 0xffff:04x} -> an exit from here '
+                                        f'counts as a death, and that hunter holds the kill until '
+                                        f'this plane is destroyed')
+                        break
+            except Exception:
+                pass
             peers = [x for x in get_sessions_in_room(s.current_room)
                      if x is not s and getattr(x, 'flying', False)]
             for p in peers:
@@ -5637,14 +8774,43 @@ def handle_post_auth(s, cmd, pl):
             game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
             pname_raw = pl[12:44] if len(pl) >= 44 else pl[12:]
             pname = pname_raw.split(b'\x00')[0].decode('ascii', 'replace').strip()
-            # Browse-and-join: current_room isn't set (room was created earlier), so
-            # resolve which room is being entered from the GameIndex in the 200 packet.
-            if not s.current_room:
-                for r in db_get_open_rooms():
-                    if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', r[0]), 'little') == game_idx:
-                        s.current_room = r[0]
-                        s.room_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
-                        break
+            # Browse-and-join / arena SWITCH: resolve which room is being entered from the
+            # GameIndex in the 200 packet. v260: resolve ALWAYS (not just 'if not current_room'),
+            # so switching from one arena to another actually moves the player. If the resolved
+            # room differs from the current one, leave the old room first (drop this player's
+            # REMOTE_PLAYER + plane from the old arena's peers and the DB) so nothing leaks between
+            # arenas - the previous gate left current_room stale on a switch, so chat/telemetry/
+            # roster kept scoping to the old arena and peers in different arenas saw each other.
+            _resolved_room = None
+            for r in db_get_open_rooms():
+                if int.from_bytes(_arena_gameindex(r[2] or r[1] or 'Arena', r[0]), 'little') == game_idx:
+                    _resolved_room = r[0]
+                    _resolved_slot = (r[5] if len(r) > 5 and r[5] else (r[0] & 0xFF))
+                    break
+            if _resolved_room is not None and _resolved_room != s.current_room:
+                if s.current_room is not None:
+                    # switching arenas: drop us from the OLD arena cleanly first
+                    _old_room = s.current_room
+                    try:
+                        broadcast_player_leave(s.current_pilot, exclude_sess=s)
+                    except Exception:
+                        pass
+                    if s.my_obj_number is not None:
+                        try:
+                            broadcast_object_delete_3(s, reason='(switched arena)')
+                        except Exception:
+                            pass
+                    try:
+                        db_room_leave(s.current_pilot)
+                    except Exception:
+                        pass
+                    log('POST-AUTH', f'ARENA SWITCH: {s.current_pilot} left room {_old_room} '
+                                     f'-> room {_resolved_room} (gidx=0x{game_idx:08x})')
+                s.current_room = _resolved_room
+                s.room_slot = _resolved_slot
+            elif not s.current_room and _resolved_room is not None:
+                s.current_room = _resolved_room
+                s.room_slot = _resolved_slot
             if pname and s.current_room:
                 existing = [p for p,_ in db_get_pilots_in_room(s.current_room)]
                 if pname not in existing:
@@ -5779,7 +8945,12 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
+        # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
+        # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
+        # 0x21 already sitting in NO_ECHO_SUBS. Guard the TYPE byte too.
+        NO_ECHO_TYPES = {0x21}
         if sub in NO_ECHO_SUBS:
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
@@ -5804,6 +8975,20 @@ def handle_post_auth(s, cmd, pl):
         # build_ingame_pkt (Size == byte count). Only filters when ON A SIDE (0..4) and the
         # upload carries more than that side's planes; never emits EMPTY (would re-trip the
         # leave/teardown), falling through to verbatim.
+        # v237: the client asks for the plane catalog (0x3a) whenever it opens the HQ / hangar
+        # screen - which is EXACTLY when the HQ SCORES screen becomes readable. Our career state was
+        # only ever pushed from the PLANE-SPAWN path, so looking at HQ -> SCORES without flying first
+        # meant nothing had ever been sent and every row read 0. That is precisely why the v236 probe
+        # came back "all 0": neither test run contained a single plane spawn (CONFIRM5 = 0), so msg 25
+        # never went on the wire. Push the career state whenever the HQ screen opens (debounced).
+        if sub == 0x3a and s.entered_game and SEND_CAREER_ON_HQ:
+            _now = time.time()
+            if _now - getattr(s, '_career_push_at', 0.0) > CAREER_PUSH_DEBOUNCE_S:
+                s._career_push_at = _now
+                log('CAREER', f'{s.current_pilot} opened the HQ screen (0x3a catalog) '
+                              f'-> pushing rank/aces + stat block')
+                push_career_stats(s, reason='(HQ screen opened)')
+
         if sub == 0x3a and PLANE_FILTER_VIA_CATALOG and s.nation is not None and 0 <= s.nation < 5:
             size = pl[0] * 16 + (pl[1] >> 4)
             if 1 <= size and 4 + size <= len(pl):
@@ -5848,8 +9033,88 @@ def handle_post_auth(s, cmd, pl):
             _pi = struct.unpack_from('<H', pl, 5)[0] if len(pl) >= 7 else None
             if _pi is not None:
                 s.spawn_ident_next = _pi + 1
-            log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object -> consumed Number {_pn} '
-                             f'ident={_pi} (counters resynced), no echo/confirm')
+            log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object -> Number {_pn} '
+                             f'ident={_pi}')
+            # *** v248: THE PARACHUTER IS A SECOND OBJECT - CONFIRM IT AND CREATE IT ON PEERS. ***
+            # After a bail there are TWO entities (the user's hint; the RE agrees - FUN_004f26b0
+            # case 2 is literally "Create NetParachuter"):
+            #     the PLANE      - pilotless, keeps the aircraft-type tag, flies on until it crashes
+            #     the PARACHUTER - carries the PILOT's name and rank (its record points at the
+            #                      plane's object number, which resolves the score object)
+            # We were doing NEITHER. We consumed this msg-4 without confirming it, so the bailing
+            # client had nothing to transmit (that is the static 2-second keepalive we saw - a client
+            # waiting on a confirm that never came, not "stale telemetry"), and we never sent a
+            # create-object type 2, so peers had nothing to render. "Create NetParachuter" appears in
+            # NEITHER client's log, ever.
+            #
+            # *** CRITICAL, and almost certainly what broke v197: DO NOT touch my_obj_number,
+            # obj_confirmed or flying here. *** A normal spawn-confirm reassigns all three. Doing
+            # that for the parachute would make the server believe the player's PLANE *is* the
+            # parachute - and the real plane's later delete would then land on an object nobody owns
+            # ("Confirm object 258 not found in list, send delete" -> the fresh plane got deleted).
+            # The parachuter gets its OWN slot.
+            if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None:
+                s.para_obj_number = _pn
+                s.para_body = bytes(pl[7:7 + PARACHUTER_HEADER_SIZE])
+                log('PARA', f'{s.current_pilot} BAILED OUT -> parachuter is object 0x{_pn:04x} '
+                            f'(plane 0x{s.my_obj_number:04x} keeps flying). '
+                            f'client body={hx(s.para_body)} ({len(s.para_body)}B) '
+                            f'| confirm={PARA_SEND_CONFIRM} create={PARA_SEND_CREATE}')
+                # v252: these two are SEPARATELY switchable so the next CTD can be bisected instead of
+                # guessed at. Three attempts have failed and we still do not know WHICH of them the
+                # client dies on.
+                if PARA_SEND_CONFIRM:
+                    threading.Thread(target=lambda nn=_pn, ii=_pi: send_reply(
+                        s, build_server_confirm_5(nn, ii),
+                        f'<- ServerConfirm 5 (PARACHUTER Number={nn} ident={ii})'), daemon=True).start()
+                if PARA_SEND_CREATE:
+                    for _peer in get_sessions_in_room(s.current_room):
+                        if _peer is not s and getattr(_peer, 'flying', False):
+                            threading.Thread(target=send_parachuter_create_for,
+                                             args=(s, _peer), daemon=True).start()
+                    # v256: THE REAL PARACHUTER LIFECYCLE (from the 2009 ground truth).
+                    # A real parachuter is NOT positioned by network telemetry. The 2009 client log
+                    # shows a create, a local model load, then NOTHING on the wire naming that object
+                    # until the SERVER sends a type-3 "Server require delete object N" when the canopy
+                    # lands - typically 5-21 s later, scaling with the bail altitude. The client
+                    # free-falls the canopy LOCALLY the whole time. Feeding it plane telemetry was
+                    # exactly wrong: the client couldn't map a type-7 packet to a parachuter object
+                    # and logged "Get coord for missing object 0" (v255). So: NO telemetry, and end
+                    # the canopy with a clean server delete so the client removes it as bsr=1 (server-
+                    # required) instead of culling it as a stale/disconnected object (bsr=0) at ~28 s.
+                    if PARA_SERVER_DELETE:
+                        def _para_land(_s=s, _pn2=_pn, _room=s.current_room):
+                            time.sleep(PARA_DESCENT_SECONDS)
+                            if getattr(_s, 'para_obj_number', None) != _pn2:
+                                return                    # already removed / recycled
+                            for _peer in get_sessions_in_room(_room):
+                                if _peer is _s or not getattr(_peer, 'flying', False):
+                                    continue
+                                try:
+                                    send_rel(_peer, build_delete_object_3(onumber=_pn2),
+                                             f'<- Server require delete PARACHUTER 0x{_pn2:04x} '
+                                             f'({_s.current_pilot} landed)', to=3.0)
+                                except Exception:
+                                    pass
+                            _s.para_obj_number = None
+                            log('PARA', f'parachuter 0x{_pn2:04x} ({_s.current_pilot}) landed after '
+                                        f'{PARA_DESCENT_SECONDS}s -> server delete sent')
+                        threading.Thread(target=_para_land, daemon=True).start()
+            else:
+                log('POST-AUTH', 'parachute msg-4 consumed, not confirmed (SEND_PARACHUTER off or '
+                                 'no plane) - counters resynced only')
+            # *** v247: the bail does not CREATE the attribution - the damage report already did.
+            # It just tells us the pilot is out, so the plane's eventual crash is a kill, however
+            # long it takes to fall. Mark the latch so the log explains itself.
+            _pk = PENDING_KILL.get(getattr(s, 'my_obj_number', None))
+            if _pk:
+                _pk['why'] = 'bail'
+                log('BAIL', f'{s.current_pilot} BAILED OUT of obj 0x{s.my_obj_number:04x} - the kill '
+                            f'is already held for obj 0x{_pk["killer"]:04x} and will be credited when '
+                            f'the empty plane comes down, however long that takes')
+            else:
+                log('BAIL', f'{s.current_pilot} bailed out with no damage on record - no kill to '
+                            f'credit')
             return
         # Generic fall-through echo. HARD GUARD: never echo a type=0x00 reliable message. The
         # client's Conductor cannot parse a reliable msg with type byte 0 ("Server sent client
@@ -5864,6 +9129,46 @@ def handle_post_auth(s, cmd, pl):
             _inner = pl[8] if len(pl) > 8 else 0
             log('POST-AUTH', f'cmd=0 type=0x00 (wrapped, inner=0x{_inner:02x}) -> swallow '
                              f'(never echo a type-0 reliable msg; would -102 the client)')
+            return
+        # v222: NO-ECHO BY *TYPE* BYTE. NO_ECHO_SUBS above tests pl[4] (the sub byte), but some
+        # client->server reports carry their message id in the TYPE byte instead, with sub=0x00 -
+        # so they slipped past that guard and got blind-echoed. Observed (run 104546):
+        #   'cmd=0 type=0x21 sub=0x00 -> echo'  = msg 33 (0x21) SCORE-EVENT, the client's own
+        #   kill/death score report ([00210000|00420000]+18000200). It is a fire-and-forget REPORT
+        #   to be CONSUMED, never reflected: echoing it feeds the client back its own event (the
+        #   same class of bug as msg 25 in v220, and 0x21 was already in NO_ECHO_SUBS for exactly
+        #   this reason - the sub-byte check just never matched it).
+        # The server does its own authoritative scoring from the msg-3 delete-notify
+        # (score_on_death) and states the result with msg 88 / msg 33, so nothing is lost.
+        # v226: msg 33 (0x21) is the EXIT-EVENT, and it must be RELAYED to the other players.
+        # The client's own sender is Msn_Exit.cpp FUN_0045d930: it emits DAT_00c82350 = 0x21 with
+        #   [0x21][AddData][Number u16][(MissExitCode << 4) | ScoreEvent][... nHits + 8B hit records]
+        # i.e. the dying plane reports WHO HIT IT AND BY HOW MUCH (each record carries a damage
+        # share). That hits list IS the game's kill-attribution mechanism, and the receiving
+        # handler (0x004f9ae0) resolves the score object, ticks the stats and prints the events.
+        #
+        # v222 added 0x21 to NO_ECHO_TYPES to stop it being blind-ECHOED back to the SENDER (that
+        # echo fed the client its own 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535]
+        # bounds-error CTD). That was right, but "don't echo to the sender" is NOT "don't relay to
+        # the peers" - and we were dropping it entirely. So NOBODY ever ran their stat pipeline,
+        # which is exactly why kills, deaths AND planes-lost all stayed 0 in the HUD / session
+        # statistics. Relay it verbatim to everyone else in the room (never back to the sender).
+        if tb == MSG_SCORE_EVENT_33:
+            if RELAY_EXIT_EVENT_33 and getattr(s, 'current_room', None) is not None:
+                peers = [p for p in get_sessions_in_room(s.current_room) if p is not s]
+                log('EXIT33', f'ExitEvent from {s.current_pilot} ({len(stored)}B: '
+                              f'{stored.hex()}) -> relay to {len(peers)} peer(s)')
+                for _p in peers:
+                    threading.Thread(
+                        target=lambda _t=_p: send_rel(_t, stored,
+                                f'<- ExitEvent 33 relay (from {s.current_pilot})', to=3.0),
+                        daemon=True).start()
+            else:
+                log('EXIT33', f'ExitEvent from {s.current_pilot} ({len(stored)}B: '
+                              f'{stored.hex()}) -> not relayed')
+            return   # never echo back to the sender (0xFFFF object index -> CTD)
+        if tb in NO_ECHO_TYPES:
+            log('POST-AUTH', f'cmd=0 type=0x{tb:02x} (client report, must not echo) -> swallow')
             return
         log('POST-AUTH',f'cmd=0 type=0x{tb:02x} sub=0x{sub:02x} -> echo')
         threading.Thread(target=lambda:send_reply(s,stored,f'echo type=0x{tb:02x}',to=5.0),daemon=True).start()
@@ -6096,7 +9401,17 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v215 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v276 on {HOST}:{PORT}')
+_unpriced = [n for n in PLANE_ROSTER if n not in PLANE_VALUE_NAMES]
+if _unpriced:
+    log('PLANES', f'[warn] no point value for {len(_unpriced)} plane(s), falling back to the '
+                  f'class default: {sorted(_unpriced)}')
+log('PLANES', f'scoring: {len(PLANE_VALUE_NAMES)} plane values loaded; ranks '
+              f'{RANK_NAMES[0]}..{RANK_NAMES[-1]} at {RANK_THRESHOLDS}')
+if _unmatched:
+    log('PLANES', f'[warn] BOMBER_PLANE_NAMES not found in PLANE_ROSTER (typo?): {sorted(_unmatched)}')
+log('PLANES', f'aircraft class: {len(BOMBER_PLANE_IDS)} bombers / '
+              f'{len(PLANE_ROSTER) - len(BOMBER_PLANE_IDS)} fighters of {len(PLANE_ROSTER)}')
 # -- ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
 #    so their camps/side block can be diffed against what a created room stores. The
 #    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
@@ -6121,6 +9436,7 @@ threading.Thread(
 ).start()
 
 threading.Thread(target=_stall_watch, daemon=True).start()
+threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
 
 _drop_ts=0.0
 

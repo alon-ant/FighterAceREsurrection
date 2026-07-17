@@ -338,7 +338,43 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 
             conn = sqlite3.connect(SRV['db_path'])
             users = conn.execute("SELECT account_name, is_admin FROM accounts ORDER BY account_name").fetchall()
-            
+
+            # Pilot stats management. Pilots live in the `pilots` table. v240: the msg-25 stat block
+            # is fully mapped, so EVERY row of the in-game HQ Scores screen has its own column and is
+            # editable - the editor doubles as an end-to-end test harness for the block.
+            pilot_html = ""
+            try:
+                pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+                if 'pilot_name' in pcols:
+                    def _c(col):
+                        return f'COALESCE({col},0)' if col in pcols else '0'
+                    pilot_rows = conn.execute(
+                        "SELECT pilot_name, COALESCE(account_name,''), " + _c('rank') + ", "
+                        + _c('score') + ", " + _c('kills') + ", " + _c('deaths') + ", "
+                        + _c('aces') + ", " + _c('planes_lost') + ", " + _c('kills_in_a_row') + " "
+                        "FROM pilots ORDER BY account_name, pilot_name").fetchall()
+                    if not pilot_rows:
+                        pilot_html = "<tr><td colspan='2'>No pilots in the database.</td></tr>"
+                    for (pname, pacct, prank, pscore, pkills, pdeaths,
+                         paces, plost, pstreak) in pilot_rows:
+                        acct_lbl = f' <small style="color:#666;">({pacct})</small>' if pacct else ''
+                        pilot_html += f"""
+                        <tr>
+                            <td><strong>{pname}</strong>{acct_lbl}<br>
+                                <small style="color:#666;">Rank {prank} &middot; Fighter Score {pscore} &middot;
+                                {pkills} kills / {pdeaths} lost pilots &middot; {plost} planes lost &middot;
+                                {pstreak} in a row &middot; Aces {paces}</small></td>
+                            <td style="text-align:right;">
+                                <a href="/admin/edit_pilot?pilot={urllib.parse.quote(pname)}" class="btn-green"
+                                   style="display:inline-block; width:auto; padding:8px 14px; margin:0;
+                                   text-decoration:none;">&#9998; Edit&nbsp;Stats</a>
+                            </td>
+                        </tr>"""
+                else:
+                    pilot_html = "<tr><td colspan='2'>No pilots table in the database.</td></tr>"
+            except Exception as e:
+                pilot_html = f"<tr><td colspan='2'>Error loading pilots: {e}</td></tr>"
+
             # Arena (room) management. Rooms live in the `rooms` table; expose name,
             # title (the arena-list section header / category) and status for editing.
             arena_html = ""
@@ -424,8 +460,117 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </div>
 
                 <div class="card">
+                    <h2 style="margin-top:0;">Pilot Stats</h2>
+                    <p style="color:#666; margin-top:0; font-size:0.9em;">Career totals stored on the
+                    server (rank, score, kills, deaths). Aces are awarded live by the game client
+                    (5 kills without dying, reset on death) and are not stored here.</p>
+                    <table>{pilot_html}</table>
+                </div>
+
+                <div class="card">
                     <h2 style="margin-top:0;">Arena Management</h2>
                     <table>{arena_html}</table>
+                </div>
+            """
+            self.send_html(content)
+
+        elif self.path.startswith('/admin/edit_pilot'):
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><p>Administrator privileges required.</p>"
+                               "<a href='/'>&larr; Back</a>")
+                return
+            q = urllib.parse.urlparse(self.path).query
+            pilot = urllib.parse.parse_qs(q).get('pilot', [''])[0]
+            conn = sqlite3.connect(SRV['db_path'])
+            pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+
+            # v240: one field per HQ Scores row. Every one of these maps to a slot in the msg-25
+            # stat block (score+0x30), so whatever is saved here is exactly what the game renders -
+            # which makes this form an end-to-end test harness for the block.
+            STAT_FIELDS = [
+                # (db column,        label,                    msg-25 slot, min, max)
+                ('rank',             'Rank',                   'f0  u8',    0,   12),
+                ('score',            'Fighter Score',          'f9  float', -2147483648, 2147483647),
+                ('bomber_score',     'Bomber Score',           'f10 float', -2147483648, 2147483647),
+                ('planes_lost',      'Planes Lost (players)',  'f4  u16',   0,   65535),
+                ('planes_lost_ai',   'Planes Lost to AI',      'f13 u16',   0,   65535),
+                ('deaths',           'Lost Pilots (deaths)',   'f1  u16',   0,   65535),
+                ('kills',            'Kills (total)',          'f5  u16',   0,   65535),
+                ('kills_fighters',   'Kills &rsaquo; Fighters','f2  u16',   0,   65535),
+                ('kills_bombers',    'Kills &rsaquo; Bombers', 'f3  u16',   0,   65535),
+                ('kills_in_a_row',   'Kills In A Row',         'f7  u8',    0,   255),
+                ('aces',             'Aces',                   'f8  u8',    0,   255),
+                ('ai_fighters',      'AI Fighters',            'f11 u16',   0,   65535),
+                ('ai_bombers',       'AI Bombers',             'f12 u16',   0,   65535),
+                ('ai_tanks',         'AI Tanks',               'f17 u16',   0,   65535),
+                ('ai_ships',         'AI Ships',               'f16 u16',   0,   65535),
+                ('ai_ground',        'AI Ground Units',        'f18 u16',   0,   65535),
+                ('ai_buildings',     'AI Buildings',           'f19 u16',   0,   65535),
+            ]
+            have = [f for f in STAT_FIELDS if f[0] in pcols]
+            sel = ', '.join(f'COALESCE({c},0)' for c, _l, _s, _lo, _hi in have)
+            row = conn.execute(
+                "SELECT pilot_name, COALESCE(account_name,'')" + (', ' + sel if sel else '') +
+                " FROM pilots WHERE pilot_name=?", (pilot,)).fetchone()
+            conn.close()
+            if not row:
+                self.send_html("<h2>Pilot not found</h2><a href='/admin'>&larr; Back to Admin</a>")
+                return
+            pname, pacct = row[0], row[1]
+            vals = {c: v for (c, _l, _s, _lo, _hi), v in zip(have, row[2:])}
+            pname_esc = hesc(pname, quote=True)
+            acct_lbl = f" (account: {hesc(pacct)})" if pacct else ""
+
+            def _grp(title, note, cols):
+                inner = ""
+                for c, label, slot, lo, hi in have:
+                    if c not in cols:
+                        continue
+                    inner += f"""
+                        <label style="display:inline-block; margin:8px 18px 8px 0; font-size:0.9em; color:#333; vertical-align:top;">
+                            {label}<br>
+                            <input type="number" step="1" name="{c}" value="{vals.get(c, 0)}"
+                                   min="{lo}" max="{hi}" required
+                                   style="display:block; width:150px; padding:6px; margin-top:3px;">
+                            <small style="color:#999;">{slot}</small>
+                        </label>"""
+                if not inner:
+                    return ""
+                return f"""
+                    <fieldset style="border:1px solid #ddd; border-radius:6px; padding:10px 14px; margin:14px 0;">
+                        <legend style="padding:0 6px; color:#444; font-weight:bold;">{title}</legend>
+                        <p style="margin:2px 0 6px; color:#888; font-size:0.82em;">{note}</p>
+                        {inner}
+                    </fieldset>"""
+
+            content = f"""
+                <div class="nav"><a href="/admin">&larr; Back to Admin</a></div>
+                <h1>Edit Pilot Stats</h1>
+                <div class="card">
+                    <h2 style="margin-top:0;">{hesc(pname)}{acct_lbl}</h2>
+                    <p style="color:#666; font-size:0.9em;">These are the pilot's career stats. Every
+                    field below maps 1:1 to a slot in the game's stat block (msg 25), which fills the
+                    <strong>HQ &rarr; SCORES</strong> screen in-game &mdash; so whatever you save here is exactly
+                    what the client will render. The grey code under each box is its slot and wire type.
+                    The server pushes this whenever the pilot opens the HQ screen, spawns, or scores a
+                    kill/death.</p>
+                    <form method="POST" action="/admin/edit_pilot">
+                        <input type="hidden" name="pilot" value="{pname_esc}">
+                        {_grp('Overall Scores',
+                              'Rank is an index 0-12; the client renders its own name for it (5 = "Major"). '
+                              'The HQ "Planes Lost" row displays the SUM of the two Planes-Lost fields.',
+                              ('rank', 'score', 'bomber_score', 'planes_lost', 'planes_lost_ai', 'deaths'))}
+                        {_grp('Record vs. Other Players',
+                              'Kills is the total; Fighters/Bombers break it down. Dying resets Kills In A '
+                              'Row, and every 5 without dying earns an Ace.',
+                              ('kills', 'kills_fighters', 'kills_bombers', 'kills_in_a_row', 'aces'))}
+                        {_grp('AI Units Destroyed',
+                              'Not yet tracked by the server - set them here to verify the client renders them.',
+                              ('ai_fighters', 'ai_bombers', 'ai_tanks', 'ai_ships', 'ai_ground', 'ai_buildings'))}
+                        <div style="margin-top:15px;">
+                            <button type="submit" class="btn-green" style="width:auto; padding:10px 20px;">Save Stats</button>
+                            &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
+                    </form>
                 </div>
             """
             self.send_html(content)
@@ -803,6 +948,58 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                  (room_name, status, rid))
                 conn.commit(); conn.close()
                 SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} status={status}")
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
+        elif self.path == '/admin/edit_pilot':
+            if not is_user_admin(user): return self.send_error(403)
+            pilot = qs.get('pilot', [''])[0].strip()
+            def _clamp(name, lo, hi, default=0):
+                try:
+                    v = int(qs.get(name, [str(default)])[0])
+                except (ValueError, TypeError):
+                    v = default
+                return max(lo, min(hi, v))
+            # v240: every column that feeds the msg-25 stat block (the HQ Scores screen).
+            # (column, lo, hi) - the bounds match each slot's wire width so a typo can't corrupt the
+            # packet. rank is capped at 12 because the client clamps anything higher to 12 anyway.
+            SAVE_FIELDS = [
+                ('rank',           0, 12),           # f0  u8
+                ('deaths',         0, 65535),        # f1  u16  "Lost Pilots"
+                ('kills_fighters', 0, 65535),        # f2  u16
+                ('kills_bombers',  0, 65535),        # f3  u16
+                ('planes_lost',    0, 65535),        # f4  u16
+                ('kills',          0, 65535),        # f5  u16
+                ('kills_in_a_row', 0, 255),          # f7  u8
+                ('aces',           0, 255),          # f8  u8
+                ('score',          -2147483648, 2147483647),   # f9  float (Fighter Score)
+                ('bomber_score',   -2147483648, 2147483647),   # f10 float
+                ('ai_fighters',    0, 65535),        # f11 u16
+                ('ai_bombers',     0, 65535),        # f12 u16
+                ('planes_lost_ai', 0, 65535),        # f13 u16
+                ('ai_ships',       0, 65535),        # f16 u16
+                ('ai_tanks',       0, 65535),        # f17 u16
+                ('ai_ground',      0, 65535),        # f18 u16
+                ('ai_buildings',   0, 65535),        # f19 u16
+            ]
+            if pilot:
+                conn = sqlite3.connect(SRV['db_path'])
+                exists = conn.execute("SELECT 1 FROM pilots WHERE pilot_name=?", (pilot,)).fetchone()
+                if exists:
+                    pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+                    # Only touch columns that (a) exist in this DB and (b) were actually posted, so an
+                    # un-migrated DB or a partial form still saves cleanly.
+                    upd = [(c, _clamp(c, lo, hi)) for c, lo, hi in SAVE_FIELDS
+                           if c in pcols and c in qs]
+                    if upd:
+                        sets = ', '.join(f'{c}=?' for c, _v in upd)
+                        args = [v for _c, v in upd] + [pilot]
+                        conn.execute(f"UPDATE pilots SET {sets} WHERE pilot_name=?", args)
+                        conn.commit()
+                        SRV['log']('WEB', f"Admin {user} edited pilot {pilot!r} stats: "
+                                          + ' '.join(f'{c}={v}' for c, v in upd))
+                conn.close()
             self.send_response(302)
             self.send_header('Location', '/admin')
             self.end_headers()
