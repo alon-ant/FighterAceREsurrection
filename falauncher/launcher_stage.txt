@@ -152,3 +152,24 @@ L: DocumentComplete
 9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/download
 D1: fetch http://fa-re-srv.ddns.net/download
 D2: saved 2172 bytes, pid=03f684cc
+1: new Host
+2: CoCreateInstance(WebBrowser)
+3: SetClientSite
+4: OleSetContainedObject
+5: DoVerb(INPLACEACTIVATE)
+6: QI(IWebBrowser2)
+7: Advise events
+8: size control
+9: Navigate
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/
+10: done
+9c: FileDownload event
+L: DocumentComplete
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/login
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/login
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/login
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/login
+L: DocumentComplete
+9b: BeforeNavigate2 vt=0x400c url=http://fa-re-srv.ddns.net/download
+D1: fetch http://fa-re-srv.ddns.net/download
+D2: saved 2172 bytes, pid=03f684cc

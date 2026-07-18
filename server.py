@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v278
+Fighter Ace LAN Server v279
 ===========================
-v278: AUTO-RESUPPLY MULTIPLAYER FIX - the grant is now TARGETED and ONE-SHOT. The remote (GCloud)
-      4-player session exposed two much bigger bugs than the v277 staleness issue:
-        (1) BROADCAST: the auto-resupply called broadcast_supply_grant_60, delivering the msg-60 to
-            EVERY session in the room (log shows each grant going to 2-4 sessions). The client's
-            msg-60 handler rearms whichever plane is LOCAL to the receiving client, so one parked
-            pilot rearmed everyone - including pilots in mid-air, whose plane object was rebuilt in
-            flight -> the observed FREEZE (plane stops moving, no crash).
-        (2) SPAM: it re-fired every AUTO_RESUPPLY_DEBOUNCE (5s) for as long as a plane sat parked -
-            168 grants across 4 pilots in one session, each fanned out to 2-4 clients. That flood of
-            unexpected reliable messages is the likely cause of the general instability, the chat
-            breaking, and the empty plane-selection list on exit to menu.
-      v278 adds send_supply_grant_60(session, ...) - a single-session send - and the auto-resupply
-      now uses it, so a grant only ever reaches the pilot who actually parked. It also fires ONCE
-      per stationary episode (s.resupplied_this_stop), re-armed only when the plane moves again or
-      respawns. broadcast_supply_grant_60 remains for the manual console command, documented as
-      rearming everyone in the room. Keeps all v277 freshness guards. BLIND (TC gate = P2b).
+v279: AUTO-RESUPPLY SPAWN GRACE - stop corrupting a plane that is still being built. With v278's
+      targeting the air-resupply and instability are gone, but resupplying right after a respawn
+      (no flight first) desynced the plane. Firestorm's client log (messages51) shows:
+        05.50.26.677  Create NetPlane (F4U-1a). St=0, ONumber=258
+        05.50.26.681  Repair PlnID:5; 0, Firestorm Full=1, Load:0      <- our msg-60, 4ms later
+        05.50.26.681  ERROR: IPC net PlnID:5; Cur:0, New:0, Net:1
+      ...and that error then repeats every ~200ms for 8.5 MINUTES (2239 times) - the local loadout
+      state (Cur/New=0) never reconciles with the network state (Net=1). The grant landed while the
+      client was still constructing the plane object, leaving it permanently inconsistent.
+      v279 records s.spawn_time on every ServerConfirm and refuses to auto-grant until
+      AUTO_RESUPPLY_SPAWN_GRACE (10s) has passed, so a freshly spawned plane is fully built before
+      it can be repaired. Runway-damage repair still works - it just waits out the grace window
+      (~12s from spawn) instead of firing into the middle of object creation. BLIND (TC gate = P2b).
+v278: AUTO-RESUPPLY targeted + one-shot (fixed air-resupply/freeze/instability with peers).
 v277: AUTO-RESUPPLY freshness guards (staleness must never look like stillness).
 v276: AUTO-RESUPPLY base change treated as an HQ entry/respawn (clean per-base settle).
 v275: AUTO-RESUPPLY WORKING - at_airfield scan-framing fix (the bug that broke all prior versions).
@@ -4818,6 +4816,7 @@ class S:
         self.pos_static_samples=0 # v277: consecutive FRESH telemetry packets with the same position
         self.last_pos_telem_t=0.0 # v277: last_telem_time already consumed by the resupply poll
         self.resupplied_this_stop=False # v278: one-shot guard - fire once per stationary episode
+        self.spawn_time=0.0       # v279: time.time() of the last ServerConfirm (spawn grace window)
         self.has_flown=False      # v269: engine has run since spawn -> a later shutdown = real landing
         self.last_resupply_at=0.0 # time.time() of the last auto-resupply grant (debounce)
         self.last_telem_tick=None # this player's most recent conductor tick (telemetry[5:7]);
@@ -7890,6 +7889,7 @@ def _fire_server_confirm(s, via='', ident=None):
     s.last_pos = None; s.pos_static_since = None
     s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
     s.resupplied_this_stop = False
+    s.spawn_time = time.time()       # v279: starts the auto-resupply spawn grace window
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
     log('CONFIRM5', f'out 4 spawn{via} -> ServerConfirm Number={number} ident={ident} ({_isrc})')
@@ -8179,6 +8179,12 @@ AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval for the stationa
 # telemetry, and require several consecutive new packets that all report the same position.
 AUTO_RESUPPLY_FRESH = 1.5      # telemetry older than this => we cannot judge; reset + skip
 AUTO_RESUPPLY_MIN_SAMPLES = 3  # consecutive NEW telemetry packets with identical position required
+# v279: after a spawn/respawn the CLIENT is still building the plane object. A msg-60 that lands in
+# that window corrupts it: run 05.50.26 shows 'Create NetPlane ... ONumber=258' followed 4ms later by
+# our 'Repair PlnID:5 ... Load:0' and then an 8.5-MINUTE flood of
+# 'ERROR: IPC net PlnID:5; Cur:0, New:0, Net:1' (local loadout state never reconciles with the net
+# state). So the auto-resupply must stay silent until the freshly spawned plane is fully built.
+AUTO_RESUPPLY_SPAWN_GRACE = 10.0  # seconds after ServerConfirm before an auto-grant may fire
 
 def _supply_msg_instrument(s, sub, cmd, pl):
     """v264: capture the spawn/land/supply/repair message flow. Logs every reliable-channel message
@@ -8275,6 +8281,13 @@ def _resupply_poll_loop():
                     s.resupplied_this_stop = False
                     continue
                 tel_t = getattr(s, 'last_telem_time', 0.0)
+                # (0) SPAWN GRACE: a freshly spawned plane is still being constructed client-side.
+                #     Repairing it mid-build leaves it permanently desynced (IPC net error flood).
+                _spawn_t = getattr(s, 'spawn_time', 0.0)
+                if _spawn_t > 0 and (now - _spawn_t) < AUTO_RESUPPLY_SPAWN_GRACE:
+                    s.last_pos = None; s.pos_static_since = None
+                    s.pos_static_samples = 0
+                    continue
                 # (1) FRESHNESS: a stale view means the plane may be moving and we simply can't see
                 #     it (remote-link stall). Never accumulate stillness from it.
                 if tel_t <= 0 or (now - tel_t) > AUTO_RESUPPLY_FRESH:
@@ -9475,7 +9488,7 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v278 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v279 on {HOST}:{PORT}')
 _unpriced = [n for n in PLANE_ROSTER if n not in PLANE_VALUE_NAMES]
 if _unpriced:
     log('PLANES', f'[warn] no point value for {len(_unpriced)} plane(s), falling back to the '
