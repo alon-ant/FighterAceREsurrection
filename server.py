@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v276
+Fighter Ace LAN Server v278
 ===========================
-v276: AUTO-RESUPPLY base-change handling = treat like an HQ entry/respawn. On a base change (tab)
-      the plane transits to the new base (position changes ~10-20s), which correctly deferred the
-      resupply - but could leave it feeling stuck. A base change re-fires StartPlace (airfield
-      change 2->3) + a fresh ServerConfirm, i.e. it IS a respawn at the new base. v276 resets the
-      auto-resupply position tracking (last_pos/pos_static_since) on (a) ServerConfirm (every spawn/
-      respawn - HQ entry AND base change) and (b) a StartPlace airfield change, so the new base
-      starts a CLEAN static settle and the old base's transit deltas can't leak in. The plane still
-      settles ~2s after transit ends, now cleanly per-base. BLIND (TC gate = P2b).
+v278: AUTO-RESUPPLY MULTIPLAYER FIX - the grant is now TARGETED and ONE-SHOT. The remote (GCloud)
+      4-player session exposed two much bigger bugs than the v277 staleness issue:
+        (1) BROADCAST: the auto-resupply called broadcast_supply_grant_60, delivering the msg-60 to
+            EVERY session in the room (log shows each grant going to 2-4 sessions). The client's
+            msg-60 handler rearms whichever plane is LOCAL to the receiving client, so one parked
+            pilot rearmed everyone - including pilots in mid-air, whose plane object was rebuilt in
+            flight -> the observed FREEZE (plane stops moving, no crash).
+        (2) SPAM: it re-fired every AUTO_RESUPPLY_DEBOUNCE (5s) for as long as a plane sat parked -
+            168 grants across 4 pilots in one session, each fanned out to 2-4 clients. That flood of
+            unexpected reliable messages is the likely cause of the general instability, the chat
+            breaking, and the empty plane-selection list on exit to menu.
+      v278 adds send_supply_grant_60(session, ...) - a single-session send - and the auto-resupply
+      now uses it, so a grant only ever reaches the pilot who actually parked. It also fires ONCE
+      per stationary episode (s.resupplied_this_stop), re-armed only when the plane moves again or
+      respawns. broadcast_supply_grant_60 remains for the manual console command, documented as
+      rearming everyone in the room. Keeps all v277 freshness guards. BLIND (TC gate = P2b).
+v277: AUTO-RESUPPLY freshness guards (staleness must never look like stillness).
+v276: AUTO-RESUPPLY base change treated as an HQ entry/respawn (clean per-base settle).
 v275: AUTO-RESUPPLY WORKING - at_airfield scan-framing fix (the bug that broke all prior versions).
 v274: AUTO-RESUPPLY position-static gate (correct, but at_airfield never set due to scan framing).
 v273: AUTO-RESUPPLY via telemetry-absence (FAILED - type-7 keeps flowing when parked).
@@ -4805,6 +4815,9 @@ class S:
         self.stationary_since=None # v272: time.time() the plane's ground speed hit 0, else None
         self.last_pos=None        # v274: last quantised position seen by the resupply poll
         self.pos_static_since=None # v274: time.time() the position last changed (static clock)
+        self.pos_static_samples=0 # v277: consecutive FRESH telemetry packets with the same position
+        self.last_pos_telem_t=0.0 # v277: last_telem_time already consumed by the resupply poll
+        self.resupplied_this_stop=False # v278: one-shot guard - fire once per stationary episode
         self.has_flown=False      # v269: engine has run since spawn -> a later shutdown = real landing
         self.last_resupply_at=0.0 # time.time() of the last auto-resupply grant (debounce)
         self.last_telem_tick=None # this player's most recent conductor tick (telemetry[5:7]);
@@ -7598,19 +7611,34 @@ def build_supply_grant_60(flags=0x04, amount=0xffff, amount2=0xffff, b1=0, b2=0)
          + struct.pack('<HH', amount & 0xffff, amount2 & 0xffff)
     return build_ingame_pkt(body)
 
-def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff,
-                              b1=0, b2=0, reason=''):
-    """Send a msg-60 SUPPLY GRANT (rearm/refuel) to every player in `room_id`. Returns the count."""
-    if room_id is None:
+def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
+                         b1=0, b2=0, reason=''):
+    """v278: send a msg-60 SUPPLY GRANT to ONE session. The client's msg-60 handler applies the
+    rearm to whichever plane is LOCAL to the receiving client, so this message must only ever go to
+    the pilot it is meant for. Broadcasting it rearms every plane in the room - including pilots who
+    are airborne, which rebuilds their plane object mid-flight and FREEZES them (observed on the
+    remote host with 4 players: 168 grants, each delivered to 2-4 sessions)."""
+    if sess is None:
         return 0
     pkt = build_supply_grant_60(flags, amount, amount2, b1, b2)
-    sess = get_sessions_in_room(room_id)
     _desc = f'flags=0x{flags:02x} amt={amount} amt2={amount2} b1={b1} b2={b2}'
+    threading.Thread(
+        target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
+        daemon=True).start()
+    log('SUPPLY60', f'{getattr(sess, "current_pilot", "?")}: msg 60 [{_desc}] {reason}')
+    return 1
+
+def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff,
+                              b1=0, b2=0, reason=''):
+    """Send a msg-60 SUPPLY GRANT to EVERY player in `room_id`. WARNING: this rearms every plane in
+    the room, including airborne ones (see send_supply_grant_60). Only for the manual console
+    command / single-player testing - the auto-resupply must use send_supply_grant_60."""
+    if room_id is None:
+        return 0
+    sess = get_sessions_in_room(room_id)
     for s in sess:
-        threading.Thread(
-            target=lambda _s=s: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
-            daemon=True).start()
-    log('SUPPLY60', f'room {room_id}: msg 60 [{_desc}] -> {len(sess)} session(s) {reason}')
+        send_supply_grant_60(s, flags, amount, amount2, b1, b2, reason)
+    log('SUPPLY60', f'room {room_id}: msg 60 broadcast -> {len(sess)} session(s) {reason}')
     return len(sess)
 
 def broadcast_scene_36(room_id, records, reason=''):
@@ -7860,6 +7888,8 @@ def _fire_server_confirm(s, via='', ident=None):
     # auto-resupply position tracking so the new spawn starts a CLEAN static settle - the old
     # object's transit/wind-down position deltas must not leak into the new base's stationary check.
     s.last_pos = None; s.pos_static_since = None
+    s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
+    s.resupplied_this_stop = False
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
     log('CONFIRM5', f'out 4 spawn{via} -> ServerConfirm Number={number} ident={ident} ({_isrc})')
@@ -8142,6 +8172,13 @@ AUTO_RESUPPLY = True
 AUTO_RESUPPLY_DEBOUNCE = 5.0   # seconds; fire at most once per this window per player
 AUTO_RESUPPLY_SETTLE = 2.0     # seconds stationary (ground speed 0) before the resupply fires
 AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval for the stationary check
+# v277 SAFETY (remote-server fix): the poll must never mistake a STALE position view for a stationary
+# plane. Over a high-latency/lossy link the telemetry stops arriving while the plane is still flying,
+# so re-reading the same cached packet looked 'static' and fired a mid-flight rearm (which rebuilds
+# the plane object and FROZE the client). So: only judge stationarity from FRESH, NEWLY-ARRIVED
+# telemetry, and require several consecutive new packets that all report the same position.
+AUTO_RESUPPLY_FRESH = 1.5      # telemetry older than this => we cannot judge; reset + skip
+AUTO_RESUPPLY_MIN_SAMPLES = 3  # consecutive NEW telemetry packets with identical position required
 
 def _supply_msg_instrument(s, sub, cmd, pl):
     """v264: capture the spawn/land/supply/repair message flow. Logs every reliable-channel message
@@ -8201,16 +8238,28 @@ def _auto_resupply_check(s, sub, pl):
         if _new_af != getattr(s, 'at_airfield', None):
             s.last_pos = None
             s.pos_static_since = None
+            s.pos_static_samples = 0
+            s.last_pos_telem_t = 0.0
+            s.resupplied_this_stop = False
         s.at_airfield = _new_af
 
 def _resupply_poll_loop():
-    """v274: background poll gating resupply on POSITION being STATIC (ground speed 0). type-7 keeps
-    flowing when parked (it doesn't reliably stop), but the position field pl[9:15] is IDENTICAL
-    every sample while stationary (verified run 135816: (1611,24009,3858) x25). So we track the
-    plane's own last position + when it last CHANGED; if the position hasn't changed for
-    AUTO_RESUPPLY_SETTLE seconds while at an airfield, the plane is stationary -> fire the msg-60
-    grant. Self-contained: reads last_plane_telem (the last full type-7 packet, saved on every relay)
-    so it doesn't depend on the _pos_hist window. Debounced. BLIND for all arenas (TC gate = P2b)."""
+    """v277: background poll gating resupply on the plane's position being STATIC - but ONLY when
+    that judgement is backed by FRESH, NEWLY-ARRIVED telemetry.
+
+    v274-v276 compared the cached last_plane_telem on every poll tick. On localhost that was fine
+    (telemetry arrives ~every 0.5s), but on a REMOTE server the stream stalls while the plane is
+    still flying - the poll then re-read the same cached packet, saw an unchanged position, and
+    concluded 'stationary'. That fired a mid-flight msg-60 rearm, which rebuilds the plane object
+    and FROZE the client. Staleness must never look like stillness.
+
+    v277 therefore requires all of:
+      * telemetry FRESH  - last_telem_time within AUTO_RESUPPLY_FRESH, else reset the clock and skip
+      * a NEW packet     - last_telem_time must advance before a sample counts (no double-counting
+                           one cached packet across poll ticks)
+      * repeated agreement - AUTO_RESUPPLY_MIN_SAMPLES consecutive new packets with the SAME position
+      * settled          - position unchanged for AUTO_RESUPPLY_SETTLE seconds
+    Any position change, telemetry gap, takeoff, or respawn resets the clock. BLIND (TC gate = P2b)."""
     while True:
         try:
             time.sleep(AUTO_RESUPPLY_POLL)
@@ -8222,8 +8271,20 @@ def _resupply_poll_loop():
                     continue
                 if getattr(s, 'at_airfield', None) is None or s.current_room is None:
                     s.last_pos = None; s.pos_static_since = None
+                    s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
+                    s.resupplied_this_stop = False
                     continue
-                # read the plane's current quantised position from the last full type-7 packet
+                tel_t = getattr(s, 'last_telem_time', 0.0)
+                # (1) FRESHNESS: a stale view means the plane may be moving and we simply can't see
+                #     it (remote-link stall). Never accumulate stillness from it.
+                if tel_t <= 0 or (now - tel_t) > AUTO_RESUPPLY_FRESH:
+                    s.last_pos = None; s.pos_static_since = None
+                    s.pos_static_samples = 0
+                    continue
+                # (2) NEW PACKET: only evaluate once per actually-received telemetry packet.
+                if tel_t <= getattr(s, 'last_pos_telem_t', 0.0):
+                    continue
+                s.last_pos_telem_t = tel_t
                 tel = getattr(s, 'last_plane_telem', None)
                 pos = None
                 if tel and len(tel) >= 15:
@@ -8232,25 +8293,38 @@ def _resupply_poll_loop():
                     except struct.error:
                         pos = None
                 if pos is None:
-                    continue                     # no position yet -> can't judge
+                    continue
                 prev = getattr(s, 'last_pos', None)
                 if prev is None or pos != prev:
-                    # position changed (or first sample) -> moving; reset the static clock
+                    # moving (or first fresh sample) -> restart the stationary clock and re-arm the
+                    # one-shot: the plane must come to rest again before it can resupply once more.
                     s.last_pos = pos
                     s.pos_static_since = now
+                    s.pos_static_samples = 1
+                    s.resupplied_this_stop = False
                     continue
-                # position unchanged since last poll -> still; how long has it been static?
+                # (3) same position on a NEW packet -> a genuine stationary observation
+                s.pos_static_samples = getattr(s, 'pos_static_samples', 0) + 1
+                if s.pos_static_samples < AUTO_RESUPPLY_MIN_SAMPLES:
+                    continue
+                # (4) settled long enough?
                 static_for = now - getattr(s, 'pos_static_since', now)
                 if static_for < AUTO_RESUPPLY_SETTLE:
                     continue
-                if now - getattr(s, 'last_resupply_at', 0.0) < AUTO_RESUPPLY_DEBOUNCE:
+                # (5) ONE-SHOT: v276 re-fired every DEBOUNCE seconds for as long as the plane sat
+                #     parked (168 grants in one remote session). Fire once per stop; the plane must
+                #     move and settle again (or respawn) before another grant.
+                if getattr(s, 'resupplied_this_stop', False):
                     continue
+                s.resupplied_this_stop = True
                 s.last_resupply_at = now
-                broadcast_supply_grant_60(
-                    s.current_room, flags=0x04, amount=0xffff, amount2=0xffff,
+                # (6) TARGETED: only the parked pilot. Broadcasting rearms airborne pilots too.
+                send_supply_grant_60(
+                    s, flags=0x04, amount=0xffff, amount2=0xffff,
                     reason=f'(auto-resupply: {s.current_pilot} stationary at AF={s.at_airfield})')
-                log('RESUPPLY', f'{s.current_pilot} position static {static_for:.1f}s at '
-                                f'AF={s.at_airfield} (pos={pos}) -> auto msg-60 grant (blind)')
+                log('RESUPPLY', f'{s.current_pilot} position static {static_for:.1f}s '
+                                f'({s.pos_static_samples} fresh samples) at AF={s.at_airfield} '
+                                f'(pos={pos}) -> auto msg-60 grant (blind, one-shot)')
         except Exception:
             logx('RESUPPLY', 'poll loop error')
 
@@ -9401,7 +9475,7 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v276 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server v278 on {HOST}:{PORT}')
 _unpriced = [n for n in PLANE_ROSTER if n not in PLANE_VALUE_NAMES]
 if _unpriced:
     log('PLANES', f'[warn] no point value for {len(_unpriced)} plane(s), falling back to the '
