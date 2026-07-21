@@ -1,20 +1,402 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v279
+Fighter Ace LAN Server v300
 ===========================
-v279: AUTO-RESUPPLY SPAWN GRACE - stop corrupting a plane that is still being built. With v278's
-      targeting the air-resupply and instability are gone, but resupplying right after a respawn
-      (no flight first) desynced the plane. Firestorm's client log (messages51) shows:
-        05.50.26.677  Create NetPlane (F4U-1a). St=0, ONumber=258
-        05.50.26.681  Repair PlnID:5; 0, Firestorm Full=1, Load:0      <- our msg-60, 4ms later
-        05.50.26.681  ERROR: IPC net PlnID:5; Cur:0, New:0, Net:1
-      ...and that error then repeats every ~200ms for 8.5 MINUTES (2239 times) - the local loadout
-      state (Cur/New=0) never reconciles with the network state (Net=1). The grant landed while the
-      client was still constructing the plane object, leaving it permanently inconsistent.
-      v279 records s.spawn_time on every ServerConfirm and refuses to auto-grant until
-      AUTO_RESUPPLY_SPAWN_GRACE (10s) has passed, so a freshly spawned plane is fully built before
-      it can be repaired. Runway-damage repair still works - it just waits out the grace window
-      (~12s from spawn) instead of firing into the middle of object creation. BLIND (TC gate = P2b).
+v300: STABLE BUILD FOR DEPLOYMENT. No new decoding - this banks the working supply/repair layer
+      and puts the unfinished TC economy work behind flags so it cannot destabilise testing.
+
+      SHIPPING AND PROVEN:
+        - auto-resupply/repair on engine-off at a field (AUTO_RESUPPLY, msg 60 grant)
+        - the 60s production step with per-scene stores, seeded from the arena's own
+          [TC] InitialStorage percent (v292)
+        - destroyed scenes lose their stored supplies immediately (v291) - measured live: killing
+          one GER fuel factory cost 15000 stored fuel at once plus 1000 fuel/min thereafter,
+          exactly the RESOURCE_PRODUCER_DEF rate
+        - scene damage/condition display via msg 69 (v295/v296): record layout [u16 id][u8 value],
+          the byte landing in obj+0x30. This is the one economy-adjacent message that visibly
+          works, and it is left ON
+        - msg 30 scene-state destroy (v290), room persistence, arena management, web admin
+
+      GATED OFF - decoded and correctly framed, but produces no visible effect yet:
+        - SEND_PRODUCTION_40 (msg 40, per-camp production complex). Accepted by the client at the
+          right size, changes nothing on screen. Off by default so we are not shipping a
+          once-a-minute broadcast per camp for no benefit; the `production` console command still
+          works for testing.
+        - msg 42 snapshot and msg 71 SCENE_TAG_PRODUCTION INFO remain console-only (`snapshot`,
+          `prodinfo`) and are never sent automatically.
+
+      REVERTED: TC_DEFAULTS get_fuel_when_lim_fuel 77 -> 50. The 77 was a wire-alignment probe and
+      it did its job (the client echoed 77, proving our GAME_DEF walk is correct); 50 is the real
+      value and should not ship as 77.
+
+      OPEN, for the next session: the Production Complex / Single Scene Data panels are still
+      blank. msgs 42, 40 and 71 are all accepted by the client without complaint and none of them
+      draws anything, so the blocker is not a missing message. The last probe attempt was
+      inconclusive - fa_probescan.py reported NOT SENT, meaning the marker bytes never reached the
+      client, which needs the PROD71 server log line to diagnose (see notes at the console command).
+
+v299: [TC] msg 71 probe markers made HIGH-ENTROPY - v298's were consecutive integers and the
+      memory scan matched noise. A=(111,112,113) is 6f,70,71, which occurs inside ANY ascending
+      index array; the first scan reported 224 'hits' for A and the node dump showed a plain
+      counter 5f,60,61,62... The 'wire path works' conclusion drawn from it was unfounded.
+      New markers carry a per-array tag in the high bytes so a 12-byte triple is effectively
+      unique. C/E/H are BYTES on the wire (max 255) so they keep small values, but note the
+      client widens them: FUN_0048e910 writes every array as DWORDS into the node, 12 bytes
+      apart, so in memory all nine are u32 triples at
+          node+0x40 A, +0x4c B, +0x58 C, +0x64 D, +0x70 E, +0x7c F, +0x88 G, +0x94 H, +0xa0 I
+      That fixed stride is what makes the search decisive: fa_memdump --findprobe now requires
+      ALL NINE families at their exact offsets from a candidate, which noise cannot satisfy.
+
+v298: [TC] msg 71 (0x47) SCENE_TAG_PRODUCTION INFO - the real economy payload. THIS is the one.
+      msg 69 carries ONE byte per scene (the condition percent, wired up in v296). It was never
+      going to fill a panel showing nine columns. The actual detail rides on msg 71, and we have
+      never sent or received a single one:
+          2009 log : out 71'=163  in 71'=163
+          ours     : out 71'=  0  in 71'=  0     (78/82/84/87, all zero)
+      Found by chasing the strings 'SCENE_TAG_PRODUCTION_MESSAGE::PACKED_REQUEST' and
+      '::PACKED_INFO' to the shared handler at 0x4fb4c0 (dispatch slot 0xc81ff4). The 2009 reply
+      sizes are arithmetic and confirm the shape: 90,173,256,339,422,505,588 - a 7-byte header
+      plus N*83.
+          request : [0x47][u32][u16] + N x u16 sceneIdx     (out 71'9 = 1 scene, '11 = 2, '13 = 3)
+          reply   : [0x47][u32][u16] + N x 83-byte PACKED_INFO
+      PACKED_INFO layout, from the unpacker FUN_0048e910 (3-iteration loop = the 3 resources):
+          +0x00 u16    scene id   <- matched against obj->field_0x4c, as in msg 69
+          +0x02 u32[3] A -> obj+0x40      +0x2c u32[3] F -> obj+0x7c
+          +0x0e u32[3] B -> obj+0x4c      +0x38 u32[3] G -> obj+0x88
+          +0x1a u8 [3] C -> obj+0x58      +0x44 u8 [3] H -> obj+0x94
+          +0x1d u32[3] D -> obj+0x64      +0x47 u32[3] I -> obj+0xa0
+          +0x29 u8 [3] E -> obj+0x70                        = 83 bytes exactly
+      The client takes the INFO path whenever [0xc6e8a4]==0 (it is not the host) and never reads
+      the u32/u16 header fields, so we can push INFO UNSOLICITED - which matters, because our
+      client never sends the request (out 71' = 0).
+      NINE arrays is too many to guess, so `prodinfo probe` fills each with a distinctive marker
+      (A=111/112/113, B=221/222/223, C=31/32/33, ...) and the panel then tells us which array is
+      which. `prodinfo` alone sends our real supply figures on a best-guess mapping.
+
+v297: [TC] msg 40 (0x28) PRODUCTION COMPLEX - the per-camp economy the map panel reads.
+      Decoded from the handler at 0x4f6ab0 (dispatch slot 0xc81f78). Layout, and it comes to
+      EXACTLY 38 bytes, matching every `in 40'38` in the 2009 log:
+          [0]          u8  type 0x28
+          [1]          u8  camp            <- bounds-checked < 8
+          [2..5]       u32 A               -> camp_rec + 0x00
+          [6..9]       u32 B               -> camp_rec + 0x04
+          [0xa..0xd]   u32 C               -> camp_rec + 0x08
+          [0xe..0x19]  u32 D[3]            -> camp_rec + 0x0c   (3-iteration loop)
+          [0x1a..0x25] u32 E[3]            -> camp_rec + 0x18
+                                             camp_rec + 0x34 = 1   (valid flag)
+          camp record base 0xc845c8, stride 0x9c
+      Three scalars then two arrays of three. Three is the resource count, and the panel shows
+      'Aircraft/Tank/Ship units' followed by Metal/Fuel/Ammo twice - once as an amount and once
+      as a percentage - so D and E are read here as STORED and CAPACITY, with the client deriving
+      the percentage. That pairing is inference from the UI, not proven from the binary: if the
+      numbers come out swapped or the units land in the wrong row, the A/B/C order or the D/E
+      roles are what to try first.
+      Sent per camp on the production tick and on demand via the `production` console command.
+      Totals are summed over every scene of a camp that has a profile, which is what makes the
+      Production Complex figures aggregate rather than per-scene.
+
+v296: [TC] msg 69 value byte identified - it is the scene's CONDITION percent, not supply.
+      v295 fixed the record layout to [u16 id][u8 value] and the client immediately started
+      displaying the byte - every scene read '100% damage', which is exactly the average supply
+      percentage we were putting there (InitialStorage=100, nothing damaged). So obj+0x30 is the
+      per-scene CONDITION/damage figure the map shows, and the id really is the scene index.
+      That is the field 'scene damage unknown' was complaining about: it had never been set.
+      Now sending scene HEALTH: 100 = intact, 0 = flattened, derived from SCENE_HP the same way
+      scene_efficiency() does. Note SCENE_HP only fills when AUTO_SCENE_DESTROY is on, so with
+      autopve off every scene legitimately reports 100 - that is accurate, not a stub.
+      Supply percentages are therefore NOT carried by msg 69. One byte cannot hold three
+      resources, so the Metal/Fuel/Ammo panel must come from elsewhere - msg 40 (184 occurrences
+      in the 2009 log, 0 in ours) is the next candidate.
+
+v295: [TC] msg 69 record layout CORRECTED - it is [u16 id][u8 value], not three percentages.
+      v294 guessed the 3-byte record was (metal%, fuel%, ammo%) because the map panel shows three
+      percentages. Wrong, and wrong in a way that failed SILENTLY: the client accepted every reply
+      (sizes all passed its (Length-1)%3==0 assertion) and did nothing visible.
+      The consumer is FUN_0048e9a0, reached from the msg-69 handler via 0x491a40:
+          for each record:
+              if (obj->field_0x4c == *(u16*)rec)      <- u16 matched against an OBJECT ID
+                  obj->field_0x30 = (u8)rec[2];       <- single byte stored
+                  obj->field_0x20 = timeGetTime();    <- last-updated stamp
+                  obj->field_0x28 = 0;
+              rec += 3;
+      So each record is [u16 id][u8 value]. Our v294 reply for scene 3 at 100/100/0 went out as
+      64 64 00, which the client read as id=0x6464=25700 - no such object - so it matched nothing
+      and dropped every record on the floor. That is why the panel stayed blank despite the client
+      logging in 69'4 / 69'13 / 69'16 at exactly the right sizes.
+      Now echoing the requested scene index as the id and one supply byte as the value. The value's
+      meaning is still unconfirmed - it lands in obj+0x30 and we are sending the scene's overall
+      supply percentage as the first candidate.
+
+v294: [TC] msg 69 (0x45) SCENE SUPPLY QUERY - answering the request we have always ignored.
+      CREDIT: Alon spotted this from the client side - a 'supply-cap' entry appears every time the
+      map is opened or a scene is selected. It is the client ASKING for economy data, and we log it
+      and say nothing. The 2009 ground truth is unambiguous:
+          2009 log : out 69'=232   in 69'=232     <- answered 1:1, every single time
+          messages78: out 69'= 17   in 69'=  0
+          messages82: out 69'= 21   in 69'=  0
+      REQUEST FORMAT, decoded from our own SUPPLY-CAP captures (the instrument was already logging
+      the payload hex, we had simply never read it):
+          00 <type> 00 00 45 <u16 sceneIdx> x N
+          type encodes N: 0x32=1 0x52=2 0x72=3 0x92=4 0xb2=5   (+0x20 per extra record)
+          e.g. 00 b2 0000 45 0300 1500 1600 1c00 2000 -> scenes 3,21,22,28,32
+      Every observed index is <= 60, i.e. the display-list scene space, and the count matches the
+      client-side sizes exactly (out 69'3 = [0x45][u16] for a single scene).
+      REPLY FORMAT, from the handler at 0x4f5130 (dispatch slot 0xc81fec):
+          count = (Length - 1) / 3, asserted to divide evenly (VNet_Rcv.cpp:1400 on failure)
+      so the answer is ONE 3-BYTE RECORD PER REQUESTED SCENE - and 2009's `out 69'3 -> in 69'4`
+      is exactly one scene asked, one record returned.
+      WHAT THE THREE BYTES ARE: a hypothesis, not yet proven. The map panel shows
+      'Resource Storage: Metal 50% / Fuel 50% / Ammo 50%' - three percentages, in that order - so
+      we answer with (metal%, fuel%, ammo%) drawn from the supply model. If the panel populates
+      with plausible numbers this is right; if it shows the wrong three values the ORDER is wrong;
+      if it stays blank the record means something else entirely. SUPPLY_QUERY_REPLY gates it.
+
+v293: [TC] msg 42 (0x2a) SCENE SNAPSHOT - the message that populates the economy display.
+      WHY THE ECONOMY PANEL IS EMPTY. Not the link radius. A wire-alignment probe settled that
+      first: get_fuel_when_lim_fuel was set to 77 and the client's [TC] dump echoed 77, so our
+      GAME_DEF walk is correct and UseSceneUnitProducers (+0x474) / ResourceProducerLinkRadius
+      (+0x47c) really are absent from the wire. Which also means they CANNOT be the cause - if
+      they were, TC economy would have been dead on every real FA server too. 0 almost certainly
+      means 'use each scene's own link value', which is what data00_scenes.json carries per scene
+      (10000..60000) and what the offline UI shows as 'Link range: 21' / '6'.
+      THE ACTUAL GAP. Comparing the 2009 ground-truth log against ours:
+          msg 42 (scene snapshot)      2009: 2     ours: 0
+          msg 40 (production step)     2009: 184   ours: 0
+          msg 28 (object state)        2009: 116   ours: 0
+          msg 30 (scene state)         2009: 22    ours: 0 (added in v290)
+      We have never sent ANY ground-war economy message. The client has no scene state at all,
+      which is why the panel is blank, damage reads 'unknown', and it re-asks on every map open.
+      WIRE FORMAT, from the handler at 0x4f4d50 (dispatch slot 0xc81f80, found by scanning for
+      `C7 05 <slot> <imm32>`; the same scan re-derives msg 30 -> 0x4f6880, which v290 already
+      confirmed, so the method is sound):
+          count = Length - 1                  <- the type byte is skipped, as in msg 30
+          count is compared against [0xc84ff8] = TRN_MANAGER::nSceneInstDef and a mismatch logs
+            'AIClient. TRN_MANAGER::nSceneInstDef=%i. Receiving %i scenes.'
+          then ONE BYTE PER SCENE, bit-packed. The debug printer spells the fields out:
+            '  Scene %3i. Camp=%i, State=%i. (%i)'  with (index, byte & 7, byte >> 3, byte)
+          so  byte = (State << 3) | Camp,  Camp 0..7 (7/0xff-equivalent = neutral), State 0..31.
+      This build adds the builder and a `snapshot` console command. It is NOT yet sent
+      automatically on join - fire it by hand first and confirm the panel populates, because an
+      count that disagrees with nSceneInstDef makes the client complain rather than render.
+
+v292: [TC] SEED FROM THE ARENA'S OWN InitialStorage - correcting v291.
+      v291 hardcoded SUPPLY_SEED_FRAC = 0.5 because the offline TC training mission seeded a fuel
+      factory to 15000 of a 30000 cap. That was the TRAINING MISSION's setting, not a constant.
+      The client's settings dump for OUR arena (messages78, 20:01:10) reads:
+          InitialStorage=100     <- our arenas start FULL, not half
+          SupplyResourceRadius=10000m   ParachuteResourceRadius=2000m
+          PlaneProducerLinkRadius=100   TankProducerLinkRadius=100   ShipProducerLinkRadius=100
+          GetFuelWhenLimFuel=50         GetAmmoWhenLimAmmo=50        CargoPercent=0
+          AttackPercent=20  DefensePercent=30  CapturePercent=50  (toggle delays all 300)
+          ResourceProducerLinkRadius=0  <- see below
+      InitialStorage is a PERCENT and is per-arena, so the seed now follows it via
+      supply_seed_frac(room_id) instead of being a global constant. 50% was never a fact about
+      the game, only about that one mission.
+      OPEN ISSUE - the missing economy panel. The client reports ResourceProducerLinkRadius=0, so
+      no scene can reach a producer, no production complex forms, and the Production Complex /
+      Single Scene Data panels have nothing to show. We CANNOT currently fix this from the server:
+      the GAME_DEF deserialiser walks +0x470 -> +0x478 -> +0x480, skipping +0x474
+      (UseSceneUnitProducers) and +0x47c (ResourceProducerLinkRadius) - both are read only by the
+      INI parser at 0x581400. So the client keeps its own default of 0 no matter what we send.
+      Offline, where the panel works, the same fields read 'Link range: 21' and 'Link range: 6'.
+
+v291: [TC] IMMEDIATE STORED-SUPPLY LOSS ON DESTROY + 50% seed, both MEASURED from the live game.
+      Method: fa_memdump.py attached read-only to the offline TC training mission and polled the
+      production globals every 5s while a single GER fuel factory was destroyed. Isolated result
+      (GER camp3 minus the undamaged camp0 baseline):
+          t= 50.7  between steps   metal 0   fuel -15000   ammo 0      <- one-time
+          t= 74.0  STEP            metal 0   fuel  -1000   ammo 0
+          t=141.0  STEP            metal 0   fuel  -1000   ammo 0
+          t=186.2  STEP            metal 0   fuel  -1000   ammo 0
+      and the individual building was caught in the same dump:
+          0x1db70fd0  fuel max=30000 camp=3   works: 1 -> 0   value: 15000 -> 0
+      So destruction has TWO distinct effects, and we only modelled the second:
+        (a) the scene's STORED contents are lost immediately, outside the production step;
+        (b) the producer's rate leaves the camp total permanently (v286 efficiency scaling).
+      -1000/min is exactly RESOURCE_PRODUCER_DEF[1] = {fuel, max 30000, rate 1000}, and metal and
+      ammo were untouched - matching the 'Fuel Factory: metal 0, fuel 1000, ammo 0' profile. An
+      earlier run showed -1400 metal too, but that was collateral damage from extra buildings; the
+      single-target run above isolates it cleanly.
+      SUPPLY_SEED_FRAC 1.0 -> 0.5. The destroyed factory held 15000 of a 30000 cap, and the map
+      screens read 'Resource Storage: Metal 50% / Fuel 50% / Ammo 50%' across the board. Fields
+      were starting completely full, which made them far too generous.
+
+v290: [PvE] msg 30 (0x1e) SCENE OBJECT STATE - the message that actually removes the building.
+      THE MISSING HALF. Across six sessions we sent 551 msg-36 and ZERO msg-30. The 2009
+      ground-truth log pairs EVERY destroy with msg 30 immediately after:
+          01:45:42 in 36'8 / 01:45:45 in 30'149 / 01:45:48 in 30'5
+          01:50:06 in 36'8 / 01:50:08 in 30'5   / 01:50:12 in 30'13
+      (36 fires 5x, 30 fires 22x, always trailing). So msg 36 is only the ANNOUNCEMENT - it prints
+      'You have destroyed X' and updates logical state - while msg 30 carries the world-state
+      change that makes the object disappear. That is exactly what we saw live: correct text,
+      intact 3D world. `destroy 402 1` naming Birchwood but leaving it standing is this bug.
+      This may also explain the Fa3_ParticleSystemCreator.cpp:942 CTDs: we ask the client to spawn
+      an explosion for an object whose state was never updated.
+      WIRE FORMAT, from the handler LAB_004f6880 (dispatch slot 0xc81f50, set in FUN_004f1490):
+          edi = Ptr; INC EDI  -> the first byte is skipped (header/pad)
+          ebx = Length; DEC EBX
+          loop: si = u16 [edi]; esi = si & 0x7fff        <- scene index, low 15 bits
+                bounds-checked against [0xc84ffc] and [0xc87274]
+                ecx = [0xc87270][esi*4]                  <- SAME raw scene array msg 36 uses,
+                                                            so indices are directly compatible
+                test byte [edi+1], 0x80                  <- bit 15 = has-value flag
+                  set   -> edx = u16 [edi+2]; call 0x568eb0(1, edx, 0); consumes 4 bytes
+                  clear -> call 0x568eb0(0, 0, 0);       consumes 2 bytes
+      FUN_00568eb0 with param_2==0 calls the object's vtable[+0x54] (the clear/destroy path);
+      with param_2==1 it drives a progress/countdown path (value*0x400, 60 - v/1000 timer) which
+      is capture progress, not destruction. So DESTRUCTION = a 2-byte record with bit 15 CLEAR.
+      broadcast_scene_36() now sends the matching msg 30 straight after the msg 36, gated by
+      SEND_SCENE_STATE_30 so it can be turned off if it proves wrong.
+
+v289: [PvE] NAME-SCAN - stop letting camp=0xFF suppress the answer we are probing for.
+      The 02:24 run probed indices 117..131 with `destroy <n>` and got 'a bridge' FOURTEEN times.
+      That was not the client failing to resolve them: camp=0xFF forces the GENERIC text path in
+      the msg-36 handler, so the client never looks the name up at all. `destroy` defaulted the
+      camp to scene_camp(), which returns 0xFF for anything outside the 0..59 table - i.e. exactly
+      the indices we were trying to identify. The probe was suppressing its own output.
+      The one probe carrying a real camp is the one that taught us something:
+          destroy 51 camp=0x01 -> 'GBR Ammo Factory'
+      while the join table calls scene 51 a Tank Factory. So the msg-36 name array is NOT the join
+      display list, and its entries are building-level ('Shed' at 59, 'Storage' at 40, 'Ammo
+      Factory' at 51).
+      (a) `destroy` now falls back to DESTROY_NAMING_CAMP (default 0) instead of 0xFF when the
+          scene's real camp is unknown, so the client always names the target. Pass 255 explicitly
+          to get the old generic behaviour.
+      (b) `idscan <lo> <hi> [gap] [camp]` sweeps a range with a naming camp, one index at a time,
+          so the CLIENT log yields one 'You have destroyed <camp> <name>' per index. That is what
+          builds the msg-36 name table for the space the weapon objects actually live in.
+
+v288: [PvE] AUTO-DESTROY NOW USES weapon_map.json - AND REFUSES TO GUESS.
+      THE BUG, from the 19-Jul 02:08 calibration run: auto-destroy used `scene_idx = obj`, bare
+      identity. Neither map was ever consulted - probe_save() writes objscene_map.json and
+      corr_map_save() writes weapon_map.json, but _handle_ground_damage_31 read from neither.
+      Live result: three GBR targets reported as 'USA Shed', 'JPN Storage' and 'a bridge'.
+      WHY IDENTITY CANNOT WORK. The msg-31 ev=0x05 `obj` byte is a PER-BUILDING index; msg-36
+      takes a SCENE index. The 02:09 bursts prove the fold - two bombs on ONE airfield lit up the
+      same ten objects (36,40,45,58,60,61,62,63,91,99), while Birchwood lit a different cluster
+      (53,59,70,71). Many objects -> one scene. No arithmetic recovers that; it needs a table.
+      (The old comment claiming identity was 'CONFIRMED messages21' was removed in v287.)
+      WHY NOT THE PROBE MAP. objscene_map.json comes from the destroy-sweep, which only exercises
+      ev=0x00 reconciliation in SCENE space - it returns the region around a scene, not that
+      scene's buildings. Hence objs 60..63 all collapsing to scene 59. Wrong space. The weapon
+      space only comes from `corr map <obj> <scene>` eye-confirmed anchors -> weapon_map.json.
+      THE FIX. WEAPON_MAP is loaded at startup and consulted for every candidate destroy. If the
+      obj has no anchor, we now emit NOTHING and log it, instead of destroying an unrelated scene.
+      Failing silent beats failing wrong: a missing entry is a gap to fill, a wrong entry corrupts
+      the arena's ownership state for every player in it. `weaponmap` reloads without a restart.
+
+v287: [PvE] CALIBRATION RECORDER - survives the run-log gap.
+      The 18-Jul 23:05 session destroyed three scenes and NOTHING was logged server-side:
+      run_20260718_210037.log stops at 21:33 and server.log jumps straight from hour 21 to the
+      01:35 restart, yet the client received three `in 36'`. A server was serving while writing no
+      logs at all - almost certainly launched with a different working directory, since
+      fa_logging.init_logging() resolves `logs/` RELATIVE TO CWD. That cost us the entire
+      calibration run: the obj indices we needed were computed and then thrown away.
+      Fix: PVE_CALIB writes to an ABSOLUTE path beside this script, opened per-append and flushed
+      immediately, so it cannot be lost to cwd, buffering or a dead console. It records both ends
+      of the mapping - every ev=0x05 damage record (obj) and every msg-36 actually sent (sceneIdx,
+      camp) - so pairing it with the client's 'You have destroyed <camp> <name>' line yields the
+      obj -> real-scene mapping directly.
+      NOTE: the live test FALSIFIES the identity assumption in _handle_ground_damage_31. The
+      comment there claims obj IS sceneIdx ('CONFIRMED messages21'); messages62 shows attacking a
+      GBR airfield reported 'USA Shed', 'JPN Storage' and 'a bridge' - three wrong scenes, the last
+      with camp 0xFF meaning the index fell outside the 0..59 table entirely. Identity is WRONG.
+
+v286: [TC] SCENE TYPE ALIASES + damage-aware production efficiency.
+      (a) ALIASES. 97 of the 662 scenes in fa_scenes.json carried a type string with no entry in
+          `profiles`, so they fell through to the blind path. Most are correct as-is (Anti-Aircraft
+          1/2 = 50 scenes, genuinely no economy), but Substation 2 (32), Farm (9), Tank (3) and the
+          three named cities (Birmingem/London/Paris) were real losses. SUPPLY_TYPE_ALIASES maps
+          them onto the right stock profile; unknown names now also get a keyword pass
+          (Airfield/Factory/Village/Port) before giving up. VERIFIED against the real table:
+          scenes resolving to an economy go 565 -> 612 of 662; the remaining 50 are exactly the
+          Anti-Aircraft sites, which correctly have none.
+      (b) EFFICIENCY. Production is now scaled by scene health. CONFIRMED this session from
+          FA.exe FUN_00588850 (the producer-death path): a destroyed producer has its rate
+          SUBTRACTED from the camp aggregate (DAT_00c87c60[resType + camp*8] -= rate) and its
+          Works() flag cleared. There is NO per-building efficiency scalar in the binary - the
+          'production efficiency %' the manual shows on the Single Scene Data panel is an emergent
+          ratio of surviving producers. We approximate that with scene HP fraction until the
+          weapon-obj -> scene index translation lands (see AUTO_SCENE_DESTROY notes).
+      (c) REPAIR. Damaged scenes now heal SUPPLY_REPAIR_HP_PER_TICK per production step, mirroring
+          the arena's BuildingsRepairRate/RepairTime parameters (both confirmed present in the
+          GAME_DEF settings dump). Without this, damage was permanent and fields decayed forever.
+      Struct facts pinned this session from FA.exe Production.cpp (FUN_0058cb50 asserts):
+          sizeof(RESOURCE_STORAGE_DEF)=8, RESOURCE_PRODUCER_DEF=16, UNIT_PRODUCER_DEF=24;
+          nResourcesUsed()<=8; aggregate arrays are 8 camps x 8 resources x u32.
+          UNIT_PRODUCER_DEF layout confirmed against a real 11-record table (Data06.all@19040):
+          [UnitType(0=plane,1=tank)][ResourceType ALWAYS 0=metal][MaxStorage][Rate/min][Cost][Flags]
+          - independently reproducing the wiki's 'metal is the only resource needed for units'.
+          Resource enum confirmed: 0=metal, 1=fuel, 2=ammo.
+
+v285: RESUPPLY IS NOW INCREMENTAL (flags 0x08), per the user's model: the aircraft should draw only
+      what it is SHORT of - ammo if it needs ammo, fuel if it needs fuel - and when the field cannot
+      cover it, fall back to aircraft units / tank production. That is exactly what the 0x08 probe
+      did ("insufficient aircraft units at the airfield, taking from tank production to supply").
+      v283/v284 used 0x01, an ABSOLUTE SET: it gated correctly but force-rewrote BOTH resources to a
+      fixed figure on every rearm, so a plane that had only burned ammo still had its fuel reset,
+      and each rearm cost the field a full load regardless of need - which is why firing repeatedly
+      drained the airfield in a handful of passes.
+      v285 offers a CEILING (SUPPLY_FULL_*_KG) and charges only a nominal amount
+      (SUPPLY_DEBIT_FUEL_KG=300 / SUPPLY_DEBIT_AMMO_KG=150) since the client never reports how much
+      it actually drew. The offer is still capped by what the field has left, so an exhausted field
+      offers 0 kg and the client surfaces the shortage itself.
+v284: [TC] economy block patched into the GAME_DEF (InitialStorage / Get*WhenLim* / CapturePercent).
+      RE chain: string hunt in FA.exe found the full arena INI parameter set including a [TC]
+      section; a pointer search located the INI parser at 0x581400, whose disassembly gave every
+      key's arena-struct offset AND default; then FUN_0057bee0 (the GAME_DEF wire deserialiser we
+      already replay for the AA bytes) was shown to write those same offsets - so the TC params
+      TRAVEL ON THE WIRE and we can set them.
+      Wire layout (continues straight on from the 5 AA-quality bytes at +0x418):
+        3 dwords, then u8 DefensePercent / AttackPercent / CapturePercent,
+        u8 x10 Attack/Defense/UnderAttackToggleDelay, u16 Friends/EnemiesForce,
+        TWO cstrings (variable - must be walked), then
+        ★ u8 InitialStorage, u32 SupplyResourceRadius, u32 ParachuteResourceRadius,
+        u8% Plane/Tank/ShipProducerLinkRadius,
+        ★★ u8% GetFuelWhenLimFuel, ★★ u8% GetAmmoWhenLimAmmo.
+      New _gamedef_tc_offsets() extends the existing parser replay to find them, and
+      apply_tc_settings() patches them at 212-serve time (same-length byte writes, with a sanity
+      check that refuses to write if the block doesn't look like percentages). Defaults:
+      InitialStorage=100, GetFuelWhenLimFuel=50, GetAmmoWhenLimAmmo=50 (the client's own INI
+      defaults are 50/50/50). TC_APPLY=False disables.
+      NOT reachable on the wire: UseSceneUnitProducers (+0x474) and ResourceProducerLinkRadius
+      (+0x47c) - the INI parser reads them but the deserialiser skips 0x474 and 0x47c.
+v283: msg-60 semantics cracked - flags select the MODE, amounts are KILOGRAMS (0x01 = absolute set).
+        0x01 100 100 -> fuel AND ammo both SET to 221 lb.  100 kg = 220.46 lb, so THE AMOUNTS ARE
+                        IN KILOGRAMS and 0x01 is an ABSOLUTE SET of both resources.
+        0x02 100/10  -> fuel pinned at 351 lb, ammo incremental (amount ignored for fuel)
+        0x04  10  10 -> ammo forced to 100%, fuel incremental. THIS is why ammo never gated in
+                        v280-v282: on the 0x04 path the ordnance restore is unconditional.
+        0x08  10  10 -> both incremental, and the client runs its OWN base-supply accounting -
+                        "insufficient aircraft units at the airfield, taking from tank production
+                        to supply". A future route to driving real scene stocks client-side.
+      So the FLAGS select the MODE, not the resource. v283 switches the auto-resupply to
+      SUPPLY_GRANT_FLAGS=0x01 and hands the client exactly how many kg of fuel and ammo the field
+      can provide: a stocked field sends more than any aircraft holds (client clamps = full load),
+      a short field sends less and the pilot takes off partially loaded - the manual's rule, now
+      driven by real numbers instead of a 0..1 scale factor. Field stores are kg throughout, which
+      matches the manual's "calculated based on the physical weight of the fuel and ammunition".
+      SUPPLY_SKIP_WHEN_DRY / SUPPLY_FUEL_CAP removed - 0x01 gives true per-resource control, so an
+      empty field simply grants 0 kg and the client reports the shortage itself.
+v282: interim ammo-dry withholding (superseded by the 0x01 absolute-set mode).
+v281: msg-60 amount=FUEL / amount2=AMMO swap; partial-supply design PROVEN (client honours scaling).
+v280: P2b - TC base-resource supply model (scene/type profiles, production step, partial grants).
+        * each scene stores METAL/FUEL/AMMO up to its buildings' summed storage volumes;
+        * resource producers add their per-minute rate on a 60s production STEP, capped;
+        * a rearm DEBITS the field (SUPPLY_REARM_AMMO / SUPPLY_REARM_FUEL);
+        * ★ a shortfall DEGRADES the load rather than refusing it - exactly the manual's rule that
+          "the plane is created but does not have full fuel or ammo" - so msg-60 amount/amount2 are
+          scaled by the fraction the field could supply.
+      Scene id -> type comes from the room's TERRAIN (already tracked per room) + fa_scenes.json;
+      unknown terrain/scene, a non-storing scene (AA sites, substations), a missing JSON file, or
+      SUPPLY_MODEL=False all fall back to the previous BLIND full grant - which is correct for
+      dogfight arenas (Common/Private/NaW/FFA), as those have no economy at all.
+      New console command: `supply` (list all fields) / `supply <room> <scene>` (inspect) /
+      `supply <room> <scene> <ammo> <fuel> [metal]` (set stores, to test the gate live).
+      Verified upstream: the Q6 UNIT_PRODUCER_TABLE values were cross-checked against the wiki
+      building tables on Desert NAW and match exactly (Tank Factory 4000/250, Plane Factory
+      6000/500, Hangar 6000/80/60000, Small Hangar 2000/10/10000).
+v279: AUTO-RESUPPLY spawn grace - CONFIRMED, the IPC-net flood is gone (2239 errors -> 0).
 v278: AUTO-RESUPPLY targeted + one-shot (fixed air-resupply/freeze/instability with peers).
 v277: AUTO-RESUPPLY freshness guards (staleness must never look like stillness).
 v276: AUTO-RESUPPLY base change treated as an HQ entry/respawn (clean per-base settle).
@@ -1495,6 +1877,12 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# Single source of truth for the build number. The runtime banner is a DIAGNOSTIC SIGNAL - it is
+# what a session log is read against when reconstructing which code served a run - so it must never
+# drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
+# a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
+VERSION = 'v300'
+
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
 HEARTBEAT_INTERVAL = 1.0   # v206: seconds between in-game keepalive/TIME beacons. Was 5s, but the
@@ -2579,6 +2967,118 @@ def apply_aa_quality(d, values=EVP_AA_QUALITY):
         d[off + i] = max(0, min(255, int(v)))
     return off, old
 
+def _gamedef_tc_offsets(d):
+    """Locate the [TC] parameters inside a DECOMPRESSED GAME_DEF. Returns a dict of
+    field-name -> byte offset, or None.
+
+    Continues _gamedef_aa_offset's replay of FUN_0057bee0. Confirmed read order from the
+    deserialiser at 0x57c560-0x57c910 (each `push N; call 0x575210` consumes N bytes):
+        +0x418 AAquality           u8   <- _gamedef_aa_offset lands here
+        +0x41c FlakQuality         u8
+        +0x420 BomberGunnerQuality u8
+        +0x424 ShipAAQuality       u8
+        +0x428 TankAAQuality       u8
+        +0x42c u32 | +0x430 u32 | +0x434 u32
+        +0x438 DefensePercent      u8
+        +0x43c AttackPercent       u8
+        +0x440 CapturePercent      u8      (the capture threshold)
+        +0x444 AttackToggleDelay      u8   (stored x10)
+        +0x448 DefenseToggleDelay     u8   (x10)
+        +0x44c UnderAttackToggleDelay u8   (x10)
+        +0x450 FriendsForce        u16
+        +0x454 EnemiesForce        u16
+        +0x458 cstr | +0x45c cstr        <- VARIABLE LENGTH, must be walked
+        +0x468 InitialStorage      u8      <- starting supply level
+        +0x470 SupplyResourceRadius     u32
+        +0x478 ParachuteResourceRadius  u32
+        +0x480 PlaneProducerLinkRadius  u8 (percent -> x0.01)
+        +0x484 TankProducerLinkRadius   u8 (percent)
+        +0x488 ShipProducerLinkRadius   u8 (percent)
+        +0x48c GetFuelWhenLimFuel  u8 (percent) <- fuel fraction from a fuel-limited field
+        +0x490 GetAmmoWhenLimAmmo  u8 (percent) <- ammo fraction from an ammo-limited field
+    NOTE: UseSceneUnitProducers (+0x474) and ResourceProducerLinkRadius (+0x47c) are read by the
+    INI parser (0x581400) but NOT by this deserialiser - the wire jumps 0x470 -> 0x478 -> 0x480 -
+    so they cannot be pushed to the client through the GAME_DEF."""
+    aa = _gamedef_aa_offset(d)
+    if aa is None:
+        return None
+    try:
+        n = len(d)
+        p = aa + 5                       # past the 5 AA-quality bytes
+        p += 12                          # three dwords: +0x42c, +0x430, +0x434
+        o = {'defense_percent': p, 'attack_percent': p + 1, 'capture_percent': p + 2,
+             'attack_toggle': p + 3, 'defense_toggle': p + 4, 'underattack_toggle': p + 5,
+             'friends_force': p + 6, 'enemies_force': p + 8}
+        p += 10                          # 6 bytes + 2 words
+        for _ in range(2):               # two NUL-terminated strings
+            while p < n and d[p] != 0:
+                p += 1
+            p += 1
+        if p >= n:
+            return None
+        o['initial_storage'] = p;              p += 1
+        o['supply_resource_radius'] = p;       p += 4
+        o['parachute_resource_radius'] = p;    p += 4
+        o['plane_producer_link'] = p;          p += 1
+        o['tank_producer_link'] = p;           p += 1
+        o['ship_producer_link'] = p;           p += 1
+        o['get_fuel_when_lim_fuel'] = p;       p += 1
+        o['get_ammo_when_lim_ammo'] = p;       p += 1
+        if p > n:
+            return None
+        return o
+    except Exception:
+        return None
+
+# Per-arena [TC] economy defaults. The client's own INI defaults are InitialStorage=50,
+# GetFuelWhenLimFuel=50, GetAmmoWhenLimAmmo=50, CapturePercent=50. If the stored GAME_DEF
+# templates ship InitialStorage=0 the scenes start empty, which is exactly what the HQ screen
+# showing "0 supplies" means - and with nothing stocked the client has no economy to negotiate,
+# so it never sends msg 59 and can never apply the Get*When Lim* fractions.
+TC_SETTING_KEYS = ('initial_storage', 'capture_percent', 'attack_percent', 'defense_percent',
+                   'get_fuel_when_lim_fuel', 'get_ammo_when_lim_ammo',
+                   'plane_producer_link', 'tank_producer_link', 'ship_producer_link')
+# The [TC] defaults applied when an arena has no per-room override.
+# v300: reverted from the 77 wire-alignment probe. 77 was chosen because it is distinctive and 50
+# happens to equal the client's own default, making it useless as a test value. The probe answered
+# its question - the client echoed 77, so our GAME_DEF wire walk is correct and
+# UseSceneUnitProducers/ResourceProducerLinkRadius genuinely are absent from it - and 50 is the
+# real setting.
+TC_DEFAULTS = {'initial_storage': 100, 'get_fuel_when_lim_fuel': 50, 'get_ammo_when_lim_ammo': 50}
+TC_APPLY = True                   # master switch for patching the [TC] block at 212-serve time
+
+def apply_tc_settings(d, settings=None):
+    """In-place patch the [TC] single-byte parameters of a DECOMPRESSED GAME_DEF. Same-length
+    byte writes only, so the struct never shifts. Values come from the arena's web settings where
+    present, else TC_DEFAULTS; anything absent from both is left exactly as the template had it.
+    SAFETY: refuses if the located bytes don't look like plausible percentages (0..200).
+    Returns (offsets, old_values) on success, None on no-op."""
+    if not TC_APPLY:
+        return None
+    o = _gamedef_tc_offsets(d)
+    if o is None:
+        return None
+    cfg = dict(TC_DEFAULTS)
+    for k in TC_SETTING_KEYS:
+        v = (settings or {}).get(k)
+        if v not in (None, ''):
+            try:
+                cfg[k] = int(v)
+            except (TypeError, ValueError):
+                pass
+    # sanity-check the block before writing anything
+    for k in ('initial_storage', 'capture_percent', 'get_fuel_when_lim_fuel',
+              'get_ammo_when_lim_ammo'):
+        off = o.get(k)
+        if off is None or off >= len(d) or d[off] > 200:
+            return None
+    old = {k: d[v] for k, v in o.items() if v < len(d)}
+    for k, val in cfg.items():
+        off = o.get(k)
+        if off is not None and off < len(d):
+            d[off] = max(0, min(255, int(val)))
+    return o, old
+
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
@@ -2711,6 +3211,22 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                               f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')
         else:
             log('GAMEDEF212', 'EvP AA: quality bytes not located/verified; left as-is')
+    # --- [TC] economy block: InitialStorage + the limited-field load fractions -----------------
+    # Without this the scenes ship empty (HQ shows "0 supplies"), so the client has no economy to
+    # negotiate: it never sends msg 59 and can never apply GetFuelWhenLimFuel/GetAmmoWhenLimAmmo.
+    _tc = apply_tc_settings(d, arena_settings)
+    if _tc:
+        _to, _told = _tc
+        log('GAMEDEF212',
+            f"[TC] InitialStorage {_told.get('initial_storage')} -> "
+            f"{TC_DEFAULTS['initial_storage']} @+{_to['initial_storage']}, "
+            f"GetFuelWhenLimFuel {_told.get('get_fuel_when_lim_fuel')} -> "
+            f"{TC_DEFAULTS['get_fuel_when_lim_fuel']}, "
+            f"GetAmmoWhenLimAmmo {_told.get('get_ammo_when_lim_ammo')} -> "
+            f"{TC_DEFAULTS['get_ammo_when_lim_ammo']}, "
+            f"CapturePercent={_told.get('capture_percent')}")
+    else:
+        log('GAMEDEF212', '[TC] block not located/verified; economy left as-is')
     D_orig = len(d)
     # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
@@ -3108,18 +3624,18 @@ def console_handler():
             elif cmd == 'destroy':
                 # destroy <sceneIdx> [camp] [progress]  - fire msg 36 SCENE DESTROY/STATE at a
                 # KNOWN scene index, to validate the msg-36 wire format live (independent of the
-                # unconfirmed msg-31 objidx->sceneIdx mapping). Defaults: camp=0xff (neutralized),
-                # progress=0.0 (captured/destroyed). Targets every in-game room that has players.
+                # unconfirmed msg-31 objidx->sceneIdx mapping).
+                # CAMP MATTERS FOR IDENTIFICATION: camp 0..4 takes the NAMED path ('You have
+                # destroyed <owner> <SceneName>'); camp 0xFF forces the generic 'a bridge' and the
+                # client never resolves the name. Since scene_camp() returns 0xFF for every index
+                # outside 0..59 - precisely the ones worth probing - we fall back to a NAMING camp
+                # instead. Pass 255 explicitly for the old behaviour.
                 args = (parts[1].split() if len(parts) > 1 else [])
                 if not args:
-                    log('CONSOLE', 'Usage: destroy <sceneIdx> [camp=255] [progress=0]')
+                    log('CONSOLE', 'Usage: destroy <sceneIdx> [camp=auto] [progress=0]')
                 else:
                     try:
                         sidx = int(args[0], 0)
-                        # default camp = the scene's REAL owning camp so the client names the
-                        # target ('You have destroyed <owner> <SceneName>') instead of the
-                        # generic 'a bridge' that camp=0xFF forces. Pass an explicit 2nd arg
-                        # (e.g. 255) to override.
                         prog = float(args[2]) if len(args) > 2 else 0.0
                     except ValueError:
                         log('CONSOLE', 'destroy: sceneIdx/camp must be ints, progress a float')
@@ -3133,7 +3649,50 @@ def console_handler():
                                 camp = int(args[1], 0)
                             else:
                                 camp = scene_camp(_probe_terrain_for_room(rid), sidx)
+                                if camp == SCENE_CAMP_NEUTRAL:
+                                    camp = DESTROY_NAMING_CAMP
+                                    log('CONSOLE', f'destroy: scene {sidx} has no known camp; using '
+                                                   f'camp={camp} so the client NAMES it (255 would '
+                                                   f'print "a bridge" and tell us nothing)')
                             broadcast_scene_36(rid, [(sidx, camp, prog)], reason='(console destroy)')
+            elif cmd == 'idscan':
+                # idscan <lo> <hi> [gap] [camp]  - walk a range of msg-36 indices with a NAMING
+                # camp so the client prints one 'You have destroyed <camp> <name>' per index. The
+                # names land in the CLIENT log (messagesNN.log), not here; this end just records
+                # which index was fired when, so the two can be zipped by order.
+                ia = (parts[1].split() if len(parts) > 1 else [])
+                if len(ia) < 2:
+                    log('CONSOLE', 'Usage: idscan <lo> <hi> [gap=3.0] [camp=0]  (then read the '
+                                   'names out of the client log, in order)')
+                else:
+                    try:
+                        _lo, _hi = int(ia[0], 0), int(ia[1], 0)
+                        _gap = float(ia[2]) if len(ia) > 2 else 3.0
+                        _camp = int(ia[3], 0) if len(ia) > 3 else DESTROY_NAMING_CAMP
+                    except ValueError:
+                        log('CONSOLE', 'idscan: lo/hi/camp must be ints, gap a float')
+                    else:
+                        _rooms = {x.current_room for x in get_all_sessions()
+                                  if getattr(x, 'entered_game', False) and x.current_room is not None}
+                        if not _rooms:
+                            log('CONSOLE', 'idscan: no in-game players to send to')
+                        else:
+                            def _idscan(lo=_lo, hi=_hi, gap=_gap, camp=_camp, rooms=set(_rooms)):
+                                log('IDSCAN', f'sweeping {lo}..{hi} camp={camp} gap={gap}s - read the '
+                                             f'names from the CLIENT log in this order')
+                                for sidx in range(lo, hi + 1):
+                                    if PROBE.get('stop'):
+                                        log('IDSCAN', 'stopped'); return
+                                    for rid in rooms:
+                                        broadcast_scene_36(rid, [(sidx, camp, 0.0)],
+                                                           reason=f'(idscan {sidx})')
+                                    calib('IDSCAN', f'sceneIdx={sidx} camp={camp}')
+                                    time.sleep(gap)
+                                log('IDSCAN', f'sweep {lo}..{hi} done')
+                            PROBE['stop'] = False
+                            threading.Thread(target=_idscan, daemon=True).start()
+                            log('CONSOLE', f'idscan {_lo}..{_hi} started (camp={_camp}, gap={_gap}s); '
+                                           f'`probe stop` cancels')
             elif cmd == 'resupply':
                 # resupply [flags] [amount] [amount2] [b1] [b2]  - v266: send msg 60 (0x3c) SUPPLY
                 # GRANT to trigger the client's in-world REARM/REFUEL (no despawn). Defaults:
@@ -3167,6 +3726,91 @@ def console_handler():
                         log('CONSOLE', f'resupply: sent msg 60 (flags=0x{flags:02x} amt={amount} '
                                        f'amt2={amount2} b1={b1} b2={b2}) to {n} player(s) in room {rid}. '
                                        f'Park + deplete + engine off -> watch for in-place rearm.')
+            elif cmd == 'supply':
+                # supply                       -> list every seeded field's stores
+                # supply <room> <scene>        -> show one field
+                # supply <room> <scene> <a> <f> [<m>]  -> set stores (testing the gate)
+                args = (parts[1].split() if len(parts) > 1 else [])
+                if len(args) == 0:
+                    if not _SUPPLY:
+                        log('CONSOLE', 'supply: no fields seeded yet - a pilot must park at one first')
+                    for (rid, sid), st in sorted(_SUPPLY.items()):
+                        _t = _probe_terrain_for_room(rid)
+                        _p = scene_profile(_t, sid)
+                        _c = _p['caps'] if _p else {'ammo': 0, 'fuel': 0, 'metal': 0}
+                        log('CONSOLE',
+                            f"  room {rid} scene {sid:>3} {scene_type_for(_t, sid) or '?':22s} "
+                            f"ammo {st['ammo']:>6}/{_c['ammo']:<6} "
+                            f"fuel {st['fuel']:>6}/{_c['fuel']:<6} "
+                            f"metal {st['metal']:>6}/{_c['metal']:<6}")
+                elif len(args) >= 2:
+                    rid, sid = int(args[0]), int(args[1])
+                    _t = _probe_terrain_for_room(rid)
+                    _named = scene_type_for(_t, sid)
+                    st, p = supply_state(rid, _t, sid, True)
+                    if st is None:
+                        log('CONSOLE', f'supply: room {rid} scene {sid} has no economy '
+                                       f'(terrain={_t}, type={_named!r}) -> grants stay blind')
+                    else:
+                        if len(args) >= 4:
+                            st['ammo'] = int(args[2]); st['fuel'] = int(args[3])
+                            if len(args) >= 5:
+                                st['metal'] = int(args[4])
+                        _tag = _named if _named else (
+                            f'{SUPPLY_DEFAULT_TYPE} [DEFAULT - terrain {_t} '
+                            f'({TERRAIN_NAMES.get(_t, "?")}) not in fa_scenes.json]')
+                        log('CONSOLE',
+                            f"  room {rid} scene {sid} {_tag}: "
+                            f"ammo {st['ammo']}/{p['caps']['ammo']} "
+                            f"fuel {st['fuel']}/{p['caps']['fuel']} "
+                            f"metal {st['metal']}/{p['caps']['metal']} "
+                            f"| rates a={p['rates']['ammo']} f={p['rates']['fuel']} "
+                            f"m={p['rates']['metal']}/min")
+                else:
+                    log('CONSOLE', 'usage: supply | supply <room> <scene> | '
+                                   'supply <room> <scene> <ammo> <fuel> [metal]')
+
+            elif cmd == 'prodinfo':
+                # prodinfo [probe] [scene ...]  - push msg 71 SCENE_TAG_PRODUCTION INFO.
+                # 'probe' fills the nine arrays with distinctive markers so the in-game panel
+                # reveals which array feeds which column.
+                _probe = len(parts) > 1 and parts[1].lower() == 'probe'
+                _rest = parts[2:] if _probe else parts[1:]
+                _ids = None
+                if _rest:
+                    try:
+                        _ids = [int(x) for x in _rest]
+                    except ValueError:
+                        log('CONSOLE', 'usage: prodinfo [probe] [sceneIdx ...]'); _ids = None
+                _rooms = {x.current_room for x in get_all_sessions()
+                          if getattr(x, 'entered_game', False) and x.current_room is not None}
+                if not _rooms:
+                    log('CONSOLE', 'prodinfo: no in-game players to send to')
+                for _rid in _rooms:
+                    broadcast_production_info_71(_rid, scene_ids=_ids, probe=_probe,
+                                                 reason='(console prodinfo)')
+            elif cmd == 'production':
+                # production  - push msg 40 PRODUCTION COMPLEX for every camp, on demand.
+                _rooms = {x.current_room for x in get_all_sessions()
+                          if getattr(x, 'entered_game', False) and x.current_room is not None}
+                if not _rooms:
+                    log('CONSOLE', 'production: no in-game players to send to')
+                for _rid in _rooms:
+                    broadcast_production_40(_rid, reason='(console production)')
+            elif cmd == 'snapshot':
+                # snapshot  - send msg 42 SCENE SNAPSHOT to every in-game room. This is what the
+                # client needs before it can show any economy/ownership at all; without it the
+                # Production Complex panel is blank and damage reports come back as 'unknown'.
+                _rooms = {x.current_room for x in get_all_sessions()
+                          if getattr(x, 'entered_game', False) and x.current_room is not None}
+                if not _rooms:
+                    log('CONSOLE', 'snapshot: no in-game players to send to')
+                for _rid in _rooms:
+                    broadcast_scene_snapshot_42(_rid, reason='(console snapshot)')
+            elif cmd == 'weaponmap':
+                n = weapon_map_load()
+                log('CONSOLE', f'weapon_map.json reloaded: {n} anchor(s)'
+                               + (f' {sorted(WEAPON_MAP.items())[:12]}' if n else ''))
             elif cmd == 'probe':
                 # probe <sceneIdx>            fire one destroy + capture ev=0x00 reconciliation
                 # probe sweep [lo] [hi] [gap]  walk a scene range, building the whole map
@@ -3264,7 +3908,8 @@ def console_handler():
                                    f'scene HP threshold={SCENE_DEFAULT_HP}, tracked scenes={len(SCENE_HP)}')
                 elif aa[0] == 'on':
                     AUTO_SCENE_DESTROY = True
-                    log('CONSOLE', 'autopve ON - weapon damage now auto-destroys scenes (obj==sceneIdx)')
+                    log('CONSOLE', 'autopve ON - weapon damage auto-destroys scenes via weapon_map.json '
+                                   f'({len(WEAPON_MAP)} anchor(s) loaded; un-anchored objs are skipped)')
                 elif aa[0] == 'off':
                     AUTO_SCENE_DESTROY = False
                     log('CONSOLE', 'autopve OFF')
@@ -7545,6 +8190,55 @@ SCENE_CAMP_BY_TERRAIN = {
         57:4, 58:2, 59:0},
 }
 
+MSG_SCENE_SNAPSHOT_42 = 0x2a
+SCENE_STATE_NORMAL = 0             # the State nibble in a msg-42 byte; 0 = intact/normal
+
+def build_scene_snapshot_42(entries):
+    """Build FA msg 42 (0x2a) SCENE SNAPSHOT - full per-scene ownership/state for the arena.
+
+    `entries` is an ordered list of (camp, state) per scene index, starting at scene 0. One byte
+    each, packed (state << 3) | (camp & 7). See v293 notes: the client's own debug printer reads
+    them back as Camp = b & 7 and State = b >> 3.
+
+    The count MUST equal the terrain's nSceneInstDef. The client compares them and logs
+    'TRN_MANAGER::nSceneInstDef=%i. Receiving %i scenes.' on a mismatch, so a short or long list
+    is worse than none - it will refuse rather than render a partial map.
+    """
+    body = bytearray([MSG_SCENE_SNAPSHOT_42])
+    for camp, state in entries:
+        body.append(((int(state) & 0x1f) << 3) | (int(camp) & 0x07))
+    return build_ingame_pkt(bytes(body))
+
+
+def scene_snapshot_entries(terrain):
+    """(camp, state) for every scene of a terrain, in index order, from SCENE_CAMP_BY_TERRAIN.
+    Unknown scenes get camp 7 - the neutral slot within the 3-bit field (0xFF does not fit)."""
+    camps = SCENE_CAMP_BY_TERRAIN.get(terrain, {})
+    if not camps:
+        return []
+    return [(camps.get(i, 7), SCENE_STATE_NORMAL) for i in range(max(camps) + 1)]
+
+
+def broadcast_scene_snapshot_42(room_id, reason=''):
+    """Send the full scene snapshot to everyone in-game in a room. Returns the number of sessions."""
+    trn = _probe_terrain_for_room(room_id)
+    entries = scene_snapshot_entries(trn)
+    if not entries:
+        log('SCENE42', f'room {room_id}: no camp table for terrain {trn} - nothing to send')
+        return 0
+    pkt = build_scene_snapshot_42(entries)
+    sess = [s for s in get_all_sessions()
+            if getattr(s, 'entered_game', False) and s.current_room == room_id]
+    for s in sess:
+        threading.Thread(
+            target=lambda _s=s: send_rel(_s, pkt, f'<- SCENE_SNAPSHOT 42 x{len(entries)} {reason}',
+                                         to=3.0),
+            daemon=True).start()
+    log('SCENE42', f'room {room_id}: msg 42 terrain={trn} scenes={len(entries)} '
+                   f'({len(pkt)} bytes) -> {len(sess)} session(s) {reason}')
+    return len(sess)
+
+
 def scene_camp(terrain, scene_idx):
     """Owning camp (0..4) for a scene, or SCENE_CAMP_NEUTRAL if unknown. Sending the real
     camp is what makes the client name the target instead of printing 'a bridge'."""
@@ -7569,8 +8263,38 @@ SCENE_MAX_IDX = 65                 # raw scene-instance array is 0..65 on TRN02 
 # [0xc87270] raw array) and is exactly the table.goi objIdx->sceneIdx data the .q6 route
 # targets. Leave OFF until that translation is obtained (per-building calibration or table.goi).
 AUTO_SCENE_DESTROY = False
+_UNMAPPED_SEEN = set()   # objs already reported as un-anchored, so the log stays readable
+# Camp used when we need the client to NAME a scene whose real owner we don't know. Any value in
+# 0..4 takes the named path; 0xFF forces the generic 'a bridge' and yields no information.
+DESTROY_NAMING_CAMP = 0
 # ^ default OFF; `autopve on` flips it live for experiments. While the A->C translation is
 #   missing it will destroy the wrong building, so keep it off for normal play.
+
+MSG_SCENE_OBJSTATE_30 = 0x1e
+# Send msg 30 after every msg 36. See v290 notes: msg 36 announces, msg 30 actually changes the
+# world. Set False to get the pre-v290 announce-only behaviour.
+SEND_SCENE_STATE_30 = True
+
+def build_scene_state_30(indices, progress=None):
+    """Build FA msg 30 (0x1e) SCENE OBJECT STATE.
+
+    Wire (from LAB_004f6880): [0x1e] then per object either
+        u16 (idx & 0x7fff)                      -> bit15 clear: vtable[+0x54], the DESTROY path
+        u16 (idx | 0x8000) + u16 value          -> bit15 set:   progress/capture path
+    NO pad byte. The handler's `inc edi` skips the TYPE byte itself, and `dec ebx` makes the
+    record area Length-1. Since each record consumes 2 or 4 and the loop exits on ebx<=0, the
+    body length must be ODD - which every observed live length is (5, 13, 49, 149). An even
+    body would leave ebx==1 at the end and read one record past the buffer.
+    """
+    body = bytearray([MSG_SCENE_OBJSTATE_30])
+    for idx in indices:
+        if progress is None:
+            body += struct.pack('<H', idx & 0x7FFF)
+        else:
+            body += struct.pack('<HH', (idx & 0x7FFF) | 0x8000, int(progress) & 0xFFFF)
+    assert len(body) % 2 == 1, 'msg 30 body must be odd-length or the client over-reads'
+    return build_ingame_pkt(bytes(body))
+
 
 def build_scene_destroy_36(records):
     """Build FA msg 36 (0x24) SCENE DESTROY/STATE. `records` = list of
@@ -7654,7 +8378,73 @@ def broadcast_scene_36(room_id, records, reason=''):
             target=lambda _s=s: send_rel(_s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0),
             daemon=True).start()
     log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(sess)} session(s) {reason}')
+    # v291: a destroyed scene loses its stored supplies immediately - measured at -15000 fuel the
+    # instant a fuel factory died, well before the next production step. Only prog<=0 counts as a
+    # destroy; a non-zero progress is the capture path, which does not empty the stores.
+    for _i, _c, _p in records:
+        if _p <= 0:
+            _lost = supply_on_scene_destroyed(room_id, _i)
+            if _lost and any(_lost.values()):
+                log('SUPPLY', f'room {room_id}: scene {_i} destroyed - stores lost '
+                              f'ammo={_lost.get("ammo")} fuel={_lost.get("fuel")} '
+                              f'metal={_lost.get("metal")}')
+    if SEND_SCENE_STATE_30:
+        # v290: msg 36 only ANNOUNCES. msg 30 is what actually clears the object from the world -
+        # in the 2009 log every destroy is followed by one. Sent with bit15 clear (2-byte records)
+        # so the client takes vtable[+0x54], the destroy path, rather than the capture-progress one.
+        _idx = [i for i, _c, _p in records]
+        pkt30 = build_scene_state_30(_idx)
+        for s in sess:
+            threading.Thread(
+                target=lambda _s=s: send_rel(_s, pkt30, f'<- SCENE_STATE 30 {_idx} {reason}', to=3.0),
+                daemon=True).start()
+        log('SCENE30', f'room {room_id}: msg 30 {_idx} -> {len(sess)} session(s) {reason}')
     return len(sess)
+
+# --- PvE CALIBRATION RECORDER -----------------------------------------------
+# Deliberately NOT routed through fa_logging: that writes `logs/` relative to the CWD, and a run
+# launched from elsewhere silently produces no run log (see v287 notes - it cost us a full
+# calibration session). This opens an absolute path per append and flushes, so the data survives a
+# detached console, a different cwd, and a hard kill.
+PVE_CALIB = True
+PVE_CALIB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pve_calibration.log')
+
+def calib(kind, msg):
+    """Append one calibration line. Never raises - calibration must not be able to kill a session."""
+    if not PVE_CALIB:
+        return
+    try:
+        with open(PVE_CALIB_PATH, 'a', encoding='utf-8') as f:
+            f.write(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]} [{kind}] {msg}\n')
+            f.flush()
+    except Exception:
+        pass
+
+# --- WEAPON-OBJ -> SCENE MAP (auto-destroy source of truth) ------------------
+# Populated by `corr map <obj> <scene>` (eye-confirmed anchors) into weapon_map.json. Loaded here
+# so auto-destroy can translate a per-building weapon index into the scene index msg 36 expects.
+# Deliberately NOT seeded from objscene_map.json: that map is scene-space region data from the
+# ev=0x00 destroy-sweep and does not describe the weapon space (see v288 notes).
+WEAPON_MAP = {}                        # int obj -> int sceneIdx
+WEAPON_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weapon_map.json')
+# When True, an obj with no anchor produces NO msg 36 at all. Turning this off restores the v287
+# and earlier behaviour of guessing identity, which is known to destroy the wrong building.
+AUTO_DESTROY_REQUIRE_MAP = True
+
+def weapon_map_load():
+    """(Re)load weapon_map.json. Returns the number of anchors. Safe to call any time."""
+    global WEAPON_MAP
+    try:
+        d = json.load(open(WEAPON_MAP_PATH)) if os.path.exists(WEAPON_MAP_PATH) else {}
+        WEAPON_MAP = {int(k): int(v) for k, v in d.get('weapon_obj_to_scene', {}).items()}
+    except Exception as e:
+        WEAPON_MAP = {}
+        log('WEAPONMAP', f'load failed ({e}) - auto-destroy will not fire until anchors exist')
+    return len(WEAPON_MAP)
+
+def weapon_scene_for(obj):
+    """Scene index for a weapon-target obj, or None when we have no confirmed anchor."""
+    return WEAPON_MAP.get(int(obj))
 
 def _handle_ground_damage_31(s, body, via=''):
     """FA msg 31 (0x1f) - GROUND-OBJECT DAMAGE REPORT, client->server ONLY. The client's
@@ -7687,13 +8477,25 @@ def _handle_ground_damage_31(s, body, via=''):
         probe_observe(s.current_room, obj, ev)
         # weapon-obj correlation: track ev=0x05 real weapon targets
         corr_observe(s.current_room, obj, ev, dmg)
-        if AUTO_SCENE_DESTROY and ev == 0x05 and s.current_room is not None and 0 <= obj <= SCENE_MAX_IDX:
-            # CONFIRMED (messages21, 02-Jul): the msg-31 ev=0x05 weapon-target `obj` byte IS
-            # the msg-36 sceneIdx, identity - single-target anchors obj59->scene59 (Tank
-            # Factory) and obj40->scene40 (Front Airfield) both matched the join scene table,
-            # and bomb-splash bursts hit the physically-adjacent scenes. ev=0x00 is client
-            # reconciliation (echoes our own destroys) and must NOT be counted here.
-            scene_idx = obj
+        if ev == 0x05:
+            # Calibration: the RAW weapon-target index, before any mapping is applied. Pair this
+            # with the client's 'You have destroyed <camp> <name>' to recover obj -> real scene.
+            calib('DMG', f'room={s.current_room} pilot={s.current_pilot} obj={obj} dmg={dmg} '
+                         f'total={GROUND_HP[key]}')
+        if AUTO_SCENE_DESTROY and ev == 0x05 and s.current_room is not None:
+            # Translate the per-building weapon index into a SCENE index. Identity is wrong (see
+            # v288 notes); without an anchor we decline to fire rather than destroy something else.
+            scene_idx = weapon_scene_for(obj)
+            if scene_idx is None:
+                if AUTO_DESTROY_REQUIRE_MAP:
+                    if obj not in _UNMAPPED_SEEN:
+                        _UNMAPPED_SEEN.add(obj)
+                        log('AUTOPVE', f'obj {obj} has no weapon_map anchor - NOT firing msg 36. '
+                                       f'Anchor it with: corr map {obj} <sceneIdx>')
+                        calib('UNMAPPED', f'room={s.current_room} obj={obj} dmg={dmg} '
+                                          f'(no anchor; no msg 36 sent)')
+                    continue
+                scene_idx = obj                      # legacy guess - known to be wrong
             skey = (s.current_room, scene_idx)
             hp = SCENE_HP.get(skey, SCENE_DEFAULT_HP) - dmg
             SCENE_HP[skey] = hp
@@ -7710,6 +8512,10 @@ def _handle_ground_damage_31(s, body, via=''):
         for sidx in destroyed:
             log('AUTOPVE', f'{s.current_pilot} destroyed scene {sidx} camp={scene_camp(_trn, sidx)} '
                           f'(weapon damage crossed threshold)')
+            # The OTHER end of the mapping: what we actually told the client to destroy. The client
+            # log then names what that index really was on its side.
+            calib('SENT36', f'room={s.current_room} terrain={_trn} sceneIdx={sidx} '
+                            f'camp={scene_camp(_trn, sidx)} <- obj={sidx} (identity assumption)')
 
 
 # --- PvE OBJ->SCENE LIVE PROBE (no .q6 needed) ------------------------------
@@ -8186,6 +8992,528 @@ AUTO_RESUPPLY_MIN_SAMPLES = 3  # consecutive NEW telemetry packets with identica
 # state). So the auto-resupply must stay silent until the freshly spawned plane is fully built.
 AUTO_RESUPPLY_SPAWN_GRACE = 10.0  # seconds after ServerConfirm before an auto-grant may fire
 
+# ═══════════════════ P2b: TC BASE-RESOURCE SUPPLY MODEL ═══════════════════
+# Grounded in the official docs (ACWIKI "Fighter Ace Production and Supply", by the FA game
+# designer) plus the per-map scene/building tables harvested from the wiki map pages:
+#   * every scene stores METAL / FUEL / AMMO up to a per-building "storage volume";
+#   * resource producers add a "production value per minute" on a one-minute STEP;
+#   * taking off charges the field; landing + returning to the menu credits it back;
+#   * ★ if resources are not fully available the plane is still created but WITHOUT a full fuel
+#     or ammo load - i.e. the gate DEGRADES the load, it never refuses it. That is exactly what
+#     the msg-60 amount/amount2 fields express, so our grant is scaled by the field's stock.
+# Scene->type and type->profile data live in fa_scenes.json next to this script (423 scenes over
+# 7 terrains). If that file is missing, or the room's terrain/scene isn't in it, we fall back to
+# the pre-P2b BLIND behaviour (full 0xffff grant) - dogfight arenas (Common/Private/NaW/FFA) have
+# no economy at all, so blind is correct there by design.
+SUPPLY_MODEL      = True     # master switch; False => always blind, exactly like v279
+SUPPLY_TICK       = 60.0     # production step in seconds (the wiki's one-minute step)
+SUPPLY_SEED_FRAC  = 1.0      # FALLBACK only - the real value is the arena's [TC] InitialStorage
+                             # percent, read per-room by supply_seed_frac(). v291 pinned this to
+                             # 0.5 from the offline training mission; our own arenas send
+                             # InitialStorage=100, so a global constant was simply wrong.
+# v291: when a scene is destroyed its stored supplies are lost outright, immediately, rather than
+# decaying at the next production step. Set False to keep the pre-v291 behaviour where a destroyed
+# field kept whatever it was holding.
+SUPPLY_DESTROY_LOSES_STORES = True
+# (v280's SUPPLY_REARM_AMMO/FUEL and v281's SUPPLY_AMOUNT_IS_FUEL are gone: under the 0x01 absolute
+#  mode the grant is simply "however many kg the field has", so there is no per-rearm cost constant
+#  and no ambiguity about which u16 is which - see the flag-probe results below.)
+# ★ EMPIRICAL FIELD MAPPING (v281). The msg-60 body is [0x3c][b1][b2][flags][u16 amount][u16 amount2].
+# We initially assumed amount=ammo, amount2=fuel. LIVE TEST DISPROVED IT: starving a field's AMMO
+# (so we sent amount=0) made the client print "there is no fuel available" - so the FIRST u16 is
+# FUEL and the SECOND is AMMO. That test also proved the client HONOURS SCALED AMOUNTS rather than
+# treating the fields as flags, which is what the whole partial-supply design rests on.
+# ★★ v283 - THE FLAG PROBE CRACKED THE msg-60 SEMANTICS. Live matrix (park, deplete, then
+# `resupply <flags> <amount> <amount2>`):
+#   0x01 100 100 -> fuel AND ammo both SET to 221 lb   ★ 100 kg = 220.46 lb, so THE AMOUNTS ARE IN
+#                   KILOGRAMS and 0x01 is an ABSOLUTE SET of both resources. This is the exact
+#                   partial-load control the supply model needs.
+#   0x02 100 100 -> fuel pinned to 351 lb, ammo INCREMENTAL (repeats keep adding)
+#   0x02  10  10 -> same fuel 351 lb, smaller ammo increment  => 0x02 ignores amount for fuel
+#   0x04  10  10 -> ammo forced to 100%, fuel incremental     => explains v281/v282: under 0x04 the
+#                   ordnance restore is unconditional, which is why ammo never gated
+#   0x08  10  10 -> both incremental, and the CLIENT reports "insufficient aircraft units at the
+#                   airfield, taking from tank production to supply" => 0x08 runs the client's OWN
+#                   base-supply accounting (see notes - a future route to feeding real scene stocks)
+# So: FLAGS SELECT THE MODE, not the resource.
+# ★★ v285: we now use 0x08 - INCREMENTAL top-up WITH the client's own base-supply accounting.
+# 0x01 (absolute set) worked and gated correctly, but it is the wrong MODEL: it force-sets both
+# resources to a fixed figure every time, so a plane that only burned ammo still had its fuel
+# rewritten, and every rearm cost the field a full load regardless of need. The authentic mechanic
+# is incremental - the aircraft draws only what it is SHORT of, and when the field cannot cover it
+# the client itself reports "insufficient aircraft units at the airfield, taking from tank
+# production to supply" and falls back to unit production. That is the behaviour 0x08 gives, and it
+# is what the original game did.
+SUPPLY_GRANT_FLAGS  = 0x08     # incremental top-up + client-side base-supply accounting
+SUPPLY_GRANT_FLAGS_ABS = 0x01  # (kept for probing: absolute SET of both, kg)
+# Per-grant increment offered to the aircraft, in kg. The client tops up only what the plane is
+# actually short of and clamps at its own capacity, so this is a CEILING per resupply, not a cost.
+SUPPLY_FULL_FUEL_KG = 3000     # kg of fuel offered per top-up
+SUPPLY_FULL_AMMO_KG = 1000     # kg of ammo/ordnance offered per top-up
+# In incremental mode the client never tells us how much it actually drew, so we cannot debit the
+# real figure. Charging the whole OFFER is what drained a field in a handful of rearms during the
+# v284 test. Instead each top-up costs a modest nominal amount, and the offer is still capped by
+# what remains, so an exhausted field offers 0 and the client reports the shortage itself.
+SUPPLY_DEBIT_FUEL_KG = 300     # nominal fuel drawn from the field per top-up
+SUPPLY_DEBIT_AMMO_KG = 150     # nominal ammo drawn from the field per top-up
+# Maps we have no harvested scene table for (e.g. terrain 2 Mediterrain, 38 Classic_II - the wiki
+# only linked those externally) would otherwise stay blind forever. But `at_airfield` is BY
+# CONSTRUCTION the field the pilot spawned from, so it is always a real airfield even when we can't
+# name it. For that case only, fall back to a generic airfield profile so the economy still applies.
+# This is an APPROXIMATION - caps are the stock 'Airfield' template, not that map's real buildings.
+SUPPLY_UNKNOWN_FALLBACK = True
+SUPPLY_DEFAULT_TYPE     = 'Airfield'
+
+# v286: scene TYPE strings that have no `profiles` entry of their own but are clearly one of the
+# stock types. Anti-Aircraft sites are deliberately NOT aliased - they hold nothing, so returning
+# None (blind) is the correct behaviour for them.
+SUPPLY_TYPE_ALIASES = {
+    'Substation 2':  'Substation 1',
+    'Farm':          'Village',        # ammo-only storage, same as a village
+    'Tank':          'Tank Factory',
+    'Birmingem':     'Village',        # named cities on the English Channel / Germany maps
+    'London':        'Village',
+    'Paris':         'Village',
+}
+# Keyword fallback, tried after the alias table when a type is still unknown. Order matters:
+# the first substring that matches wins, so put the more specific strings first.
+SUPPLY_TYPE_KEYWORDS = (
+    ('Bomber Airfield', 'Bomber Airfield'),
+    ('Front Line',      'Front Line Airfield'),
+    ('Tower',           'Tower Airfield'),
+    ('Grass',           'Grass Airfield'),
+    ('Front',           'Front Airfield'),
+    ('Airfield',        'Airfield'),        # catches 'Figter  Airfield', 'Fighter Airfield'
+    ('Tank Factory',    'Tank Factory'),
+    ('Fuel',            'Fuel Factory'),
+    ('Metal',           'Metal Factory'),
+    ('Support',         'Support Factory'),
+    ('Factory',         'Support Factory'), # 'Aircraft Factory', 'Planes Factory'
+    ('Village',         'Village'),
+    ('Port',            'Port'),
+)
+
+# v286: production efficiency + repair. Both are approximations of confirmed engine behaviour:
+# efficiency is really (alive producers / all producers) per FUN_00588850, and repair is really
+# the arena's BuildingsRepairRate. We drive both off scene HP because that is the damage signal we
+# actually hold today.
+SUPPLY_DAMAGE_SCALES_RATE = True   # destroyed/damaged scenes produce proportionally less
+SUPPLY_MIN_EFFICIENCY     = 0.0    # a fully flattened scene produces nothing
+SUPPLY_REPAIR_HP_PER_TICK = 250    # HP healed per production step (BuildingsRepairRate analogue)
+SUPPLY_JSON       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_scenes.json')
+
+_SCENES = {'terrains': {}, 'profiles': {}}
+try:
+    with open(SUPPLY_JSON, 'r', encoding='utf-8') as _f:
+        _SCENES = json.load(_f)
+    log('SUPPLY', f'loaded {sum(len(v) for v in _SCENES["terrains"].values())} scenes over '
+                  f'{len(_SCENES["terrains"])} terrains, {len(_SCENES["profiles"])} type profiles')
+except Exception as _e:
+    log('SUPPLY', f'fa_scenes.json not loaded ({_e}) - supply model disabled, grants stay blind')
+
+_SUPPLY = {}                              # (room_id, scene_id) -> {'ammo':n,'fuel':n,'metal':n}
+_SUPPLY_LOCK = threading.Lock()
+
+def scene_type_for(terrain, scene_id):
+    """Scene TYPE string ('Front Line Airfield', 'FAB', ...) for a terrain+scene id, else None."""
+    return _SCENES['terrains'].get(str(terrain), {}).get(str(scene_id))
+
+def scene_profile(terrain, scene_id, allow_default=False):
+    """{'caps':{ammo,fuel,metal}, 'rates':{...}} for a scene, or None if unknown/no economy.
+    allow_default=True applies the generic airfield profile when the map isn't in fa_scenes.json -
+    only pass that from paths where the scene is known to be a real spawn airfield."""
+    st = scene_type_for(terrain, scene_id)
+    if not st:
+        if allow_default and SUPPLY_UNKNOWN_FALLBACK:
+            return _SCENES['profiles'].get(SUPPLY_DEFAULT_TYPE)
+        return None
+    p = _SCENES['profiles'].get(st)
+    if p is None:
+        # v286: the scene HAS a type but no profile of that exact name. Try the alias table,
+        # then a keyword pass, before giving up. This recovered 47 real scenes (Substation 2,
+        # Farm, Tank, Birmingem/London/Paris) that were previously falling through to blind.
+        alias = SUPPLY_TYPE_ALIASES.get(st)
+        if alias:
+            p = _SCENES['profiles'].get(alias)
+        if p is None:
+            for kw, target in SUPPLY_TYPE_KEYWORDS:
+                if kw.lower() in st.lower():
+                    p = _SCENES['profiles'].get(target)
+                    if p is not None:
+                        break
+    if not p or not any(p['caps'].values()):
+        return None                        # AA sites, substations etc. hold nothing
+    return p
+
+
+def scene_efficiency(room_id, scene_id):
+    """v286: production efficiency for a scene, 0.0..1.0, derived from its HP fraction.
+
+    The ENGINE does not store an efficiency scalar. Per FA.exe FUN_00588850, each producer
+    building is binary - it Works() or it does not - and killing one subtracts exactly its rate
+    from the camp aggregate. The percentage the game shows is therefore the emergent ratio of
+    surviving producers. Until we can map weapon-object damage onto individual buildings we
+    approximate that ratio with the scene's overall HP fraction, which has the same endpoints
+    (undamaged = 1.0, flattened = 0.0) and degrades monotonically in between.
+    """
+    if not SUPPLY_DAMAGE_SCALES_RATE:
+        return 1.0
+    hp = SCENE_HP.get((room_id, int(scene_id)))
+    if hp is None:
+        return 1.0                         # never damaged
+    frac = float(hp) / float(SCENE_DEFAULT_HP or 1)
+    return max(SUPPLY_MIN_EFFICIENCY, min(1.0, frac))
+
+def supply_on_scene_destroyed(room_id, scene_id):
+    """v291: a destroyed scene loses everything it was holding, at once.
+
+    Measured directly (see v291 notes): killing one GER fuel factory dropped the camp's stored fuel
+    by 15000 BETWEEN production steps - the building's entire contents - separately from the
+    -1000/min rate loss that showed up at every step afterwards. Modelling only the rate loss left
+    a destroyed field still handing out whatever it had banked.
+
+    Returns the amounts lost, for logging. Safe to call for scenes we have no state for.
+    """
+    if not SUPPLY_DESTROY_LOSES_STORES:
+        return None
+    key = (room_id, int(scene_id))
+    with _SUPPLY_LOCK:
+        st = _SUPPLY.get(key)
+        if not st:
+            return None
+        lost = dict(st)
+        for r in st:
+            st[r] = 0
+    return lost
+
+
+def supply_seed_frac(room_id):
+    """v292: starting stock as a fraction of capacity, from the arena's own [TC] InitialStorage.
+
+    InitialStorage is a per-arena PERCENT (0..100), not a constant: the offline training mission
+    uses 50 (a 30000 fuel cap seeded to 15000, confirmed by memory dump), while our arenas send
+    100. Falls back to the TC default, then to SUPPLY_SEED_FRAC.
+    """
+    try:
+        v = db_get_room_settings(room_id).get('initial_storage')
+        if v is None:
+            v = TC_DEFAULTS.get('initial_storage')
+        if v is not None:
+            return max(0.0, min(1.0, float(v) / 100.0))
+    except Exception:
+        pass
+    return SUPPLY_SEED_FRAC
+
+
+def supply_state(room_id, terrain, scene_id, allow_default=False):
+    """Current stores for a scene, seeded to SUPPLY_SEED_FRAC of capacity on first touch."""
+    p = scene_profile(terrain, scene_id, allow_default)
+    if p is None:
+        return None, None
+    key = (room_id, int(scene_id))
+    with _SUPPLY_LOCK:
+        st = _SUPPLY.get(key)
+        if st is None:
+            _frac = supply_seed_frac(room_id)
+            st = {r: int(p['caps'][r] * _frac) for r in ('ammo', 'fuel', 'metal')}
+            _SUPPLY[key] = st
+    return st, p
+
+def supply_take(room_id, terrain, scene_id, ammo_kg, fuel_kg, allow_default=True):
+    """Draw up to `ammo_kg` / `fuel_kg` from a field for one rearm. Returns (ammo_got, fuel_got) in
+    KILOGRAMS - the amounts actually available, which is what we hand straight to msg-60 under
+    SUPPLY_GRANT_FLAGS=0x01 (an absolute set, in kg). Returns None when the scene has no economy, so
+    the caller stays blind. Stores are held in the same kg units, which is consistent with the
+    manual: resources to equip a unit are 'calculated based on the physical weight of the fuel and
+    ammunition/ordnance used'."""
+    st, p = supply_state(room_id, terrain, scene_id, allow_default)
+    if st is None:
+        return None
+    out = []
+    with _SUPPLY_LOCK:
+        for res, want in (('ammo', ammo_kg), ('fuel', fuel_kg)):
+            got = max(0, min(st[res], want))
+            st[res] -= got
+            out.append(got)
+    return tuple(out)
+
+def _supply_tick_loop():
+    """One production STEP per SUPPLY_TICK: every seeded scene adds its producers' per-minute rate,
+    capped at its storage volume (the wiki's 'if there is no available storage space the resources
+    simply vanish')."""
+    while True:
+        try:
+            time.sleep(SUPPLY_TICK)
+            if not SUPPLY_MODEL:
+                continue
+            with _SUPPLY_LOCK:
+                items = list(_SUPPLY.items())
+            for (rid, sid), st in items:
+                trn = _probe_terrain_for_room(rid)
+                p = scene_profile(trn, sid)
+                if not p:
+                    continue
+                # v286: damaged scenes produce less, and repair a little each step.
+                eff = scene_efficiency(rid, sid)
+                with _SUPPLY_LOCK:
+                    for r in ('ammo', 'fuel', 'metal'):
+                        rate = p['rates'][r]
+                        if rate:
+                            st[r] = min(p['caps'][r], st[r] + int(rate * eff))
+                if SUPPLY_REPAIR_HP_PER_TICK:
+                    skey = (rid, int(sid))
+                    hp = SCENE_HP.get(skey)
+                    if hp is not None and hp < SCENE_DEFAULT_HP:
+                        SCENE_HP[skey] = min(SCENE_DEFAULT_HP,
+                                             hp + SUPPLY_REPAIR_HP_PER_TICK)
+            # v297: push the new per-camp totals after every step. The 2009 log carries msg 40 at
+            # exactly this cadence (184 of them across the session, one per camp per minute), which
+            # is what keeps the Production Complex panel live rather than frozen at join values.
+            # NOTE _SUPPLY is keyed by (room_id, scene_id) - take k[0], not the whole key. The
+            # first cut unpacked the key itself as the room and logged 'room (49, 23): no camp
+            # table for terrain 1' on every scene.
+            for _rid in {k[0] for (k, _v) in items}:
+                try:
+                    broadcast_production_40(_rid, reason='(production step)')
+                except Exception:
+                    logx('PROD40', 'broadcast failed')
+        except Exception:
+            logx('SUPPLY', 'tick loop error')
+
+
+PRODINFO_MAX_SCENES = 8       # scenes per msg 71 push; 2009 never sent more than 7 at once
+SUPPLY_QUERY_REPLY = True     # answer msg 69 scene-supply queries (v294)
+MSG_SCENE_SUPPLY_69 = 0x45
+
+MSG_SCENE_PRODUCTION_71 = 0x47
+PACKED_INFO_SIZE = 83
+
+# Probe markers, one distinctive family per array. v299: these must NOT be consecutive integers -
+# v298 used (111,112,113) etc. and the memory scan matched every ascending index array in the
+# process. Each u32 family now carries a tag in the high bytes, so a 12-byte triple is effectively
+# unique. C/E/H are single bytes on the wire so they cannot be tagged; the scan disambiguates them
+# by requiring the whole nine-array stride pattern rather than any one family.
+PRODINFO_PROBE = {
+    'A': (0xA1BE0001, 0xA1BE0002, 0xA1BE0003),
+    'B': (0xB2BE0001, 0xB2BE0002, 0xB2BE0003),
+    'C': (0xC3, 0xC4, 0xC5),
+    'D': (0xD4BE0001, 0xD4BE0002, 0xD4BE0003),
+    'E': (0xE5, 0xE6, 0xE7),
+    'F': (0xF6BE0001, 0xF6BE0002, 0xF6BE0003),
+    'G': (0x67BE0001, 0x67BE0002, 0x67BE0003),
+    'H': (0x8B, 0x8C, 0x8D),
+    'I': (0x99BE0001, 0x99BE0002, 0x99BE0003),
+}
+
+def build_packed_info_71(scene_id, arrays):
+    """One 83-byte PACKED_INFO record. `arrays` maps 'A'..'I' to a 3-tuple (one per resource).
+
+    Field order and widths are fixed by the client's unpacker (FUN_0048e910) - see the v298 notes.
+    C, E and H are single BYTES; the rest are u32. Getting a width wrong shifts everything after
+    it, and the client only validates the total length, so a mistake here is silent.
+    """
+    def u32s(key):
+        return b''.join(struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF) for v in arrays[key])
+    def u8s(key):
+        return bytes(max(0, min(255, int(v))) for v in arrays[key])
+    rec = (struct.pack('<H', int(scene_id) & 0xFFFF)
+           + u32s('A') + u32s('B') + u8s('C') + u32s('D') + u8s('E')
+           + u32s('F') + u32s('G') + u8s('H') + u32s('I'))
+    assert len(rec) == PACKED_INFO_SIZE, f'PACKED_INFO must be 83 bytes, built {len(rec)}'
+    return rec
+
+
+def build_production_info_71(records):
+    """[0x47][u32][u16] + N x 83. The header pair is echoed from the request by the real host but
+    is never read on the INFO path, so zeros are fine for unsolicited sends."""
+    body = bytearray([MSG_SCENE_PRODUCTION_71]) + struct.pack('<IH', 0, 0)
+    for rec in records:
+        body += rec
+    assert (len(body) - 7) % PACKED_INFO_SIZE == 0, 'length must satisfy (len-7) %% 83 == 0'
+    return build_ingame_pkt(bytes(body))
+
+
+def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
+    """The nine arrays for one scene. Resource order is (metal, fuel, ammo) throughout.
+
+    With probe=False this is a BEST GUESS at the mapping - stored, capacity and percent are the
+    only quantities we actually hold, so they are placed in the wider u32 arrays and the byte
+    arrays get percentages (a byte cannot hold a raw resource total anyway). Use probe=True to
+    find out what really goes where.
+    """
+    if probe:
+        return dict(PRODINFO_PROBE)
+    st, p = supply_state(room_id, terrain, scene_id)
+    if not st or not p:
+        z = (0, 0, 0)
+        return {k: z for k in 'ABCDEFGHI'}
+    order = ('metal', 'fuel', 'ammo')
+    stored = tuple(int(st.get(r, 0)) for r in order)
+    caps = tuple(int(p['caps'].get(r, 0)) for r in order)
+    rates = tuple(int(p['rates'].get(r, 0)) for r in order)
+    pct = tuple(0 if c <= 0 else max(0, min(100, s * 100 // c)) for s, c in zip(stored, caps))
+    return {'A': stored, 'B': caps, 'C': pct, 'D': rates, 'E': pct,
+            'F': stored, 'G': caps, 'H': pct, 'I': rates}
+
+
+def broadcast_production_info_71(room_id, scene_ids=None, probe=False, reason=''):
+    """Push msg 71 INFO for a set of scenes to everyone in-game in a room."""
+    trn = _probe_terrain_for_room(room_id)
+    camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+    if scene_ids is None:
+        scene_ids = sorted(camps)[:PRODINFO_MAX_SCENES]
+    sess = [s for s in get_all_sessions()
+            if getattr(s, 'entered_game', False) and s.current_room == room_id]
+    if not sess or not scene_ids:
+        return 0
+    recs = [build_packed_info_71(sid, scene_prodinfo_arrays(room_id, trn, sid, probe))
+            for sid in scene_ids]
+    pkt = build_production_info_71(recs)
+    for s in sess:
+        threading.Thread(
+            target=lambda _s=s: send_rel(_s, pkt, f'<- PRODUCTION_INFO 71 x{len(recs)}', to=3.0),
+            daemon=True).start()
+    log('PROD71', f'room {room_id}: msg 71 {"PROBE " if probe else ""}x{len(recs)} scene(s) '
+                  f'({len(pkt)} bytes, 7+{len(recs)}*83) -> {len(sess)} session(s) {reason}')
+    return len(recs)
+
+
+MSG_PRODUCTION_40 = 0x28
+# v300: OFF for the stable build. msg 40 is correctly framed and the client accepts it at exactly
+# 38 bytes without complaint, but nothing appears on screen, so broadcasting one per camp every
+# production step is pure traffic. The `production` console command still sends on demand.
+SEND_PRODUCTION_40 = False
+
+def build_production_40(camp, units, stored, capacity):
+    """Build FA msg 40 (0x28) PRODUCTION COMPLEX for one camp. Always 38 bytes.
+
+    units    = (aircraft, tank, ship)     -> the three scalars at +0x00/+0x04/+0x08
+    stored   = (metal, fuel, ammo)        -> D[3] at +0x0c
+    capacity = (metal, fuel, ammo)        -> E[3] at +0x18
+
+    The camp byte is bounds-checked against 8 by the client, which logs a range assert and keeps
+    going, so an out-of-range camp is noisy rather than fatal - but we clamp anyway.
+    """
+    body = bytearray([MSG_PRODUCTION_40, camp & 0x07])
+    for v in units:
+        body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
+    for v in stored:
+        body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
+    for v in capacity:
+        body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
+    assert len(body) == 38, f'msg 40 must be 38 bytes, built {len(body)}'
+    return build_ingame_pkt(bytes(body))
+
+
+def camp_economy_totals(room_id, terrain, camp):
+    """Sum stored + capacity over every profiled scene owned by a camp.
+
+    This aggregation is the point: the panel's 'Production Complex Data' is a whole-camp figure,
+    while 'Single Scene Data' is the one scene under the cursor. Scenes with no profile (AA sites
+    and similar) contribute nothing rather than being counted as empty.
+    """
+    camps = SCENE_CAMP_BY_TERRAIN.get(terrain, {})
+    stored = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    capacity = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    for sidx, c in camps.items():
+        if c != camp:
+            continue
+        st, p = supply_state(room_id, terrain, sidx)
+        if not st or not p:
+            continue
+        for r in ('metal', 'fuel', 'ammo'):
+            stored[r] += int(st.get(r, 0))
+            capacity[r] += int(p['caps'].get(r, 0))
+    return stored, capacity
+
+
+def broadcast_production_40(room_id, reason=''):
+    """Send one msg 40 per active camp to everyone in-game in a room."""
+    if not SEND_PRODUCTION_40:
+        return 0
+    trn = _probe_terrain_for_room(room_id)
+    camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+    if not camps:
+        log('PROD40', f'room {room_id}: no camp table for terrain {trn}')
+        return 0
+    sess = [s for s in get_all_sessions()
+            if getattr(s, 'entered_game', False) and s.current_room == room_id]
+    if not sess:
+        return 0
+    sent = []
+    for camp in sorted(set(camps.values())):
+        if camp > 7:
+            continue
+        stored, capacity = camp_economy_totals(room_id, trn, camp)
+        if not any(capacity.values()):
+            continue
+        pkt = build_production_40(
+            camp, (0, 0, 0),
+            (stored['metal'], stored['fuel'], stored['ammo']),
+            (capacity['metal'], capacity['fuel'], capacity['ammo']))
+        for s in sess:
+            threading.Thread(
+                target=lambda _s=s, _p=pkt: send_rel(_s, _p, f'<- PRODUCTION 40 camp={camp}',
+                                                    to=3.0),
+                daemon=True).start()
+        sent.append(f'c{camp}:{stored["metal"]}/{stored["fuel"]}/{stored["ammo"]}')
+    log('PROD40', f'room {room_id}: msg 40 x{len(sent)} camp(s) -> {len(sess)} session(s) '
+                  f'{reason} [{" ".join(sent)}]')
+    return len(sent)
+
+
+def _handle_scene_supply_query_69(s, pl):
+    """v294: answer a msg-69 scene supply query.
+
+    Request : [00][type][00 00][0x45] then N x u16 scene index, type = 0x32 + (N-1)*0x20.
+    Reply   : [0x45] then N x 3 bytes. The client asserts (Length-1) %% 3 == 0, so the record
+              count must match exactly - a short reply is a hard error on its side, not a
+              cosmetic one.
+
+    The three bytes are our best reading of the map panel's 'Metal / Fuel / Ammo %' triplet.
+    Unknown scenes answer 0,0,0 rather than being omitted, because dropping a record would
+    desynchronise the whole reply against the request list.
+    """
+    if not SUPPLY_QUERY_REPLY:
+        return False
+    body = bytes(pl)
+    i = body.find(MSG_SCENE_SUPPLY_69, 3)
+    if i < 0 or (len(body) - i - 1) % 2 != 0:
+        return False
+    idxs = [struct.unpack_from('<H', body, p)[0] for p in range(i + 1, len(body) - 1, 2)]
+    if not idxs:
+        return False
+    trn = _probe_terrain_for_room(s.current_room)
+    out = bytearray([MSG_SCENE_SUPPLY_69])
+    parts = []
+    for sidx in idxs:
+        st, p = supply_state(s.current_room, trn, sidx)
+        if not st or not p:
+            # Still emit a record - the client walks a fixed 3-byte stride and asserts on the
+            # total length, so a skipped scene would shift every record after it.
+            out += struct.pack('<HB', sidx & 0xFFFF, 0)
+            parts.append(f'{sidx}:-')
+            continue
+        pcts = []
+        for r in ('metal', 'fuel', 'ammo'):
+            cap = p['caps'].get(r) or 0
+            if cap > 0:
+                pcts.append(max(0, min(100, int(round(st[r] * 100.0 / cap)))))
+        supply_pct = int(round(sum(pcts) / len(pcts))) if pcts else 0
+        # v296: the byte is the scene's CONDITION, not its supply. Proven live - v295 put the
+        # supply average here and the client rendered it as '100% damage' on every scene. Health
+        # comes from SCENE_HP, which only populates while AUTO_SCENE_DESTROY is on; undamaged
+        # scenes correctly report 100.
+        val = int(round(scene_efficiency(s.current_room, sidx) * 100))
+        out += struct.pack('<HB', sidx & 0xFFFF, val & 0xFF)
+        parts.append(f'{sidx}:hp{val}(sup{supply_pct})')
+    pkt = build_ingame_pkt(bytes(out))
+    threading.Thread(target=lambda: send_rel(s, pkt, f'<- SCENE_SUPPLY 69 x{len(idxs)}', to=3.0),
+                     daemon=True).start()
+    log('SUPPLY69', f'{s.current_pilot} asked {len(idxs)} scene(s) -> ' + ' '.join(parts))
+    return True
+
+
 def _supply_msg_instrument(s, sub, cmd, pl):
     """v264: capture the spawn/land/supply/repair message flow. Logs every reliable-channel message
     once the pilot is in-arena (entered_game), decoding the PREFIXED inner sub (pl[8]) for cmd!=0
@@ -8331,13 +9659,38 @@ def _resupply_poll_loop():
                     continue
                 s.resupplied_this_stop = True
                 s.last_resupply_at = now
-                # (6) TARGETED: only the parked pilot. Broadcasting rearms airborne pilots too.
+                # (6) P2b SUPPLY GATE. SUPPLY_GRANT_FLAGS=0x08 is an INCREMENTAL top-up: the client
+                #     takes only what the aircraft is actually short of, clamps at its capacity, and
+                #     runs its own base accounting (falling back to unit/tank production and telling
+                #     the player when the field cannot cover it). We therefore OFFER a ceiling and
+                #     charge a nominal amount, rather than force-setting a fixed load every time.
+                _flags = SUPPLY_GRANT_FLAGS
+                amt  = SUPPLY_FULL_FUEL_KG
+                amt2 = SUPPLY_FULL_AMMO_KG
+                _sup = ''
+                if SUPPLY_MODEL:
+                    _trn = _probe_terrain_for_room(s.current_room)
+                    _fr = supply_take(s.current_room, _trn, s.at_airfield,
+                                      SUPPLY_DEBIT_AMMO_KG, SUPPLY_DEBIT_FUEL_KG)
+                    if _fr is not None:
+                        _ammo_kg, _fuel_kg = _fr
+                        _st, _p = supply_state(s.current_room, _trn, s.at_airfield, True)
+                        # offer is capped by what the field can still back: a field with nothing
+                        # left offers 0 and the client surfaces the shortage on its own.
+                        amt  = min(0xffff, SUPPLY_FULL_FUEL_KG if _fuel_kg > 0 else 0, _st['fuel'] + _fuel_kg)
+                        amt2 = min(0xffff, SUPPLY_FULL_AMMO_KG if _ammo_kg > 0 else 0, _st['ammo'] + _ammo_kg)
+                        _ty = scene_type_for(_trn, s.at_airfield) or f'{SUPPLY_DEFAULT_TYPE}?'
+                        _sup = (f" [supply {_ty}: field now ammo {_st['ammo']}/{_p['caps']['ammo']} "
+                                f"fuel {_st['fuel']}/{_p['caps']['fuel']} kg"
+                                f" | drew fuel {_fuel_kg}kg ammo {_ammo_kg}kg"
+                                f" | offering fuel {amt}kg ammo {amt2}kg"
+                                f" (flags=0x{_flags:02x} incremental)]")
                 send_supply_grant_60(
-                    s, flags=0x04, amount=0xffff, amount2=0xffff,
+                    s, flags=_flags, amount=amt, amount2=amt2,
                     reason=f'(auto-resupply: {s.current_pilot} stationary at AF={s.at_airfield})')
                 log('RESUPPLY', f'{s.current_pilot} position static {static_for:.1f}s '
                                 f'({s.pos_static_samples} fresh samples) at AF={s.at_airfield} '
-                                f'(pos={pos}) -> auto msg-60 grant (blind, one-shot)')
+                                f'(pos={pos}) -> auto msg-60 grant{_sup}')
         except Exception:
             logx('RESUPPLY', 'poll loop error')
 
@@ -8383,6 +9736,9 @@ def handle_post_auth(s, cmd, pl):
     log('RX/REL/PL', f'  [{_h4}|{_d4}] +{hx(stored[8:8+80]) if len(stored)>8 else ""}')
     _ingame_msg_instrument(s, sub, stored)     # v258: dump watched types while a parachuter is alive
     _supply_msg_instrument(s, sub, cmd, stored)  # v263: capture supply/repair msgs (59/60/40/73)
+    if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
+        # v294: the scene supply query the client fires on every map open / scene select.
+        _handle_scene_supply_query_69(s, stored)
     _auto_resupply_check(s, sub, stored)         # v267: auto msg-60 resupply on park+engine-off
 
     if cmd in COMPOUND_CMDS:
@@ -9488,7 +10844,10 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server v279 on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server {VERSION} on {HOST}:{PORT}')
+log('WEAPONMAP', f'{weapon_map_load()} weapon-obj anchor(s) from weapon_map.json'
+                 + ('' if WEAPON_MAP else ' - auto-destroy will skip every obj until anchors '
+                                          'exist (corr watch -> corr map <obj> <sceneIdx>)'))
 _unpriced = [n for n in PLANE_ROSTER if n not in PLANE_VALUE_NAMES]
 if _unpriced:
     log('PLANES', f'[warn] no point value for {len(_unpriced)} plane(s), falling back to the '
@@ -9524,6 +10883,7 @@ threading.Thread(
 
 threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
+threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
 
 _drop_ts=0.0
 
