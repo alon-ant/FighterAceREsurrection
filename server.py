@@ -2,6 +2,36 @@
 r"""
 Fighter Ace LAN Server v300
 ===========================
+v311: [MOD] Enabled the DEATH-EFFECT exit form for plane-destroy (MOD_DESTROY_USE_EFFECT=True).
+      v310's silent delete was proven clean end-to-end (run_20260723_021655: 'killp ... obj 0x0100
+      -> 1 client(s) [SELF-TARGET] [silent]'; client logged 'Server require delete object 256 ...
+      DelObject bsr=1' - clean server delete, no desync, no CTD). Now crumblep/killp send exit 0x53
+      (MEC5|EEC3 shot-down = explosion) and ejectp sends 0x50 (bailout). Entry-tail sizing verified
+      against EXIT_EEC_ENTRY_SIZE (0x53->12B, 0x50->3B) so the peer parse loop cannot desync; an
+      unknown EEC still falls back to the silent delete. Hunter field is zeroed (a moderator kill
+      has no attributable shooter).
+v310: [MOD] Wired the by-name 0x80 destroy form (80 <sub> <name[32]>) in addition to the compact
+      0x7f. The client sends 0x80 when it cannot resolve the target locally (e.g. self-target, since
+      its resolver excludes the sender); the server owns the full roster and resolves the name,
+      which makes crumblep/killp/ejectp self-testable with a single client. _session_by_pilot_name
+      (case-insensitive). Self-target tagged [SELF-TARGET] in the log.
+      NOTE: the plane-selection-menu corruption after exiting is a SEPARATE PRE-EXISTING bug, NOT
+      caused by destroy - the 'Wrong char 11' parse errors fire on JOIN / HQ-catalog (the 0x3a
+      'REFRAME ... NOT re-framing' path), 18s BEFORE the killp in the same session. Filed for later.
+v309: [MOD] PLANE-DESTROY ENACTED (crumblep/killp/ejectp). The 2-client capture run_20260722_223331
+      settled the outbound question: the moderator's client, WHEN it resolves the target locally,
+      sends the COMPACT form 'out 127'4' = type 0x42 + [7F <player_index:u16 LE> <sub>] (sub 01
+      crumble / 02 nofuel / 03 eject / 04 kill). Self-tests always fell to the by-name 0x80 form
+      because a client cannot resolve itself; with a real 2nd player the 0x7f form appears. The
+      server was RECEIVING it and only logging it (relay-only) - that was the whole 'crumblep does
+      nothing'. Now enact_plane_destroy() resolves player_index -> session -> my_obj_number and
+      sends the proven type-3 object delete (build_delete_object_3, the same primitive a real
+      kill/bail/para-land uses, client logs it as 'Server require delete object N') to the victim
+      and every peer. CONSERVATIVE default: silent delete (no exit-entry tail -> cannot desync the
+      peer parse loop). MOD_DESTROY_USE_EFFECT flips to the explosion/bail exit form (0x53/0x50)
+      once the basic relay is confirmed. nofuelp is a fuel-drain (no type-3 form) - logged, not yet
+      wired. NOTE: the 'Unsupported message 8' errors in the client log are UNRELATED (idle-time
+      stray path, not the destroy relay - confirmed by timing).
 v300: STABLE BUILD FOR DEPLOYMENT. No new decoding - this banks the working supply/repair layer
       and puts the unfinished TC economy work behind flags so it cannot destabilise testing.
 
@@ -2313,12 +2343,119 @@ def enact_mod_action(s, op, body):
             on = bool(body[1]) if len(body) > 1 else False
             _ALLCHAT[room] = on
             log('MODERATOR', f'ALLCHAT {"ON" if on else "OFF"} in room {room} by {by}')
+        elif op == 0x7f:                       # PLANE-DESTROY, compact form: 7F <idx:u16> <sub>
+            enact_plane_destroy(s, body, by_index=True)
+        elif op == 0x80:                       # PLANE-DESTROY, by-name form: 80 <sub> <name[32]>
+            # The client sends this when it CANNOT resolve the target locally (e.g. self-target,
+            # since its resolver walks the REMOTE roster and excludes the sender). The SERVER owns
+            # the full roster, so we CAN resolve the name - which also makes crumblep/killp/eject
+            # self-testable with a single client.
+            enact_plane_destroy(s, body, by_index=False)
         else:
-            # 0x7f/0x80/0x8c/0x8d/0x91 are relay-to-target (destroy/chime/ghost/smoke) - not
-            # self-testable; decode_mod_action already logged them. No server state to change.
+            # 0x8c/0x8d/0x91 are chime / ghost / smoke relay forms - not yet enacted;
+            # decode_mod_action already logged them.
             pass
     except Exception as e:
         log('MODERATOR', f'enact op=0x{op:02x} failed: {e}')
+
+# Moderator plane-destroy sub-actions (the 0x7f compact form: 7F <player_index:u16> <sub>).
+# Confirmed on the wire from run_20260722_223331 (2-client): 'out 127'4' = 7f 01 00 0X.
+MOD_DESTROY_SUBS = {0x01: 'crumblep', 0x02: 'nofuelp', 0x03: 'ejectp', 0x04: 'killp'}
+# Death-effect exit bytes (from the kill/exit RE). 0x53 = MEC5|EEC3 shot-down (explosion + names);
+# 0x50 = MEC5|EEC0 bailout short-form. Silent removal = plain build_delete_object_3 (X/Z=0).
+# Start CONSERVATIVE: crumblep/killp use the silent object delete (no exit-entry tail -> no desync
+# risk). Death effects can be switched on once the basic relay is confirmed live.
+MOD_DESTROY_USE_EFFECT = True           # v311: silent delete proven clean -> enable explosion/bail exit
+MOD_DESTROY_EXIT = {0x01: 0x53, 0x04: 0x53, 0x03: 0x50, 0x02: None}
+
+def _session_by_player_index(room, idx):
+    """Resolve a target session by the PlayerIndex carried in the 0x7f destroy packet, scoped to
+    the moderator's room. player_index is stamped per session at spawn (s.player_index)."""
+    for x in get_sessions_in_room(room):
+        if getattr(x, 'player_index', None) == idx:
+            return x
+    return None
+
+def _session_by_pilot_name(room, name):
+    """Resolve a target session by pilot name (case-insensitive), scoped to the room. Used for the
+    by-name 0x80 destroy form, which the client sends when it cannot resolve the target locally."""
+    if not name:
+        return None
+    low = name.lower()
+    for x in get_sessions_in_room(room):
+        if (getattr(x, 'current_pilot', None) or '').lower() == low:
+            return x
+    return None
+
+def enact_plane_destroy(s, body, by_index=True):
+    """Enact crumblep/killp/ejectp/nofuelp. Two wire forms (both opcode-first):
+        by_index=True  (0x7f):  7F <player_index:u16 LE> <sub>
+        by_index=False (0x80):  80 <sub> <name[32] ASCIIZ>
+    The client sends 0x7f when it resolves the target locally, 0x80 (by name) when it cannot -
+    e.g. self-target, since its resolver excludes the sender. The SERVER can resolve either, so
+    handling 0x80 by name also makes these commands self-testable with a single client.
+
+    We map the target to its session, take its live plane object number (my_obj_number), and send
+    the SAME type-3 object-delete the client honours as 'Server require delete object N' (the exact
+    primitive a real kill / bail / para-land uses) to the victim AND every peer in the room.
+
+    Conservative by default: a plain silent delete (no exit-entry tail) which cannot desync the
+    peer parse loop. MOD_DESTROY_USE_EFFECT enables the explosion/bail exit form once confirmed.
+    """
+    by = getattr(s, 'current_pilot', None) or '?'
+    room = getattr(s, 'current_room', None)
+    if by_index:
+        if len(body) < 4:
+            log('MODERATOR', f'destroy: short 0x7f packet {bytes(body).hex()}')
+            return
+        idx = struct.unpack_from('<H', body, 1)[0]
+        sub = body[3]
+        cmd = MOD_DESTROY_SUBS.get(sub, f'sub0x{sub:02x}')
+        target = _session_by_player_index(room, idx)
+        _who = f'player_index={idx}'
+    else:
+        if len(body) < 3:
+            log('MODERATOR', f'destroy: short 0x80 packet {bytes(body).hex()}')
+            return
+        sub = body[1]
+        name = bytes(body[2:34]).split(b'\x00')[0].decode('ascii', 'replace')
+        cmd = MOD_DESTROY_SUBS.get(sub, f'sub0x{sub:02x}')
+        target = _session_by_pilot_name(room, name)
+        _who = f'name="{name}"'
+    if target is None:
+        log('MODERATOR', f'destroy {cmd}: no target ({_who}) in room {room}')
+        return
+    onum = getattr(target, 'my_obj_number', None)
+    if not onum:
+        log('MODERATOR', f'destroy {cmd}: target "{target.current_pilot}" has no live plane object')
+        return
+    if sub == 0x02:
+        # nofuelp is NOT a destroy - it drains fuel, a different mechanism with no type-3 form.
+        # Not wired yet; log so it is visible rather than silently mis-handled as a delete.
+        log('MODERATOR', f'nofuelp on "{target.current_pilot}" not implemented (fuel-drain, not a delete)')
+        return
+    exit_byte = MOD_DESTROY_EXIT.get(sub)
+    _self = (target is s)
+    recipients = [x for x in get_sessions_in_room(room) if getattr(x, 'flying', False) or x is target]
+    if target not in recipients:
+        recipients.append(target)
+    sent = 0
+    for peer in recipients:
+        try:
+            if MOD_DESTROY_USE_EFFECT and exit_byte is not None:
+                pkt = build_exit_delete_object_3(onum, exit_byte)
+            else:
+                pkt = None
+            if pkt is None:
+                pkt = build_delete_object_3(onumber=onum)   # silent removal (already msg13-wrapped)
+            send_rel(peer, pkt, f'<- MOD {cmd} destroy obj 0x{onum:04x} ({target.current_pilot})', to=3.0)
+            sent += 1
+        except Exception as e:
+            log('MODERATOR', f'destroy {cmd}: send to {getattr(peer,"current_pilot","?")} failed: {e}')
+    log('MODERATOR', f'{cmd} by {by}: destroyed "{target.current_pilot}" '
+                     f'obj 0x{onum:04x} -> {sent} client(s)'
+                     f'{" [SELF-TARGET]" if _self else ""}'
+                     f'{" [effect]" if (MOD_DESTROY_USE_EFFECT and exit_byte is not None) else " [silent]"}')
 
 def kick_session(sess, reason='kicked', notice=None):
     """Forcibly remove a live session (console BAN). Transport is a single shared UDP socket,

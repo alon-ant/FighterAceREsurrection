@@ -1,11 +1,36 @@
+# =============================================================================
+# FA Server - web interface (separate module, launched as a daemon thread from the
+# main server file). Login / launcher / ladder / admin panel / arena settings / live console.
+#
+# CHANGELOG
+# 2026-07-23: STABILITY - made the web server multithreaded and added a health watchdog.
+#   Was plain single-threaded HTTPServer (serial: one request at a time). One stalled request -
+#   a half-open FA-launcher browser socket, a SQLite lock, or the /admin/logs.json 2s auto-poll
+#   from a console left open - queued ALL others forever, so after a few hours it wedged and
+#   "stopped responding". Fixes:
+#     * ThreadingHTTPServer (_ThreadedWebServer, daemon_threads) so one stuck request can't block
+#       the rest; per-request socket timeout + larger accept backlog.
+#     * _connect() opens SQLite with a 5s busy_timeout so concurrent writers wait instead of
+#       erroring 'database is locked' (used by new code; the existing per-request connects still
+#       work and can be migrated to it later).
+#     * Health watchdog thread: every 30s it GETs http://127.0.0.1:80/login (needs no DB/auth);
+#       if it doesn't answer within 10s twice in a row, _restart_httpd() tears down and rebuilds
+#       just the web server on the same port (shutdown -> server_close -> rebind, 5 retries).
+#       This is the requested "wget localhost:80, if >10s restart the web portion" keep-alive.
+#   serving now runs on its own thread; start_web_server still blocks (unchanged contract).
+# =============================================================================
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import os
 import subprocess
 import sqlite3
 import hashlib
 import secrets
 import json
+import threading
+import time
+import socket
+import urllib.request
 from http import cookies
 from html import escape as hesc
 
@@ -85,6 +110,19 @@ LOG_CONSOLE_PAGE = """
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
+def _connect():
+    """Open a SQLite connection with a busy timeout. Now that the web server is threaded, several
+    requests can hit the DB at once; a 5s busy_timeout makes a writer wait for a concurrent write
+    to finish instead of immediately raising 'database is locked'. check_same_thread=False is safe
+    here because each connection is created, used, and closed within a single request handler (we
+    never share one connection across threads)."""
+    conn = sqlite3.connect(SRV['db_path'], timeout=5.0, check_same_thread=False)
+    try:
+        conn.execute('PRAGMA busy_timeout=5000')
+    except Exception:
+        pass
+    return conn
 
 def migrate_web_db():
     conn = sqlite3.connect(SRV['db_path'])
@@ -1078,6 +1116,155 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         except (ConnectionResetError, ConnectionAbortedError):
             self.close_connection = True
 
+# A per-request-threaded HTTP server. Each request runs in its own daemon thread, so one slow
+# or stalled request (a half-open launcher socket, a SQLite lock, a client that opened the
+# auto-refreshing console and walked away) can no longer wedge the single accept loop and freeze
+# the whole web UI - which is what made it "stop responding after a few hours" under the plain
+# serial HTTPServer.
+class _ThreadedWebServer(ThreadingHTTPServer):
+    daemon_threads = True          # worker threads don't block process/thread shutdown
+    allow_reuse_address = True     # let a restart re-bind port 80 immediately (no TIME_WAIT wait)
+
+# The live server + the thread running it, so the watchdog can restart just this part.
+_WEB = {'httpd': None, 'thread': None}
+
+def _serve_forever_guarded():
+    """Run the current httpd.serve_forever(); if it ever throws, log it instead of silently
+    killing the web thread (the old code had no guard, so any unexpected error left the UI dead
+    with no trace)."""
+    httpd = _WEB.get('httpd')
+    if httpd is None:
+        return
+    try:
+        httpd.serve_forever(poll_interval=0.5)
+    except Exception as e:
+        try:
+            SRV['log']('WEB', f'serve_forever exited with error: {e!r}')
+        except Exception:
+            pass
+
+def _build_httpd():
+    server_address = ('', WEB_PORT)
+    httpd = _ThreadedWebServer(server_address, WebInterfaceHandler)
+    # Cap how long a single request may tie up its worker. request_queue_size raises the accept
+    # backlog so bursts don't get refused while workers spin up.
+    httpd.timeout = 30
+    httpd.request_queue_size = 64
+    return httpd
+
+def _start_httpd_thread():
+    """(Re)build the httpd and start its serving thread. Any previous instance must already be
+    shut down by the caller. Returns the new thread."""
+    _WEB['httpd'] = _build_httpd()
+    t = threading.Thread(target=_serve_forever_guarded, name='web-serve', daemon=True)
+    t.start()
+    _WEB['thread'] = t
+    return t
+
+def _restart_httpd(reason=''):
+    """Tear down the current web server and stand a fresh one up on the same port. Called by the
+    watchdog when the UI stops answering. shutdown() unblocks serve_forever(); server_close()
+    frees the listening socket so the rebuild can re-bind."""
+    old = _WEB.get('httpd')
+    SRV['log']('WEB', f'restarting web server{(" - " + reason) if reason else ""}')
+    if old is not None:
+        try:
+            old.shutdown()          # signals serve_forever() to return (must not be called from
+                                    # the serving thread itself - the watchdog is a separate thread)
+        except Exception as e:
+            SRV['log']('WEB', f'shutdown() during restart raised: {e!r}')
+        try:
+            old.server_close()      # release the port
+        except Exception as e:
+            SRV['log']('WEB', f'server_close() during restart raised: {e!r}')
+    # Give the old thread a moment to unwind, then rebuild.
+    old_thread = _WEB.get('thread')
+    if old_thread is not None:
+        old_thread.join(timeout=5)
+    for attempt in range(1, 6):
+        try:
+            _start_httpd_thread()
+            SRV['log']('WEB', f'web server restarted on http://localhost:{WEB_PORT}')
+            return True
+        except OSError as e:
+            SRV['log']('WEB', f'rebind attempt {attempt}/5 failed ({e!r}); retrying in 2s')
+            time.sleep(2)
+    SRV['log']('WEB', 'ERROR: web server could not be restarted after 5 attempts')
+    return False
+
+def _health_ping(timeout=10.0):
+    """GET http://localhost:<port>/login and return the elapsed seconds, or None if it failed /
+    timed out. /login is used because it needs no DB row and no auth, so a slow reply means the
+    server itself is wedged, not a slow query. This is the wget-with-10s-timeout check."""
+    url = f'http://127.0.0.1:{WEB_PORT}/login'
+    start = time.monotonic()
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            r.read(256)             # drain a little so the handler completes
+        return time.monotonic() - start
+    except Exception:
+        return None
+
+def _wlog(msg, level=None):
+    """Log helper that tolerates an injected log_fn which may or may not accept level=."""
+    try:
+        if level is None:
+            SRV['log']('WEB', msg)
+        else:
+            SRV['log']('WEB', msg, level=level)
+    except TypeError:
+        SRV['log']('WEB', msg)
+    except Exception:
+        pass
+
+def _web_watchdog(interval=30.0, timeout=10.0):
+    """Every `interval` seconds, ping the web server. If it does not answer within `timeout`
+    seconds (or errors), restart just the web-server portion. Two consecutive bad checks are
+    required before a restart, so a single transient blip doesn't cause a needless bounce.
+
+    Observability: a healthy check used to log nothing, which made it impossible to tell a
+    silent-because-healthy watchdog from a dead one. Now it does an immediate startup ping
+    (logged at INFO so you get proof-of-life at boot), then logs each healthy check as a DEBUG
+    heartbeat (goes to the file log / DEBUG console, stays off the INFO console) and a periodic
+    INFO summary every ~10 checks so there's a visible pulse without spam."""
+    consecutive_bad = 0
+    checks_ok = 0
+    # Immediate startup ping so we know the watchdog can actually reach the server right now,
+    # rather than waiting a full interval and staying silent.
+    first = _health_ping(timeout=timeout)
+    if first is None:
+        _wlog(f'startup health ping FAILED (no response within {timeout:.0f}s) - '
+              f'will keep checking every {interval:.0f}s')
+    else:
+        _wlog(f'startup health ping OK ({first:.2f}s) - watchdog is live, '
+              f'checking every {interval:.0f}s')
+    while True:
+        time.sleep(interval)
+        elapsed = _health_ping(timeout=timeout)
+        if elapsed is None:
+            consecutive_bad += 1
+            _wlog(f'health check FAILED (no response within {timeout:.0f}s) '
+                  f'[{consecutive_bad}/2]')
+        elif elapsed > timeout:
+            consecutive_bad += 1
+            _wlog(f'health check SLOW ({elapsed:.1f}s > {timeout:.0f}s) '
+                  f'[{consecutive_bad}/2]')
+        else:
+            if consecutive_bad:
+                _wlog(f'health check OK ({elapsed:.2f}s) - recovered')
+            consecutive_bad = 0
+            checks_ok += 1
+            # DEBUG heartbeat every check (file/DEBUG only), plus an INFO pulse every 10 checks
+            # (~5 min at 30s) so a healthy watchdog is provably alive on the normal console too.
+            if checks_ok % 10 == 0:
+                _wlog(f'health check OK ({elapsed:.2f}s) - {checks_ok} checks passed')
+            else:
+                _wlog(f'health check OK ({elapsed:.2f}s)', level='DEBUG')
+            continue
+        if consecutive_bad >= 2:
+            _restart_httpd(reason=f'unresponsive ({consecutive_bad} failed checks)')
+            consecutive_bad = 0
+
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None):
     SRV['db_path'] = db_path
@@ -1089,7 +1276,13 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['get_logs'] = get_logs_fn                    # get_recent_logs(n, min_level) -> [str]
 
     migrate_web_db()
-    server_address = ('', WEB_PORT)
-    httpd = HTTPServer(server_address, WebInterfaceHandler)
-    SRV['log']('WEB', f'Web interface running on http://localhost:{WEB_PORT}')
-    httpd.serve_forever()
+    _start_httpd_thread()
+    SRV['log']('WEB', f'Web interface running on http://localhost:{WEB_PORT} (threaded)')
+    # Health watchdog: pings the server and restarts the web portion if it stops answering.
+    threading.Thread(target=_web_watchdog, name='web-watchdog', daemon=True).start()
+    SRV['log']('WEB', 'Web health watchdog started (30s interval, 10s timeout)')
+    # This call previously ran serve_forever() inline and blocked here forever. serving now happens
+    # on its own thread (so the watchdog, which shares this thread, can restart it). Block here to
+    # preserve the original contract that start_web_server does not return while the server lives.
+    while True:
+        time.sleep(3600)
