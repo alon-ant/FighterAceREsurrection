@@ -1778,6 +1778,27 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
       flag gates the per-build decompressed-hex dump (default off).
 
 TODO list:
+  [ ] SYSOP ROSTER SECTION (v307, deferred - cosmetic, powers already work without it).
+      Goal: make moderator pilots appear under the client's dedicated "sysop" group in the
+      chat/arena roster instead of a normal nation.
+      WHAT'S KNOWN (traced from FA.exe, do not re-derive):
+        * The roster groups players by CAMP. The client recognises three special-cased camp
+          values (assert @ 0x6b94a1..0x6b94b4, string 0xa5cc08):
+              C_UNKNOWN = -1 (0xffffffff)   "In Menu"/unassigned
+              C_SYSOPS  = -2 (0xfffffffe)   <-- THE SYSOP SECTION
+              normal camps 0..7             the eight nations
+        * So: report a moderator's camp as -2 and the client files them under sysops.
+        * Camp is carried on the PLAYER-OBJECT layer, NOT the 0xcc lobby update (which has no
+          camp field). It is set via msg 63 op=CAMP(1): rp->Camp() lives at player+0x2c
+          (see the msg 62/63/96 notes below). The lobby-list path (EVENT_LOBBY_PLAYERS /
+          EVENT_CHANGE_LOBBY_CAMP receivers) is the other candidate for the lobby-screen
+          grouping specifically - confirm which surface (in-arena roster vs lobby list) the
+          'sysop section' the user means actually is before wiring.
+      NEXT STEPS: (1) confirm whether the target surface is the in-arena roster (msg 63 camp)
+      or the lobby player list; (2) emit camp=-2 for pilots with admin_rights!=0 in that
+      message; (3) verify a normal player still shows under their nation. Risk: -2 is outside
+      the 0..7 range the rest of the code assumes for camp (production, scenes), so gate the
+      -2 strictly to the roster/display path and never let it reach nation-indexed logic.
   [x] SYN structure mapped (offsets confirmed)
   [x] Pilot creation/rename/delete (0xe2/0xe7/0xe3) saved to DB
   [x] Ticket generation: gen <name> at server console -> ticket_<name>.vr1
@@ -1863,7 +1884,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   length. Any length-driven message MUST tile to len == 1 (mod 16) with parser-valid
   padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
-import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json
+import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math
 from datetime import datetime
 from collections import deque
 
@@ -2019,6 +2040,11 @@ def init_db():
         if _c not in pcols:
             conn.execute(f"ALTER TABLE pilots ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
             log('DB', f'pilots: added missing `{_c}` column (default 0) [msg-25 stat block]')
+    # v301: moderator rights. DEFAULT 0 - deliberately NOT the legacy `rights` column, which
+    # defaults to 1 and would have promoted every existing pilot at once.
+    if 'admin_rights' not in pcols:
+        conn.execute("ALTER TABLE pilots ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 0")
+        log('DB', 'pilots: added `admin_rights` column (default 0) [moderator MyRights]')
     conn.commit(); conn.close()
 
 def db_upsert_account(acct, pid, f45, ab):
@@ -2035,6 +2061,19 @@ def db_ensure_pilot(name, acct, slot):
     conn.execute("INSERT OR IGNORE INTO pilots(pilot_name,account_name,slot_index) VALUES(?,?,?)",
                  (name, acct, slot))
     conn.commit(); conn.close()
+
+def db_pilot_name_taken(name):
+    """True if a pilot with this name already exists (pilot_name is the PRIMARY KEY, so names are
+    GLOBALLY unique across all accounts). Used to reject duplicate pilot creation up front rather
+    than relying on INSERT OR IGNORE + the soft select-time block, which gave the client no
+    feedback. Case-sensitive to match the DB key exactly (FA treats distinct casings as distinct
+    keys here)."""
+    if not name:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT 1 FROM pilots WHERE pilot_name=?", (name,)).fetchone()
+    conn.close()
+    return row is not None
 
 def db_get_account_by_pid(pid_hex):
     conn = sqlite3.connect(DB_PATH)
@@ -2058,6 +2097,293 @@ def db_delete_pilot(pilot_name, acct):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM pilots WHERE pilot_name=? AND account_name=?", (pilot_name, acct))
     conn.commit(); conn.close()
+
+# --- Moderator rights (v301) --------------------------------------------------
+# FA's moderator layer is SERVER-GRANTED. From RE of FA.exe:
+#   * msg 218 (0xDA) handler FUN_004edcf0 reads payload offset +9 (u32 LE) into the global
+#     DAT_00c6e8b0, logging '**** MyRights=%i ****'. That global has exactly ONE writer in
+#     the whole binary (0x4edd02) and its only source is this message - so a client CANNOT
+#     self-promote; rights exist only because we send them.
+#   * The chat parser FUN_0044d180 gates the '##<cmd>' admin command group (0xc7ec18 -
+#     ban/gag/explode/ghost/smoke/chime/...) on DAT_00c6e8b0 != 0, and likewise gates the
+#     high access-level selector letters ('o:', 'b:').
+# We were ALREADY sending msg 218 with offset +9 = 0, which is why no one ever had powers.
+# Storage is per-PILOT and settable ONLY from the server console (see 'mod'/'unmod'), never
+# from any network path.
+#
+# NOTE ON THE COLUMN NAME: the pilots table has a legacy `rights` column that DEFAULTS TO 1
+# and is read nowhere. Reusing it would have silently made EVERY existing pilot a moderator
+# the moment we honoured it. We use a separate `admin_rights` column defaulting to 0.
+
+MODERATORS_ENABLED = True    # master kill-switch for the whole moderator layer
+MOD_RIGHTS_DEFAULT = 1       # value written for 'mod <pilot>' (any non-zero = full mod)
+
+# Client->server opcodes emitted by the '##' admin command handlers (group 0xc7ec18).
+# Derived by scanning each handler for its call to the net-send FUN_007e3350 and reading the
+# opcode byte / length pushed alongside:
+#   0x55, 0x56  41B  ban / unban / gag / ungag        (target name + duration hours)
+#   0x80        34B  explode / out-of-fuel / bail / ghost, discriminated by a SUB byte at +1
+#               (explode = sub 0x01, per FUN_0046da40 which prints 'will be exploded')
+#   0x7f         4B  companion packet sent with the 0x80 family
+#   0x8c        37B  chime      (FUN_0046d1b0)
+#   0x8d        33B  ghost      (FUN_0046d550)
+#   0x91        37B  smoke      (FUN_0046d430)
+MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x5f, 0x62, 0x7f, 0x80, 0x8c, 0x8d, 0x91})
+
+MOD_OPCODE_NAMES = {
+    0x55: 'ban/gag-family', 0x56: 'unban/ungag-family', 0x7f: '0x80-companion',
+    0x80: 'killp/ejectp/crumblep/nofuelp-family', 0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke',
+}
+# Real command names come from the official "FA 3.6 Sysop Commands" reference (rev 2004-08-06).
+# The 'p' suffix = player-targeted. Mapping of sub-byte -> command is inferred by pairing each
+# handler's confirmation string with the doc's description; still to be confirmed live.
+MOD_80_SUBS = {
+    0x01: 'crumblep? ("will be exploded" / disintegrates plane)',
+    0x02: 'nofuelp?  ("will be out of fuel")',
+    0x03: 'ejectp?   ("will be bailed out")',
+    0x04: 'killp?    (kills pilot)',
+}
+
+def decode_mod_action(tb, msg):
+    """Human-readable decode of an inbound moderator message (opcode-first slice).
+
+    Layout CONFIRMED from live capture (run_20260721_163944):
+      0x55/0x56  41B : [0]=op [1:33]=target ASCIIZ (32B, EMPTY = room/all)
+                       [33:37]=arg1 (duration/flag) [37:41]=target player index (-1 = the
+                       client could not resolve the name - hence FA's own "(may be)")
+      0x8d       33B : [0]=0x8d [1:33]=target ASCIIZ (EMPTY = all players)
+    NOTE: for the room-wide form (no name) the [37:41] field is NOT an index - gag sends 1 and
+    ungag sends -1, so it doubles as a mode flag. Treated as a union until confirmed.
+    """
+    name = MOD_OPCODE_NAMES.get(tb, f'0x{tb:02x}')
+    body = bytes(msg)
+    out = [f'{name} len={len(body)}']
+    if tb in (0x55, 0x56, 0x8d) and len(body) >= 33:
+        target = body[1:33].split(b'\x00')[0].decode('ascii', 'replace')
+        out.append(f'target={target!r}' if target else 'target=<ALL/ROOM>')
+        if len(body) >= 41:
+            a1, a2 = struct.unpack_from('<ii', body, 33)
+            out.append(f'arg1={a1}')
+            out.append((f'player_index={a2}' + (' (UNRESOLVED by client)' if a2 == -1 else ''))
+                       if target else f'mode={a2}')
+    elif tb == 0x80 and len(body) > 1:
+        out.append(f'sub={MOD_80_SUBS.get(body[1], hex(body[1]))}')
+    out.append(f'raw={hx(body[:24])}')
+    return ' '.join(out)
+
+def db_get_admin_rights(pilot_name):
+    """Return the pilot's MyRights value (0 = ordinary player)."""
+    if not pilot_name: return 0
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute("SELECT admin_rights FROM pilots WHERE pilot_name=?", (pilot_name,)).fetchone()
+    conn.close()
+    return int(row[0]) if row and row[0] is not None else 0
+
+def db_set_admin_rights(pilot_name, value):
+    """Set a pilot's MyRights. Console-only by design. Returns True if a row was updated."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.execute("UPDATE pilots SET admin_rights=? WHERE pilot_name=?",
+                       (int(value) & 0xffffffff, pilot_name))
+    conn.commit(); n = cur.rowcount; conn.close()
+    return n > 0
+
+def db_list_moderators():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute("SELECT pilot_name, account_name, admin_rights FROM pilots "
+                        "WHERE admin_rights!=0 ORDER BY pilot_name").fetchall()
+    conn.close(); return rows
+
+def sess_rights(s):
+    """MyRights for whichever pilot this session currently has selected."""
+    if not MODERATORS_ENABLED: return 0
+    return db_get_admin_rights(getattr(s, 'current_pilot', None))
+
+def push_myrights(s, reason=''):
+    """Re-send msg 218 (0xDA) after pilot selection so MyRights reflects the CHOSEN pilot.
+
+    The login-time 0xDA goes out BEFORE the pilot is picked, so it necessarily carries 0.
+    This tops it up once the pilot is known.
+
+    DELIBERATE: fires ONLY when rights != 0. For an ordinary player the wire traffic stays
+    byte-for-byte identical to v300, so this cannot regress the (delicate) lobby flow for
+    anyone who isn't a moderator. Uses the Size=15 '63-safe' variant for the same reason
+    build_da_session_safe exists - a stray Size-17 0xDA can be misdispatched to the msg-63
+    handler and assert-crash the client."""
+    if not MODERATORS_ENABLED: return 0
+    r = sess_rights(s)
+    if not r: return 0
+    try:
+        send_unrel(s, build_da_session_safe(r),
+                   f'<- 0xDA MyRights={r} (moderator grant{(" " + reason) if reason else ""})')
+        log('MODERATOR', f'granted MyRights={r} to pilot "{getattr(s,"current_pilot",None)}" {reason}')
+    except Exception as e:
+        log('MODERATOR', f'push_myrights failed: {e}')
+    return r
+
+# --- Moderator ENACTMENT state (v304) -----------------------------------------
+# Self-testable actions only. Plane-destroy (crumblep/killp/ejectp/nofuelp) is intentionally
+# NOT here: it must relay to a *remote* client and cannot be validated on one machine (the
+# client's own name-resolver FUN_004696c0 walks the REMOTE roster, which excludes yourself).
+#
+# Wire opcodes (confirmed from FA.exe + live capture run_20260722_234344):
+#   0x55 41B  -> gag  (apply)   [1:33]=name [33:37]=i32 dur hours (0=softboot, -1=open)
+#   0x56 41B  -> ungag(release)
+#   0x5f  2B  -> Join enable(0x5f 00) / disable(0x5f 01)
+#   0x62  2B  -> AllChat on(0x62 01) / off(0x62 00)
+#   0x8d 33B  -> GhostAll (relay-only; logged, not enacted here)
+# NOTE: ##Ban and ##Gag are INDISTINGUISHABLE on the wire (both 0x55). Per design decision,
+# inbound 0x55 = GAG (reversible chat mute); real room-BAN is a server-console command only.
+
+GAGS = {}            # pilot_name(lower) -> expiry epoch (float); math.inf = open-ended
+_JOIN_DISABLED = {}  # room_id -> True   (Fly-Now button suppressed)
+_ALLCHAT = {}        # room_id -> bool   (informational; client-side toggle)
+BANS = {}            # pilot_name(lower) -> {'until': epoch|inf, 'by': str, 'room': room_id|None}
+
+def _dur_to_expiry(hours):
+    """Map the packet's i32 duration field to an absolute expiry. 0 = soft (immediate expiry,
+    i.e. a boot with instant return per FA 3.5 semantics); -1 = open-ended; else N hours,
+    capped at the documented 12h maximum."""
+    if hours == 0:      return time.time()          # soft: expires now
+    if hours < 0:       return math.inf             # open-ended
+    return time.time() + min(int(hours), 12) * 3600
+
+def is_gagged(pilot_name):
+    if not pilot_name: return False
+    k = pilot_name.lower()
+    exp = GAGS.get(k)
+    if exp is None: return False
+    if exp <= time.time():
+        GAGS.pop(k, None); return False
+    return True
+
+def set_gag(pilot_name, hours, by=''):
+    exp = _dur_to_expiry(hours)
+    if exp <= time.time():
+        GAGS.pop(pilot_name.lower(), None)
+        log('MODERATOR', f'gag on "{pilot_name}" is a soft/expired no-op (dur={hours})')
+        return False
+    GAGS[pilot_name.lower()] = exp
+    when = 'open-ended' if exp == math.inf else f'{int((exp-time.time())/60)}min'
+    log('MODERATOR', f'GAGGED "{pilot_name}" ({when}) by {by or "?"}')
+    return True
+
+def clear_gag(pilot_name, by=''):
+    if GAGS.pop(pilot_name.lower(), None) is not None:
+        log('MODERATOR', f'UNGAGGED "{pilot_name}" by {by or "?"}')
+        return True
+    log('MODERATOR', f'ungag "{pilot_name}": was not gagged')
+    return False
+
+def is_banned(pilot_name):
+    if not pilot_name: return None
+    rec = BANS.get(pilot_name.lower())
+    if not rec: return None
+    if rec['until'] <= time.time():
+        BANS.pop(pilot_name.lower(), None); return None
+    return rec
+
+def _mod_name_and_dur(body):
+    """Parse the 41B gag/ungag payload: [0]=op [1:33]=ASCIIZ name [33:37]=i32 dur."""
+    name = body[1:33].split(b'\x00')[0].decode('ascii', 'replace') if len(body) >= 33 else ''
+    dur = struct.unpack_from('<i', body, 33)[0] if len(body) >= 37 else -1
+    return name, dur
+
+def enact_mod_action(s, op, body):
+    """Apply the self-testable moderator actions server-side. `body` is opcode-first.
+
+    Only reversible / room-state effects are wired here; plane-destroy is relay-only and not
+    self-testable (see the v304 state block). `s` is the MODERATOR's session; the target is
+    named inside the payload and resolved against the moderator's current room.
+    """
+    by = getattr(s, 'current_pilot', None) or '?'
+    room = getattr(s, 'current_room', None)
+    try:
+        if op == 0x55:                         # GAG (per design decision; NOT ban)
+            name, dur = _mod_name_and_dur(body)
+            if name: set_gag(name, dur, by=by)
+        elif op == 0x56:                       # UNGAG
+            name, _ = _mod_name_and_dur(body)
+            if name: clear_gag(name, by=by)
+        elif op == 0x5f:                       # Join enable(0)/disable(1)
+            disabled = bool(body[1]) if len(body) > 1 else False
+            if disabled: _JOIN_DISABLED[room] = True
+            else:        _JOIN_DISABLED.pop(room, None)
+            log('MODERATOR', f'JOIN {"DISABLED" if disabled else "ENABLED"} in room {room} by {by}')
+        elif op == 0x62:                       # AllChat on(1)/off(0)
+            on = bool(body[1]) if len(body) > 1 else False
+            _ALLCHAT[room] = on
+            log('MODERATOR', f'ALLCHAT {"ON" if on else "OFF"} in room {room} by {by}')
+        else:
+            # 0x7f/0x80/0x8c/0x8d/0x91 are relay-to-target (destroy/chime/ghost/smoke) - not
+            # self-testable; decode_mod_action already logged them. No server state to change.
+            pass
+    except Exception as e:
+        log('MODERATOR', f'enact op=0x{op:02x} failed: {e}')
+
+def kick_session(sess, reason='kicked', notice=None):
+    """Forcibly remove a live session (console BAN). Transport is a single shared UDP socket,
+    so there is no per-session socket to close - a 'kick' means: stop its loops (closing=True),
+    drop its remote object from peers, free its slot, and unregister it so nothing is served to
+    it. The client then times out. Mirrors _reap_stale_sessions. Safe from the console thread.
+
+    v305: if `notice` is given, deliver it as a private system chat line (msg 0xcd) to the
+    target FIRST and wait for its ACK, so the player actually sees WHY they were removed before
+    the connection goes quiet. send_rel blocks on the reliable ACK, so the line is rendered
+    before we unregister. A gagged/normal player receives it regardless (it is server->client)."""
+    pilot = getattr(sess, 'current_pilot', None)
+    if notice:
+        try:
+            send_rel(sess, build_chat_broadcast('Server', notice), '<- ban notice', to=2.0)
+        except Exception as e:
+            log('MODERATOR', f'ban-notice send failed: {e}')
+    sess.closing = True
+    try:
+        if pilot:
+            broadcast_player_leave(pilot, exclude_sess=sess)
+            broadcast_system(f'[{pilot}] {reason}')
+            db_room_leave(pilot)
+        _free_start_place(sess)
+        free_client_number(sess)
+    except Exception as e:
+        log('MODERATOR', f'kick cleanup error: {e}')
+    with sl:
+        sadrs.pop(getattr(sess, 'addr', None), None); sids.pop(getattr(sess, 'sid', None), None)
+    log('MODERATOR', f'KICKED "{pilot}" ({reason}) - session unregistered, client will time out')
+    return True
+
+# --- Reserved staff-tag names (v307) ------------------------------------------
+# The retail service reserved the @FA3 / @HQ / @FAVG staff tags. Players must not be able to
+# create pilot (or account) names that impersonate staff. We refuse creation of any name that
+# carries one of these tags. Matching is case-insensitive and matches the tag as a token
+# anywhere in the name (prefix, suffix, or standalone) so 'Bob@FA', '@HQ', 'x @favg y' are all
+# blocked, while ordinary names containing the letters (e.g. 'Fafnir', 'Shqip') are NOT.
+RESERVED_TAGS = ('@FA3', '@FA', '@HQ', '@FAVG', '@VR1')   # @FA3/@FA/@HQ/@FAVG staff + @VR1 vol
+
+def is_reserved_name(name):
+    """True if `name` impersonates a staff tag. Case-insensitive; the '@' makes these tokens
+    that cannot occur in a normal FA nick, so a simple substring test is both sufficient and
+    safe (no false positives on tagless names)."""
+    if not name:
+        return False
+    low = name.lower()
+    return any(tag.lower() in low for tag in RESERVED_TAGS)
+
+def _enforce_ban_on_select(s, pilot_name):
+    """If the just-selected pilot is under an active ban, kick the session. Returns True if the
+    caller should stop processing this packet. Moderators are exempt (they can't ban themselves
+    into a corner). Called right after current_pilot is set, before push_myrights."""
+    rec = is_banned(pilot_name)
+    if not rec:
+        return False
+    if db_get_admin_rights(pilot_name):        # a moderator is never held by the banlist
+        return False
+    _rem = 'open-ended' if rec['until'] == math.inf else f'{int((rec["until"]-time.time())/60)}min'
+    log('MODERATOR', f'BAN-BLOCK "{pilot_name}" tried to select while banned ({_rem}) - kicking')
+    _why = rec.get('msg')
+    _notice = (f'You are banned ({_rem} remaining): {_why}' if _why
+               else f'You are banned ({_rem} remaining).')
+    kick_session(s, reason='banned', notice=_notice)
+    return True
 
 def db_rename_pilot(old_name, new_name, acct):
     conn = sqlite3.connect(DB_PATH)
@@ -3579,7 +3905,7 @@ def cmd_gen_ticket(account_name: str):
     log('TICKET_GEN', f'  Verify: acct="{acct_rb}" pid={pid_rb} size={len(saved)}b')
 
 def console_handler():
-    log('CONSOLE', 'Ready. Commands: gen | list | destroy | loglevel | logmute | logtags | help')
+    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | loglevel | logmute | logtags | help')
     while running:
         try:
             raw_line = sys.stdin.readline()
@@ -3595,6 +3921,94 @@ def console_handler():
             if cmd == 'gen':
                 if len(parts) < 2: log('CONSOLE', 'Usage: gen <account_name>')
                 else: cmd_gen_ticket(parts[1].strip())
+            # --- v301 moderator management (CONSOLE ONLY - no network path writes these) ---
+            elif cmd == 'mod':
+                if len(parts) < 2:
+                    log('CONSOLE', f'Usage: mod <pilot_name> [rights]   (default {MOD_RIGHTS_DEFAULT}; any non-zero = full mod)')
+                else:
+                    _a = parts[1].split()
+                    _pilot = _a[0]
+                    try: _val = int(_a[1]) if len(_a) > 1 else MOD_RIGHTS_DEFAULT
+                    except ValueError: _val = MOD_RIGHTS_DEFAULT
+                    if _val == 0:
+                        log('CONSOLE', 'rights=0 would REVOKE - use `unmod` if that is what you meant')
+                    elif db_set_admin_rights(_pilot, _val):
+                        log('CONSOLE', f'MODERATOR: "{_pilot}" rights={_val}')
+                        _live = [x for x in get_all_sessions() if getattr(x,'current_pilot',None) == _pilot]
+                        for _s in _live: push_myrights(_s, '(live promote)')
+                        log('CONSOLE', 'Takes effect at next pilot select'
+                                       if not _live else f'Pushed live to {len(_live)} session(s)')
+                    else:
+                        log('CONSOLE', f'No such pilot "{_pilot}" (pilot must exist - see `list`)')
+            elif cmd == 'unmod':
+                if len(parts) < 2: log('CONSOLE', 'Usage: unmod <pilot_name>')
+                else:
+                    _pilot = parts[1].strip()
+                    if db_set_admin_rights(_pilot, 0):
+                        log('CONSOLE', f'REVOKED moderator rights from "{_pilot}"')
+                        # The client caches MyRights in DAT_00c6e8b0 for the whole session and we
+                        # cannot clear it remotely (a 0 in msg 218 is only READ at attach time), so
+                        # an already-connected mod keeps powers until they reconnect. Say so plainly.
+                        if any(getattr(x,'current_pilot',None) == _pilot for x in get_all_sessions()):
+                            log('CONSOLE', f'WARNING: "{_pilot}" is ONLINE and keeps powers until reconnect')
+                    else:
+                        log('CONSOLE', f'No such pilot "{_pilot}"')
+            elif cmd == 'mods':
+                _rows = db_list_moderators()
+                if not _rows: log('CONSOLE', 'No moderators defined')
+                for _p, _acct, _r in _rows:
+                    _on = any(getattr(x,'current_pilot',None) == _p for x in get_all_sessions())
+                    log('CONSOLE', f'  {_p}  account={_acct}  rights={_r}  {"[ONLINE]" if _on else ""}')
+            elif cmd == 'ban':
+                # Console-only room/server BAN (##Ban is indistinguishable from ##Gag on the wire,
+                # so real removal lives here).
+                # Usage: ban <pilot> [hours] [message...]
+                #   hours is optional: omitted/0 = open-ended, else N (max 12). If the token after
+                #   the pilot name is NOT numeric it is treated as the first word of the message,
+                #   so `ban Bob spamming` works (open ban, reason 'spamming') as does
+                #   `ban Bob 2 team killing` (2h ban, reason 'team killing').
+                _a = parts[1].split() if len(parts) > 1 else []
+                if not _a:
+                    log('CONSOLE', 'Usage: ban <pilot_name> [hours] [message...]  (omit/0 hours = open, max 12)')
+                else:
+                    _pilot = _a[0]
+                    _rest = _a[1:]
+                    _hrs = -1
+                    if _rest and _rest[0].lstrip('-').isdigit():
+                        _hrs = int(_rest[0]); _rest = _rest[1:]
+                    _custom = ' '.join(_rest).strip()
+                    _until = _dur_to_expiry(_hrs if _hrs != 0 else -1)  # console ban never soft-boots
+                    BANS[_pilot.lower()] = {'until': _until, 'by': 'console',
+                                            'room': None, 'msg': _custom or None}
+                    _live = [x for x in get_all_sessions() if getattr(x,'current_pilot',None) == _pilot]
+                    _when = 'open-ended' if _until == math.inf else f'{int((_until-time.time())/3600)}h'
+                    if _custom:
+                        _msg = f'You have been banned by a sysop ({_when}): {_custom}'
+                    else:
+                        _msg = f'You have been banned by a sysop ({_when}).'
+                    for _s in _live: kick_session(_s, reason='banned by sysop', notice=_msg)
+                    log('CONSOLE', f'BANNED "{_pilot}" ({_when})'
+                                   f'{" reason=" + repr(_custom) if _custom else ""}; '
+                                   f'kicked {len(_live)} live session(s)')
+            elif cmd == 'unban':
+                if len(parts) < 2: log('CONSOLE', 'Usage: unban <pilot_name>')
+                else:
+                    _pilot = parts[1].strip()
+                    if BANS.pop(_pilot.lower(), None) is not None:
+                        log('CONSOLE', f'UNBANNED "{_pilot}"')
+                    else:
+                        log('CONSOLE', f'"{_pilot}" was not banned')
+            elif cmd == 'bans':
+                if not BANS: log('CONSOLE', 'No active bans')
+                for _p, _rec in list(BANS.items()):
+                    _rem = 'open' if _rec['until'] == math.inf else f'{int((_rec["until"]-time.time())/60)}min'
+                    _r = f'  reason={_rec["msg"]!r}' if _rec.get('msg') else ''
+                    log('CONSOLE', f'  {_p}  until={_rem}  by={_rec["by"]}{_r}')
+            elif cmd == 'gags':
+                if not GAGS: log('CONSOLE', 'No active gags')
+                for _p, _exp in list(GAGS.items()):
+                    _rem = 'open' if _exp == math.inf else f'{int((_exp-time.time())/60)}min'
+                    log('CONSOLE', f'  {_p}  {_rem}')
             elif cmd == 'list':
                 accounts = db_get_all_accounts()
                 if not accounts: log('CONSOLE', 'No accounts in DB')
@@ -4291,11 +4705,15 @@ def build_auth_response(auth64):
     pl=bytearray(80); pl[0]=4; pl[3]=0x64; pl[4:16]=auth64[32:44]; pl[16:80]=auth64
     return bytes(pl)
 
-def build_da_session():
+def build_da_session(rights=0):
+    """msg 218 (0xDA) lobby attach. v301: `rights` lands at payload offset +9, which is the
+    MyRights u32 that FUN_004edcf0 stores to DAT_00c6e8b0 - the single global gating the
+    client's '##' moderator command group. 0 = ordinary player (previous behaviour)."""
     data=bytearray(17); data[0]=0xDA; data[1]=0x01
+    struct.pack_into('<I', data, 9, int(rights) & 0xffffffff)
     return build_appspace_pkt(bytes(data))
 
-def build_da_session_safe():
+def build_da_session_safe(rights=0):
     """63-misdispatch-safe variant of the 0xDA lobby re-attach, for the EXIT-TO-HQ
     path only (NOT login). After >=3 enter/fly/exit cycles the client routes this 0xDA
     to the msg-63 ChangePlayerCB handler FUN_004fa9c0 instead of the 218 handler
@@ -4308,8 +4726,11 @@ def build_da_session_safe():
     stays 0xDA so a CORRECT dispatch still hits the 218 handler, which only reads
     offsets 1/5/9 (Size!=0x19) -> all within 15 bytes, identical effect to Size 17.
     build_ingame_pkt sends Size==n exactly: n=15 -> bc=0, T=0xf2 (T>>4=15, low nibble
-    2 = appspace-data channel)."""
-    return build_ingame_pkt(bytes([0xDA, 0x01]) + bytes(13))
+    2 = appspace-data channel).
+    v301: MyRights u32 at offset +9 (fits inside the 15 bytes: +9..+12)."""
+    data = bytearray([0xDA, 0x01]) + bytearray(13)
+    struct.pack_into('<I', data, 9, int(rights) & 0xffffffff)
+    return build_ingame_pkt(bytes(data))
 
 def build_e1_pilot_list(pilots):
     data = bytearray([0xe1])
@@ -4628,6 +5049,12 @@ def reflect_chat_20(s, channel, text, player_index=0):
     else:
         disp = str(text)
     room = s.current_room
+    # v304 GAG: a gagged sender's chat is dropped at the server (the authoritative reflect point).
+    # We swallow silently rather than bouncing an error, matching how the retail server behaved -
+    # the gagged player sees their own text vanish. Moderators (rights!=0) are never gagged.
+    if is_gagged(getattr(s, 'current_pilot', None)) and not sess_rights(s):
+        log('MODERATOR', f'GAG-DROP chat from "{s.current_pilot}": {disp!r}')
+        return
     room_players = get_sessions_in_room(room) if room is not None else []
     if channel == 1:
         targets = [x for x in room_players if x.nation == s.nation]
@@ -4640,6 +5067,16 @@ def reflect_chat_20(s, channel, text, player_index=0):
     if not targets:
         targets = [s]
     pkt = build_chat_display_20(channel, text, player_index=s.player_index)
+    # v302 COMMAND-NAME ORACLE: the client parses '##<cmd>' LOCALLY (FUN_0044d180) and, when the
+    # name resolves in admin group 0xc7ec18, consumes it - it never reaches us. So if a '##' line
+    # arrives here as ordinary chat, the client did NOT recognise that name. Silence = valid name.
+    # (The names live in the TXT '*.str' resource inside FA's packed VFS, indexed by command ID -
+    # explode is ID 0x3af/943 - so they can't be read statically; this is how we brute-force them.)
+    _probe = disp.strip() if isinstance(disp, str) else ''
+    if _probe.startswith('##') or _probe.startswith('!!'):
+        _tok = _probe[2:].split()[0] if len(_probe) > 2 and _probe[2:].split() else '(empty)'
+        log('CMDPROBE', f'NOT-A-COMMAND: client did not recognise {_tok!r} '
+                        f'(fell through to chat). MyRights={sess_rights(s)}')
     log('CHAT20', f'reflect ch={channel} {disp!r} from PI={s.player_index} '
                   f'-> {len(targets)} player(s) in room {room}')
     for sess in targets:
@@ -7557,10 +7994,10 @@ def handle_leave_arena(s):
         # 0x43 and we resend it there (resend-on-poll). entered_game is now False, so the
         # resend/echo gates below are armed until the player re-enters a game.
         s._awaiting_reattach = True
-        send_unrel(s, build_da_session_safe(),
+        send_unrel(s, build_da_session_safe(sess_rights(s)),
                    '<- 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) - stops post-leave poll')
     else:
-        threading.Thread(target=lambda: send_rel(s, build_da_session_safe(),
+        threading.Thread(target=lambda: send_rel(s, build_da_session_safe(sess_rights(s)),
                          '<- 0xDA lobby re-attach (218, Size=15 63-safe) - stops post-leave 0x43 poll',
                          to=5.0), daemon=True).start()
 
@@ -7874,6 +8311,25 @@ def handle_compound(s, outer_cmd, pl):
     if inner_type == 0x22 and inner_sub == 0xe2:
         name_raw = inner[6:] if len(inner) > 6 else b''
         new_name = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
+        if new_name and is_reserved_name(new_name):
+            log('MODERATOR', f'REFUSED reserved pilot name "{new_name}" (staff tag) - not created')
+            send_rel(s, build_chat_broadcast('Server',
+                     f'The name "{new_name}" is reserved for staff and cannot be used.'),
+                     '<- reserved-name refusal', to=2.0)
+            # Do NOT echo the create back - without the create echo the client does not register
+            # the pilot, so the reserved name never comes into existence.
+            return
+        if new_name and db_pilot_name_taken(new_name):
+            # DUPLICATE. pilot_name is globally unique. Refusing the echo (as with reserved names)
+            # means the client's create never completes - this is what should surface the native
+            # "name already exists" feedback instead of the old silent select-time soft-block.
+            # A chat line is sent as a guaranteed-visible fallback in case the native box does not
+            # fire on echo-suppression alone.
+            log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
+            send_rel(s, build_chat_broadcast('Server',
+                     f'A pilot named "{new_name}" already exists. Choose another name.'),
+                     '<- duplicate-name refusal', to=2.0)
+            return
         if new_name and s.account:
             slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
             log('COMPOUND', f'Created "{new_name}" slot={slot}')
@@ -7928,6 +8384,8 @@ def handle_compound(s, outer_cmd, pl):
             slot = exslot or db_get_pilot_slot(s.account, pname) or 0
             s.current_pilot = pname; s.current_slot = slot
             log('COMPOUND', f'Pilot selected: "{pname}" slot={slot}')
+            if _enforce_ban_on_select(s, pname): return
+            push_myrights(s, '(compound pilot select)')   # v301: no-op for normal pilots
         threading.Thread(target=lambda: send_rel(s, inner, '<- compound pilot select echo', to=5.0), daemon=True).start()
         return
 
@@ -8039,7 +8497,7 @@ def handle_compound(s, outer_cmd, pl):
         s.last_43_ts = now
         _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT (enters game)
         if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-            send_unrel(s, build_da_session_safe(), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
+            send_unrel(s, build_da_session_safe(sess_rights(s)), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
         room_slot = getattr(s, 'room_slot', 0)
         rooms = db_get_open_rooms()
         if rooms and (s.current_room or room_slot):
@@ -9832,6 +10290,33 @@ def handle_post_auth(s, cmd, pl):
         _fire_server_confirm(s, via=' (scan)', ident=_ident)
         return
 
+    # -- v303 MODERATOR ACTIONS (inbound '##' command results) ---------------------
+    # The moderator opcode is NOT the outer type byte. Confirmed on the wire: it is the
+    # appspace SUB byte at pl[4], and when the client compound-wraps the command it sits one
+    # header deeper at pl[8] (outer [00 1d 00 00] + inner [02 92 00 00] + message):
+    #   unban 'bigalon'  sz=49  [001d0000|02920000] +55 <32B name> ffffffff ffffffff
+    #   room ungag       sz=45  [02920000|56000000] +  (empty name) ffffffff ffffffff
+    #   ghost all        sz=37  [02120000|8d000000] +  (empty name)
+    # Sizes match the RE exactly: 0x55/0x56 = 41B, 0x8d = 33B.
+    # The client only refuses to SEND when un-privileged, so we re-check rights server-side and
+    # never trust that an arriving admin opcode came from a real moderator.
+    if MODERATORS_ENABLED and len(pl) > 4:
+        _op = _mo = None
+        if pl[4] in MOD_INBOUND_OPCODES:
+            _op, _mo = pl[4], 4                      # direct
+        elif len(pl) > 8 and pl[8] in MOD_INBOUND_OPCODES:
+            _op, _mo = pl[8], 8                      # compound-wrapped
+        if _op is not None:
+            _who = getattr(s, 'current_pilot', None)
+            if not sess_rights(s):
+                log('MODERATOR', f'REJECT op=0x{_op:02x} from non-moderator "{_who}" - swallowed')
+                return
+            log('MODERATOR', f'ACTION by "{_who}": {decode_mod_action(_op, pl[_mo:])}')
+            enact_mod_action(s, _op, pl[_mo:])
+            # Swallow: admin packets must NOT be echoed. The generic echo path was reflecting
+            # them back at the moderator's own client, which is meaningless and risks a loop.
+            return
+
     if cmd == 0:
         if tb == 0x12:
             if sub == 0xe1:
@@ -9840,7 +10325,7 @@ def handle_post_auth(s, cmd, pl):
                 threading.Thread(target=lambda:send_rel(s,resp,'<- pilot list',to=5.0),daemon=True).start(); return
             if sub == 0xde:
                 def da_then_echo():
-                    da=build_da_session()
+                    da=build_da_session(sess_rights(s))
                     if not send_rel(s,da,'<- 0xDA',to=5.0): return
                     time.sleep(0.005); send_rel(s,stored,'<- echo 0xde',to=5.0)
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
@@ -9895,7 +10380,7 @@ def handle_post_auth(s, cmd, pl):
                     s.last_43_ts = now
                     _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                     if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-                        send_unrel(s, build_da_session_safe(), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
+                        send_unrel(s, build_da_session_safe(sess_rights(s)), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
@@ -10085,6 +10570,18 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xe2 and s.account:
                 name_raw=pl[6:] if len(pl)>6 else b''
                 new_name=name_raw.split(b'\x00')[0].decode('ascii',errors='replace')
+                if new_name and is_reserved_name(new_name):
+                    log('MODERATOR', f'REFUSED reserved pilot name "{new_name}" (staff tag) - not created')
+                    send_rel(s, build_chat_broadcast('Server',
+                             f'The name "{new_name}" is reserved for staff and cannot be used.'),
+                             '<- reserved-name refusal', to=2.0)
+                    return    # no create echo -> client never registers the pilot
+                if new_name and db_pilot_name_taken(new_name):
+                    log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
+                    send_rel(s, build_chat_broadcast('Server',
+                             f'A pilot named "{new_name}" already exists. Choose another name.'),
+                             '<- duplicate-name refusal', to=2.0)
+                    return    # no create echo -> client's create does not complete
                 if new_name:
                     slot=db_next_slot(s.account); db_ensure_pilot(new_name,s.account,slot)
             threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe2',to=5.0),daemon=True).start(); return
@@ -10114,6 +10611,8 @@ def handle_post_auth(s, cmd, pl):
                 slot = explicit_slot or db_get_pilot_slot(s.account, pname) or 0
                 s.current_pilot = pname; s.current_slot = slot
                 log('POST-AUTH',f'Pilot selected: "{pname}" slot={slot}')
+                if _enforce_ban_on_select(s, pname): return
+                push_myrights(s, '(pilot select)')   # v301: moderator grant, no-op for normal pilots
                 # NOTE (v151): NO room auto-restore. The real client never auto-joins
                 # a room on reconnect - the player lands on the tabbed menu and only
                 # sees rooms when they open the Arenas tab (via the 0xcb list). The old
