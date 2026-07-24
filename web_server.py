@@ -3,6 +3,20 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-07-24: v318 - admin page split into tabs with per-panel filtering.
+#   The page had grown into three long stacked cards on one scroll. Now:
+#     User Management  ->  Users | Pilot Stats     (sub-tabs)
+#     Arenas
+#   Each of the three panels has its own filter box that hides non-matching table rows and
+#   shows an "N of M" count. Tabbing is client-side only - no new routes, no extra requests,
+#   and the server-side HTML for each table is unchanged, so every existing form still posts
+#   to the same endpoint.
+#   The chosen tab is persisted (localStorage, guarded by try/catch) because every admin
+#   action POSTs and then 302s back to /admin; without it, renaming a pilot or saving an
+#   arena would bounce you back to the Users tab each time.
+#   ADMIN_TABS_ASSETS holds the CSS+JS as a PLAIN string, not an f-string: the admin body IS
+#   an f-string, and CSS/JS braces inside one need doubling. Keeping them separate means the
+#   braces pass through untouched (an f-string does not re-scan substituted values).
 # 2026-07-24: v317 - admin console command box, account/pilot rename, manual pilot create.
 #   * Live Console page gained a command input. It POSTs to /admin/console_cmd, which hands the
 #     line to the game server's queue_console_command() - the SAME queue the server terminal
@@ -162,6 +176,76 @@ LOG_CONSOLE_PAGE = """
                 });
                 reload(); toggle();
                 </script>
+"""
+
+# v318: tab chrome for the admin page. Kept as a PLAIN string (not an f-string) so the CSS and
+# JS braces need no doubling - the admin page body is an f-string and mixing the two is how
+# brace-escaping bugs get in.
+# Structure: two top-level tabs (User Management | Arenas); User Management has two sub-tabs
+# (Users | Pilot Stats). Every panel carries its own filter box that hides non-matching table
+# rows client-side. The chosen tab is remembered so the POST-then-redirect-to-/admin cycle
+# (rename, reset, create, save) returns you to the panel you were working in instead of
+# bouncing back to Users every time.
+ADMIN_TABS_ASSETS = """
+<style>
+  .tabbar { display:flex; gap:4px; border-bottom:2px solid #dee2e6; margin-bottom:0; }
+  .tabbar button { width:auto; margin:0; border-radius:6px 6px 0 0; background:#e9ecef; color:#495057;
+                   padding:11px 22px; font-size:1em; border:1px solid #dee2e6; border-bottom:none;
+                   position:relative; top:2px; }
+  .tabbar button:hover { background:#dde2e6; }
+  .tabbar button.on { background:#fff; color:#0b5ed7; border-bottom:2px solid #fff; }
+  .subbar { display:flex; gap:4px; margin:14px 0 0 0; }
+  .subbar button { width:auto; margin:0; padding:7px 16px; font-size:0.9em; border-radius:14px;
+                   background:#f1f3f5; color:#495057; border:1px solid #dee2e6; }
+  .subbar button:hover { background:#e6e9ec; }
+  .subbar button.on { background:#0d6efd; color:#fff; border-color:#0d6efd; }
+  .panel { display:none; }
+  .panel.on { display:block; }
+  .filterbar { display:flex; align-items:center; gap:10px; margin:14px 0 6px; }
+  .filterbar input { flex:1; padding:9px 12px; margin:0; border:1px solid #ccc; border-radius:4px; }
+  .filtercount { color:#888; font-size:0.85em; white-space:nowrap; }
+</style>
+<script>
+function faShow(group, id){
+  var scope = document.querySelectorAll('[data-group="'+group+'"]');
+  for (var i=0;i<scope.length;i++){
+    var on = scope[i].getAttribute('data-panel')===id;
+    scope[i].classList.toggle('on', on);
+  }
+  var btns = document.querySelectorAll('[data-btngroup="'+group+'"]');
+  for (var j=0;j<btns.length;j++){
+    btns[j].classList.toggle('on', btns[j].getAttribute('data-target')===id);
+  }
+  try { localStorage.setItem('fa_admin_'+group, id); } catch(e){}
+}
+function faFilter(inputEl){
+  var tbl = document.getElementById(inputEl.getAttribute('data-table'));
+  if(!tbl) return;
+  var q = inputEl.value.toLowerCase();
+  var rows = tbl.getElementsByTagName('tr');
+  var shown = 0, total = 0;
+  for (var i=0;i<rows.length;i++){
+    var txt = (rows[i].textContent||'').toLowerCase();
+    total++;
+    var hit = !q || txt.indexOf(q) >= 0;
+    rows[i].style.display = hit ? '' : 'none';
+    if(hit) shown++;
+  }
+  var out = document.getElementById(inputEl.getAttribute('data-count'));
+  if(out) out.textContent = q ? (shown + ' of ' + total) : (total + ' total');
+}
+document.addEventListener('DOMContentLoaded', function(){
+  var groups = ['main','user'];
+  for (var g=0; g<groups.length; g++){
+    var saved = null;
+    try { saved = localStorage.getItem('fa_admin_'+groups[g]); } catch(e){}
+    var exists = saved && document.querySelector('[data-group="'+groups[g]+'"][data-panel="'+saved+'"]');
+    if (exists) faShow(groups[g], saved);
+  }
+  var f = document.querySelectorAll('.filterbar input');
+  for (var i=0;i<f.length;i++){ faFilter(f[i]); }
+});
+</script>
 """
 
 def hash_password(password: str) -> str:
@@ -616,47 +700,92 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             conn.close()
 
             content = f"""
+                {ADMIN_TABS_ASSETS}
                 <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
                     <a href="/admin/logs" style="color:#17a2b8;">Live Console</a> |
-                    Logged in as <strong>{user}</strong></div>
+                    Logged in as <strong>{hesc(str(user))}</strong></div>
                 <h1>Server Administration</h1>
-                
-                <div class="card">
-                    <h2 style="margin-top:0;">User Management</h2>
-                    <table>{user_html}</table>
+
+                <div class="tabbar">
+                    <button class="on" data-btngroup="main" data-target="p-users"
+                            onclick="faShow('main','p-users')">User Management</button>
+                    <button data-btngroup="main" data-target="p-arenas"
+                            onclick="faShow('main','p-arenas')">Arenas</button>
                 </div>
 
-                <div class="card">
-                    <h2 style="margin-top:0;">Pilot Stats</h2>
-                    <p style="color:#666; margin-top:0; font-size:0.9em;">Career totals stored on the
-                    server (rank, score, kills, deaths). Aces are awarded live by the game client
-                    (5 kills without dying, reset on death) and are not stored here.</p>
-                    <form method="POST" action="/admin/create_pilot"
-                          style="background:#fff; border:1px dashed #bbb; border-radius:6px; padding:10px 14px; margin-bottom:14px;">
-                        <strong style="font-size:0.95em;">Create a pilot manually</strong>
-                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-top:8px;">
-                            <label style="font-size:0.8em; color:#666;">Account<br>
-                                <select name="account_name" style="padding:8px; margin:2px 0;">{acct_options}</select>
-                            </label>
-                            <label style="font-size:0.8em; color:#666;">Pilot name (max 31)<br>
-                                <input type="text" name="pilot_name" required maxlength="31"
-                                       placeholder="@HQ" style="width:210px; padding:8px; margin:2px 0;">
-                            </label>
-                            <button type="submit" class="btn-green" style="width:auto; padding:9px 18px; margin:0;">Create</button>
+                <div class="panel on" data-group="main" data-panel="p-users">
+                    <div class="subbar">
+                        <button class="on" data-btngroup="user" data-target="s-accounts"
+                                onclick="faShow('user','s-accounts')">Users</button>
+                        <button data-btngroup="user" data-target="s-pilots"
+                                onclick="faShow('user','s-pilots')">Pilot Stats</button>
+                    </div>
+
+                    <div class="panel on" data-group="user" data-panel="s-accounts">
+                        <div class="card">
+                            <h2 style="margin-top:0;">Users</h2>
+                            <p style="color:#666; margin-top:0; font-size:0.9em;">Login accounts. Each owns
+                            its own .vr1 ticket and any number of pilots.</p>
+                            <div class="filterbar">
+                                <input type="text" placeholder="Filter accounts&hellip;"
+                                       data-table="usersTable" data-count="usersCount"
+                                       oninput="faFilter(this)">
+                                <span class="filtercount" id="usersCount"></span>
+                            </div>
+                            <table id="usersTable">{user_html}</table>
                         </div>
-                        <small style="color:#888;">Any printable ASCII is accepted &mdash; including
-                        <code>@ * # !</code> and spaces &mdash; so staff names like
-                        <code>@HQ</code>, <code>@FA</code>, <code>@INSTRUCTOR</code> and <code>@HELP</code>
-                        can be made here. The game client's own name box refuses these; the server never did.
-                        Only control bytes and non-ASCII are rejected (they terminate the name field on the
-                        wire and corrupt the client's text parse).</small>
-                    </form>
-                    <table>{pilot_html}</table>
+                    </div>
+
+                    <div class="panel" data-group="user" data-panel="s-pilots">
+                        <div class="card">
+                            <h2 style="margin-top:0;">Pilot Stats</h2>
+                            <p style="color:#666; margin-top:0; font-size:0.9em;">Career totals stored on the
+                            server (rank, score, kills, deaths). Aces are awarded live by the game client
+                            (5 kills without dying, reset on death) and are not stored here.</p>
+                            <form method="POST" action="/admin/create_pilot"
+                                  style="background:#fff; border:1px dashed #bbb; border-radius:6px; padding:10px 14px; margin-bottom:6px;">
+                                <strong style="font-size:0.95em;">Create a pilot manually</strong>
+                                <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-top:8px;">
+                                    <label style="font-size:0.8em; color:#666;">Account<br>
+                                        <select name="account_name" style="padding:8px; margin:2px 0;">{acct_options}</select>
+                                    </label>
+                                    <label style="font-size:0.8em; color:#666;">Pilot name (max 31)<br>
+                                        <input type="text" name="pilot_name" required maxlength="31"
+                                               placeholder="@HQ" style="width:210px; padding:8px; margin:2px 0;">
+                                    </label>
+                                    <button type="submit" class="btn-green" style="width:auto; padding:9px 18px; margin:0;">Create</button>
+                                </div>
+                                <small style="color:#888;">Any printable ASCII is accepted &mdash; including
+                                <code>@ * # !</code> and spaces &mdash; so staff names like
+                                <code>@HQ</code>, <code>@FA</code>, <code>@INSTRUCTOR</code> and <code>@HELP</code>
+                                can be made here. The game client's own name box refuses these; the server never did.
+                                Only control bytes and non-ASCII are rejected (they terminate the name field on the
+                                wire and corrupt the client's text parse).</small>
+                            </form>
+                            <div class="filterbar">
+                                <input type="text" placeholder="Filter pilots (name, account, stats)&hellip;"
+                                       data-table="pilotsTable" data-count="pilotsCount"
+                                       oninput="faFilter(this)">
+                                <span class="filtercount" id="pilotsCount"></span>
+                            </div>
+                            <table id="pilotsTable">{pilot_html}</table>
+                        </div>
+                    </div>
                 </div>
 
-                <div class="card">
-                    <h2 style="margin-top:0;">Arena Management</h2>
-                    <table>{arena_html}</table>
+                <div class="panel" data-group="main" data-panel="p-arenas">
+                    <div class="card">
+                        <h2 style="margin-top:0;">Arena Management</h2>
+                        <p style="color:#666; margin-top:0; font-size:0.9em;">Rooms served in the client's
+                        arena list. Use <em>Edit Settings</em> for altitudes and enemy AA/Flak strength.</p>
+                        <div class="filterbar">
+                            <input type="text" placeholder="Filter arenas (name, title, creator)&hellip;"
+                                   data-table="arenasTable" data-count="arenasCount"
+                                   oninput="faFilter(this)">
+                            <span class="filtercount" id="arenasCount"></span>
+                        </div>
+                        <table id="arenasTable">{arena_html}</table>
+                    </div>
                 </div>
             """
             self.send_html(content)
