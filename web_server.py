@@ -3,6 +3,29 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-07-24: v317 - admin console command box, account/pilot rename, manual pilot create.
+#   * Live Console page gained a command input. It POSTs to /admin/console_cmd, which hands the
+#     line to the game server's queue_console_command() - the SAME queue the server terminal
+#     feeds - so every existing console command works identically from the browser. Command
+#     output already goes through log('CONSOLE', ...), which this page streams, so nothing had
+#     to be captured or plumbed back; the submitted line is echoed as "[web:<admin>] > <cmd>".
+#     Up/Down arrows walk the in-page command history. Admin-only.
+#   * /admin/rename_account and /admin/rename_pilot rename across EVERY table holding the name
+#     (accounts, pilots, room_players, rooms.account_name, rooms.creator_pilot) in one
+#     transaction - the DB has no foreign keys, so a partial rename silently orphans a pilot's
+#     stats and their arenas. Duplicate checks are case-insensitive.
+#     Account rename warns, in the UI, that the .vr1 ticket must be re-downloaded: the pid is
+#     kept (so pilots/stats/arenas follow) but the account NAME lives inside the ticket and the
+#     game server identifies a connection by that name first, so a stale ticket would re-create
+#     the old account on the next connect.
+#   * /admin/create_pilot makes a pilot by hand. _valid_name() accepts any printable ASCII
+#     (0x20-0x7e) up to 31 chars, so staff names like @HQ / @FA / @INSTRUCTOR / @HELP and the
+#     characters @ * # ! and space are all allowed - the game server never restricted pilot
+#     names, that limit is the client's own name-entry box. Rejected: control bytes (they
+#     terminate the NUL-terminated wire field and corrupt the client's text parse), non-ASCII,
+#     empty/whitespace-only, over-length, and duplicates.
+#     NOTE: because names may now contain ' " < > &, every place a name is rendered is escaped
+#     and no name is interpolated into a JS confirm() string.
 # 2026-07-23: STABILITY - made the web server multithreaded and added a health watchdog.
 #   Was plain single-threaded HTTPServer (serial: one request at a time). One stalled request -
 #   a half-open FA-launcher browser socket, a SQLite lock, or the /admin/logs.json 2s auto-poll
@@ -43,6 +66,7 @@ SRV = {
     'db_path': None,
     'get_existing_ticket': None,
     'generate_ticket': None,
+    'exec_console': None,
     'log': print
 }
 
@@ -82,6 +106,18 @@ LOG_CONSOLE_PAGE = """
                   &nbsp; <button style="width:auto;padding:6px 12px;margin:0;" onclick="reload()">Refresh now</button>
                   &nbsp; <label>Filter: <input type="text" id="flt" oninput="render()" style="width:200px;padding:5px;margin:0;"></label>
                 </div>
+                <div class="card" style="padding:12px;">
+                  <form method="POST" action="/admin/console_cmd" onsubmit="return sendCmd(event);"
+                        style="display:flex; gap:8px; align-items:center; margin:0;">
+                    <span style="font-family:monospace; font-weight:bold; color:#2a7;">&gt;</span>
+                    <input type="text" id="cmd" name="cmd" autocomplete="off" spellcheck="false"
+                           placeholder="server command (try: help)"
+                           style="flex:1; padding:8px; margin:0; font-family:monospace;">
+                    <button type="submit" class="btn-green" style="width:auto; padding:8px 18px; margin:0;">Run</button>
+                  </form>
+                  <small style="color:#888;">Runs on the server exactly as if typed at its terminal.
+                    Output appears in the stream above (tagged CONSOLE). Up/Down = history.</small>
+                </div>
                 <pre id="con" style="background:#1e1e1e;color:#ddd;padding:12px;border-radius:6px;height:62vh;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
                 <script>
                 var COLORS={DEBUG:"#888",INFO:"#ddd",WARNING:"#e6c07b",ERROR:"#e06c75"};
@@ -104,6 +140,26 @@ LOG_CONSOLE_PAGE = """
                 var timer=null;
                 function toggle(){var on=document.getElementById('auto').checked;
                   if(on){timer=setInterval(reload,2000);}else{if(timer)clearInterval(timer);timer=null;}}
+                var HIST=[],HI=-1;
+                function sendCmd(ev){
+                  ev.preventDefault();
+                  var box=document.getElementById('cmd');
+                  var v=box.value.trim();
+                  if(!v) return false;
+                  HIST.push(v); HI=HIST.length;
+                  box.value='';
+                  fetch('/admin/console_cmd',{method:'POST',
+                    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                    body:'cmd='+encodeURIComponent(v)})
+                    .then(function(){setTimeout(reload,250);})
+                    .catch(function(){});
+                  return false;
+                }
+                document.getElementById('cmd').addEventListener('keydown',function(e){
+                  if(e.key==='ArrowUp'){ if(HI>0){HI--; this.value=HIST[HI];} e.preventDefault(); }
+                  else if(e.key==='ArrowDown'){ if(HI<HIST.length-1){HI++; this.value=HIST[HI];}
+                    else {HI=HIST.length; this.value='';} e.preventDefault(); }
+                });
                 reload(); toggle();
                 </script>
 """
@@ -183,6 +239,61 @@ def user_can_edit_arena(username, room_id):
     if is_user_admin(username):
         return True
     return arena_owner_account(room_id) == username
+
+# --- v317: NAME VALIDATION ----------------------------------------------------
+# There is NO character restriction on pilot names anywhere in the game server - the limits
+# people hit are enforced by the CLIENT's own name-entry box. Names travel the wire as
+# NUL-terminated ASCII inside fixed 32-byte fields, so the only things that genuinely break are:
+#   * a NUL or any control byte (terminates the string early / trips the client's text parser,
+#     which is what the "Wrong char 13, pos 1" errors look like)
+#   * non-ASCII (the fields are ASCII; the client renders bytes >0x7e as garbage)
+#   * more than 31 characters (32 minus the terminator)
+# Everything else printable is fine, which is exactly what lets an admin create the reserved
+# looking staff names - @HQ, @FA, @INSTRUCTOR, @HELP - and use @ * # ! and spaces.
+NAME_MAX = 31
+
+def _valid_name(name):
+    """Return (ok, cleaned_or_error). Accepts printable ASCII 0x20..0x7e, 1..31 chars."""
+    if name is None:
+        return False, 'Name is empty.'
+    # Only trim the outer edges - interior spaces are legal and intentional ("@FA Instructor").
+    n = name.strip()
+    if not n:
+        return False, 'Name is empty.'
+    if len(n) > NAME_MAX:
+        return False, f'Name is {len(n)} characters; the wire field holds {NAME_MAX}.'
+    bad = sorted({c for c in n if not (0x20 <= ord(c) <= 0x7e)})
+    if bad:
+        shown = ', '.join(f'0x{ord(c):02x}' for c in bad)
+        return False, ('Name contains bytes that are not printable ASCII (' + shown +
+                       '). Control bytes terminate the name field and corrupt the client parse.')
+    return True, n
+
+def _name_taken(conn, table, column, name):
+    row = conn.execute(f"SELECT 1 FROM {table} WHERE {column}=? COLLATE NOCASE", (name,)).fetchone()
+    return row is not None
+
+# Every place a name is stored. The DB has NO foreign keys, so a rename must touch all of these
+# in one transaction or the pilot's stats / arenas silently orphan.
+ACCOUNT_REFS = [('accounts', 'account_name'), ('pilots', 'account_name'),
+                ('room_players', 'account_name'), ('rooms', 'account_name')]
+PILOT_REFS   = [('pilots', 'pilot_name'), ('room_players', 'pilot_name'),
+                ('rooms', 'creator_pilot')]
+
+def _rename_everywhere(conn, refs, old, new):
+    """Apply a rename across every (table, column) that exists in this DB. Returns a report."""
+    done = []
+    for table, col in refs:
+        try:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if not cols or col not in cols:
+                continue
+            cur = conn.execute(f"UPDATE {table} SET {col}=? WHERE {col}=?", (new, old))
+            if cur.rowcount:
+                done.append(f'{table}.{col}x{cur.rowcount}')
+        except Exception as e:
+            done.append(f'{table}.{col}:ERR({e})')
+    return done
 
 class WebInterfaceHandler(BaseHTTPRequestHandler):
     def get_current_user(self):
@@ -395,10 +506,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                         pilot_html = "<tr><td colspan='2'>No pilots in the database.</td></tr>"
                     for (pname, pacct, prank, pscore, pkills, pdeaths,
                          paces, plost, pstreak) in pilot_rows:
-                        acct_lbl = f' <small style="color:#666;">({pacct})</small>' if pacct else ''
+                        acct_lbl = f' <small style="color:#666;">({hesc(str(pacct))})</small>' if pacct else ''
                         pilot_html += f"""
                         <tr>
-                            <td><strong>{pname}</strong>{acct_lbl}<br>
+                            <td><strong>{hesc(str(pname))}</strong>{acct_lbl}<br>
                                 <small style="color:#666;">Rank {prank} &middot; Fighter Score {pscore} &middot;
                                 {pkills} kills / {pdeaths} lost pilots &middot; {plost} planes lost &middot;
                                 {pstreak} in a row &middot; Aces {paces}</small></td>
@@ -406,6 +517,13 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                 <a href="/admin/edit_pilot?pilot={urllib.parse.quote(pname)}" class="btn-green"
                                    style="display:inline-block; width:auto; padding:8px 14px; margin:0;
                                    text-decoration:none;">&#9998; Edit&nbsp;Stats</a>
+                                <form method="POST" action="/admin/rename_pilot" style="display:inline-block; margin-left:8px;"
+                                      onsubmit="return confirm('Rename this pilot? Stats, arenas and room membership follow the new name.');">
+                                    <input type="hidden" name="pilot" value="{hesc(str(pname), quote=True)}">
+                                    <input type="text" name="new_name" placeholder="New pilot name" required
+                                           maxlength="31" style="width:150px; padding:8px; margin:0; display:inline-block;">
+                                    <button type="submit" class="btn-yellow" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Rename</button>
+                                </form>
                             </td>
                         </tr>"""
                 else:
@@ -466,19 +584,30 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 arena_html = f"<tr><td>Error loading arenas: {e}</td><td></td></tr>"
 
             user_html = ""
+            acct_options = ''.join(
+                '<option value="' + hesc(str(u), quote=True) + '">' + hesc(str(u)) + '</option>'
+                for u, _a in users)
             for u_name, is_adm in users:
                 role = "&#128081; Admin" if is_adm else "Player"
+                u_esc = hesc(str(u_name), quote=True)
                 user_html += f"""
                 <tr>
-                    <td><strong>{u_name}</strong> <br><small style="color:#666;">{role}</small></td>
+                    <td><strong>{u_esc}</strong> <br><small style="color:#666;">{role}</small></td>
                     <td style="text-align:right;">
                         <form method="POST" action="/admin/reset_password" style="display:inline-block; margin-right: 10px;">
-                            <input type="hidden" name="account_name" value="{u_name}">
+                            <input type="hidden" name="account_name" value="{u_esc}">
                             <input type="password" name="new_password" placeholder="New Password" required style="width:130px; padding:8px; margin:0; display:inline-block;">
                             <button type="submit" class="btn-yellow" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Reset</button>
                         </form>
-                        <form method="POST" action="/admin/delete_user" style="display:inline-block;" onsubmit="return confirm('Delete user {u_name}? This permanently deletes their ticket and cannot be undone.');">
-                            <input type="hidden" name="account_name" value="{u_name}">
+                        <form method="POST" action="/admin/rename_account" style="display:inline-block; margin-right:10px;"
+                              onsubmit="return confirm('Rename this account?\\n\\nThe player_id is kept, so pilots and stats follow - but the account name lives inside the .vr1 ticket, so this account MUST re-download its ticket before it can connect again.');">
+                            <input type="hidden" name="account_name" value="{u_esc}">
+                            <input type="text" name="new_name" placeholder="New account name" required
+                                   maxlength="31" style="width:150px; padding:8px; margin:0; display:inline-block;">
+                            <button type="submit" class="btn-yellow" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Rename</button>
+                        </form>
+                        <form method="POST" action="/admin/delete_user" style="display:inline-block;" onsubmit="return confirm('Delete this user? This permanently deletes their ticket and cannot be undone.');">
+                            <input type="hidden" name="account_name" value="{u_esc}">
                             <button type="submit" class="btn-red" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Delete</button>
                         </form>
                     </td>
@@ -502,6 +631,26 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <p style="color:#666; margin-top:0; font-size:0.9em;">Career totals stored on the
                     server (rank, score, kills, deaths). Aces are awarded live by the game client
                     (5 kills without dying, reset on death) and are not stored here.</p>
+                    <form method="POST" action="/admin/create_pilot"
+                          style="background:#fff; border:1px dashed #bbb; border-radius:6px; padding:10px 14px; margin-bottom:14px;">
+                        <strong style="font-size:0.95em;">Create a pilot manually</strong>
+                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-top:8px;">
+                            <label style="font-size:0.8em; color:#666;">Account<br>
+                                <select name="account_name" style="padding:8px; margin:2px 0;">{acct_options}</select>
+                            </label>
+                            <label style="font-size:0.8em; color:#666;">Pilot name (max 31)<br>
+                                <input type="text" name="pilot_name" required maxlength="31"
+                                       placeholder="@HQ" style="width:210px; padding:8px; margin:2px 0;">
+                            </label>
+                            <button type="submit" class="btn-green" style="width:auto; padding:9px 18px; margin:0;">Create</button>
+                        </div>
+                        <small style="color:#888;">Any printable ASCII is accepted &mdash; including
+                        <code>@ * # !</code> and spaces &mdash; so staff names like
+                        <code>@HQ</code>, <code>@FA</code>, <code>@INSTRUCTOR</code> and <code>@HELP</code>
+                        can be made here. The game client's own name box refuses these; the server never did.
+                        Only control bytes and non-ASCII are rejected (they terminate the name field on the
+                        wire and corrupt the client's text parse).</small>
+                    </form>
                     <table>{pilot_html}</table>
                 </div>
 
@@ -1042,6 +1191,125 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_header('Location', '/admin')
             self.end_headers()
 
+        elif self.path == '/admin/console_cmd':
+            # v317: run a server console command from the web. The command is queued onto the
+            # SAME queue the server terminal feeds, so console_handler executes it identically;
+            # its log('CONSOLE', ...) output shows up in the live stream on this page.
+            if not is_user_admin(user): return self.send_error(403)
+            cmd = qs.get('cmd', [''])[0].strip()
+            runner = SRV.get('exec_console')
+            if cmd and runner:
+                try:
+                    runner(cmd, 'web:' + str(user))
+                    SRV['log']('WEB', f'Admin {user} ran console command: {cmd!r}')
+                except Exception as e:
+                    SRV['log']('WEB', f'console command failed: {e!r}')
+            elif not runner:
+                SRV['log']('WEB', 'console command ignored - server did not inject a runner')
+            self.send_response(204)      # fetch() call; the page refreshes the log itself
+            self.end_headers()
+
+        elif self.path == '/admin/rename_account':
+            if not is_user_admin(user): return self.send_error(403)
+            old = qs.get('account_name', [''])[0].strip()
+            ok, new = _valid_name(qs.get('new_name', [''])[0])
+            if not ok:
+                self.send_html(f"<h2 style='color:red;'>Rename failed</h2><p>{hesc(new)}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn = _connect()
+            try:
+                if not conn.execute("SELECT 1 FROM accounts WHERE account_name=?", (old,)).fetchone():
+                    raise ValueError(f'No such account "{old}".')
+                if new.lower() != old.lower() and _name_taken(conn, 'accounts', 'account_name', new):
+                    raise ValueError(f'An account named "{new}" already exists.')
+                done = _rename_everywhere(conn, ACCOUNT_REFS, old, new)
+                conn.commit()
+            except Exception as e:
+                conn.rollback(); conn.close()
+                self.send_html(f"<h2 style='color:red;'>Rename failed</h2><p>{hesc(str(e))}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn.close()
+            # Keep any live web session pointing at the renamed account.
+            for tok, who in list(WEB_SESSIONS.items()):
+                if who == old:
+                    WEB_SESSIONS[tok] = new
+            SRV['log']('WEB', f'Admin {user} renamed account {old!r} -> {new!r} ({", ".join(done)})')
+            self.send_html(
+                "<h2>Account renamed</h2>"
+                f"<p><strong>{hesc(old)}</strong> is now <strong>{hesc(new)}</strong>.<br>"
+                f"<small style='color:#666;'>Updated: {hesc(', '.join(done) or 'nothing')}</small></p>"
+                "<div class='card' style='border-left:4px solid #ffc107;'>"
+                "<strong>The ticket must be re-downloaded.</strong><br>"
+                "The player_id is unchanged, so all pilots, stats and arenas stay attached - but the "
+                "account name is stored <em>inside</em> the .vr1 ticket, and the game server "
+                "identifies a connection by the name in the ticket before anything else. Until this "
+                "account logs in to the web page and launches/downloads again, its old ticket will "
+                "re-create the old account name on connect.</div>"
+                "<a href='/admin'>&larr; Back to Admin</a>")
+
+        elif self.path == '/admin/rename_pilot':
+            if not is_user_admin(user): return self.send_error(403)
+            old = qs.get('pilot', [''])[0].strip()
+            ok, new = _valid_name(qs.get('new_name', [''])[0])
+            if not ok:
+                self.send_html(f"<h2 style='color:red;'>Rename failed</h2><p>{hesc(new)}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn = _connect()
+            try:
+                if not conn.execute("SELECT 1 FROM pilots WHERE pilot_name=?", (old,)).fetchone():
+                    raise ValueError(f'No such pilot "{old}".')
+                if new.lower() != old.lower() and _name_taken(conn, 'pilots', 'pilot_name', new):
+                    raise ValueError(f'A pilot named "{new}" already exists.')
+                done = _rename_everywhere(conn, PILOT_REFS, old, new)
+                conn.commit()
+            except Exception as e:
+                conn.rollback(); conn.close()
+                self.send_html(f"<h2 style='color:red;'>Rename failed</h2><p>{hesc(str(e))}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn.close()
+            SRV['log']('WEB', f'Admin {user} renamed pilot {old!r} -> {new!r} ({", ".join(done)})')
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
+        elif self.path == '/admin/create_pilot':
+            if not is_user_admin(user): return self.send_error(403)
+            acct = qs.get('account_name', [''])[0].strip()
+            ok, pname = _valid_name(qs.get('pilot_name', [''])[0])
+            if not ok:
+                self.send_html(f"<h2 style='color:red;'>Create failed</h2><p>{hesc(pname)}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn = _connect()
+            try:
+                if not conn.execute("SELECT 1 FROM accounts WHERE account_name=?", (acct,)).fetchone():
+                    raise ValueError(f'No such account "{acct}".')
+                if _name_taken(conn, 'pilots', 'pilot_name', pname):
+                    raise ValueError(f'A pilot named "{pname}" already exists.')
+                pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+                cols, vals = ['pilot_name', 'account_name'], [pname, acct]
+                if 'slot_index' in pcols:
+                    row = conn.execute("SELECT MAX(slot_index) FROM pilots WHERE account_name=?",
+                                       (acct,)).fetchone()
+                    cols.append('slot_index'); vals.append((row[0] or 0) + 1)
+                conn.execute("INSERT INTO pilots (" + ','.join(cols) + ") VALUES ("
+                             + ','.join('?' * len(cols)) + ")", vals)
+                conn.commit()
+            except Exception as e:
+                conn.rollback(); conn.close()
+                self.send_html(f"<h2 style='color:red;'>Create failed</h2><p>{hesc(str(e))}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            conn.close()
+            SRV['log']('WEB', f'Admin {user} created pilot {pname!r} on account {acct!r}')
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
         elif self.path == '/admin/delete_arena':
             if not is_user_admin(user): return self.send_error(403)
             table = qs.get('table', [''])[0].strip()
@@ -1266,7 +1534,7 @@ def _web_watchdog(interval=30.0, timeout=10.0):
             consecutive_bad = 0
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
-                     tail_fields=None, get_logs_fn=None):
+                     tail_fields=None, get_logs_fn=None, exec_console_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -1274,6 +1542,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['settings_read'] = settings_read_fn          # arena_settings_read(blob) -> {key: feet}
     SRV['tail_fields'] = tail_fields or []           # [(key, delta, label), ...]
     SRV['get_logs'] = get_logs_fn                    # get_recent_logs(n, min_level) -> [str]
+    SRV['exec_console'] = exec_console_fn            # v317: queue_console_command(line, src)
 
     migrate_web_db()
     _start_httpd_thread()

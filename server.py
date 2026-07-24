@@ -2,6 +2,146 @@
 r"""
 Fighter Ace LAN Server v300
 ===========================
+v317: [WEB] Admin console command box, account/pilot rename, manual pilot create.
+      * CONSOLE INPUT: console_handler no longer reads stdin inline. stdin is pumped by its own
+        thread into a shared queue (_CONSOLE_Q) that console_handler consumes, so the web admin
+        console can inject commands via queue_console_command() and have them run immediately
+        instead of waiting for someone to type on the terminal. The whole command if/elif body
+        is untouched, so every command behaves identically from either source. Output already
+        flows through log('CONSOLE', ...) which the web console streams, so no output-capture
+        plumbing was needed; web-submitted lines are echoed as "[web] > <cmd>".
+      * RENAME: /admin/rename_account and /admin/rename_pilot. Renames are done across EVERY
+        table that stores the name (accounts, pilots, room_players, rooms.account_name and
+        rooms.creator_pilot) inside one transaction, because the DB has no foreign keys and a
+        partial rename would orphan stats and arenas.
+        ACCOUNT RENAME CAVEAT (surfaced in the UI): the player_id is random and is NOT derived
+        from the name, so the pid survives a rename - but the account NAME is embedded in the
+        .vr1 ticket, and SYN identifies by that name first (db_upsert_account would then
+        re-create the OLD account). So the ticket MUST be re-downloaded after a rename.
+      * PILOT NAMES: there was NO server-side character validation at all - the restriction is
+        the client's own name-entry box. The web admin can therefore create/rename pilots to the
+        reserved-looking names Alon needs (@HQ, @FA, @INSTRUCTOR, @HELP) and anything else using
+        @ * # ! and spaces. _valid_pilot_name() accepts printable ASCII 0x20-0x7e up to 31 chars
+        and rejects only control bytes, non-ASCII, empty/whitespace-only names and duplicates -
+        31 is the wire limit the name fields use, and NUL is the terminator in every name field.
+v316: [UI] TWO ARENA-PANEL BUGS, both caught in run_20260724_094524 + messages19.log.
+      (1) DISPLAY PILOTS EMPTY AFTER JOINING A TEAM - the popup request was being SWALLOWED.
+      A pre-existing branch handled type=0x52 sub=0xe0 as "EnterArena phase 1", logged
+      "accepted" and returned, sitting AHEAD of v314's handle_224_request in the same chain,
+      so the DIRECT form never reached it; only the compound-wrapped form worked. That is
+      exactly why it looked intermittent - four "out 224'5" in messages19 got no reply at
+      09:46:43, 09:46:48, 09:47:35 and 09:47:37, each matching an "EnterArena ... accepted"
+      line. The EnterArena label was a MISIDENTIFICATION (a 0xe0 often precedes
+      SendEnterToGame simply because the user opens Display Pilots and then clicks Join):
+      FA.exe shows the ONLY caller of the 0xe0 sender FUN_004f0a70 is FUN_006b0e90, the
+      members-dialog constructor. sub=0xe0 now routes to handle_224_request.
+      (2) TOTAL DROPPING TO 0 - handle_213_request carried its OWN inline per-camp tally that
+      predated v315 and ignored ARENA_UNASSIGNED_CAMP, so a side-less pilot was counted in no
+      camp and the on-demand reply said 0 while the poll loop said 1 in NU. Clicking an arena
+      therefore overwrote the correct live row with zero:
+          09:46:25 ARENA213 counts=[0,0,0,0,0,0,0,1]   <- poll loop, right
+          09:46:29 ARENA213 counts=[0,0,0,0,0,0,0,0] ... "1 players"  <- on-demand, wrong
+      Both paths now share _room_nation_counts. The real defect was two implementations of
+      one tally; there is now one.
+v315: [WIRE] THE bc*16+1 LENGTH RULE - fixes the Display Pilots garbage/blank lines, and
+      unassigned pilots now count as NU/Neutral.
+      (1) ROOT CAUSE of the junk entries: the client takes a message's length from the
+      appspace framing as bc*16+1, NOT from the number of bytes we actually send. Proven in
+      messages18.log: our 21-byte counts-only 213 was logged by the client as "in 213'33",
+      and our 14-byte 224 reply as "in 224'17". So it read 12 / 3 bytes of stale receive
+      buffer past our data - zero residue produced BLANK lines, leftover text produced
+      uninitialised names. Every message that already worked (210'225, 212'625/657/769, and
+      v313's roster 213'33) was ALREADY == 1 mod 16, which is why only these two broke.
+      INVARIANT, now enforced: any appspace payload must satisfy len % 16 == 1 so that the
+      true length and bc*16+1 are the same number.
+        * msg 224: pad the LAST name with trailing spaces (invisible in a list box) onto the
+          grid. Budget and pointer advance identically here, so length ==
+          budget-after-last-record and the loop exits without scanning past us. An EMPTY
+          arena is now not answered at all - 5 bytes cannot be aligned and any filler would
+          render as a blank pilot; the popup builds its list box empty each time it opens,
+          so silence is the correct empty state.
+        * msg 213 counts-only: pad 21 -> 33 with ONE filler record engineered to be
+          REJECTED. With F filler bytes ending in NUL the scan sees strlen=F-1, so the
+          budget reaches 0x15+F+2 > the declared 0x15+F and `jg` exits before appending
+          anything. Counts still parse (the handler reads them from fixed offsets 5..0x13
+          regardless of length).
+      Verified by emulating both parse loops against realistic buffer residue: the old
+      packets yield '' blank entries and '\x03Warri' garbage, the new ones are clean.
+      (2) ARENA_COUNT_INCLUDE_UNASSIGNED back to True but into camp 7 (ARENA_UNASSIGNED_CAMP)
+      = NU/Neutral, per Alon: that is what a side-less pilot actually IS, so the per-camp
+      breakdown stays truthful AND the arena total stops omitting them. GAME_DEF confirms
+      the mapping ("ccn 7 NU NEU Neutral"); camps 5/6 are unused. This supersedes v312's
+      camp-0/US bucketing and v314's count-them-nowhere.
+v314: [UI] "DISPLAY PILOTS" POPUP IMPLEMENTED - it is msg 224, NOT msg 213.
+      v313 was half right: the 213 trailing strings ARE a pilot list, but they feed the
+      ARENA ACTION box (confirmed live - the names showed up there). The popup is a
+      separate request/reply we were never answering. messages17.log shows exactly one
+      unexplained outbound on the button click: "out 224'5".
+      PROVEN: opening the popup builds Arenas_dlg.cpp's members dialog (FUN_006b0e90 ->
+      MEMBERS_LIST_BOX, subscribes to observer list 0xbfe9e4) and calls FUN_004f0a70(gidx),
+      which is literally { buf[0]=0xe0; *(u32*)(buf+1)=GameIndex; send(buf,5); }. The
+      inbound-224 handler (dispatch 0xc81ed8 + 224*4 -> LAB_004eed70, undefined in Ghidra -
+      disassembled straight out of FA.exe with capstone) parses:
+          [0]=0xe0  [1..4]=GameIndex (u32, `test/jle` -> must be > 0)  then per pilot:
+          [1 prefix byte][name\0]
+      Budget starts at 5 and advances strlen+2 per record while the pointer advances
+      1+(strlen+1) - they MATCH, so unlike 213 the declared length is just the true length
+      (no slack, no name padding). The popup's receiver (0x006adc00) does
+      `mov edx,[ecx+0x334]; cmp eax,edx; jne skip`, so the reply MUST echo the requested
+      GameIndex or it is discarded. Empty arena = 5 bytes, record loop skipped.
+      Added build_arena_members_224 + handle_224_request, wired on sub=0xe0 in BOTH the
+      direct and compound dispatch paths. Verified by emulating the handler over 6 roster
+      shapes incl. empty and a deliberate GameIndex mismatch.
+      ALSO: ARENA_ROSTER_ENABLE -> False, so 213 goes back to counts-only and stops
+      spamming pilot names into the Arena Action box.
+      ALSO: ARENA_COUNT_INCLUDE_UNASSIGNED -> False. Bucketing side-less players into camp
+      0 made every joiner show as US in the per-camp counter. The client's row total is
+      sum(8 camps), so there is NO way to count an unassigned player without putting them
+      in some camp; camp accuracy wins, and the total now omits them for the few seconds
+      between entering an arena and picking a country.
+v313: [UI] "DISPLAY PILOTS" ROSTER IMPLEMENTED (the window was always empty).
+      ROOT CAUSE: msg 213's trailing NUL-strings ARE the arena pilot list - the earlier note in
+      build_arena_players_213 claiming they were "Combat Action" lines was WRONG. FUN_004ef6e0
+      fires TWO events: GameIndex+8 counts -> PTR_LOOP_00bfe964 (RECEIVER<EVENT_PLAYERS_CAMPS_
+      COUNT>) and the string list -> PTR_LOOP_00bfe96c (RECEIVER<EVENT_ARENA_PILOTS>), whose only
+      subscriber is Arenas_dlg.cpp (FUN_006b1270 - the dialog that owns SHOW_PILOTS_BUTTON). We
+      had been suppressing exactly the section that fills the window.
+      WIRE FORMAT (disassembly 0x4ef7a0..0x4ef822, not guesswork):
+          budget starts 0x15; per record: budget += strlen+1+2 ; if budget > length -> REJECT
+          record; pointer += strlen+1 (records are CONTIGUOUS [name\0]); loop while budget<length.
+      So the declared length must exceed the bytes occupied by 2 PER RECORD or trailing names are
+      dropped, and at length >= budget+3 the client scans PAST the data and appends a phantom
+      empty pilot - that is the old "player names + corrupt strings" bug. The safe point is
+      length == budget-after-last-record EXACTLY (the trailing while() is then false, so the
+      client never scans past us):  L = 0x15 + sum(len(name)+3), emitted as header + [name\0]
+      records + 2*N zero bytes of slack. L is forced to L%16==1 by padding the LAST name with
+      trailing spaces (invisible in a list control) so the true wire length and the client's
+      bc*16+1 framing agree. Verified by emulating the parse loop over 6 roster shapes.
+      Flags ARENA_ROSTER_ENABLE / ARENA_ROSTER_MAX(40). Counts-only stays exactly 21 bytes so
+      the client's `if (length <= 0x15)` gate skips the string loop.
+      ALSO: broadcast_arena_count() now carries the roster, not just counts - EVENT_ARENA_PILOTS
+      is re-broadcast on EVERY 213 and carries NO GameIndex, so a counts-only live push would
+      blank an open Display Pilots window every few seconds.
+v312: [UI] ARENA-LIST PLAYER COUNTS for ALL arenas (were 0 until an arena was selected).
+      ROOT CAUSE (proven in Ghidra, not guessed): the 0xd2 list record has no count field -
+      the count is delivered by msg 213. Handler FUN_004ef6e0 packs [GameIndex][8 x u16] and
+      broadcasts to observer list PTR_LOOP_00bfe964; the Arenas_dlg.cpp observer FUN_006af720
+      sums the 8 camps and calls FUN_0076c080 + FUN_006acdb0 with (GameIndex, total) WITHOUT
+      any selection check - only the per-camp detail panel (FUN_006ae7c0 -> controls
+      ARENA_CAMP_PLAYERS_1..8) is gated on the selected row. FUN_006acdb0 resolves the row via
+      FUN_005d26b0(GameIndex) and writes COLUMN 4 of that row. So the client happily fills in
+      ANY arena's count on receipt of a 213 for its GameIndex; we were only ever sending one -
+      the on-demand reply for the arena the user clicked.
+      FIX: send_all_arena_counts() pushes one 213 per arena immediately AFTER the 0xd2 list
+      (ordering is mandatory: FUN_005d26b0 scans EXISTING rows and silently drops -1 if the
+      row isn't created yet). Flag SEND_ALL_ARENA_COUNTS to disable.
+      Also ARENA_COUNT_INCLUDE_UNASSIGNED (default True): a player in an arena who hasn't
+      picked a side has nation=None and was counted in NO camp, so the row total (sum of the
+      8 camps) read 0 even with people in the arena; they're now bucketed into camp 0 so the
+      list total is truthful. Trade-off: the detail panel attributes them to camp 0 until
+      they choose. Set False for strict per-camp accuracy.
+      NOT YET DONE: live refresh while sitting in the lobby (push 213 to OTHER rooms'
+      spectators on join/leave) - counts currently refresh when the list is (re)served.
 v311: [MOD] Enabled the DEATH-EFFECT exit form for plane-destroy (MOD_DESTROY_USE_EFFECT=True).
       v310's silent delete was proven clean end-to-end (run_20260723_021655: 'killp ... obj 0x0100
       -> 1 client(s) [SELF-TARGET] [silent]'; client logged 'Server require delete object 256 ...
@@ -1808,6 +1948,28 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
       flag gates the per-build decompressed-hex dump (default off).
 
 TODO list:
+  [ ] CLIENT-SIDE PARSE-ERROR FLOOD ("unknown message" flood) - OPEN, cosmetic-but-noisy.
+      Symptom: the CLIENT debug log fills at ~30 lines/second with
+          ERROR: Wrong char 13, pos 1 in line '<junk>'      (also seen as "Wrong char 11")
+      for tens of seconds at a stretch. Seen heavily in messages17/18 and messages13; ABSENT
+      from messages20, so it is intermittent and tied to a particular screen/message rather
+      than being constant.
+      WHAT'S KNOWN:
+        * It is the CLIENT complaining, not us - it is parsing a string it received and hitting
+          a control byte (13 = 0x0d, 11 = 0x0b) at position 1 where it expects text.
+        * Correlates in time with the HQ-catalog traffic and with the messages the server logs as
+          "REFRAME [note] ... is a PREFIXED message we are NOT re-framing" (inner type=0x12
+          sub=0xd2, inner type=0x52 sub=0xd5/0xe0, inner type=0x32 sub=0x44). Those are passed
+          through unframed and "have always been ignored; logged for review".
+        * The 0x3a HQ catalog is the prime suspect: the errors cluster around the HQ screen and
+          the plane-selection menu was reported corrupt on exit at the same time.
+        * NOT caused by the moderator/destroy work (timing ruled that out in run_20260723_021655:
+          the flood started 18s BEFORE the killp).
+      NEXT STEPS: capture one flood with the console at DEBUG, find which TX immediately precedes
+      the first error line, and check that message against the len%16==1 rule from v315 - a
+      message delivered as bc*16+1 while we sent fewer bytes makes the client read stale buffer,
+      which is exactly how a control byte appears "at pos 1". v315 fixed two such messages
+      (213 counts-only, 224); there may be more senders with the same defect.
   [ ] SYSOP ROSTER SECTION (v307, deferred - cosmetic, powers already work without it).
       Goal: make moderator pilots appear under the client's dedicated "sysop" group in the
       chat/arena roster instead of a normal nation.
@@ -1914,7 +2076,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   length. Any length-driven message MUST tile to len == 1 (mod 16) with parser-valid
   padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
-import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math
+import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math, queue
 from datetime import datetime
 from collections import deque
 
@@ -4041,17 +4203,52 @@ def cmd_gen_ticket(account_name: str):
     log('TICKET_GEN', f'Saved: {out_path}')
     log('TICKET_GEN', f'  Verify: acct="{acct_rb}" pid={pid_rb} size={len(saved)}b')
 
-def console_handler():
-    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | loglevel | logmute | logtags | help')
+# --- v317: CONSOLE COMMAND SOURCES -------------------------------------------
+# The console used to read stdin directly inside console_handler's loop, which meant a command
+# could only come from the server terminal. The web admin console now needs to inject commands
+# too, and sys.stdin.readline() blocks - so a queued web command would sit unexecuted until
+# somebody typed on the terminal.
+# Fix: stdin is pumped by its OWN thread into a queue, and console_handler consumes that queue.
+# Both sources land in the same place, so every existing command works identically from either,
+# and the big command if/elif body below is untouched. Output already goes through
+# log('CONSOLE', ...), which the web console page streams, so the web caller sees the result
+# without any output-capture plumbing.
+_CONSOLE_Q = queue.Queue()
+
+def queue_console_command(line, src='web'):
+    """Submit a console command from outside the terminal (the web admin console).
+    Returns the stripped command, or '' if it was blank."""
+    line = (line or '').strip()
+    if not line:
+        return ''
+    _CONSOLE_Q.put((line, src))
+    return line
+
+def _stdin_pump():
+    """Read the server terminal and feed the shared console queue."""
     while running:
         try:
             raw_line = sys.stdin.readline()
         except Exception:
-            break
+            return
         if raw_line == '':          # EOF (stdin closed / piped / detached)
-            log('CONSOLE', 'stdin closed - console commands disabled (server still running)')
+            log('CONSOLE', 'stdin closed - terminal console disabled '
+                           '(the web admin console still works)')
             return
         line = raw_line.strip()
+        if line:
+            _CONSOLE_Q.put((line, 'terminal'))
+
+def console_handler():
+    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | loglevel | logmute | logtags | help')
+    threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
+    while running:
+        try:
+            line, _src = _CONSOLE_Q.get(timeout=0.25)
+        except queue.Empty:
+            continue
+        if _src != 'terminal':
+            log('CONSOLE', f'[{_src}] > {line}')     # echo so the web console shows what ran
         if not line: continue
         try:
             parts = line.split(None, 1); cmd = parts[0].lower()
@@ -5220,6 +5417,56 @@ def reflect_chat_20(s, channel, text, player_index=0):
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
                          f'<- chat-20 ch={channel} {disp!r}', to=3.0), daemon=True).start()
 
+# v313: THE ARENA PILOTS ROSTER (the "Display Pilots" window).
+# PROVEN this session: msg 213's trailing strings ARE the arena pilot list. FUN_004ef6e0
+# broadcasts TWO events - the GameIndex+8 counts to PTR_LOOP_00bfe964
+# (RECEIVER<EVENT_PLAYERS_CAMPS_COUNT>) and the NUL-string list to PTR_LOOP_00bfe96c
+# (RECEIVER<EVENT_ARENA_PILOTS>), whose only subscriber is Arenas_dlg.cpp (FUN_006b1270,
+# the dialog that owns SHOW_PILOTS_BUTTON). The earlier "these are Combat Action lines"
+# reading was WRONG; they are the pilots list, which is why it has always come up empty.
+#
+# Wire format, from the handler disassembly (0x4ef7a0..0x4ef822):
+#     budget = 0x15                       ; ESI
+#     loop:  strlen scan at ptr           ; happens BEFORE the budget check
+#            EDI    = strlen+1
+#            budget = budget + EDI + 2    ; LEA ESI,[ESI+EDI*1+0x2]  <- +2 PER RECORD
+#            if (budget >  length) break  ; JG   -> record REJECTED
+#            <append name to pilots list>
+#            ptr    = ptr + EDI           ; ADD EBP,EDI  <- records are CONTIGUOUS
+#            while (budget <  length)     ; JL
+# So on the wire the records are plain back-to-back [name\0], but the length handed to the
+# client must be 2 BYTES PER RECORD LARGER than the bytes they occupy or trailing names are
+# silently dropped. Conversely at length >= budget+3 the client scans one record PAST our
+# data and appends a phantom empty/garbage pilot - exactly the old "player names + corrupt
+# strings" bug that made us fall back to counts-only.
+# THE SAFE POINT is length == budget-after-the-last-record EXACTLY: every record is accepted
+# and the trailing `while (budget < length)` is false, so the client never scans past us:
+#     L = 0x15 + sum(len(name_i) + 3)
+# and we emit exactly L bytes = 21-byte header + the [name\0] records + 2*N zero bytes of
+# slack that the client counts but never reads.
+# L must ALSO satisfy L % 16 == 1 so the true wire length and the client's bc*16+1 framing
+# agree; we pad the LAST name with trailing spaces (invisible in a list control) to land on
+# that boundary - the same trick build_arenalist uses for its display label.
+# v314: msg 213's roster feeds the ARENA ACTION box, NOT the Display Pilots popup
+# (confirmed live in messages17.log - the names appeared in Arena Action). The popup is
+# msg 224, implemented below. Leave this OFF so 213 stays counts-only and the Arena
+# Action box isn't spammed with pilot names.
+ARENA_ROSTER_ENABLE = False
+ARENA_ROSTER_MAX    = 40          # cap the packet (40 names stays well under 1KB)
+
+def _roster_names_only(names):
+    """Call sites pass [(pilot, nation), ...] or ['pilot', ...]; normalise to clean bytes."""
+    out = []
+    for e in (names or []):
+        nm = e[0] if isinstance(e, (tuple, list)) else e
+        if not nm:
+            continue
+        b = nm.encode('ascii', 'replace') if isinstance(nm, str) else bytes(nm)
+        b = b.replace(b'\x00', b'').strip()[:31]
+        if b:
+            out.append(b)
+    return out
+
 def build_arena_players_213(room, counts=None, names=None):
     """FA message 213 - arena player info, the reply to the client's 'out 213' request.
     Layout decoded from incoming-213 handler FUN_004ef6e0:
@@ -5237,19 +5484,117 @@ def build_arena_players_213(room, counts=None, names=None):
     payload = bytearray([0xd5]) + gidx
     for c in counts:
         payload += int(c & 0xFFFF).to_bytes(2, 'little')     # 8 ushorts = 16 bytes
-    # COUNTS ONLY - no trailing strings. Re-RE of the incoming-213 handler
-    # (FUN_004ef6e0) shows the strings after +0x15 are NOT a roster: each NUL-string
-    # (budgeted strlen+1+2) is appended to a UI list - and that list renders in the
-    # arena-selection page's "Combat Action" box. Our invented roster is exactly the
-    # "player names + corrupt strings" bug (the per-record trailing bytes, e.g.
-    # nation=0xff, parsed as 1-char garbage strings). Per-nation grouping comes from
-    # the 8 counts above, not from names here. Until we emulate real combat-action
-    # lines, send counts only; bc-grid zero padding may yield blank entries at most.
-    if names:
-        log('ARENA213', f'NOTE: roster names suppressed (combat-action box): {names}')
-    log('ARENA213', f'213 gidx={gidx.hex()} counts={counts} (counts-only) '
-                    f'payload={len(payload)}B')
-    return build_appspace_pkt_exact(bytes(payload))
+    # v313: append the pilots roster (see the format note above). Counts-only stays EXACTLY
+    # 21 bytes so the client's `if (length <= 0x15)` gate skips the string loop entirely.
+    roster = _roster_names_only(names) if (ARENA_ROSTER_ENABLE and names) else []
+    if not roster:
+        # v315: 21 raw bytes is NOT safe. The client takes the message length from the
+        # appspace framing as bc*16+1, NOT from the bytes we actually send - proven in
+        # messages18.log, where this exact 21-byte packet was logged by the client as
+        # "in 213'33". At length 33 the string loop runs (33 > 0x15) over 12 bytes of
+        # stale receive buffer and appends garbage/blank pilots to the Arena Action box.
+        # Fix: pad out to the grid (33) with ONE filler record that the loop is guaranteed
+        # to REJECT. With F filler bytes ending in NUL the scan sees strlen = F-1, so the
+        # budget becomes 0x15 + (F-1+1) + 2 = 0x15+F+2, which always exceeds the declared
+        # length 0x15+F -> `jg` exits before appending anything. Nothing is displayed.
+        target = 33                                   # smallest bc*16+1 above the 21B header
+        fill = target - len(payload)
+        payload += b'\x20' * (fill - 1) + b'\x00'     # non-NUL run, NUL-terminated
+        log('ARENA213', f'213 gidx={gidx.hex()} counts={counts} (counts-only) '
+                        f'L={len(payload)} (reject-filler {fill}B)')
+        return build_appspace_pkt_exact(bytes(payload))
+    dropped = max(0, len(roster) - ARENA_ROSTER_MAX)
+    roster = roster[:ARENA_ROSTER_MAX]
+    N = len(roster)
+    S = sum(len(b) for b in roster)
+    L = 0x15 + S + 3 * N                      # the client's budget after the last record
+    pad = (1 - L) % 16                        # land on bc*16+1 so both length views agree
+    if pad:
+        roster[-1] = roster[-1] + (b'\x20' * pad)
+        S += pad
+        L += pad
+    body = bytearray(payload)
+    for b in roster:
+        body += b + b'\x00'
+    slack = L - len(body)                     # == 2*N, counted by the client, never read
+    body += bytes(slack)
+    if len(body) != L or L % 16 != 1:         # must never happen; fall back rather than risk a CTD
+        log('ARENA213', f'ERROR: roster framing off (len={len(body)} L={L}) - sending counts-only')
+        return build_appspace_pkt_exact(bytes(payload))
+    log('ARENA213', f'213 gidx={gidx.hex()} counts={counts} roster={N} pilot(s) '
+                    f'L={L} (slack={slack}, namepad={pad}'
+                    f'{f", dropped={dropped}" if dropped else ""}): '
+                    f'{[b.decode().rstrip() for b in roster]}')
+    return build_appspace_pkt_exact(bytes(body))
+
+def build_arena_members_224(room, names):
+    """FA message 224 (0xe0) - the "Display Pilots" popup roster (MEMBERS_LIST_BOX).
+
+    THIS, not msg 213, is what fills the Display Pilots window. Proven from FA.exe:
+      * Opening the popup constructs Arenas_dlg.cpp's members dialog (FUN_006b0e90), which
+        creates MEMBERS_LIST_BOX, subscribes to observer list 0xbfe9e4, then calls
+        FUN_004f0a70(GameIndex) -> sends [0xe0][GameIndex:4]. That is exactly the lone
+        "out 224'5" seen in messages17.log when the button is clicked - and we never
+        answered it, which is why the popup was always empty.
+      * The inbound-224 handler (dispatch slot 0xc81ed8 + 224*4 -> LAB_004eed70) parses:
+            [0]     0xe0
+            [1..4]  GameIndex   (u32; `test eax,eax / jle` -> must be > 0 or it NO-OPs)
+            [5..]   per pilot:  [1 prefix byte][name\0]
+        The budget starts at 5 and advances strlen+2 per record (`lea esi,[esi+eax+1]`
+        with eax=strlen+1) while the pointer advances 1+(strlen+1) - the two MATCH, unlike
+        msg 213 which over-counts by 2. So the declared length is simply the true payload
+        length: no slack bytes and no name padding needed here.
+      * The popup's receiver (0x006adc00) compares the message's GameIndex against its own
+        (`mov edx,[ecx+0x334] / cmp eax,edx / jne skip`), so the reply MUST echo the
+        REQUESTED GameIndex or the list box is left untouched.
+    An empty arena is fine: 5 bytes total, and the record loop is skipped (length <= 5).
+    The per-record prefix byte is stepped over by the client and never read; we put the
+    camp there (0xff = no side chosen) purely so captures are self-documenting.
+    """
+    creator = (room[2] or room[1] or 'Arena')
+    gidx = _arena_gameindex(creator, room[0])
+    recs = []
+    for e in (names or []):
+        if len(recs) >= ARENA_ROSTER_MAX:
+            break
+        if isinstance(e, (tuple, list)):
+            nm = e[0]
+            camp = e[1] if len(e) > 1 else None
+        else:
+            nm, camp = e, None
+        if not nm:
+            continue
+        b = (nm.encode('ascii', 'replace') if isinstance(nm, str) else bytes(nm))
+        b = b.replace(b'\x00', b'').strip()[:31]
+        if not b:
+            continue
+        pfx = camp if (isinstance(camp, int) and 0 <= camp < 8) else 0xff
+        recs.append((pfx, b))
+    if not recs:
+        # 5 bytes cannot be brought onto the bc*16+1 grid, and any filler we added would be
+        # parsed as a blank pilot. The popup's list box is constructed empty every time it
+        # opens, so an empty arena is correctly represented by sending nothing at all.
+        log('ARENA224', f'224 gidx={gidx.hex()}: arena empty - no reply (list box stays empty)')
+        return None
+    # v315: the client reads bc*16+1 bytes, not the length we send (messages18.log logged
+    # our exact 14-byte reply as "in 224'17"), so it scanned 3 bytes of stale buffer and
+    # produced the uninitialised names and blank lines. Force the payload onto the grid.
+    # Here budget and pointer advance identically, so length == budget-after-last-record
+    # and the loop exits without ever scanning past us.
+    L = 5 + sum(len(b) + 2 for _p, b in recs)
+    pad = (1 - L) % 16
+    if pad:
+        recs[-1] = (recs[-1][0], recs[-1][1] + (b'\x20' * pad))   # trailing spaces: invisible
+        L += pad
+    body = bytearray([0xe0]) + gidx
+    for pfx, b in recs:
+        body += bytes([pfx]) + b + b'\x00'
+    if len(body) != L or L % 16 != 1:      # never send an off-grid 224 - that is the bug
+        log('ARENA224', f'ERROR: 224 framing off (len={len(body)} L={L}) - not sending')
+        return None
+    log('ARENA224', f'224 gidx={gidx.hex()} members={len(recs)} L={L} (namepad={pad}): '
+                    f'{[b.decode().rstrip() for _p, b in recs]}')
+    return build_appspace_pkt_exact(bytes(body))
 
 # -- PLAYER-OBJECT LAYER (msgs 62 / 63 / 96) ------------------------------------
 # Decoded from FA.exe VNet_Rcv.cpp handlers (dispatch table FUN_004f1490):
@@ -5959,6 +6304,157 @@ def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
     log('PLAYER63', f'broadcast camp-change {s.current_pilot} side={side} op={op} -> '
                     f'{n} session(s) incl. self')
 
+# --- v312: ARENA-LIST PLAYER COUNTS (all arenas, not just the selected one) ----
+#
+# PROVEN from FA.exe this session:
+#   msg 213 handler FUN_004ef6e0 packs [GameIndex][8 x u16 counts] into a contiguous stack
+#   struct and BROADCASTS it to the observer list PTR_LOOP_00bfe964. The Arenas_dlg.cpp
+#   observer is FUN_006af720:
+#       total = counts[0]+..+counts[7]
+#       FUN_0076c080(GameIndex, total)
+#       FUN_006acdb0(GameIndex, total)          <- NOT gated on selection
+#       if (row_of(GameIndex) == selected_row) FUN_006ae7c0(counts)   <- detail panel only
+#   and FUN_006acdb0 is:
+#       row = FUN_005d26b0(GameIndex)           # scan existing rows for this GameIndex
+#       if row != -1: FUN_005d3e40(row, text(total), 4)    # write COLUMN 4 of that row
+#   (Arenas_dlg also builds controls HEADER_ARENA_PLAYERS_COUNT and ARENA_CAMP_PLAYERS_1..8,
+#   the per-camp breakdown fed by FUN_006ae7c0 for the selected arena only.)
+#
+# So the client fills in ANY arena's player column the moment it receives a 213 for that
+# GameIndex - selection is irrelevant. Every arena showed 0 purely because we only ever
+# answered the client's on-demand 213 for the arena it had selected.
+#
+# ORDER MATTERS: FUN_005d26b0 scans rows that ALREADY EXIST and returns -1 (silent drop)
+# if the row isn't there yet, so the 0xd2 list MUST go out before these 213s.
+SEND_ALL_ARENA_COUNTS = True
+# A player who is in an arena but has not picked a side has nation=None. The client's row
+# total is sum(all 8 camps), so excluding them makes a populated arena read 0 - exactly the
+# symptom being fixed. Bucket them into camp 0 so the LIST total is truthful; the cost is
+# that the per-camp detail panel attributes them to camp 0 until they choose a side. Set
+# False to restore strict per-camp accuracy at the cost of under-counting the list.
+# v315: unassigned players go to camp 7 = NU/Neutral, which is what they actually are.
+# The client's row total is sum(all 8 camps), so a side-less player must sit in SOME camp
+# to be counted; camp 0 (v312) wrongly showed every joiner as US, and counting them nowhere
+# (v314) dropped them from the arena total. GAME_DEF confirms the mapping - the client logs
+# "ccn 0 US / 1 GB / 2 SU / 3 GE / 4 JP / 7 NU NEU Neutral" - so camp 7 is truthful AND
+# keeps the total right. (Camps 5/6 are unused: GAME_DEF reports 0 planes for them.)
+ARENA_COUNT_INCLUDE_UNASSIGNED = True
+ARENA_UNASSIGNED_CAMP = 7          # NU / Neutral
+
+def _room_nation_counts(room_id):
+    """Return (counts[8], total, unassigned) for a room from live sessions."""
+    counts = [0] * 8
+    total = 0
+    unassigned = 0
+    try:
+        for sess in get_sessions_in_room(room_id):
+            total += 1
+            n = sess.nation
+            if n is not None and 0 <= n < 8:
+                counts[n] += 1
+            else:
+                unassigned += 1
+                if ARENA_COUNT_INCLUDE_UNASSIGNED:
+                    counts[ARENA_UNASSIGNED_CAMP] += 1
+    except Exception as e:
+        log('ARENACNT', f'count failed for room {room_id}: {e!r}')
+    return counts, total, unassigned
+
+def send_all_arena_counts(s, rooms, reason=''):
+    """Send one msg 213 per arena so EVERY row in the arena list shows its player count,
+    not just the selected one. MUST be called AFTER the 0xd2 list has been sent."""
+    if not SEND_ALL_ARENA_COUNTS:
+        return
+    sent = 0
+    desc = []
+    for r in rooms:
+        try:
+            counts, total, unassigned = _room_nation_counts(r[0])
+            pkt = build_arena_players_213(r, counts=counts)
+            send_rel(s, pkt, f'<- 213 count (room {r[0]} {r[1]!r} n={total})', to=3.0)
+            sent += 1
+            desc.append(f'{r[1]}={total}' + (f'(+{unassigned}u)' if unassigned else ''))
+            time.sleep(0.01)        # same pacing as the 212 loop
+        except Exception as e:
+            log('ARENACNT', f'213 push failed for room {r[0]}: {e!r}')
+    log('ARENACNT', f'pushed {sent} arena count(s) {reason}: {desc}')
+
+# --- v313: LIVE arena counts for lobby spectators ------------------------------
+# v312 fills the list when it is SERVED. This keeps it live: whenever a room's
+# per-nation counts change, push that room's 213 to everyone sitting in the lobby, so a
+# spectator watching the arena list sees the number tick up/down without re-entering.
+#
+# Implemented as a WATCHER rather than hooks on join/leave. The count can change through
+# many paths - arena entry, back-to-lobby, side change, session timeout, socket drop,
+# client crash - and hooking each one risks silently missing a path (the pre-existing
+# push_arena_players_213 was written as such a hook and ended up never being called at
+# all). One poll over the live session table catches every cause by construction.
+#
+# It compares the FULL 8-camp tuple, not just the total, so a side change (which leaves
+# the total unchanged) still refreshes the per-camp panel of whoever has that arena
+# selected. Recipients are lobby sessions only: a player inside an arena is not looking
+# at the list, and skipping them keeps the extra reliable traffic off flying clients.
+ARENA_COUNT_POLL_SEC = 3.0
+_arena_count_last = {}          # room_id -> tuple(counts) last broadcast
+
+def broadcast_arena_count(room, counts=None, reason=''):
+    """Push msg 213 for ONE room to every lobby session (see note above)."""
+    room_id = room[0]
+    if counts is None:
+        counts, _t, _u = _room_nation_counts(room_id)
+    total = sum(counts)
+    try:
+        # v313: carry the ROSTER too, not just the counts. FUN_004ef6e0 re-broadcasts
+        # EVENT_ARENA_PILOTS on EVERY 213, and that event carries NO GameIndex (the handler
+        # pushes only the string-list head/tail), so the pilots list is replaced wholesale by
+        # whichever 213 arrived last. A counts-only live push would therefore BLANK an open
+        # "Display Pilots" window every few seconds.
+        pkt = build_arena_players_213(room, counts=counts, names=_room_roster_names(room_id))
+    except Exception as e:
+        log('ARENACNT', f'live push build failed room={room_id}: {e!r}')
+        return 0
+    with sl:
+        targets = [x for x in sids.values()
+                   if x.auth_done and not x.closing and not x.entered_game]
+    if not targets:
+        return 0
+    for sess in targets:
+        threading.Thread(
+            target=lambda _s=sess: send_rel(_s, pkt,
+                f'<- 213 live count (room {room_id} n={total})', to=3.0),
+            daemon=True).start()
+    log('ARENACNT', f'live push room={room_id} {room[1]!r} counts={counts} n={total} '
+                    f'-> {len(targets)} lobby session(s) {reason}')
+    return len(targets)
+
+def _arena_count_poll_loop():
+    """Watch every open room's per-nation counts; broadcast a 213 on any change."""
+    while running:
+        try:
+            time.sleep(ARENA_COUNT_POLL_SEC)
+            if not SEND_ALL_ARENA_COUNTS:
+                continue
+            seen = set()
+            for r in db_get_open_rooms():
+                rid = r[0]
+                seen.add(rid)
+                counts, _total, _u = _room_nation_counts(rid)
+                key = tuple(counts)
+                if _arena_count_last.get(rid) != key:
+                    _arena_count_last[rid] = key
+                    broadcast_arena_count(r, counts=counts, reason='(population change)')
+            for gone in [k for k in _arena_count_last if k not in seen]:
+                _arena_count_last.pop(gone, None)      # room closed - drop stale state
+        except Exception as e:
+            log('ARENACNT', f'poll loop error: {e!r}')
+
+def _room_roster_names(room_id):
+    """Pilot names currently inside a room (for the Display Pilots list)."""
+    try:
+        return [(sess.current_pilot or 'Player') for sess in get_sessions_in_room(room_id)]
+    except Exception:
+        return []
+
 def send_arenalist_with_gamedefs(s, rooms, label):
     """v164: send each room's 212 GAME_DEF FIRST, then the 0xd2 list.
     The 212 parse (FUN_0057bee0) calls the terrain setter FUN_004c7cd0(terrain) with
@@ -5973,6 +6469,10 @@ def send_arenalist_with_gamedefs(s, rooms, label):
                 send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
                 time.sleep(0.01)
     send_rel(s, build_arenalist(rooms), label, to=3.0)
+    # v312: the 0xd2 rows now exist client-side, so push each arena's player count. Without
+    # this only the arena the user clicks gets a 213 (its on-demand request), which is why
+    # every other row sat at 0.
+    send_all_arena_counts(s, rooms, reason=f'after {label}')
 
 def build_chat_broadcast(pilot_name, message):
     nb = (pilot_name.encode() if isinstance(pilot_name,str) else pilot_name) + b'\x00'
@@ -7912,21 +8412,41 @@ def handle_213_request(s, game_idx, via=''):
         log('POST-AUTH', f'213 request{via} gidx=0x{game_idx:08x}: no matching room - silent')
         return
     sessions = get_sessions_in_room(room[0])
+    # v316: use the SHARED counter. This used to run its own inline tally that ignored
+    # ARENA_COUNT_INCLUDE_UNASSIGNED / ARENA_UNASSIGNED_CAMP, so a side-less pilot landed in
+    # no camp at all and the on-demand reply reported ZERO while the poll loop (which does use
+    # _room_nation_counts) was correctly reporting 1 in NU. Clicking an arena therefore
+    # OVERWROTE the correct live row with 0 - visible in run_20260724_094524:
+    #   09:46:25 ARENA213 counts=[0,0,0,0,0,0,0,1]   <- poll loop, right
+    #   09:46:29 ARENA213 counts=[0,0,0,0,0,0,0,0] ... "1 players"  <- this path, wrong
+    # Two implementations of the same tally is the actual defect; there is now one.
+    counts, _total, _unassigned = _room_nation_counts(room[0])
     if sessions:
-        counts = [0] * 8
-        roster = []
-        for sess in sessions:
-            roster.append((sess.current_pilot or 'Player', sess.nation))
-            if sess.nation is not None and 0 <= sess.nation < 8:
-                counts[sess.nation] += 1
+        roster = [(sess.current_pilot or 'Player', sess.nation) for sess in sessions]
     else:
         try:
             roster = [(p, None) for p, _ in db_get_pilots_in_room(room[0])]
         except Exception:
             roster = []
-        counts = [0] * 8
     send_rel(s, build_arena_players_213(room, counts=counts, names=roster),
              f'<- ArenaPlayers 213{via} (room {room[0]} gidx=0x{game_idx:08x}, {len(roster)} players)', to=5.0)
+
+def handle_224_request(s, game_idx, via=''):
+    """FA msg 224 - the "Display Pilots" popup asking for an arena's member list.
+    The reply must echo the SAME GameIndex or the dialog discards it (see
+    build_arena_members_224)."""
+    room = _find_room_by_gidx(game_idx)
+    if room is None:
+        log('POST-AUTH', f'224 request{via} gidx=0x{game_idx:08x}: no matching room - silent')
+        return
+    roster = [(sess.current_pilot or 'Player', sess.nation)
+              for sess in get_sessions_in_room(room[0])]
+    pkt = build_arena_members_224(room, roster)
+    if pkt is None:
+        return
+    send_rel(s, pkt,
+             f'<- ArenaMembers 224{via} (room {room[0]} gidx=0x{game_idx:08x}, '
+             f'{len(roster)} pilot(s))', to=5.0)
 
 # -- START-PLACE ALLOCATION ----------------------------------------------------
 # Each airfield has several start positions (parking/runway spots). The Fly request
@@ -8719,6 +9239,11 @@ def handle_compound(s, outer_cmd, pl):
         gidx = int.from_bytes(inner[5:9], 'little') if len(inner) >= 9 else 0
         log('COMPOUND', f'inner sub=0xd5 ArenaPlayers request gidx=0x{gidx:08x}')
         handle_213_request(s, gidx, via=' (compound)')
+        return
+    if inner_sub == 0xe0:
+        gidx = int.from_bytes(inner[5:9], 'little') if len(inner) >= 9 else 0
+        log('COMPOUND', f'inner sub=0xe0 DisplayPilots request gidx=0x{gidx:08x}')
+        handle_224_request(s, gidx, via=' (compound)')
         return
 
     # Compound inner type=0x52 (sub=0xd7/0xd9): squad/team update - do NOT echo
@@ -10810,14 +11335,19 @@ def handle_post_auth(s, cmd, pl):
         # and fills the squadron page with GAME_DEF garbage when triggered by wrong 0xce data.
         if tb == 0x52:
             if sub == 0xe0:
-                # sub=0xe0 = "EnterArena" phase 1 (5 bytes: [0xe0][GameIndex 4B])
-                # Sent at type=0x52 just before VNET::SendEnterToGame.
-                # GameIndex at pl[5:9] LE.
-                if len(pl) >= 9:
-                    game_idx = int.from_bytes(pl[5:9], 'little')
-                    log('POST-AUTH', f'EnterArena sub=0xe0 GameIndex=0x{game_idx:08x} ({game_idx}) - accepted')
-                else:
-                    log('POST-AUTH', f'EnterArena sub=0xe0 len={len(pl)} - accepted')
+                # v316: sub=0xe0 is the "Display Pilots" roster request, NOT "EnterArena".
+                # It was labelled EnterArena because a 0xe0 is often seen shortly before
+                # VNET::SendEnterToGame - but that is just the user opening Display Pilots
+                # and then clicking Join. FA.exe settles it: the ONLY caller of the sender
+                # FUN_004f0a70 (which does buf[0]=0xe0; *(u32*)(buf+1)=GameIndex; send(,5))
+                # is FUN_006b0e90, the members-dialog constructor.
+                # This branch used to just log "accepted" and return, which SWALLOWED the
+                # direct form before it could reach handle_224_request lower down - so the
+                # popup came up empty whenever the client sent 0xe0 direct instead of
+                # compound. run_20260724_094524 shows the swallow at 09:46:43, 09:46:48,
+                # 09:47:35 and 09:47:37, each matching an unanswered "out 224'5".
+                game_idx = int.from_bytes(pl[5:9], 'little') if len(pl) >= 9 else 0
+                handle_224_request(s, game_idx, via=' (direct)')
                 return
             if sub == 0xd7:
                 # sub=0xd7 = FUN_004f0570 "SetArena" (5 bytes: [0xd7][GameIndex 4B])
@@ -11513,13 +12043,14 @@ threading.Thread(target=console_handler, daemon=True).start()
 threading.Thread(
     target=start_web_server, 
     args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read,
-          ARENA_TAIL_FIELDS, _falog.get_recent_logs),
+          ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command),
     daemon=True
 ).start()
 
 threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
 threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
+threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts
 
 _drop_ts=0.0
 
