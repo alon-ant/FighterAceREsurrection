@@ -3,6 +3,45 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-07-24: v322 - the health watchdog is now SILENT while healthy.
+#   The web server has been stable, so the observability scaffolding from the 07-23 work is
+#   just noise. Removed: the startup ping line, the per-check DEBUG heartbeat, the INFO pulse
+#   every 10 checks, and the "recovered" line. The check itself is UNCHANGED - still every 30s
+#   with a 10s timeout, still two consecutive bad checks before a restart.
+#   Nothing diagnostic was lost. The reason for each bad check is buffered and emitted as part
+#   of the restart line, so a restart still says exactly what failed and when:
+#     restarting web server - 2 failed checks: [10:14:03 no response within 10s;
+#                                               10:14:33 slow 12.4s > 10s]
+#   WEB_HEALTH_VERBOSE = True restores the old per-check chatter for debugging.
+#   ALSO added a guard that the new silence made necessary: if the health ping can never
+#   succeed for an ENVIRONMENTAL reason (proxy env var, 127.0.0.1 blocked, port taken by
+#   another process), the watchdog would bounce a perfectly healthy web server every 60s
+#   forever - and with healthy checks now silent, restart lines would be the only clue. After
+#   3 restarts with no successful check in between it says so once, plainly, and backs off to
+#   one check every 300s; any successful check resets it and logs that it has resumed.
+# 2026-07-24: v321 - admin Logs tab: browse, tail and download the server's log files.
+#   Third top-level tab on /admin. The list is loaded lazily from /admin/logfiles.json (there
+#   are already 170+ run_*.log files, so rendering them into every /admin response would bloat
+#   the page); each row offers "View tail" (last 128 KB in the browser, so a multi-MB log can
+#   be peeked at without downloading) and "Download".
+#   SECURITY - this is the only place the panel serves files off disk, so the path handling is
+#   deliberately paranoid. The client supplies a BARE FILENAME only; the directory always comes
+#   from the server (SRV['log_dir'], injected from the game server's LOG_DIR). Four independent
+#   checks in _safe_log_path(), any one of which suffices alone:
+#     1. basename(name) == name   -> no separators, no '..'
+#     2. reject ':' and NUL       -> no Windows drive-relative paths, no NTFS ADS, no NUL trunc
+#     3. extension allowlist      -> .log / .log.<n> / .txt / .err only
+#     4. realpath containment     -> resolves symlinks/junctions, proves it's inside logs/
+#   Verified against 27 attack strings (../, ..\, URL-encoded, absolute, C:.., ADS, NUL,
+#   sub-dir, and a symlink deliberately pointing outside the dir) under BOTH posix and Windows
+#   path semantics - all blocked; all 5 legitimate log shapes resolve.
+#   The name charset also makes Content-Disposition header injection impossible (no quote, CR,
+#   LF, space or ';' can appear in a name that passes).
+#   Downloads STREAM in 64 KB chunks and emit exactly the Content-Length advertised, so the
+#   live server.log growing (or rotating) mid-read cannot desync the body from the header.
+#   The listing is filtered through _safe_log_path() too, so it can never show an entry that
+#   would then 404. flightrec/ is deliberately not traversed - one flat directory keeps the
+#   traversal surface at exactly zero.
 # 2026-07-24: v318 - admin page split into tabs with per-panel filtering.
 #   The page had grown into three long stacked cards on one scroll. Now:
 #     User Management  ->  Users | Pilot Stats     (sub-tabs)
@@ -64,6 +103,7 @@ import sqlite3
 import hashlib
 import secrets
 import json
+import re
 import threading
 import time
 import socket
@@ -81,6 +121,7 @@ SRV = {
     'get_existing_ticket': None,
     'generate_ticket': None,
     'exec_console': None,
+    'log_dir': None,
     'log': print
 }
 
@@ -244,7 +285,48 @@ document.addEventListener('DOMContentLoaded', function(){
   }
   var f = document.querySelectorAll('.filterbar input');
   for (var i=0;i<f.length;i++){ faFilter(f[i]); }
+  faLoadLogs();
 });
+function faBytes(n){
+  if(n < 1024) return n + ' B';
+  if(n < 1048576) return (n/1024).toFixed(1) + ' KB';
+  return (n/1048576).toFixed(1) + ' MB';
+}
+function faLoadLogs(){
+  var tb = document.getElementById('logsTable');
+  if(!tb) return;
+  tb.innerHTML = '<tr><td>Loading&hellip;</td></tr>';
+  fetch('/admin/logfiles.json').then(function(r){return r.json();}).then(function(j){
+    var d = document.getElementById('logsDir');
+    if(d) d.textContent = j.dir || '(log directory not available)';
+    if(!j.files || !j.files.length){
+      tb.innerHTML = '<tr><td>No log files found.</td></tr>';
+      return;
+    }
+    var total = 0, html = '';
+    for(var i=0;i<j.files.length;i++){
+      var f = j.files[i];
+      total += f.size;
+      var when = new Date(f.mtime*1000).toLocaleString();
+      var q = encodeURIComponent(f.name);
+      html += '<tr><td><strong>' + f.name + '</strong><br>'
+            + '<small style="color:#666;">' + faBytes(f.size) + ' &middot; ' + when + '</small></td>'
+            + '<td style="text-align:right; white-space:nowrap;">'
+            + '<a class="btn-green" style="display:inline-block;width:auto;padding:7px 13px;'
+            + 'margin:0 6px 0 0;text-decoration:none;" href="/admin/log_view?name=' + q + '">View tail</a>'
+            + '<a class="btn-yellow" style="display:inline-block;width:auto;padding:7px 13px;'
+            + 'margin:0;text-decoration:none;color:#333;" href="/admin/log_download?name=' + q + '">Download</a>'
+            + '</td></tr>';
+    }
+    tb.innerHTML = html;
+    var s = document.getElementById('logsSummary');
+    if(s) s.textContent = j.files.length + ' files, ' + faBytes(total) + ' total';
+    var fb = document.getElementById('logsFilter');
+    if(fb) faFilter(fb);
+  }).catch(function(e){
+    tb.innerHTML = '<tr><td style="color:#c00;">Could not load the log list.</td></tr>';
+  });
+}
 </script>
 """
 
@@ -378,6 +460,77 @@ def _rename_everywhere(conn, refs, old, new):
         except Exception as e:
             done.append(f'{table}.{col}:ERR({e})')
     return done
+
+# --- v321: LOG FILE ACCESS -----------------------------------------------------
+# Serving files off disk over HTTP is the one genuinely dangerous thing this admin panel
+# does, so the path handling is deliberately paranoid. A request only ever supplies a BARE
+# FILENAME; the directory comes from the server, never from the client.
+#
+# Four independent checks, any one of which is sufficient on its own:
+#   1. basename(name) == name  -> kills 'a/b', 'a\b', and anything with a separator
+#   2. reject ':' and NUL      -> kills Windows drive-relative paths ('C:..\x') and NTFS
+#                                 alternate data streams ('server.log:hidden')
+#   3. extension allowlist     -> only .log / .log.<n> / .txt / .err are downloadable
+#   4. realpath containment    -> resolves symlinks/junctions and proves the final path is
+#                                 genuinely inside the logs directory
+# Plus: it must exist and be a regular file (never a directory or device node).
+LOG_NAME_OK = re.compile(r'^[A-Za-z0-9._-]+$')
+LOG_EXT_OK  = re.compile(r'\.(log(\.\d+)?|txt|err)$', re.IGNORECASE)
+
+def _log_dir():
+    d = SRV.get('log_dir')
+    return d if d and os.path.isdir(d) else None
+
+def _safe_log_path(name):
+    """Map a client-supplied filename to an absolute path inside the logs dir, or None."""
+    d = _log_dir()
+    if not d or not name:
+        return None
+    if '\x00' in name or ':' in name:
+        return None
+    if os.path.basename(name) != name:          # any separator, '.' or '..'
+        return None
+    if name in ('.', '..') or not LOG_NAME_OK.match(name):
+        return None
+    if not LOG_EXT_OK.search(name):
+        return None
+    full = os.path.realpath(os.path.join(d, name))
+    root = os.path.realpath(d)
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:                          # different drives on Windows
+        return None
+    if not os.path.isfile(full):
+        return None
+    return full
+
+def _list_log_files():
+    """[{name,size,mtime}] for every downloadable file in the logs dir, newest first.
+    Sub-directories (e.g. flightrec/) are intentionally NOT traversed - one flat directory
+    keeps the traversal surface at exactly zero."""
+    d = _log_dir()
+    if not d:
+        return []
+    out = []
+    try:
+        for nm in os.listdir(d):
+            # Filter with the SAME function that guards the download, so the list can never
+            # show an entry that would then 404 - e.g. a symlink/junction pointing outside
+            # the logs dir passes the name checks but fails realpath containment.
+            p = _safe_log_path(nm)
+            if not p:
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append({'name': nm, 'size': st.st_size, 'mtime': st.st_mtime})
+    except OSError as e:
+        SRV['log']('WEB', f'log listing failed: {e!r}')
+        return []
+    out.sort(key=lambda r: r['mtime'], reverse=True)
+    return out
 
 class WebInterfaceHandler(BaseHTTPRequestHandler):
     def get_current_user(self):
@@ -711,6 +864,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             onclick="faShow('main','p-users')">User Management</button>
                     <button data-btngroup="main" data-target="p-arenas"
                             onclick="faShow('main','p-arenas')">Arenas</button>
+                    <button data-btngroup="main" data-target="p-logs"
+                            onclick="faShow('main','p-logs')">Logs</button>
                 </div>
 
                 <div class="panel on" data-group="main" data-panel="p-users">
@@ -785,6 +940,29 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             <span class="filtercount" id="arenasCount"></span>
                         </div>
                         <table id="arenasTable">{arena_html}</table>
+                    </div>
+                </div>
+
+                <div class="panel" data-group="main" data-panel="p-logs">
+                    <div class="card">
+                        <h2 style="margin-top:0;">Server Logs</h2>
+                        <p style="color:#666; margin-top:0; font-size:0.9em;">
+                            Download or peek at the server's log files without opening a session on
+                            the VM. <em>View tail</em> shows the last 128&nbsp;KB in the browser;
+                            <em>Download</em> fetches the whole file.<br>
+                            <small style="color:#888;">Directory: <code id="logsDir">&hellip;</code>
+                            &middot; <span id="logsSummary"></span>
+                            &middot; the <code>flightrec/</code> sub-folder is not listed.</small>
+                        </p>
+                        <div class="filterbar">
+                            <input type="text" id="logsFilter" placeholder="Filter logs (try a date, e.g. 20260724)&hellip;"
+                                   data-table="logsTable" data-count="logsCount"
+                                   oninput="faFilter(this)">
+                            <span class="filtercount" id="logsCount"></span>
+                            <button style="width:auto; padding:8px 14px; margin:0;"
+                                    onclick="faLoadLogs()">Refresh</button>
+                        </div>
+                        <table id="logsTable"></table>
                     </div>
                 </div>
             """
@@ -1129,6 +1307,96 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith('/admin/logfiles.json'):
+            # v321: directory listing for the admin Logs tab. Loaded lazily by the page so
+            # /admin stays fast even with hundreds of run_*.log files accumulated.
+            if not is_user_admin(user):
+                self.send_error(403); return
+            files = _list_log_files()
+            body = json.dumps({'dir': _log_dir() or '', 'files': files}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path.startswith('/admin/log_download'):
+            if not is_user_admin(user):
+                self.send_error(403); return
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = q.get('name', [''])[0]
+            path = _safe_log_path(name)
+            if not path:
+                SRV['log']('WEB', f'log download REJECTED for {user!r}: name={name!r}')
+                self.send_error(404); return
+            try:
+                size = os.path.getsize(path)
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(size))
+                self.send_header('Content-Disposition',
+                                 'attachment; filename="' + name + '"')
+                self.end_headers()
+                # Stream in chunks rather than read()-ing the whole file: some run logs are
+                # megabytes, and the live server.log is being APPENDED TO while we read. We
+                # send exactly the `size` bytes we advertised, so a file that grows mid-read
+                # can't desync Content-Length from the body.
+                sent = 0
+                with open(path, 'rb') as f:
+                    while sent < size:
+                        chunk = f.read(min(65536, size - sent))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        sent += len(chunk)
+                    if sent < size:                 # file shrank (rotated) mid-read: pad so
+                        self.wfile.write(b'\n' * (size - sent))   # the body matches the header
+                SRV['log']('WEB', f'Admin {user} downloaded log {name} ({size} bytes)')
+            except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+                pass                                # client cancelled the download; harmless
+            except Exception as e:
+                SRV['log']('WEB', f'log download failed for {name!r}: {e!r}')
+
+        elif self.path.startswith('/admin/log_view'):
+            # Show the TAIL of a log in the browser, so a 2 MB run log can be peeked at
+            # without downloading it.
+            if not is_user_admin(user):
+                self.send_error(403); return
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = q.get('name', [''])[0]
+            try:
+                kb = max(1, min(1024, int(q.get('kb', ['128'])[0])))
+            except (ValueError, TypeError):
+                kb = 128
+            path = _safe_log_path(name)
+            if not path:
+                SRV['log']('WEB', f'log view REJECTED for {user!r}: name={name!r}')
+                self.send_error(404); return
+            try:
+                size = os.path.getsize(path)
+                want = kb * 1024
+                with open(path, 'rb') as f:
+                    if size > want:
+                        f.seek(size - want)
+                        f.readline()               # drop the partial first line
+                    data = f.read()
+                text = data.decode('utf-8', 'replace')
+            except Exception as e:
+                self.send_html(f"<h2 style='color:red;'>Could not read log</h2><p>{hesc(str(e))}</p>"
+                               "<a href='/admin'>&larr; Back to Admin</a>")
+                return
+            trunc = ('<p style="color:#c60;">Showing the last '
+                     + str(kb) + ' KB of ' + f'{size/1024.0:,.0f}' + ' KB &mdash; '
+                     + '<a href="/admin/log_view?name=' + urllib.parse.quote(name) + '&kb=1024">last 1 MB</a>'
+                     + ' &middot; <a href="/admin/log_download?name=' + urllib.parse.quote(name)
+                     + '">download the whole file</a></p>') if size > want else ''
+            self.send_html(
+                '<div class="nav"><a href="/admin">&larr; Back to Admin</a></div>'
+                '<h1>' + hesc(name) + '</h1>' + trunc
+                + '<pre style="background:#1e1e1e;color:#ddd;padding:12px;border-radius:6px;'
+                  'height:70vh;overflow:auto;font-size:12px;line-height:1.4;'
+                  'white-space:pre-wrap;word-break:break-word;">' + hesc(text) + '</pre>')
+
         else:
             self.send_error(404)
 
@@ -1614,56 +1882,75 @@ def _wlog(msg, level=None):
     except Exception:
         pass
 
-def _web_watchdog(interval=30.0, timeout=10.0):
-    """Every `interval` seconds, ping the web server. If it does not answer within `timeout`
-    seconds (or errors), restart just the web-server portion. Two consecutive bad checks are
-    required before a restart, so a single transient blip doesn't cause a needless bounce.
+# v322: the watchdog is SILENT while healthy. It used to log a startup ping, a DEBUG line per
+# check, an INFO pulse every 10 checks and a "recovered" line - useful while proving the thing
+# worked, pure noise now that it has. It now logs ONLY when a failure actually causes a restart.
+#
+# Nothing diagnostic is lost: the reason for each bad check is BUFFERED and emitted as part of
+# the restart line, so a restart still says exactly what went wrong and when, e.g.
+#   restarting web server - 2 failed checks: [10:14:03 no response within 10s,
+#                                             10:14:33 slow 12.4s > 10s]
+# Set WEB_HEALTH_VERBOSE = True to get the old per-check chatter back for debugging.
+WEB_HEALTH_VERBOSE = False
+# If the health ping can never succeed for an ENVIRONMENTAL reason (a proxy env var, 127.0.0.1
+# blocked, port taken by something else) the watchdog would otherwise bounce a perfectly healthy
+# web server every 60s forever - and now that healthy checks are silent, the only clue would be
+# the restart lines. After this many restarts with no successful check in between, the watchdog
+# says so plainly and backs off to WEB_HEALTH_BACKOFF seconds; any successful check resets it.
+WEB_HEALTH_MAX_INEFFECTIVE = 3
+WEB_HEALTH_BACKOFF = 300.0
 
-    Observability: a healthy check used to log nothing, which made it impossible to tell a
-    silent-because-healthy watchdog from a dead one. Now it does an immediate startup ping
-    (logged at INFO so you get proof-of-life at boot), then logs each healthy check as a DEBUG
-    heartbeat (goes to the file log / DEBUG console, stays off the INFO console) and a periodic
-    INFO summary every ~10 checks so there's a visible pulse without spam."""
+def _web_watchdog(interval=30.0, timeout=10.0):
+    """Every `interval` seconds, ping the web server; after two consecutive bad checks, restart
+    just the web-server portion. Two are required so a single transient blip doesn't bounce a
+    working server.
+
+    Logging: silent while healthy (see WEB_HEALTH_VERBOSE). The only lines this produces in
+    normal operation are the ones describing a restart and the failures that caused it."""
     consecutive_bad = 0
-    checks_ok = 0
-    # Immediate startup ping so we know the watchdog can actually reach the server right now,
-    # rather than waiting a full interval and staying silent.
-    first = _health_ping(timeout=timeout)
-    if first is None:
-        _wlog(f'startup health ping FAILED (no response within {timeout:.0f}s) - '
-              f'will keep checking every {interval:.0f}s')
-    else:
-        _wlog(f'startup health ping OK ({first:.2f}s) - watchdog is live, '
-              f'checking every {interval:.0f}s')
+    reasons = []                 # why each bad check in the current streak failed
+    ineffective = 0              # restarts with no successful check since
+    delay = interval
     while True:
-        time.sleep(interval)
+        time.sleep(delay)
         elapsed = _health_ping(timeout=timeout)
-        if elapsed is None:
-            consecutive_bad += 1
-            _wlog(f'health check FAILED (no response within {timeout:.0f}s) '
-                  f'[{consecutive_bad}/2]')
-        elif elapsed > timeout:
-            consecutive_bad += 1
-            _wlog(f'health check SLOW ({elapsed:.1f}s > {timeout:.0f}s) '
-                  f'[{consecutive_bad}/2]')
-        else:
-            if consecutive_bad:
-                _wlog(f'health check OK ({elapsed:.2f}s) - recovered')
-            consecutive_bad = 0
-            checks_ok += 1
-            # DEBUG heartbeat every check (file/DEBUG only), plus an INFO pulse every 10 checks
-            # (~5 min at 30s) so a healthy watchdog is provably alive on the normal console too.
-            if checks_ok % 10 == 0:
-                _wlog(f'health check OK ({elapsed:.2f}s) - {checks_ok} checks passed')
-            else:
+        if elapsed is not None and elapsed <= timeout:
+            if WEB_HEALTH_VERBOSE:
                 _wlog(f'health check OK ({elapsed:.2f}s)', level='DEBUG')
-            continue
-        if consecutive_bad >= 2:
-            _restart_httpd(reason=f'unresponsive ({consecutive_bad} failed checks)')
+            # A success clears the streak AND proves the ping works, so the back-off resets.
+            if ineffective or delay != interval:
+                if ineffective >= WEB_HEALTH_MAX_INEFFECTIVE:
+                    _wlog('health check OK again - resuming normal 30s checks')
+                ineffective = 0
+                delay = interval
             consecutive_bad = 0
+            reasons = []
+            continue
+        # --- bad check -------------------------------------------------------------------
+        consecutive_bad += 1
+        why = ('no response within %.0fs' % timeout) if elapsed is None \
+              else ('slow %.1fs > %.0fs' % (elapsed, timeout))
+        reasons.append(time.strftime('%H:%M:%S') + ' ' + why)
+        if WEB_HEALTH_VERBOSE:
+            _wlog(f'health check {why} [{consecutive_bad}/2]')
+        if consecutive_bad < 2:
+            continue
+        # --- two in a row: restart, and report the whole streak ---------------------------
+        _restart_httpd(reason=f'{consecutive_bad} failed checks: [' + '; '.join(reasons) + ']')
+        consecutive_bad = 0
+        reasons = []
+        ineffective += 1
+        if ineffective >= WEB_HEALTH_MAX_INEFFECTIVE:
+            delay = WEB_HEALTH_BACKOFF
+            if ineffective == WEB_HEALTH_MAX_INEFFECTIVE:   # say it ONCE, not on every retry
+                _wlog(f'ERROR: {ineffective} restarts with no healthy check in between - the '
+                      f'health ping itself may be failing (proxy env var, 127.0.0.1:{WEB_PORT} '
+                      f'blocked, or the port taken by another process) rather than the web '
+                      f'server being down. Backing off to {WEB_HEALTH_BACKOFF:.0f}s between '
+                      f'checks until one succeeds.')
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
-                     tail_fields=None, get_logs_fn=None, exec_console_fn=None):
+                     tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -1672,13 +1959,15 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['tail_fields'] = tail_fields or []           # [(key, delta, label), ...]
     SRV['get_logs'] = get_logs_fn                    # get_recent_logs(n, min_level) -> [str]
     SRV['exec_console'] = exec_console_fn            # v317: queue_console_command(line, src)
+    SRV['log_dir'] = log_dir                         # v321: for the admin Logs tab
 
     migrate_web_db()
     _start_httpd_thread()
     SRV['log']('WEB', f'Web interface running on http://localhost:{WEB_PORT} (threaded)')
     # Health watchdog: pings the server and restarts the web portion if it stops answering.
     threading.Thread(target=_web_watchdog, name='web-watchdog', daemon=True).start()
-    SRV['log']('WEB', 'Web health watchdog started (30s interval, 10s timeout)')
+    SRV['log']('WEB', 'Web health watchdog started (30s interval, 10s timeout) - '
+                      'silent unless a restart is needed')
     # This call previously ran serve_forever() inline and blocked here forever. serving now happens
     # on its own thread (so the watchdog, which shares this thread, can restart it). Block here to
     # preserve the original contract that start_web_server does not return while the server lives.

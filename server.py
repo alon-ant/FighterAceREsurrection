@@ -1,6 +1,68 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v300
+Fighter Ace LAN Server v322
+===========================
+v322: [WEB] Health watchdog goes quiet. The check is UNCHANGED (every 30s, 10s timeout, two
+      consecutive bad checks before a restart) but it no longer logs while healthy - no startup
+      ping, no per-check heartbeat, no periodic pulse. It speaks only when a failure actually
+      causes a restart, and the restart line carries the buffered reasons for the checks that
+      triggered it so nothing diagnostic is lost. Detail in web_server.py's changelog.
+      No change to this file beyond the banner; the version is bumped so a run log's banner
+      still identifies the server.py + web_server.py pair that served it.
+===========================
+v321: [WEB] Admin "Logs" tab - browse, tail and download the server's logs from the browser,
+      without opening a session on the VM. LOG_DIR is now a named constant (it was computed
+      inline inside the init_logging() call, so the web server had no way to find it) and is
+      injected into start_web_server. All the endpoint and path-safety detail is in
+      web_server.py's changelog; the short version is that the client only ever supplies a
+      bare filename, four independent checks guard the path, downloads stream, and the file
+      list is filtered through the same guard as the download so it can never show an entry
+      that would 404.
+      NOTE: this file was renamed "fa with web server.py" -> "server.py". Nothing referenced
+      the old name - every path is derived from __file__ - so the rename is inert.
+===========================
+v320: STABLE BUILD FOR DEPLOYMENT. No new decoding - this banks the arena-panel and web-admin
+      work from v309-v318 after each piece was confirmed live by Alon.
+
+      SHIPPING AND PROVEN THIS CYCLE:
+        - MODERATOR PLANE-DESTROY (v309-v311): crumblep / killp / ejectp, both the compact
+          0x7f and by-name 0x80 wire forms, with the death-effect exit enabled (0x53 explosion
+          for crumblep/killp, 0x50 bailout for ejectp). Confirmed end-to-end incl. self-target.
+          Semantics match the official FA 3.6 Sysop doc: punitive removal, no auto-respawn,
+          and ejectp correctly does NOT register a death.
+        - WEB SERVER STABILITY: ThreadingHTTPServer + a health watchdog that GETs
+          127.0.0.1:80/login every 30s and rebuilds the web server after two 10s failures.
+          Fixes the "stops responding after a few hours" wedge (one stalled request used to
+          block the single serial accept loop).
+        - ARENA LIST PLAYER COUNTS (v312/v313): every row now shows its count, not just the
+          selected arena, and a population watcher pushes live updates to lobby spectators.
+        - DISPLAY PILOTS (v314-v316): implemented as msg 224 - proven from FA.exe, not guessed.
+          Confirmed working by Alon in messages20 (every "out 224'5" answered).
+        - THE bc*16+1 LENGTH RULE (v315): the client takes a message's length from the appspace
+          framing, NOT from the bytes we send. Any payload whose true length is not == 1 (mod 16)
+          makes it read stale buffer. This is now an explicit invariant; it was the root cause
+          of the Display Pilots garbage/blank lines and is the prime suspect for the remaining
+          client-side parse-error flood (see TODO).
+        - UNASSIGNED PILOTS COUNT AS NU/NEUTRAL (camp 7), which keeps the arena total truthful
+          without misreporting anyone as US.
+        - WEB ADMIN (v317/v318): console command box wired to the same queue the server terminal
+          feeds; account + pilot rename across every referencing table; manual pilot creation
+          allowing @HQ / @FA / @INSTRUCTOR / @HELP and @ * # ! and spaces; admin page split into
+          User Management (Users | Pilot Stats) and Arenas tabs with per-panel filtering.
+
+      FLAG STATE FOR THIS BUILD (all deliberate):
+        MOD_DESTROY_USE_EFFECT = True          death effects on
+        SEND_ALL_ARENA_COUNTS = True           per-arena counts + live push on
+        ARENA_COUNT_INCLUDE_UNASSIGNED = True  side-less pilots counted...
+        ARENA_UNASSIGNED_CAMP = 7              ...as NU/Neutral
+        ARENA_ROSTER_ENABLE = False            msg 213 stays counts-only (its trailing strings
+                                               feed the Arena Action box, NOT Display Pilots)
+
+      KNOWN OPEN (see the TODO list below, none of it blocking):
+        - the client-side "Wrong char N, pos 1" parse-error flood
+        - nofuelp (needs a fuel-drain mechanism, not a delete)
+        - the sysop roster section (camp=-2)
+        - optional: ejectp could deploy a parachute for full fidelity
 ===========================
 v317: [WEB] Admin console command box, account/pilot rename, manual pilot create.
       * CONSOLE INPUT: console_handler no longer reads stdin inline. stdin is pumped by its own
@@ -2094,7 +2156,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v300'
+VERSION = 'v322'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2159,8 +2221,13 @@ SYN_OFF_AUTH = 56; SYN_OFF_F45 = 72; SYN_OFF_PID = 76; SYN_OFF_ACCT = 88
 TICKET_TEMPLATE = None
 
 import fa_logging as _falog
+# v321: single source of truth for the log directory. It used to be computed inline in the
+# init_logging() call, so the web server had no way to find it; the admin log browser needs
+# the same path. Note the deliberate os.path.dirname(os.path.abspath(__file__)) - resolving
+# 'logs/' relative to CWD instead is the bug documented at the top of this file.
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
 _falog.init_logging(
-    log_dir=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'),
+    log_dir=LOG_DIR,
     console_level=os.environ.get('FA_CONSOLE_LEVEL', 'INFO'),
     file_level=os.environ.get('FA_FILE_LEVEL', 'DEBUG'))
 log  = _falog.log     # drop-in: same signature log(tag, msg[, level=...])
@@ -12043,7 +12110,7 @@ threading.Thread(target=console_handler, daemon=True).start()
 threading.Thread(
     target=start_web_server, 
     args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read,
-          ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command),
+          ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR),
     daemon=True
 ).start()
 
