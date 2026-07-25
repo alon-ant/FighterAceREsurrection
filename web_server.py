@@ -173,6 +173,18 @@ LOG_CONSOLE_PAGE = """
                   <small style="color:#888;">Runs on the server exactly as if typed at its terminal.
                     Output appears in the stream above (tagged CONSOLE). Up/Down = history.</small>
                 </div>
+                <div class="card" style="padding:12px; border-left:4px solid #ffc107;">
+                  <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                    <button class="btn-yellow" style="width:auto; padding:9px 20px; margin:0;"
+                            onclick="doUpdate();">&#8635; Update &amp; Restart</button>
+                    <small style="color:#666; flex:1; min-width:280px;">
+                      Runs <code>git pull --ff-only</code> in the server directory, then restarts.
+                      Progress appears in the stream above tagged <code>UPDATE</code>.
+                      <strong>The server goes down for a few seconds</strong> and players are
+                      disconnected, so do this between sessions.
+                    </small>
+                  </div>
+                </div>
                 <pre id="con" style="background:#1e1e1e;color:#ddd;padding:12px;border-radius:6px;height:62vh;overflow:auto;font-size:12px;line-height:1.4;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
                 <script>
                 var COLORS={DEBUG:"#888",INFO:"#ddd",WARNING:"#e6c07b",ERROR:"#e06c75"};
@@ -215,6 +227,20 @@ LOG_CONSOLE_PAGE = """
                   else if(e.key==='ArrowDown'){ if(HI<HIST.length-1){HI++; this.value=HIST[HI];}
                     else {HI=HIST.length; this.value='';} e.preventDefault(); }
                 });
+                function doUpdate(){
+                  if(!confirm('Update and restart the server?\\n\\n'
+                    + '\\u2022 git pull --ff-only in the server directory\\n'
+                    + '\\u2022 the server process restarts\\n'
+                    + '\\u2022 ALL CONNECTED PLAYERS ARE DISCONNECTED\\n\\n'
+                    + 'The pull is aborted (and nothing restarts) if the working tree has\\n'
+                    + 'local edits or the branches have diverged.')) return;
+                  document.getElementById('auto').checked = true; toggle();
+                  fetch('/admin/console_cmd',{method:'POST',
+                    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                    body:'cmd=update'})
+                    .then(function(){setTimeout(reload,300);})
+                    .catch(function(){});
+                }
                 reload(); toggle();
                 </script>
 """

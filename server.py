@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v328
+Fighter Ace LAN Server v329
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -146,7 +146,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   length. Any length-driven message MUST tile to len == 1 (mod 16) with parser-valid
   padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
-import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math, queue
+import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math, queue, subprocess
 from datetime import datetime
 from collections import deque
 
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v328'
+VERSION = 'v329'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2326,8 +2326,133 @@ def _stdin_pump():
         if line:
             _CONSOLE_Q.put((line, 'terminal'))
 
+# --- v329: SELF-UPDATE (git pull + restart) -----------------------------------
+# Driven from the `update` console command, which the web admin button also calls, so there
+# is ONE implementation and its output streams to the web console for free.
+#
+# RESTART STRATEGY - the default is to EXIT and let the supervisor restart us. That is
+# deliberate: calling `systemctl restart <self>` from inside the unit's own process is
+# unreliable (systemd stops the unit, killing the process that issued the command, and the
+# restart can race) AND it needs root or a sudoers rule. Exiting needs no privileges at all
+# and works identically under systemd (Restart=always), supervisor, docker and NSSM.
+# REQUIREMENT: the unit must be configured to restart. For systemd that means
+#     Restart=always
+#     RestartSec=2
+# If your unit uses Restart=on-failure instead, set UPDATE_EXIT_CODE=1 below so the exit
+# looks like a failure and still triggers the restart.
+# If you would rather drive an external restarter, set UPDATE_RESTART_MODE='command' and put
+# the argv in UPDATE_RESTART_COMMAND (e.g. ['sudo','systemctl','restart','fa-server']).
+UPDATE_ENABLED         = True
+UPDATE_DIR             = os.path.dirname(os.path.abspath(__file__))
+UPDATE_GIT_TIMEOUT     = 120.0
+UPDATE_ALLOW_DIRTY     = False     # refuse to pull over uncommitted local edits
+UPDATE_RESTART_MODE    = 'exit'    # 'exit' | 'command' | 'none'
+UPDATE_RESTART_COMMAND = []        # argv list, used only when mode == 'command'
+UPDATE_RESTART_DELAY   = 2.0       # let the HTTP response and log writes flush first
+UPDATE_EXIT_CODE       = 0
+_update_lock = threading.Lock()
+
+def _run_cmd(argv, timeout, cwd=None):
+    """Run argv with NO shell (so nothing here can be command-injected) and capture output.
+    Returns (returncode, combined_output)."""
+    try:
+        p = subprocess.run(argv, cwd=cwd or UPDATE_DIR, timeout=timeout,
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return p.returncode, p.stdout.decode('utf-8', 'replace').strip()
+    except FileNotFoundError:
+        return 127, f'{argv[0]}: not found on PATH'
+    except subprocess.TimeoutExpired:
+        return 124, f'timed out after {timeout:.0f}s'
+    except Exception as e:
+        return 1, repr(e)
+
+def perform_update(actor='console'):
+    """git pull the server directory, then restart. Returns True if a restart was scheduled.
+    Every step is logged to the UPDATE tag, which the web console streams live."""
+    if not UPDATE_ENABLED:
+        log('UPDATE', 'update is disabled (UPDATE_ENABLED=False)')
+        return False
+    if not _update_lock.acquire(blocking=False):
+        log('UPDATE', 'an update is already running - ignoring this request')
+        return False
+    try:
+        log('UPDATE', f'--- update requested by {actor} --- dir={UPDATE_DIR}')
+
+        # 1. Is this actually a git working tree? Fail loudly rather than pulling somewhere odd.
+        rc, out = _run_cmd(['git', 'rev-parse', '--is-inside-work-tree'], 15.0)
+        if rc != 0 or out.strip() != 'true':
+            log('UPDATE', f'ABORT: {UPDATE_DIR} is not a git working tree ({out})')
+            return False
+
+        # 2. Refuse to pull over uncommitted edits. A pull onto a dirty tree either refuses
+        #    halfway or leaves a merge in progress, and the server would then restart into a
+        #    half-updated directory - much worse than not updating.
+        rc, dirty = _run_cmd(['git', 'status', '--porcelain'], 30.0)
+        if rc == 0 and dirty:
+            n = len(dirty.splitlines())
+            log('UPDATE', f'{n} uncommitted local change(s) in the working tree:')
+            for line in dirty.splitlines()[:20]:
+                log('UPDATE', f'    {line}')
+            if not UPDATE_ALLOW_DIRTY:
+                log('UPDATE', 'ABORT: refusing to pull over local edits. Commit, stash or '
+                              'discard them first (or set UPDATE_ALLOW_DIRTY=True).')
+                return False
+            log('UPDATE', 'UPDATE_ALLOW_DIRTY=True - continuing anyway')
+
+        before = _run_cmd(['git', 'rev-parse', '--short', 'HEAD'], 15.0)[1]
+
+        # 3. --ff-only: never create a merge commit and never leave a conflicted tree.
+        #    If the branches have diverged this fails cleanly and we simply do not restart.
+        rc, out = _run_cmd(['git', 'pull', '--ff-only'], UPDATE_GIT_TIMEOUT)
+        for line in (out or '').splitlines():
+            log('UPDATE', f'    {line}')
+        if rc != 0:
+            log('UPDATE', f'ABORT: git pull failed (rc={rc}) - NOT restarting, the running '
+                          f'build is untouched')
+            return False
+
+        after = _run_cmd(['git', 'rev-parse', '--short', 'HEAD'], 15.0)[1]
+        if before == after:
+            log('UPDATE', f'already up to date at {after} - no restart needed')
+            return False
+        log('UPDATE', f'updated {before} -> {after}')
+
+        # 4. Restart.
+        if UPDATE_RESTART_MODE == 'none':
+            log('UPDATE', 'UPDATE_RESTART_MODE=none - files updated, restart manually to apply')
+            return False
+        if UPDATE_RESTART_MODE == 'command':
+            if not UPDATE_RESTART_COMMAND:
+                log('UPDATE', 'ABORT: restart mode is "command" but UPDATE_RESTART_COMMAND is empty')
+                return False
+            log('UPDATE', f'running restart command: {UPDATE_RESTART_COMMAND}')
+            threading.Thread(
+                target=lambda: (time.sleep(UPDATE_RESTART_DELAY),
+                                _run_cmd(UPDATE_RESTART_COMMAND, 60.0)),
+                daemon=True).start()
+            return True
+
+        # default: exit and let the supervisor bring us back on the new code
+        log('UPDATE', f'restarting in {UPDATE_RESTART_DELAY:.0f}s by exiting '
+                      f'(code {UPDATE_EXIT_CODE}) - the supervisor must have a restart policy; '
+                      f'this page/console will go quiet for a few seconds')
+        def _bye():
+            time.sleep(UPDATE_RESTART_DELAY)
+            try:
+                # flush the log handlers before the hard exit - `logging` is not imported at
+                # module level here, so reach it through fa_logging which already owns it.
+                import logging as _lg
+                _lg.shutdown()
+            except Exception:
+                pass
+            os._exit(UPDATE_EXIT_CODE)      # _exit, not sys.exit: we are on a daemon thread
+        threading.Thread(target=_bye, daemon=True).start()
+        return True
+    finally:
+        _update_lock.release()
+
 def console_handler():
-    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | loglevel | logmute | logtags | help')
+    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | update | loglevel | logmute | logtags | help')
     threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
     while running:
         try:
@@ -2806,6 +2931,10 @@ def console_handler():
                     log('CONSOLE', f'rec dump: wrote {n} file(s)')
                 else:
                     log('CONSOLE', 'Usage: rec on | off | status | dump')
+            elif cmd == 'update':
+                # v329: git pull + restart. Also reachable from the web admin button, which
+                # simply queues this same command, so there is one code path.
+                perform_update(actor=line if _src == 'terminal' else _src)
             elif cmd == 'loglevel':
                 a = parts[1].split() if len(parts) > 1 else []
                 if len(a) == 2 and a[0] == 'console':
