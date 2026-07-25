@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v329
+Fighter Ace LAN Server v330
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v329'
+VERSION = 'v330'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2345,7 +2345,6 @@ def _stdin_pump():
 UPDATE_ENABLED         = True
 UPDATE_DIR             = os.path.dirname(os.path.abspath(__file__))
 UPDATE_GIT_TIMEOUT     = 120.0
-UPDATE_ALLOW_DIRTY     = False     # refuse to pull over uncommitted local edits
 UPDATE_RESTART_MODE    = 'exit'    # 'exit' | 'command' | 'none'
 UPDATE_RESTART_COMMAND = []        # argv list, used only when mode == 'command'
 UPDATE_RESTART_DELAY   = 2.0       # let the HTTP response and log writes flush first
@@ -2384,20 +2383,30 @@ def perform_update(actor='console'):
             log('UPDATE', f'ABORT: {UPDATE_DIR} is not a git working tree ({out})')
             return False
 
-        # 2. Refuse to pull over uncommitted edits. A pull onto a dirty tree either refuses
-        #    halfway or leaves a merge in progress, and the server would then restart into a
-        #    half-updated directory - much worse than not updating.
-        rc, dirty = _run_cmd(['git', 'status', '--porcelain'], 30.0)
-        if rc == 0 and dirty:
-            n = len(dirty.splitlines())
-            log('UPDATE', f'{n} uncommitted local change(s) in the working tree:')
-            for line in dirty.splitlines()[:20]:
-                log('UPDATE', f'    {line}')
-            if not UPDATE_ALLOW_DIRTY:
-                log('UPDATE', 'ABORT: refusing to pull over local edits. Commit, stash or '
-                              'discard them first (or set UPDATE_ALLOW_DIRTY=True).')
-                return False
-            log('UPDATE', 'UPDATE_ALLOW_DIRTY=True - continuing anyway')
+        # 2. Report the working-tree state, but do NOT gate on it.
+        #    v330: the original check aborted whenever `git status --porcelain` printed
+        #    anything, which was wrong twice over. First, most of that output is UNTRACKED
+        #    ('??') runtime junk - fa_server.db, logs/, server.log, nohup.out, __pycache__/,
+        #    ticket.vr1 - which git does not track and which can never block a pull. Second,
+        #    and more to the point, GIT ALREADY MAKES EXACTLY THE RIGHT DECISION: a
+        #    `--ff-only` pull refuses cleanly ('Your local changes would be overwritten') if
+        #    an incoming change would clobber a local edit, and otherwise merges fine and
+        #    leaves the edit in place. Pre-judging it here only blocked updates that plain
+        #    `git pull` performs happily - which is exactly what Alon had been doing by hand.
+        #    So: list tracked edits for visibility, ignore untracked entirely, and let git
+        #    arbitrate. rc != 0 below is still a hard abort with no restart.
+        rc, status = _run_cmd(['git', 'status', '--porcelain'], 30.0)
+        if rc == 0 and status:
+            tracked   = [l for l in status.splitlines() if not l.startswith('??')]
+            untracked = [l for l in status.splitlines() if l.startswith('??')]
+            if tracked:
+                log('UPDATE', f'{len(tracked)} tracked file(s) modified locally - git will refuse '
+                              f'only if the incoming commit touches them:')
+                for line in tracked[:20]:
+                    log('UPDATE', f'    {line}')
+            if untracked:
+                log('UPDATE', f'({len(untracked)} untracked file(s) ignored - runtime artifacts, '
+                              f'they cannot affect a pull)', level='DEBUG')
 
         before = _run_cmd(['git', 'rev-parse', '--short', 'HEAD'], 15.0)[1]
 
@@ -2408,7 +2417,8 @@ def perform_update(actor='console'):
             log('UPDATE', f'    {line}')
         if rc != 0:
             log('UPDATE', f'ABORT: git pull failed (rc={rc}) - NOT restarting, the running '
-                          f'build is untouched')
+                          f'build is untouched. If it names a local file that would be '
+                          f'overwritten, commit/stash/checkout that file and try again.')
             return False
 
         after = _run_cmd(['git', 'rev-parse', '--short', 'HEAD'], 15.0)[1]
