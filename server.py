@@ -1,6 +1,176 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v322
+Fighter Ace LAN Server v327
+===========================
+v327: [MP] *** PREFIXED MESSAGES SOLVED - AND PLAYER CHAT WAS BEING SILENTLY DROPPED. ***
+      The 257-per-peak-window "PREFIXED message we are NOT re-framing" notes are gone, and the
+      cause turned out to be much more mundane - and more damaging - than a framing mystery.
+
+      LAYOUT, now PROVEN on 100+ real samples (not inferred):
+          pl[0]   = 0x00              always
+          pl[1]   = per-session message counter
+          pl[2:4] = cmd, BE u16       non-zero == this is the prefixed form
+          pl[4:]  = a NORMAL appspace frame [bc][T][00][00][sub][payload]
+                    with Size = bc*16 + (T>>4) == the real payload length, on every sample.
+      (So POST-AUTH's "type=0x.." on these lines was never a type - it is pl[1], the counter.)
+      Confirmed from the client side too: the game hands raw buffers to vcncSendMessage()
+      (ConductorInterface.cpp, FUN_007e6f60 -> FUN_007e6180), so the 4-byte prefix is VNET
+      transport framing, not something the game builds.
+
+      THE ACTUAL BUG: the real sub sits at pl[8], and almost every handler ALREADY reads pl[8]
+      for exactly this shape - the "type-scan double-wrap" fallbacks for chat 0x14, team-select
+      0x44, leave 0x40, delete 0x03, 0x17, 0x1f, plus the whole scan-inner block. They were just
+      gated on `sub == 0x00`. For a prefixed message sub = pl[4] = the inner bc, and bc is 0 only
+      while the payload is <= 15 bytes. So SHORT messages were delivered and LONGER ONES WERE
+      SILENTLY DISCARDED. Measured on real chat from the run:
+          "~S~"                             bc=0  -> delivered
+          "hey Butterz ~S~"                 bc=1  -> DROPPED
+          "Good to see old names back in"   bc=2  -> DROPPED
+          "Yeah, LOL, been doing that ..."  bc=3  -> DROPPED
+      Named chat (0xcd) always worked only because its branch tests pl[8] without consulting sub
+      at all - which is exactly why nobody spotted that plain chat had a length cliff.
+      Real messages lost in run_20260724_073916 include "Good to see old names back in",
+      "hey Butterz ~S~", "Moira@HQ: Hi guys" and "Taurus: Hiya Warrior".
+
+      FIX (PREFIXED_NORMALISE_SUB): for a prefixed message, normalise sub to 0x00 so those
+      existing, already-correct pl[8] handlers fire for a payload of ANY length. Deliberately
+      NOT a blanket re-frame: the bytes are untouched, so nothing that reads fixed pl[..]
+      offsets can shift underneath it, and any sub with no handler stays ignored exactly as
+      before. The delete-notify (pl[8]==0x03) keeps its existing proven re-frame path.
+      SAFETY - the v246 worry was that switching these on would fire something dangerous (one
+      decodes to 0xd4 = LEAVE). It cannot: the blanket echo fall-through is inside `if cmd == 0:`
+      (line ~11298) and every pl[8] handler sits BEFORE it, so a prefixed message can reach a
+      handler but can never reach the echo. Verified by replaying real captured payloads through
+      the dispatch chain: long chat recovered, and every message type that already worked routes
+      to exactly the same place as before.
+===========================
+v326: [MP] PEER DELETES FOR A JUST-RESPAWNED PLANE WERE SWALLOWED, AND THE RE-ARM WITH THEM.
+      Second bug found while opening the PREFIXED delete-notify task, and independent of it.
+      The delete-notify ownership lookup compared `_onum` against each peer's CURRENT
+      my_obj_number only. A peer that had respawned since the delete was sent no longer matched,
+      so the message was logged "neither its own nor any peer's" and dropped.
+      The DROP is harmless on its own - that object really is gone. What is NOT harmless is that
+      the same branch performs the `_created_peers.discard(sender)` RE-ARM, which is what makes
+      the telemetry relay re-create that peer's plane for the sender. Miss the lookup and the
+      re-arm never happens, so THE SENDER NEVER SEES THAT PEER AGAIN. That is "players not
+      seeing each other", by a different route from v324.
+      These are all from run_20260724_073916, and every one carries a REAL Number, not garbage:
+          02:32:45  ALL41_MAD  delete for 0x0107  (Snoman's, freed 28s earlier)
+          02:50:29  Taurus     delete for 0x0105  (Sparky's)
+          02:50:30  Warrior    delete for 0x0105  (Sparky's)
+          02:48:26  Warrior    delete for 0x0101
+      FIX: each session now keeps a bounded history of every Number it has worn
+      (_obj_number_history, last 16, stamped with issue time), and _peer_owning_object() falls
+      back to it when no current Number matches. The grace window is set EQUAL to
+      OBJ_NUMBER_QUARANTINE_SEC, so a historical hit is provably unambiguous - inside that window
+      v324 guarantees the Number cannot have been re-issued to anyone else, and outside it we
+      decline to guess. Resolutions via history are tagged in the log.
+
+      THE PREFIXED DELETE-NOTIFY TASK ITSELF IS STILL OPEN. What is established so far:
+        * `cmd` is a BIG-ENDIAN u16 at pl[2:4] (parser: struct.unpack_from('>H', pl, 2)).
+          cmd == 0 is the normal case; cmd != 0 means a 4-byte prefix sits in front of the real
+          reliable frame, so the real [bc][T][00][00][sub] starts at offset 4.
+        * pl[0:2] looks like a monotonic per-connection counter - observed 0x0000, 0x0003,
+          0x0005, 0x0007, 0x0008, 0x000a, 0x000d, 0x0014, 0x0015, 0x001b, 0x001d, 0x001e,
+          0x001f, 0x0025 across one session.
+        * handle_post_auth re-frames ONLY when pl[8] == 0x03 (delete-notify). Every other
+          prefixed message is logged and dropped - 257 in the peak window alone.
+        * Blanket re-framing is NOT safe: one of the currently-ignored subs decodes to 0xd4 =
+          LEAVE (noted in v246), so switching them all on at once would break the lobby.
+      WHAT IS NEEDED: the actual byte layout, from either (a) the RX/REL/PL hex that already sits
+      two lines below each REFRAME line in the run log, or (b) the client's reliable send path in
+      Ghidra. Only two hand-written examples exist in the v246 comment and they disagree about
+      whether pl[2:4] mirrors the inner [bc][T], so this must be settled on real data rather than
+      inferred.
+===========================
+v325: [DOC] Two long-standing items closed - one fixed, one that was never a bug.
+      * REMOTE NAME-TAG BUG: fixed (confirmed by Alon). Tags now show the pilot name rather
+        than the aircraft type.
+      * KILLS / DEATHS / PLANES-LOST BLANK ON THE SCOREBOARD: **not a server bug at all.** The
+        arena simply did not have "scoring enabled" ticked; with it on, the global stats list
+        correctly in game. The v221/v226 notes claiming these needed their own authoritative
+        setter via score-object methods FUN_004269a0 / FUN_00428360 ("deeper RE - scope before
+        committing") were WRONG and have been corrected in place, because that guess would have
+        sent the next session on a long and pointless hunt.
+        NOTE the distinction, which still holds: the per-life "Current Life / Current Game" HUD
+        counters ARE genuinely client-computed and unreachable server-side (v233). It is the
+        HQ Scores career columns that were only ever gated on the arena flag.
+      NEW TODO raised by this: that flag is a GAME_DEF PRE-BLOCK setting and is NOT exposed in
+      the web arena editor (which wires only the 9 post-block float fields plus the EvP
+      sliders), so an arena can silently ship with scoring off. Suggested approach needs no RE -
+      diff two GAME_DEF blobs from the same terrain, one with scoring ticked and one without.
+===========================
+v324: [MP] **THE 8-PLAYER BUG** - object Numbers were recycled immediately and LIFO, so two
+      players could end up wearing each other's object Number. This is the cause of both
+      "hits not registering on remote players" and "players not seeing each other".
+      PROVEN in run_20260724_073916:
+          02:15:38  DELETE3 Snoman     ONumber=0x0107 (death)
+          02:16:08  CREATE2 Thndrstorm ONumber=0x0107     <- Snoman's Number, 30s later
+          02:19:57  DELETE3 Thndrstorm ONumber=0x0107 (death)
+          02:19:57  DELETE3 Snoman     ONumber=0x0106 (death)
+          02:20:05  CREATE2 Thndrstorm ONumber=0x0106     <- the two players SWAPPED
+          02:20:05  CREATE2 Snoman     ONumber=0x0107
+      0x0102 alone was worn by Kindschi, _Butterz_, Taurus, VIPER and Sparky within 40 minutes.
+      free_obj_number() appended and next_obj_number() popped from the END, so the Number freed
+      by the LAST death went to the NEXT spawn - precisely the object a peer most recently had.
+      A peer holding the stale mapping then has the wrong aircraft under that Number, and since
+      damage is attributed BY OBJECT NUMBER, hits land on the wrong plane or on nothing.
+      Invisible with 2 testers (deaths rare and well separated); at 8 players with 119 deaths /
+      89 kills in one run, Numbers turn over in seconds.
+      FIX: FIFO instead of LIFO, plus OBJ_NUMBER_QUARANTINE_SEC (300s) before a freed Number may
+      be re-issued. Recycling is kept only as an exhaustion safety net - 0x0100..0xFFFF is 65,280
+      Numbers, hundreds of sessions' worth. Verified: 200 rapid death/respawn cycles across 8
+      players produce 200 distinct Numbers and zero live collisions.
+
+      ALSO FIXED THIS ROUND:
+        - assign_player_slot() race (v323): read-then-assign is now atomic under `sl`.
+          NOTE: the log shows this did NOT fire on 24 Jul (all 73 assignments were minutes
+          apart) - it is a real bug, just not the one that bit.
+        - free_client_number() was CALLED but never DEFINED; 22 reaps logged
+          "cleanup error: name 'free_client_number' is not defined". Harmless in itself (last
+          statement in both try-blocks) but it was MASKING any genuine cleanup failure behind
+          the same bare except. Now defined.
+        - STALL-WATCH false alarms: 715 warnings (1415 lines, 3rd-largest tag) all had
+          pending_tx=0 and clustered at 10.0-13.7s, i.e. the client's normal ~11.5s reliable
+          cadence sitting just above the old 10s threshold. Threshold -> 20s AND pending_tx>0
+          is now required. Replayed against the real warnings: 715 -> 0.
+
+      RULED OUT: msg 212 GAME_DEF framing. Zero MISALIGNED lines in the whole run, so the LZ
+      comment-pad is holding the bc*16+1 grid correctly.
+
+      STILL OPEN - the empty plane-selection menu after exiting. The remaining suspect is the
+      PREFIXED delete-notify path: 257 REFRAME [note] "NOT re-framing" lines in the peak window
+      alone, and when we DON'T re-frame we mis-read the ONumber (the re-framed ones say "was
+      mis-read as ONumber 0x0032") and then swallow it -
+          PEERDEL <pilot> sent a delete for object 0x0032 which is neither its own nor any
+                  peer's -> swallow
+      so those peer deletes are silently dropped and ghost planes stay in the world. Needs the
+      0x0542 / 0x0312 prefixed forms decoded properly rather than pattern-matched.
+===========================
+v323: [MP] RACE FIX in assign_player_slot - two players joining at the same instant could be
+      given the SAME PlayerIndex. The function read the peer list under `sl`, RELEASED the
+      lock, and only then computed and stored its index, so concurrent joiners saw an
+      identical peer set and both claimed the same free slot. The whole read-then-assign is
+      now atomic (peer scan inlined, since `sl` is a plain Lock and calling
+      get_sessions_in_room() under it would self-deadlock).
+      WHY IT SURFACED NOW: with two testers joining one at a time the window basically never
+      opened. With 8 people clicking Fly together it becomes likely - and a duplicated
+      PlayerIndex is exactly the failure this function's own docstring describes: each
+      client's peer lookup for that index resolves to the wrong session or to null, so
+      remote planes never appear and damage attributed by index lands on the wrong plane or
+      nowhere. That matches the 8-player report of "players not seeing each other" and "hits
+      not registering on remote players".
+      STILL TO CONFIRM from run_20260724_073916.log: duplicate PlayerIndex values in the
+      'ROOM ... slot ClientNumber=N PlayerIndex=N' lines for one room would prove it.
+      SEPARATE, ALSO OPEN: the empty plane-selection menu after exiting. build_gamedef_212
+      already pads the LZ stream so the 212 payload lands on the bc*16+1 grid and logs
+      ALIGNED / MISALIGNED! - any MISALIGNED line in that run is the plane-menu bug, because
+      the client would then decompress past the end of the GAME_DEF into stale buffer.
+      (Note build_appspace_pkt_exact is NOT exact from the client's point of view: it skips
+      the padding but still hardcodes T=0x12, so the client computes bc*16+1 regardless.
+      build_ingame_pkt is the truly exact framer.)
+      ALSO SPOTTED, unrelated: free_client_number() is CALLED in the kick path but is never
+      DEFINED anywhere - any kick raises NameError into the 'kick cleanup error' handler.
 ===========================
 v322: [WEB] Health watchdog goes quiet. The check is UNCHANGED (every 30s, 10s timeout, two
       consecutive bad checks before a restart) but it no longer logs while healthy - no startup
@@ -1574,9 +1744,9 @@ v222: DEATHS NOW COUNT + SERVER-AUTHORITATIVE LIVE ACE RULE.
           BLIND-ECHOED ('cmd=0 type=0x21 sub=0x00 -> echo', run 104546) despite 0x21 already being
           listed there. Added a TYPE-byte guard; the client's own score report is now consumed, not
           reflected (same class of bug as msg 25 in v220).
-      STILL OPEN: kills/deaths/planes-lost are not yet STATED to the client's score object (msg 88
-      carries only aces+rank), so those scoreboard columns remain blank - the setter for the score
-      object's kill/death counters is the remaining Project A item.
+      RESOLVED v325 - NOT a missing setter. The columns were blank because the ARENA did not have
+      "scoring enabled" ticked; with it on, the global stats populate in game. See v325. Do NOT
+      spend RE effort on a score-object kill/death setter - there isn't one to find.
 v221: STORED ACE STATUS. Added an `aces` column to the pilots table (INTEGER, default 0, with an
       ALTER-TABLE migration for existing DBs) and exposed it in the web admin Pilot Stats editor.
       db_get_pilot_career() now returns (score, kills, deaths, rank, aces) and send_ace_rank_88()
@@ -1612,10 +1782,11 @@ v219: SCORING - push the pilot's REAL career aces/rank from the DB, at the TEAM/
       instead of taking hardcoded zeros - a team or room change RESTORES the pilot's real standing
       rather than wiping it; (c) new _push_career_stats_88() fired on BOTH team-change branches (join
       and leave) as well as the existing spawn hook.
-      STILL OPEN: kills / deaths / lost-planes / lost-pilots garbage. Those are NOT simple score-
-      object fields (they're computed via score-object methods FUN_004269a0 / FUN_00428360), so msg 88
-      does not touch them. Re-test to see whether fixing the aces/rank timing also settles them, or
-      whether they need their own authoritative setter (deeper RE - scope before committing).
+      RESOLVED v325 - NOT a message/RE problem at all. The garbage/blank kills / deaths /
+      lost-planes / lost-pilots columns were an ARENA CONFIG issue: the arena did not have
+      "scoring enabled" ticked. With it on, the global stats list correctly in game. The
+      FUN_004269a0 / FUN_00428360 "needs its own authoritative setter (deeper RE)" guess above
+      was WRONG - do not chase it. See v325.
 v218:
 v218: SCORING - fix the garbage aces/rank on the scoreboard (msg 88 AceOrRankChangedCB). Test2
       swapping USA->GBR and re-entering showed garbage stats (e.g. '96 Aces', bogus rank). Root
@@ -2010,6 +2181,17 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
       flag gates the per-build decompressed-hex dump (default off).
 
 TODO list:
+  [ ] EXPOSE THE ARENA "SCORING ENABLED" CHECKBOX IN THE WEB EDITOR - v325, operational trap.
+      The blank kills/deaths/planes-lost columns turned out to be this setting being unticked,
+      not a missing message (see the corrected v226/v221 notes). It lives in the GAME_DEF
+      PRE-PLANE-BLOCK region, which is variable-offset and NOT wired into the arena settings
+      editor - only the 9 post-block float fields (visual ranges, oxygen ceilings) and the EvP
+      sliders are. So an arena created or edited from the web panel can silently ship with
+      scoring off and nobody will know until players notice empty stats.
+      NEXT STEPS: locate the scoring flag in the pre-block region (diff two GAME_DEF blobs from
+      the same terrain, one with scoring ticked and one without - that isolates the byte without
+      any RE), then add it to the editor alongside the EvP sliders. The same diff technique will
+      pick up the other pre-block checkboxes/dropdowns while we're in there.
   [ ] CLIENT-SIDE PARSE-ERROR FLOOD ("unknown message" flood) - OPEN, cosmetic-but-noisy.
       Symptom: the CLIENT debug log fills at ~30 lines/second with
           ERROR: Wrong char 13, pos 1 in line '<junk>'      (also seen as "Wrong char 11")
@@ -2156,7 +2338,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v322'
+VERSION = 'v327'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6687,7 +6869,7 @@ sids={}; sadrs={}; sl=threading.Lock(); running=True
 # relayed stream never collides with the RECIPIENT's own object on the receiver - A's
 # plane and B's plane carry different Numbers, so B treats A's update as a remote object.
 _obj_num_lock = threading.Lock(); _obj_num_next = 0x0100
-_obj_num_free = []   # recycled Numbers from deleted own-planes (LIFO); popped before incrementing
+_obj_num_free = []   # [(Number, freed_monotonic)] - FIFO, and only reusable after a quarantine
 # EXPERIMENT (spawn-freeze hunt): the residual instant mid-flight freeze is cumulative in total
 # spawn count, plane-independent, with a provably clean server + reliable channel. The one thing
 # that grew unboundedly per spawn was the object Number (256,257,... never reused), a prime
@@ -6696,23 +6878,52 @@ _obj_num_free = []   # recycled Numbers from deleted own-planes (LIFO); popped b
 # Number) so it either stops the freeze or cleanly rules Numbers out. Safe in single-player (no
 # peers); the delete-notify means the client already dropped that object before we re-hand it.
 RECYCLE_OBJ_NUMBERS = True
+# v324 OBJECT-NUMBER COLLISION FIX. Recycling used to be immediate and LIFO: free_obj_number()
+# appended and next_obj_number() popped from the END, so the number freed by the LAST death was
+# handed to the NEXT spawn - the worst possible choice, because that is precisely the object a
+# peer most recently had in its world.
+# Proven in run_20260724_073916 (8-player session):
+#     02:15:38  DELETE3 Snoman     ONumber=0x0107 (death)
+#     02:16:08  CREATE2 Thndrstorm ONumber=0x0107        <- Snoman's number, 30s later
+#     02:19:57  DELETE3 Thndrstorm ONumber=0x0107 (death)
+#     02:19:57  DELETE3 Snoman     ONumber=0x0106 (death)
+#     02:20:05  CREATE2 Thndrstorm ONumber=0x0106        <- the two players SWAPPED numbers
+#     02:20:05  CREATE2 Snoman     ONumber=0x0107
+# 0x0102 alone was worn by Kindschi, _Butterz_, Taurus, VIPER and Sparky inside 40 minutes.
+# A peer still holding the old mapping then has the WRONG aircraft under that number: remote
+# planes show as the wrong plane or not at all, and since damage is attributed BY OBJECT NUMBER,
+# hits land on the wrong aircraft or on nothing. That is the 8-player report exactly.
+# It stayed invisible with 2 testers because deaths were rare and well separated; with 8 people
+# dying constantly (119 deaths / 89 kills in that run) numbers turn over in seconds.
+# Fix: FIFO instead of LIFO, and a quarantine so a Number cannot be re-issued until every peer
+# has certainly processed its delete. Recycling is KEPT as an exhaustion safety net - the space
+# is 0x0100..0xFFFF (65,280 Numbers), which at ~120 spawns per session is hundreds of sessions,
+# so the pool is only ever touched on a very long-lived server.
+OBJ_NUMBER_QUARANTINE_SEC = 300.0
 def next_obj_number():
     global _obj_num_next
     with _obj_num_lock:
         if RECYCLE_OBJ_NUMBERS and _obj_num_free:
-            return _obj_num_free.pop()          # reuse a freed Number before minting a new one
+            # FIFO + quarantine: only the OLDEST entry is eligible, and only once it has been
+            # sitting in the pool longer than OBJ_NUMBER_QUARANTINE_SEC. Anything younger is
+            # still live in some peer's world, so we mint a fresh Number instead.
+            n, freed_at = _obj_num_free[0]
+            if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC:
+                _obj_num_free.pop(0)
+                return n
         n = _obj_num_next
         _obj_num_next = _obj_num_next + 1
         if _obj_num_next > 0xFFFF: _obj_num_next = 0x0100
         return n
 def free_obj_number(n):
-    """Return a deleted own-plane Number to the recycle pool. No-op if disabled, None, or already
+    """Return a deleted own-plane Number to the recycle pool, stamped with the time it was
+    freed so next_obj_number() can enforce the quarantine. No-op if disabled, None, or already
     pooled. Capped so a pathological leak can't grow the list without bound."""
     if not RECYCLE_OBJ_NUMBERS or n is None:
         return
     with _obj_num_lock:
-        if n not in _obj_num_free and len(_obj_num_free) < 256:
-            _obj_num_free.append(n)
+        if len(_obj_num_free) < 256 and not any(e[0] == n for e in _obj_num_free):
+            _obj_num_free.append((n, time.monotonic()))
 
 def get_s(addr):
     with sl: return sadrs.get(addr)
@@ -6780,21 +6991,37 @@ def assign_player_slot(s, room_id):
     recompute if it would actually collide with a peer already in the target room. With
     <=8 players the first-assigned indices never collide, so identities stay put across
     every arena change."""
-    peers = [x for x in get_sessions_in_room(room_id) if x is not s]
-    taken = {getattr(p, 'client_number', None) for p in peers}
-    prev = s.__dict__.get('_assigned_slot')
-    if prev is not None and prev not in taken:
-        idx = prev                       # keep our stable identity across arena changes
-    else:
-        idx = 0                          # first free index not already claimed in this room
-        while idx in taken:
-            idx += 1
-    s._assigned_slot = idx
-    s.client_number = idx
-    s.player_index  = idx
+    # v323 RACE FIX: the read-then-assign must be ATOMIC. This used to call
+    # get_sessions_in_room() (which takes `sl` and releases it), and only afterwards
+    # compute and store the index - so two players joining at the same instant both read
+    # the SAME peer set, both saw the same free index, and both took it. With 2 testers
+    # joining one at a time that basically never fired; with 8 people clicking Fly at
+    # once it becomes likely. The consequence is exactly the CTD/invisibility described
+    # above: two sessions sharing a PlayerIndex, so each client's peer lookup for that
+    # index resolves to the wrong session (or null) - remote planes don't appear, and
+    # damage attributed by player index lands on the wrong plane or nowhere.
+    # `sl` is a plain Lock (not RLock), so the peer scan is INLINED here rather than
+    # calling get_sessions_in_room() - calling it under `sl` would self-deadlock.
+    with sl:
+        peers = [x for x in sids.values()
+                 if x is not s and x.auth_done and not x.closing and x.entered_game
+                 and x.current_room == room_id]
+        taken = {getattr(p, 'client_number', None) for p in peers}
+        prev = s.__dict__.get('_assigned_slot')
+        if prev is not None and prev not in taken:
+            idx = prev                   # keep our stable identity across arena changes
+        else:
+            idx = 0                      # first free index not already claimed in this room
+            while idx in taken:
+                idx += 1
+        s._assigned_slot = idx
+        s.client_number = idx
+        s.player_index  = idx
+        _npeers, _kept = len(peers), (prev == idx)
+    # Log outside the lock - never hold the session lock across I/O.
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
-                f'PlayerIndex={s.player_index} (peers={len(peers)}, '
-                f'{"kept" if prev==idx else "assigned"})')
+                f'PlayerIndex={s.player_index} (peers={_npeers}, '
+                f'{"kept" if _kept else "assigned"})')
     return s.client_number, s.player_index
 
 def _maybe_grant_create_entry(s):
@@ -8827,6 +9054,26 @@ def send_initial_ui_list(target_sess):
 
 # --- Connection handler -------------------------------------------------------
 
+def free_client_number(sess):
+    """v323: release a session's room slot. This was CALLED from both the kick path and
+    _reap_stale_sessions but was NEVER DEFINED - every kick and every reconnect-reap raised
+    NameError into the surrounding `except Exception`, which logged
+        REAP cleanup error: name 'free_client_number' is not defined
+    22 times in run_20260724_073916.
+    The NameError itself was harmless (it is the LAST statement in both try-blocks, and the
+    session is removed from sids/sadrs outside them) - but the bare except logs a real
+    cleanup failure in exactly the same words, so this noise was MASKING any genuine one.
+    There is no global ClientNumber pool to return to: slots are per-room and recomputed in
+    assign_player_slot() from the sessions actually present. So the correct action is simply
+    to drop this session's claim, which stops a dying session from being counted as an
+    occupant of its old index by a peer that is mid-assignment."""
+    try:
+        sess.__dict__.pop('_assigned_slot', None)
+        sess.client_number = 0
+        sess.player_index = 0
+    except Exception:
+        pass
+
 def _reap_stale_sessions(acct, new_sess):
     """Reap any prior session bound to the SAME account (a reconnect after a CTD/timeout).
     On Windows the dead client is never detected on sendto (the failure surfaces as a 10054 on
@@ -9861,6 +10108,39 @@ def corr_find(room, obj, lo=0, hi=59, gap=4.0):
     t.start()
 
 
+# The history stays valid for exactly as long as a retired Number cannot have been re-issued to
+# somebody else - which v324 guarantees is OBJ_NUMBER_QUARANTINE_SEC. Tying the two together
+# means a historical match is never ambiguous: inside the window the Number is provably still
+# that peer's, and outside it we correctly decline to guess.
+OBJ_HISTORY_GRACE_SEC = OBJ_NUMBER_QUARANTINE_SEC
+
+def _peer_owning_object(s, onum):
+    """Resolve which peer in the room owns object `onum`, for the delete-notify re-arm.
+
+    v326: this used to be a one-liner comparing only each peer's CURRENT my_obj_number. That
+    silently failed whenever the delete raced a respawn - the peer had already been issued a new
+    Number, so nothing matched, the delete was logged as "neither its own nor any peer's" and
+    SWALLOWED. The swallow itself is harmless (the object really is gone), but it skips the
+    _created_peers re-arm, and THAT is what stops the sender ever seeing that peer again.
+    run_20260724_073916 has these with real, live Numbers - not garbage:
+        02:32:45 ALL41_MAD delete for 0x0107 (Snoman's, freed 28s earlier)
+        02:50:29 Taurus    delete for 0x0105 (Sparky's)
+        02:50:30 Warrior   delete for 0x0105 (Sparky's)
+        02:48:26 Warrior   delete for 0x0101
+    So: fall back to the per-session Number history, within a grace window. Returns
+    (peer, matched_current) so the caller can log which way it resolved.
+    """
+    peers = [p for p in get_sessions_in_room(s.current_room) if p is not s]
+    for p in peers:
+        if getattr(p, 'my_obj_number', None) == onum:
+            return p, True
+    now = time.time()
+    for p in peers:
+        for num, issued in p.__dict__.get('_obj_number_history', ()):
+            if num == onum and (now - issued) <= OBJ_HISTORY_GRACE_SEC:
+                return p, False
+    return None, False
+
 def _fire_server_confirm(s, via='', ident=None):
     """Fire ServerConfirm (msg 5) for the current spawn: stamps the global object
     Number onto the client's plane and starts its sim loop (engine/controls). Idempotent
@@ -9876,6 +10156,15 @@ def _fire_server_confirm(s, via='', ident=None):
         _isrc = 'counter fallback'   #       Counter kept only as fallback for a too-short out-4.
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
+    # v326: remember every Number this session has worn, with the time it was issued. A peer's
+    # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
+    # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
+    # could not be resolved, the create was never re-armed, and the sender never saw that peer
+    # again. See _peer_owning_object().
+    _hist = s.__dict__.setdefault('_obj_number_history', [])
+    _hist.append((number, time.time()))
+    if len(_hist) > 16:
+        del _hist[:-16]
     # v276: a spawn/respawn (HQ entry OR base change) starts the plane fresh at a base. Reset the
     # auto-resupply position tracking so the new spawn starts a CLEAN static settle - the old
     # object's transit/wind-down position deltas must not leak into the new base's stationary check.
@@ -10002,9 +10291,9 @@ def _ingame_own_object_removed(s, tb, stored):
             s.para_obj_number = None
             return
         if _onum is not None and _onum != s.my_obj_number:
-            # NOT the sender's own plane. Find whose it is.
-            _peer = next((p for p in get_sessions_in_room(s.current_room)
-                          if p is not s and getattr(p, 'my_obj_number', None) == _onum), None)
+            # NOT the sender's own plane. Find whose it is - current Number first, then the
+            # recent-history fallback (v326) so a delete that raced a respawn still resolves.
+            _peer, _by_current = _peer_owning_object(s, _onum)
             if _peer is not None:
                 # The sender dropped this PEER's object from its world. Forget that we ever created
                 # it there, so the telemetry relay re-creates it on the next update - otherwise the
@@ -10014,10 +10303,12 @@ def _ingame_own_object_removed(s, tb, stored):
                     _cp.discard(s.addr)
                 log('PEERDEL', f'{s.current_pilot} dropped PEER object 0x{_onum:04x} '
                                f'({_peer.current_pilot}) from its world -> re-arm create for that '
-                               f'peer. NOT a removal of {s.current_pilot}\'s own plane.')
+                               f'peer. NOT a removal of {s.current_pilot}\'s own plane.'
+                               + ('' if _by_current else ' [resolved via retired-Number history]'))
             else:
                 log('PEERDEL', f'{s.current_pilot} sent a delete for object 0x{_onum:04x} which is '
-                               f'neither its own (0x{s.my_obj_number:04x}) nor any peer\'s -> swallow')
+                               f'neither its own (0x{s.my_obj_number:04x}) nor any peer\'s '
+                               f'(current or retired within {OBJ_HISTORY_GRACE_SEC:.0f}s) -> swallow')
             return
 
         s._left_world = True
@@ -10881,6 +11172,10 @@ def _resupply_poll_loop():
         except Exception:
             logx('RESUPPLY', 'poll loop error')
 
+# v327: see the block in handle_post_auth. Set False to restore the old
+# drop-everything-that-isn't-a-delete behaviour.
+PREFIXED_NORMALISE_SUB = True
+
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
     sub=pl[4] if len(pl)>4 else 0
@@ -10913,9 +11208,35 @@ def handle_post_auth(s, cmd, pl):
             pl = pl[4:]
             bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
         else:
-            log('REFRAME', f'[note] {s.current_pilot} cmd=0x{cmd:04x} is a PREFIXED message we are '
-                           f'NOT re-framing (inner type=0x{pl[5]:02x} sub=0x{_isub:02x}). It has '
-                           f'always been ignored; logged for review.')
+            # *** v327: DO NOT DROP THESE. ***
+            # The layout is now PROVEN on 100+ real samples from run_20260724_073916:
+            #     pl[0]   = 0x00              (always)
+            #     pl[1]   = per-session message counter
+            #     pl[2:4] = cmd, BE u16       (non-zero == prefixed form)
+            #     pl[4:]  = a normal appspace frame [bc][T][00][00][sub][payload],
+            #               Size = bc*16 + (T>>4), which matched the real payload length
+            #               on every single sample.
+            # So the REAL sub is at pl[8] - and almost every handler below ALREADY reads
+            # pl[8] for exactly this shape (the "type-scan double-wrap" fallbacks for chat
+            # 0x14, team-select 0x44, leave 0x40, delete 0x03, 0x17, 0x1f, and the whole
+            # scan-inner block). They were simply gated on `sub == 0x00`.
+            # For a prefixed message sub = pl[4] = the inner bc, and bc is 0 only while the
+            # payload is <= 15 bytes (Size = bc*16 + T>>4). THAT is the bug: short messages
+            # slipped through and longer ones were silently dropped. Measured on real chat:
+            #     "~S~"                            bc=0 -> delivered
+            #     "hey Butterz ~S~"                bc=1 -> DROPPED
+            #     "Good to see old names back in"  bc=2 -> DROPPED
+            # Named chat (0xcd) always worked only because its branch tests pl[8] without
+            # looking at sub at all.
+            # FIX: normalise sub to 0 so those existing, already-correct pl[8] handlers fire
+            # for a payload of ANY length. This is deliberately NOT a blanket re-frame - the
+            # bytes are untouched, so nothing that reads pl[..] offsets can shift under it,
+            # and any sub with no handler stays ignored exactly as before.
+            if PREFIXED_NORMALISE_SUB:
+                sub = 0x00
+            log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED (inner type=0x{pl[5]:02x} '
+                           f'sub=0x{_isub:02x} bc={pl[4]} len={len(pl)}) -> '
+                           f'{"sub normalised to 0x00 for the pl[8] handlers" if PREFIXED_NORMALISE_SUB else "IGNORED"}')
     log('POST-AUTH',f'cmd={cmd}(0x{cmd:04x}) type=0x{tb:02x} sub=0x{sub:02x} bc={bc}(p3={bc*16+1}) sz={len(pl)}')
     stored=bytes(pl)
     _h4=hx(stored[:4]) if len(stored)>=4 else hx(stored)
@@ -12060,9 +12381,21 @@ def _stall_watch():
             r0=getattr(s,'_rel_rx_time',0.0)
             if r0<=0: continue
             rel_idle=now-r0; unrel_idle=now-getattr(s,'_unrel_rx_time',0.0)
-            if rel_idle>=10.0 and unrel_idle<3.0 and not getattr(s,'_stall_warned',False):
+            # v323 FALSE-ALARM FIX. run_20260724_073916 produced 715 of these warnings (1415
+            # log lines, the 3rd-largest tag in an 18h run) and every single one was benign:
+            # the idle times clustered in a tight 10.0-13.7s band (median 11.5s) and EVERY
+            # warning carried pending_tx=0. That is not a stall - it is simply the client's
+            # natural reliable cadence (~11.5s between reliable messages when it has nothing
+            # to say), sitting just above the old 10s threshold.
+            # Two changes make the warning mean something again:
+            #   * threshold 10s -> 20s, comfortably clear of the observed 13.7s maximum
+            #   * require pending_tx > 0. THIS is the real discriminator: the failure this
+            #     watcher exists for is "server sent reliable data, client never ACKed it",
+            #     which necessarily leaves packets pending. With nothing pending there is no
+            #     stall to report - the client just has nothing reliable to send.
+            with s._lock: pend=len(s._evts)
+            if rel_idle>=20.0 and unrel_idle<3.0 and pend>0 and not getattr(s,'_stall_warned',False):
                 s._stall_warned=True
-                with s._lock: pend=len(s._evts)
                 log('STALL-WATCH', f'[warn] {s.current_pilot}: reliable RX idle {rel_idle:.1f}s but '
                                    f'unreliable active ({unrel_idle:.1f}s ago) - possible reliable '
                                    f'stall | last_cs={getattr(s,"_rel_rx_last_cs",None)} '
