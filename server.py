@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v330
+Fighter Ace LAN Server v331
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v330'
+VERSION = 'v331'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9610,6 +9610,48 @@ def handle_post_auth(s, cmd, pl):
                                  daemon=True).start()
             log('DAMAGE28', f'{s.current_pilot} hit -> relay to {len(peers)} peer(s) '
                             f'in room {s.current_room} ({len(stored)}B)')
+            return
+
+        # --- msg 125 / sub=0x7d: CollInfoToPlane (AIR-TO-AIR COLLISION) ---------------
+        # v331. This was never handled: it fell through to the generic echo path (which is
+        # why it only ever showed up tagged SUPPLY-CAP), so the sender got its own message
+        # bounced back and THE OTHER PLANE WAS NEVER TOLD.
+        # That is survivable only while BOTH clients happen to geometry-detect the same
+        # collision locally, because then each one kills itself off its own detection. But
+        # the two clients see each other through interpolated, network-delayed positions, so
+        # routinely only ONE of them decides the hulls intersected. When that happens the
+        # detector explodes and the other player flies on completely unaware - exactly the
+        # "Snoman detects the collision, Warrior doesn't" report.
+        # In run_20260725_135341 at 20:13:14 both DID detect, and Warrior's client log shows
+        # the tell plainly: one "out 125'23" and exactly one "in 125'23", and the one that
+        # came back is his OWN (NumberFrom=259 = Warrior's object). Snoman's 125 never
+        # reached him.
+        # WIRE FORMAT, decoded from that capture against the client's own line
+        # "Receive CollInfoToPlane. ExitCode=4, NumberTo=258, NumberFrom=259":
+        #     pl[4]    = 0x7d
+        #     pl[7:9]  = NumberTo   u16 LE - the OTHER plane (who must be told)
+        #     pl[9:11] = NumberFrom u16 LE - the sender's own plane
+        #   Warrior: To=0x0102 From=0x0103   Snoman: To=0x0103 From=0x0102
+        # both matching the CREATE2/DELETE3 object numbers for that pair.
+        # Routed by NumberTo rather than broadcast: a collision concerns exactly two planes,
+        # and _peer_owning_object() (v326) resolves it even if the target has already
+        # respawned onto a new Number, via the retired-Number history.
+        if sub == 0x7d and len(pl) >= 11:
+            _to  = int.from_bytes(pl[7:9], 'little')
+            _frm = int.from_bytes(pl[9:11], 'little')
+            _peer, _by_current = _peer_owning_object(s, _to)
+            if _peer is not None:
+                threading.Thread(
+                    target=lambda _p=_peer: send_rel(
+                        _p, stored,
+                        f'<- CollInfo 125 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
+                    daemon=True).start()
+                log('COLLIDE125', f'{s.current_pilot} obj 0x{_frm:04x} collided with obj '
+                                  f'0x{_to:04x} ({_peer.current_pilot}) -> relayed ({len(stored)}B)'
+                                  + ('' if _by_current else ' [via retired-Number history]'))
+            else:
+                log('COLLIDE125', f'{s.current_pilot} obj 0x{_frm:04x} reported a collision with '
+                                  f'obj 0x{_to:04x}, which is no longer any peer\'s - not relayed')
             return
 
         # NET::OBJECT delete-notify (msg 3 / sub=0x03) rides tb=0x42 (del object) or
