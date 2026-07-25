@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v327
+Fighter Ace LAN Server v328
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v327'
+VERSION = 'v328'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -234,10 +234,22 @@ import fa_logging as _falog
 # the same path. Note the deliberate os.path.dirname(os.path.abspath(__file__)) - resolving
 # 'logs/' relative to CWD instead is the bug documented at the top of this file.
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+# v328: file log level defaults to INFO, not DEBUG.
+# DEBUG writes a line per packet, SYNCHRONOUSLY, on the packet path. That produced 55 MB for a
+# single 8-player session - and since relay fan-out is O(N^2) within an arena, the write volume
+# grows quadratically, making disk I/O the FIRST thing to fall over as player count rises (well
+# before CPU does).
+# The detail is not lost, just off by default: set FA_FILE_LEVEL=DEBUG in the environment, or use
+# the `loglevel file DEBUG` console command (also available from the web admin console) to turn it
+# back on at runtime for a debugging session, with no restart.
+# WHAT YOU GIVE UP AT INFO: the per-packet RX/REL/PL hex dumps, TX/RELIABLE traces and RELAY lines
+# - exactly the material that solved v315/v324/v327. So for a small reproduction run, turn DEBUG
+# back on; for a populated session, leave it at INFO.
+FILE_LOG_LEVEL_DEFAULT = 'INFO'
 _falog.init_logging(
     log_dir=LOG_DIR,
     console_level=os.environ.get('FA_CONSOLE_LEVEL', 'INFO'),
-    file_level=os.environ.get('FA_FILE_LEVEL', 'DEBUG'))
+    file_level=os.environ.get('FA_FILE_LEVEL', FILE_LOG_LEVEL_DEFAULT))
 log  = _falog.log     # drop-in: same signature log(tag, msg[, level=...])
 logx = _falog.logx    # log + traceback, for use inside except blocks
 
@@ -2798,8 +2810,23 @@ def console_handler():
                 a = parts[1].split() if len(parts) > 1 else []
                 if len(a) == 2 and a[0] == 'console':
                     _falog.set_console_level(a[1]); log('CONSOLE', f'console level -> {a[1].upper()}')
+                elif len(a) == 2 and a[0] == 'file':
+                    # v328: file level is INFO by default now. DEBUG writes a line per packet
+                    # straight to disk on the packet path, so turn it on only for a
+                    # reproduction run and turn it back off afterwards.
+                    if _falog.set_file_level(a[1]):
+                        log('CONSOLE', f'file level -> {a[1].upper()}'
+                                       + (' (per-packet detail ON - remember to set it back to '
+                                          'INFO before a populated session)'
+                                          if a[1].upper() == 'DEBUG' else ''))
+                    else:
+                        log('CONSOLE', f'unknown level {a[1]!r}')
+                elif not a:
+                    c, f = _falog.get_levels()
+                    log('CONSOLE', f'console={c} file={f}  '
+                                   f'(usage: loglevel console|file <DEBUG|INFO|WARNING|ERROR>)')
                 else:
-                    log('CONSOLE', 'Usage: loglevel console <DEBUG|INFO|WARNING|ERROR>')
+                    log('CONSOLE', 'Usage: loglevel console|file <DEBUG|INFO|WARNING|ERROR>')
             elif cmd == 'logmute':
                 if len(parts) > 1: _falog.mute_tag(parts[1].strip()); log('CONSOLE', f'muted {parts[1].strip()}')
                 else: log('CONSOLE', 'Usage: logmute <TAG>')
@@ -4571,6 +4598,11 @@ class S:
         self.cid=cid; self.addr=addr; self.sq=0; self.ts=0
         self.rx=0; self.closing=False; self.t0=time.time()
         self.rseq=0; self._lock=threading.Lock(); self._evts={}
+        # v328: signalled whenever a post-auth command is queued, so the dispatch loop can
+        # WAIT instead of polling every 20ms. A plain Event (not a Condition on _lock) is
+        # used deliberately: it shares no lock with anything else, so it cannot deadlock
+        # against the four existing `with s._lock:` sites.
+        self._cmd_evt=threading.Event()
         self.undgram=0                 # per-session UNRELIABLE datagram seq (byte[3]); separate from rseq
         self._awaiting_reattach=False  # exit-to-HQ: resend 0xDA re-attach UNRELIABLY on each 0x43 poll
         self.auth_done=False; self.post_auth_cmds=[]
@@ -7056,10 +7088,24 @@ def login(s):
     threading.Thread(target=_hb,daemon=True).start()
     deadline=time.time()+300.0   # (kept for reference - no longer bounds the loop, v199)
     while not s.closing:
+        # v328: WAIT for work instead of polling every 20ms.
+        # The old loop woke 50x/second per session whether or not anything had arrived -
+        # ~10,000 wakeups/s at 200 players and 8.8% of a core with ZERO traffic (measured).
+        # This loop does nothing periodic, it only drains and dispatches, so it is safe to
+        # make purely event-driven.
+        # ORDER MATTERS: wait -> clear -> drain. Clearing BEFORE the drain means a command
+        # queued in the gap is still picked up by that same drain, and if it lands after the
+        # drain the event is left set so the next pass wakes immediately. A command can
+        # therefore never be stranded - the worst case is one harmless empty wakeup.
+        # The timeout is only a backstop: it bounds how long s.closing can go unnoticed on
+        # shutdown, and would paper over a missed signal rather than letting it hang.
+        # Latency actually IMPROVES - a queued command wakes this thread immediately instead
+        # of waiting out the remainder of a 20ms sleep.
+        s._cmd_evt.wait(timeout=0.5)
+        s._cmd_evt.clear()
         cmds=[]
         with s._lock: cmds=list(s.post_auth_cmds); s.post_auth_cmds.clear()
         for cmd,pl in cmds: handle_post_auth(s,cmd,pl)
-        time.sleep(0.02)
 
 def parse_e4_selection(pl):
     if len(pl) <= 10: return None, None
@@ -10129,6 +10175,7 @@ def on_pkt(data, addr):
                     threading.Thread(target=login,args=(s,),daemon=True).start()
             elif s.auth_done:
                 with s._lock: s.post_auth_cmds.append((cv,pl))
+                s._cmd_evt.set()          # v328: wake the dispatch loop immediately
             return
         if pt==0 and sz==8:
             aseq=(dw>>20)&0x1FF
