@@ -7,6 +7,42 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v345: [SCORING] deliberate crashes were not counted as deaths. The MEC nibble table had the
+      crash and the menu-exit the wrong way round.
+
+      SYMPTOM: pilot crashes repeatedly, HUD death count never moves. In the 07:32 session
+      AC2E_Bigalon spawned SIX times and lostpilots stayed at 8 for five of them, incrementing
+      to 9 exactly once.
+
+      ROOT CAUSE: is_death = mec_nib in DEATH_MEC_NIBBLES, and the set was {0xa, 0x5, 0x6}.
+          deliberate crash  -> exit=0x11 -> nibble 1  -> NOT in set -> "re-fly/plane-swap"
+          exit to menu      -> exit=0xa0 -> nibble 0xa -> in set     -> counted as a death
+      Exactly backwards. The pilot confirmed all five were flown into the ground on purpose,
+      and that the only removal which ever scored was the menu exit.
+      The v232 comment asserting "A CRASH ... MissExitCode 26" is WRONG - 26 (nibble 0xa) is the
+      MENU EXIT. That comment is left in the file, contradicted in place, so the next reader
+      does not re-derive it and re-introduce the bug.
+
+      FIX: add 0x1 to DEATH_MEC_NIBBLES. Deliberately NOT removing 0xa - leaving the game while
+      airborne should still cost the plane, and that is the existing anti-abuse behaviour.
+      SAFETY: adding 0x1 routes crashes into the `elif is_death` branch, which still applies the
+      existing "exited UNDAMAGED and PARKED -> clean exit, NOT a death" movement test. So if a
+      genuine land-and-swap also reports 0x11 it is still excluded, by the check that branch was
+      built for. No new discriminator was invented.
+
+      IF THIS DOES NOT FIX IT: the crashes will now fall to that second gate instead of the
+      first, and the log will say "exited UNDAMAGED and PARKED (MEC&0xf=1, movement=N) -> clean
+      exit" rather than "re-fly/plane-swap". That would mean the movement/flying state is stale
+      at removal - note every one of these crashes had a 0x17 StartPlace request arrive ~11ms
+      BEFORE the 0x03 delete, and the delete then read flying=False. Same ordering that caused
+      the v343 start-place race. Fix that ordering rather than loosening the movement test.
+
+      HOW IT WAS FOUND: only by asking the pilot what he actually did. The wire is genuinely
+      ambiguous between a crash and a re-fly - both produce 0x17 then 0x03 then a plane-select -
+      and no amount of log reading distinguishes intent. Two sessions were spent inferring.
+
+==============================================================================
+
 v344: [DIAGNOSTIC] name the ACE88 recipients. No behavioural change.
 
       The msg-88 flood is confirmed from the client side: in messages44, five `in 88'7` land in

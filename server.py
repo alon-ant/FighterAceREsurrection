@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v344
+Fighter Ace LAN Server v345
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v344'
+VERSION = 'v345'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6064,8 +6064,17 @@ PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': '
 # coincidence of 0xa0/0x80 rather than the real semantics. Classify on the MEC nibble instead, and
 # log the decode for every removal so new codes (notably a real SHOT-DOWN MEC, still unobserved) can
 # be identified from the logs and added here.
-DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6}   # MissExitCode & 0xf values that mean the pilot actually died
-                                      #   0xa = MissExitCode 26  -> CRASH (solo)
+# v345: 0x1 ADDED. The pilot CONFIRMED the 07:32 removals were deliberate flown-into-the-ground
+# crashes, so a CRASH arrives as exit=0x11 (nibble 1). MissExitCode 26 / nibble 0xa is the
+# EXIT-TO-MENU: in that test 5 crashes went uncounted and only the menu exit scored - exactly
+# backwards. The v232 note above claiming a crash arrives as MEC 26 is WRONG; it is left in place
+# only so nobody re-derives it from scratch.
+# 0xa STAYS in the set - leaving the game while airborne should still cost you the plane.
+# Adding 0x1 routes crashes into the is_death branch, which still applies the
+# "exited UNDAMAGED and PARKED -> clean exit" test, so a land-and-swap reporting 0x11 stays out.
+DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6, 0x1}   # MEC & 0xf values that mean the pilot actually died
+                                      #   0x1 = deliberate CRASH (exit 0x11) - confirmed in v345
+                                      #   0xa = MissExitCode 26  -> EXIT TO MENU (was: "CRASH")
                                       #   0x5 = SHOT DOWN by a player (exit byte 0x53).
                                       #   0x6 = KILLED BY AA / AI. New in v243, straight off the wire:
                                       #         exit 0x63 -> MEC&0xf=6, SE=3, hunter=0xffff (no player).
