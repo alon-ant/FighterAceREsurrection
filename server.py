@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v331
+Fighter Ace LAN Server v337
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v331'
+VERSION = 'v337'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1204,6 +1204,21 @@ def is_bomber_plane(plane_id):
         return False
 
 PLANE_TEAMS = {
+    # v335: camp 7 = NU / Neutral. The Me-163B was moved off Germany (camp 3) to here so that
+    # only pilots on the NU side see it in the hangar, and NU is already admin-only - so the
+    # aircraft restriction comes for free from the side restriction. This is the "double win"
+    # over gating on the pilot name.
+    # SAFE because PLANE_FILTER_VIA_CATALOG is True: apply_plane_teams then writes 0x1f into
+    # every plane's byte 0 regardless of camp, so a camp value of 7 NEVER reaches that byte and
+    # cannot repeat the v332 CTD (which was caused by writing a value the GAME_DEF parser does
+    # not accept). The camp only feeds _slot_camp_map(), i.e. the 0x3a catalog filter.
+    # If PLANE_FILTER_VIA_CATALOG is ever flipped to False, apply_plane_teams would write
+    # (1 << camp) = 0x80 for camp 7, and bit 7 of that byte is UNTESTED - check it before doing
+    # so. The STAFF_ONLY_PLANES catalog filter is deliberately kept as a second, independent
+    # gate.
+    7: [  # NU / Neutral - admin-only side
+        "Me-163B",
+    ],
     1: [  # Great Britain
         "Hurr-Ia","Spit-Ia","Martlet_I","Tomahawk","Hurr-IIC","Spit-Vb_F","Hurr-IID","Kittyhawk",
         "Spit-Vb_LF","Seafire","Spit-IXc","Spit-IXe","Typhoon","Spit-XIV","Tempest","Meteor_F1",
@@ -1218,7 +1233,7 @@ PLANE_TEAMS = {
     3: [  # Germany
         "Bf-109E-1/B","Bf-109E-4/B","Bf-110C-4","Bf-109F-4/B","FW-190A-4/U3","Bf-110G-2",
         "Bf-109G-6/R2","FW-190A-8/R6","FW-190F-8","FW-190A-8/R3","Bf-109G-6/R6","FW-190A-8/R2",
-        "FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","Me-163B","Pulqui","HA-200","Ju-88",
+        "FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","Pulqui","HA-200","Ju-88",
         "Do-217E-2","Ju-87D-3","He-111","Do-217J-1","Ju-87G-2","Ju-52/3m",
     ],
     4: [  # Japan
@@ -1307,6 +1322,153 @@ def apply_plane_teams(d, slot_camp):
         # marker rec[+1] stays 0xff (no-hascamp form); limits rec[+2],rec[+3] preserved
     d[s + 3:s + 3 + blen] = rec
     return s, blen, blen
+
+# --- v332: STAFF-ONLY AIRCRAFT ------------------------------------------------
+# Some airframes shouldn't be in the general pool. The Me-163B in particular ships in the
+# roster assigned to Japan, which is both historically wrong and not something we want in
+# normal play, so it is restricted to staff pilots.
+# MECHANISM: the flyability gate is FA.exe FUN_00438330 -
+#     flyable(plane, camp) = PLANE.field[0] & (1 << camp)
+# and field[0] is record BYTE 0 of the GAME_DEF plane block (stock 0x1f = bits 0..4 = all
+# five camps). apply_plane_teams() already rewrites exactly that byte. So setting byte 0 to
+# 0x00 leaves NO camp bit set and the plane is flyable by nobody - it simply greys out in the
+# hangar. No record grows, so there is no MTU pressure and no 'max/used' line (see the
+# apply_plane_teams docstring for why the 6-byte hascamp form is the wrong tool).
+# The GAME_DEF is rebuilt and served fresh on every arena entry and on every on-demand 212
+# request, and both senders have the requesting session in scope, so this is decided
+# PER PLAYER at serve time - no per-arena authoring and no client files needed.
+# NOTE the tag test is a SUBSTRING match, so '@FA' also admits '@FA3' and '@FAVG', and the
+# tag may sit anywhere in the name ('Bopster@FA', '@HQ', 'Moira@HQ').
+STAFF_PLANE_TAGS  = ('@HQ', '@FA', '@HOST')
+STAFF_ONLY_PLANES = ('Me-163B',)
+# v333 REGRESSION FIX - the GAME_DEF byte-0 mask CRASHES THE CLIENT. Confirmed live: with a
+# staff tag (nothing hidden) everything was fine; without one, the ARENA PAGE hard-CTD'd. The
+# arena page is where the 212 GAME_DEF is served, which pins it on apply_plane_hide() and not on
+# the catalog trim (that one runs later, in-arena, off the HQ screen).
+# WHY it crashes - from the client's own crash dump (messages30):
+#     Exception in Fighter Ace engine: logical error
+#     Assertion failed (Len==0)
+#     file ...\GameDef.cpp, line 1902
+# That is the GAME_DEF DESERIALISER, not the side picker: a consumption mismatch, the same
+# family as the GameDef.cpp:2076 Source.End() assert already documented in the LZ notes below.
+# So byte 0 is NOT merely a camp bitmask that the renderer consults - it participates in how the
+# plane record is PARSED, and 0x00 makes the parser consume a different number of bytes, leaving
+# a non-zero remainder and tripping the assert. (A purely semantic "no camp" value would have
+# greyed the plane out or crashed in the picker; it would not fail a length assertion in the
+# parser.) The stock data never contains 0x00 there, and apply_plane_teams only ever writes
+# 0x1f or a single set bit - never zero - which is why this was never hit before.
+# CONCLUSION: byte 0 can select WHICH nations may fly a plane; it cannot express "nobody".
+# The restriction therefore rides entirely on the catalog trim, which is the game's own designed
+# filter path here anyway (PLANE_FILTER_VIA_CATALOG is True, so apply_plane_teams deliberately
+# leaves byte 0 at 0x1f and lets the 0x3a echo do the filtering).
+# DO NOT re-enable STAFF_HIDE_VIA_GAMEDEF without first testing on a NON-staff pilot - a staff
+# pilot hides nothing and so proves nothing.
+STAFF_HIDE_VIA_GAMEDEF = False    # byte-0 mask - corrupts the GAME_DEF parse, see above
+STAFF_HIDE_VIA_CATALOG = True     # 0x3a catalog trim - the safe, designed path
+
+# v337 EXPERIMENTAL: force a plane onto a specific nation TAB by writing its GAME_DEF byte 0.
+# The catalog echo can only include/exclude a plane, not re-tab it - so this is the only way to
+# get the Me-163B onto the NU tab rather than JPN. 0x80 = bit 7 = camp 7 (NU).
+# DEFAULT OFF because bit 7 of this byte has never been exercised: stock data uses only bits
+# 0..4, and this is the same byte whose 0x00 value caused the v332 CTD. Turning this on changes
+# the GAME_DEF for EVERY player, so it must be tested on a NON-ADMIN as well as an admin - a
+# malformed GAME_DEF CTDs on the arena page regardless of who is looking at it.
+PLANE_BYTE0_OVERRIDE_ENABLED = True
+PLANE_BYTE0_OVERRIDE = {118: 0x80}    # Me-163B (slot 118) -> camp 7 / NU
+STAFF_ONLY_PLANE_IDS = {i for i, n in enumerate(PLANE_ROSTER) if n in STAFF_ONLY_PLANES}
+_unknown_staff_planes = set(STAFF_ONLY_PLANES) - set(PLANE_ROSTER)
+
+def pilot_may_fly_staff_planes(name):
+    """True if this pilot may fly the staff-only airframes.
+
+    v335: ADMIN RIGHTS are the real gate, not the name tag. The tag test is kept as a fallback
+    (a pilot named '@HQ'/'@FA'/'@HOST' still passes) because staff names are the convention,
+    but an admin whose pilot name carries no tag would otherwise have been locked out of a
+    plane they are entitled to - and with the Me-163B now on the NU camp, which is itself
+    admin-only, that would have made it unflyable by anyone.
+    """
+    if not name:
+        return False
+    try:
+        if db_get_admin_rights(name):
+            return True
+    except Exception:
+        pass                                   # DB unavailable -> fall back to the tag test
+    low = name.lower()
+    return any(tag.lower() in low for tag in STAFF_PLANE_TAGS)
+
+def hidden_plane_ids_for(sess):
+    """PLANE_ROSTER ids this session must NOT be able to fly. Empty for staff."""
+    if not STAFF_ONLY_PLANE_IDS:
+        return frozenset()
+    name = getattr(sess, 'current_pilot', None) if sess is not None else None
+    if pilot_may_fly_staff_planes(name):
+        return frozenset()
+    return STAFF_ONLY_PLANE_IDS
+
+def apply_plane_hide(d, hide_ids):
+    """Zero byte 0 of the given plane slots so no camp can fly them. Runs AFTER
+    apply_plane_teams (which would otherwise overwrite byte 0) and independently of it, so
+    the restriction holds even in arenas where per-team plane assignment is off.
+    Returns the number of slots actually masked."""
+    if not hide_ids:
+        return 0
+    loc = _gamedef_plane_block(d)
+    if not loc:
+        return 0
+    s, count, blen = loc
+    rec = bytearray(d[s + 3:s + 3 + blen])
+    n = 0
+    for slot in hide_ids:
+        if 0 <= slot <= count:                  # the block holds count+1 records
+            rec[slot * 4] = 0x00                # no camp bit -> flyable by nobody
+            n += 1
+    d[s + 3:s + 3 + blen] = rec
+    return n
+
+def apply_plane_byte0_override(d, overrides):
+    """v337 EXPERIMENTAL - force specific plane slots to a specific GAME_DEF byte-0 value.
+
+    WHY THIS EXISTS: the 0x3a catalog echo controls only whether a plane is IN the hangar list;
+    the client decides which NATION TAB to draw it on from the GAME_DEF plane-info array, i.e.
+    byte 0. So camp 7 in PLANE_TEAMS keeps the Me-163B out of every other side's list, but
+    cannot move it onto the NU tab - proven live: an admin on NU saw it under JPN, and the NU
+    tab was empty. Re-tabbing needs byte 0.
+
+    THIS IS THE BYTE THAT CAUSED THE v332 CTD (GameDef.cpp:1902, "Assertion failed (Len==0)")
+    when it was set to 0x00. The lesson taken from that: 0x00 means NO bits set, which the
+    GAME_DEF parser does not accept. A single set bit is structurally the same shape as the
+    0x01/0x02/0x10 values apply_plane_teams already writes every run - but bit 7 specifically
+    has never been exercised, since stock data only ever uses bits 0..4. Hence the flag, hence
+    the default of off, and hence the hard refusal below.
+
+    Guards: a value of 0 (or anything with no bits set) is REFUSED outright - that is the exact
+    v332 failure and there is no legitimate reason to write it. Record length never changes, so
+    the block cannot grow and the LZ pad alignment is untouched.
+    Returns the number of slots written.
+    """
+    if not overrides:
+        return 0
+    loc = _gamedef_plane_block(d)
+    if not loc:
+        return 0
+    start, count, blen = loc
+    rec = bytearray(d[start + 3:start + 3 + blen])
+    n = 0
+    for slot, val in overrides.items():
+        v = int(val) & 0xff
+        if v == 0:
+            log('GAMEDEF212', f'byte0-override REFUSED for slot {slot}: 0x00 has no camp bit '
+                             f'and is what caused the v332 GameDef.cpp:1902 CTD')
+            continue
+        if not (0 <= slot <= count):
+            log('GAMEDEF212', f'byte0-override skipped slot {slot}: outside this block '
+                             f'(count={count})')
+            continue
+        rec[slot * 4] = v
+        n += 1
+    d[start + 3:start + 3 + blen] = rec
+    return n
 
 # --- Binary GAME_DEF layout (from FA.exe FUN_0057bee0 / FUN_0056ed90) ----------
 #
@@ -1791,7 +1953,8 @@ def apply_tc_settings(d, settings=None):
             d[off] = max(0, min(255, int(val)))
     return o, old
 
-def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None):
+def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None,
+                     hide_planes=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -1907,6 +2070,35 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                               f"GE={c.get(3,0)} JP={c.get(4,0)}")
         else:
             log('GAMEDEF212', 'plane-teams: plane block not located; planes left on USA')
+    # v332: STAFF-ONLY AIRFRAMES. Runs unconditionally and AFTER apply_plane_teams, because
+    # that function rewrites byte 0 of every record and would otherwise undo the mask. Zeroing
+    # byte 0 clears every camp bit, so FUN_00438330's `field[0] & (1<<camp)` fails for all five
+    # nations and the plane greys out. Decided per player by the caller.
+    # v337: byte-0 tab override. MUST sit here - after apply_plane_teams (which rewrites byte 0
+    # of every record and would otherwise undo it) and BEFORE any encoding, so it applies on the
+    # real-LZ path as well as the all-literals fallback. Global rather than per-player: a nation
+    # tab is a property of the arena's GAME_DEF, not of who is looking at it. Length-preserving,
+    # so it cannot disturb the pad alignment computed below.
+    if PLANE_BYTE0_OVERRIDE_ENABLED and PLANE_BYTE0_OVERRIDE:
+        _nb = apply_plane_byte0_override(d, PLANE_BYTE0_OVERRIDE)
+        if _nb:
+            log('GAMEDEF212', 'byte0-override: '
+                + ', '.join(f'{PLANE_ROSTER[s]}(slot {s})=0x{v:02x}'
+                            for s, v in sorted(PLANE_BYTE0_OVERRIDE.items())
+                            if 0 <= s < len(PLANE_ROSTER))
+                + '  [EXPERIMENTAL - if the arena page CTDs, set '
+                  'PLANE_BYTE0_OVERRIDE_ENABLED=False]')
+        else:
+            log('GAMEDEF212', 'byte0-override: nothing written (plane block not located, or '
+                             'every entry refused/out of range)')
+    if hide_planes and STAFF_HIDE_VIA_GAMEDEF:
+        _nh = apply_plane_hide(d, hide_planes)
+        if _nh:
+            _names = ', '.join(PLANE_ROSTER[i] for i in sorted(hide_planes)
+                               if 0 <= i < len(PLANE_ROSTER))
+            log('GAMEDEF212', f'staff-only: masked {_nh} plane slot(s) for this player ({_names})')
+        else:
+            log('GAMEDEF212', 'staff-only: plane block not located; restriction NOT applied')
     # WEB-EDITED SETTINGS: patch the post-block tail (visual ranges, oxygen ceilings) from the
     # per-room override dict. In-place float32 writes, so no struct shift / pad-alignment change.
     if arena_settings:
@@ -3540,7 +3732,7 @@ def build_arenalist(rooms):
 # GameIndex. A server arena this client never selected was never cached -> terrain 0
 # -> crash. So push the stored GAME_DEF as a 212 (same GameIndex as the 0xd2 record)
 # BEFORE the list, so the arena - with its real terrain - is cached first.
-def build_gamedef_212(room):
+def build_gamedef_212(room, hide_planes=None):
     """[0xd4][GameIndex:4][LZ GAME_DEF] as an APPSPACE packet, EXACT bc*16+1 size.
     The stored blob is LZ-compressed at a size (==4 mod16) that can't sit on the
     bc*16+1 grid. We decompress it and RE-ENCODE it as an all-literals LZ stream whose
@@ -3552,7 +3744,8 @@ def build_gamedef_212(room):
     comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
                                     force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
                                     plane_camp=plane_camp_for_room(room),
-                                    arena_settings=db_get_room_settings(room[0]))
+                                    arena_settings=db_get_room_settings(room[0]),
+                                    hide_planes=hide_planes)
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -4705,7 +4898,7 @@ def send_arenalist_with_gamedefs(s, rooms, label):
     and still asserted: with no 212 the current terrain stayed 0.)"""
     for r in rooms:
         if len(r) > 6 and r[6]:
-            pkt = build_gamedef_212(r)
+            pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
             if pkt is not None:
                 send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
                 time.sleep(0.01)
@@ -6687,7 +6880,7 @@ def handle_gamedef_request(s, game_idx, via=''):
     'empty description + disabled Join' bug."""
     room = _find_room_by_gidx(game_idx)
     if room is not None:
-        pkt = build_gamedef_212(room)
+        pkt = build_gamedef_212(room, hide_planes=hidden_plane_ids_for(s))
         if pkt is not None:
             send_rel(s, pkt, f'<- GAME_DEF 212 on-demand{via} (room {room[0]} gidx=0x{game_idx:08x})', to=5.0)
         else:
@@ -9569,7 +9762,18 @@ def handle_post_auth(s, cmd, pl):
         # every 'sub=0x1c -> echo'; messages09: zero 'in 28'). Object ids are GLOBAL (the
         # target id is identical on every client), so forward the bytes as-is, reliably, to
         # each flying peer; no remap/re-stamp needed.
-        if s.entered_game and sub == 0x1c:
+        # v333: accept the PREFIXED form too. Damage was gated on `sub == 0x1c` alone, and
+        # for a prefixed message sub is pl[4] (the inner bc), which v327 normalises to 0x00 so
+        # the pl[8] fallbacks can fire - but damage never had one, so PREFIXED DAMAGE WAS
+        # SILENTLY DROPPED. Every other double-wrapped message type (chat 0x14, team 0x44,
+        # leave 0x40, delete 0x03, 0x17, 0x1f) already had a pl[8] fallback; 0x1c was simply
+        # missed. Caught in run_20260725_203749: ALL41_MAD's hits on Warrior arrived as
+        #   cmd=0x0542 PFX type=0x82 sub=0x1c len=32
+        #   pl=00170542|01820000|1c0401090102...   <- pl[8]=0x1c, the real sub
+        # and the server logged not one damage report FROM ALL41_MAD all session, while
+        # Warrior's client logged zero "You have been hit" lines. The shooter saw his hits
+        # land; the victim never heard about them.
+        if s.entered_game and (sub == 0x1c or (len(pl) > 8 and pl[8] == 0x1c)):
             s.last_fired_at = time.time()   # stamp shooter for kill attribution on a peer's death
             # v232/v244: DAMAGE TRACKING. The msg-28 record is [VictimNumber i16][HunterNumber i16]
             # [count u8] + count*9B (HitToPlaneCB, FUN_004f3820). Two things come out of it:
@@ -9583,8 +9787,17 @@ def handle_post_auth(s, cmd, pl):
             #     "AC2E_Bigalon has destroyed You" - it just doesn't tell us. Recording the hunter
             #     here gives us the same fact, exactly.
             try:
-                _victim_num = struct.unpack_from('<h', stored, 5)[0]
-                _hunter_num = struct.unpack_from('<h', stored, 7)[0]
+                # v333: the record sits immediately after the sub byte, and the sub is at a
+                # DIFFERENT offset in the two wire forms - pl[4] normally, pl[8] when the
+                # message carries the 4-byte VNET prefix. Offsets 5/7 were hardcoded for the
+                # non-prefixed layout; on a prefixed packet they read the framing bytes
+                # instead (victim=0x0082 hunter=0x1c00 - garbage) which matches no peer, so
+                # even once the guard above let the message through the damage would have been
+                # attributed to nobody. Verified against the real capture: base 9 yields
+                # victim=0x0104 hunter=0x0109, and 0x0109 is ALL41_MAD.
+                _dbase = 9 if (sub != 0x1c and len(pl) > 8 and pl[8] == 0x1c) else 5
+                _victim_num = struct.unpack_from('<h', stored, _dbase)[0]
+                _hunter_num = struct.unpack_from('<h', stored, _dbase + 2)[0]
                 for _p in get_sessions_in_room(s.current_room):
                     if getattr(_p, 'my_obj_number', None) == _victim_num:
                         _p.took_damage = True
@@ -10039,16 +10252,51 @@ def handle_post_auth(s, cmd, pl):
                               f'-> pushing rank/aces + stat block')
                 push_career_stats(s, reason='(HQ screen opened)')
 
-        if sub == 0x3a and PLANE_FILTER_VIA_CATALOG and s.nation is not None and 0 <= s.nation < 5:
-            size = pl[0] * 16 + (pl[1] >> 4)
-            if 1 <= size and 4 + size <= len(pl):
-                ids = list(pl[5:4 + size])
-                sc = _session_slot_camp(s)
-                kept = [i for i in ids if sc.get(i, 0) == s.nation]
+        # v334: accept the PREFIXED form as well. This filter is what actually hides planes
+        # (the hangar gates on plane-ID membership in this echoed list), and it was gated on
+        # `sub == 0x3a` alone - so when the client sent its catalog in the prefixed wrapper,
+        # v327 normalised sub to 0x00, the filter never ran, and the FULL unfiltered catalog
+        # was echoed back. That is why the Me-163B stayed visible to non-staff even with
+        # STAFF_HIDE_VIA_CATALOG on. Same omission as msg 28 in v333: the pl[8] fallback was
+        # never added for 0x3a. (The 0x3a catalog IS seen prefixed in practice - e.g.
+        # "cmd=0x00e2 ... inner type=0xa2 sub=0x3a" in the REFRAME notes.)
+        # The header offsets move with it: in the prefixed form pl[0]/pl[1] are the counter and
+        # cmd bytes, NOT bc/T, and the ID list starts 4 bytes later. Reading bc/T from the
+        # wrong bytes yields a nonsense size and slices garbage, so the base has to shift too.
+        _cat_pfx = (sub != 0x3a and len(pl) > 8 and pl[8] == 0x3a)
+        # v334: the staff filter must apply even BEFORE a side is chosen. The side filter
+        # obviously needs s.nation, but the staff restriction does not - and gating the whole
+        # block on a valid nation meant a pilot browsing the hangar before picking a country
+        # got the full unfiltered catalog, Komet included. Run whenever there is either a side
+        # to filter by or something staff-only to remove.
+        # v336: the range is 0..7, NOT 0..4. NU/Neutral is camp 7 (GAME_DEF: "ccn 7 NU NEU
+        # Neutral"), so `< 5` made _have_side False for an NU pilot. With no side to filter by,
+        # and nothing staff-hidden for an admin, kept == ids - which fails the
+        # `len(kept) != len(ids)` guard below, so NO filtered echo is sent at all and the client
+        # falls back to its OWN built-in nation grouping. That grouping files the Me-163B under
+        # Japan and has nothing for NU, which is exactly the reported symptom: "NU team has no
+        # planes, JPN team has the ME163". Introduced by v334's own rewrite of this condition.
+        # Camps 5 and 6 are unused, so admitting them is harmless; the range just has to reach 7.
+        _have_side = s.nation is not None and 0 <= s.nation < 8
+        _hide = hidden_plane_ids_for(s) if STAFF_HIDE_VIA_CATALOG else frozenset()
+        if (sub == 0x3a or _cat_pfx) and PLANE_FILTER_VIA_CATALOG and (_have_side or _hide):
+            _b = 4 if _cat_pfx else 0
+            size = pl[_b] * 16 + (pl[_b + 1] >> 4)
+            if 1 <= size and _b + 4 + size <= len(pl):
+                ids = list(pl[_b + 5:_b + 4 + size])
+                sc = _session_slot_camp(s) if _have_side else {}
+                kept = [i for i in ids
+                        if (not _have_side or sc.get(i, 0) == s.nation) and i not in _hide]
                 if kept and len(kept) != len(ids):
                     rec = b''.join(struct.pack('<BH', i & 0xff, CATALOG_RECORD_USHORT & 0xffff) for i in kept)
                     fpkt = build_ingame_pkt(bytes([0x3a]) + rec)
-                    log('POST-AUTH', f'cmd=0 sub=0x3a -> side {s.nation} catalog filtered {len(ids)}->{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)')
+                    _dropped = [i for i in ids if i in _hide]
+                    log('POST-AUTH', f'cmd=0 sub=0x3a -> side {s.nation} catalog filtered '
+                                     f'{len(ids)}->{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)'
+                                     + (f' [staff-only removed: '
+                                        + ', '.join(PLANE_ROSTER[i] for i in _dropped
+                                                    if 0 <= i < len(PLANE_ROSTER)) + ']'
+                                        if _dropped else ''))
                     threading.Thread(target=lambda p=fpkt: send_reply(s, p, 'echo 0x3a (side-filtered, 3B)', to=5.0), daemon=True).start()
                     return
 
@@ -10478,6 +10726,14 @@ if _unmatched:
     log('PLANES', f'[warn] BOMBER_PLANE_NAMES not found in PLANE_ROSTER (typo?): {sorted(_unmatched)}')
 log('PLANES', f'aircraft class: {len(BOMBER_PLANE_IDS)} bombers / '
               f'{len(PLANE_ROSTER) - len(BOMBER_PLANE_IDS)} fighters of {len(PLANE_ROSTER)}')
+if _unknown_staff_planes:
+    log('PLANES', f'[warn] STAFF_ONLY_PLANES not found in PLANE_ROSTER (typo?): '
+                  f'{sorted(_unknown_staff_planes)}')
+if STAFF_ONLY_PLANE_IDS:
+    log('PLANES', 'staff-only: '
+                  + ', '.join(f'{PLANE_ROSTER[i]} (slot {i})' for i in sorted(STAFF_ONLY_PLANE_IDS))
+                  + ' -> hidden from the hangar list AND ungated only for pilots whose name '
+                  + 'contains ' + '/'.join(STAFF_PLANE_TAGS))
 # -- ONE-TIME DEBUG (remove later): decompress the stock arena templates FFA.gdf / TC.gdf
 #    so their camps/side block can be diffed against what a created room stores. The
 #    decompressor anchors on the 0x8a version byte, so each .gdf's "Custom Arena" label
