@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v343
+Fighter Ace LAN Server v344
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v343'
+VERSION = 'v344'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4641,7 +4641,8 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
         threading.Thread(target=lambda _x=_t: send_rel(_x, pkt, _label, to=3.0),
                          daemon=True).start()
     log('ACE88', f'AceOrRank -> {pilot} PI={s.player_index} aces={aces} rank={rank} '
-                 f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room}; the owner '
+                 f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room} '
+                 f'{[t.current_pilot for t in _targets]}; the owner '
                  f'gets it via msg 25 so the in-flight announcement can fire {reason}')
 
 

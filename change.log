@@ -7,6 +7,45 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v344: [DIAGNOSTIC] name the ACE88 recipients. No behavioural change.
+
+      The msg-88 flood is confirmed from the client side: in messages44, five `in 88'7` land in
+      a single millisecond (07:36:43.024) and EVERY one fails - PlayerIndex 3, 1, 7, 4, 0 all
+      "AceOrRankChangedCB. PlayerIndex=N not found". Same in messages20 for _AvA_Insane:
+      22 failures across indexes 0,1,4,7,8,10,11 out of 83 msg-88 arrivals.
+
+      The broadcast fans out to every session in the room with no check that the recipient was
+      ever advertised the subject:
+          _targets = [t for t in get_sessions_in_room(s.current_room) if t is not s]
+      That is CONSISTENT with the symptom but does not establish the cause - the recipient may
+      never have been sent a msg 62 for that player, may have been sent one late, or the index
+      may have been recycled. Suppressing sends on that guess risks silencing legitimate rank
+      announcements, so this version only makes the question answerable: the ACE88 line now
+      lists the recipient pilots by name.
+
+      TO CLOSE IT NEXT SESSION: take one failing PlayerIndex from a client log, find the ACE88
+      line that carried it, read off which peers received it, and check whether a PLAYER62
+      advertisement for that subject ever went to those peers. That is a direct log-to-log
+      cross-reference and it decides between "never advertised" and "advertised but stale".
+      Precedent: the same move on FLY23 in v343 turned an undiagnosable subsystem into a
+      solved one in a single session. Do not guess at a suppression rule before doing this.
+
+      ALSO NOTED: v343 sat on disk UNDEPLOYED for a full session. server_2_.log shows the last
+      start banner as v342 (02:22:44) still serving traffic at 07:37 - the file was v343, the
+      process was v342, and an entire test session was diagnosed against the wrong build before
+      anyone noticed. Check the banner in the run log against VERSION before analysing anything.
+
+      OPEN, DELIBERATELY NOT FIXED HERE: 5 of 6 deaths in the 07:32 session were classified
+      "re-fly/plane-swap, NOT a death" because they carried exit=0x11 (MEC nibble 1); the one
+      that counted carried exit=0xa0 (nibble 10). The v232 note says a real crash arrives as
+      MissExitCode 26, and each 0x11 exit was preceded ~11ms by a 0x17 StartPlace request -
+      which IS the re-fly sequence. Whether those five were genuine crashes or deliberate
+      re-flies is unresolved and only the pilot can say. Do NOT flip the classifier on
+      inference: it writes lostpilots into the career DB permanently and there is no clean
+      rollback if 0x11 really is a plane swap.
+
+==============================================================================
+
 v343: [SPAWN] start-place grant races the player's own death -> no respawn, empty plane list,
       timeout. Plus the FLY23 log finally names the pilot.
 
