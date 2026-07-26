@@ -1,10 +1,440 @@
 Fighter Ace LAN Server - CHANGE LOG
 ==============================================================================
-Split out of server.py's docstring on 2026-07-25, current build v327.
+Split out of server.py's docstring on 2026-07-25, current build v328.
 Newest first. server.py keeps only the banner, the TODO list and the
 bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
+==============================================================================
+
+v340: [WIRE] PREFIXED_REFRAME_SUBS - msg 69 (scene-supply) and msg 125 (collision) were
+      being dropped 100% of the time in their prefixed form.
+
+      FOUND BY: auditing run_20260725_203749 (4h, 9 pilots, 323 prefixed messages over 22
+      distinct subs) and matching every captured message 1:1 against its own handler log line:
+          msg 69  (0x45): plain 200/200 handled   PREFIXED  0/29 handled
+          msg 125 (0x7d): plain  23/23  handled   PREFIXED  0/3  handled
+      Total loss in both cases, not partial. Two apparent prefixed successes on msg 69 were
+      timing false positives - each had a PLAIN request from the same pilot within 0.6s that
+      accounted for the SUPPLY69 line. Verify that way, not by proximity alone.
+
+      WHY v327 DID NOT COVER THEM: v327 normalises sub to 0x00 so the pl[8] double-wrap
+      fallbacks fire. That only helps subs which HAVE such a fallback (chat 0x14, team-select
+      0x44, leave 0x40, delete 0x03, 0x17, 0x1f). 0x45 and 0x7d have none, so normalising sub
+      to 0 just guarantees no handler ever matches and the message dies silently. That is the
+      real definition of the '19 uncovered subs' from the v33x audit: not 'no prefixed guard'
+      but 'no pl[8] reader'.
+
+      FIX: PREFIXED_REFRAME_SUBS = {0x03, 0x45, 0x7d} - these get the FULL re-frame (pl = pl[4:])
+      that 0x03 has had since v326, instead of the sub-normalisation. The existing plain-path
+      handlers then receive a plain frame and needed NO changes at all.
+      This is NOT the blanket re-frame the v327 comment warns against. v327's hazard is shifting
+      bytes under a handler that already reads pl[8]; these two have no pl[8] reader, which is
+      precisely why they were dead, so nothing currently being read can shift. The set is
+      explicit rather than a default - empty it to revert to pure v327 behaviour.
+
+      VERIFIED STATICALLY on all 32 captured prefixed payloads before shipping:
+        * the _pfx guard detects 32/32
+        * after pl[4:] all 32 satisfy len == 4 + bc*16 + (T>>4)
+        * every resulting (T,len) shape is one the plain handler has already processed
+          (msg 69: 29/29 shapes, T=0x32/0x52/0x72/0x92/0xb2; msg 125: 3/3, T=0x72)
+      NOTE the frame-length invariant is len == 4 + bc*16 + (T>>4), NOT bc*16 + (T>>4). Size
+      excludes the [bc][T][00][00] header. Getting that wrong makes every PLAIN message look
+      like a mismatch too, which is the tell.
+
+      ALSO CORRECTED: the 'byte-swapped cmd' anomaly (0x0312 vs 0x1203) is not a bug - the
+      v327 layout note already documents pl[2:4] as cmd, BE u16. Nothing to chase there.
+
+      NOT DONE, deliberately: 0xd4 (LEAVE) and 0xd7 (SetArena) were the v33x audit's prime
+      suspects for the escape-to-leave bug, but they appear ZERO times in the entire run,
+      prefixed or plain. All 16 in-game leaves went through msg 64 (0x40), which already has a
+      pl[8] fallback and fired 5/5 on its prefixed arrivals. Those two audit entries are
+      unfalsifiable from this capture and the paths look dead - do not fix them blind.
+      msg 28 (0x1c) is a weak signal worth a look: 21 prefixed seen, ~76% handled vs 94% plain.
+
+==============================================================================
+
+v339: [RESUPPLY] REVERTED v338's engine-OFF re-park. Removes the mid-air re-park risk;
+      the root bug is deliberately left OPEN rather than papered over.
+
+      v338 restored at_airfield from _last_af on engine-off, on the theory that engine-off
+      means the pilot has landed. That conflates two different things and is wrong in BOTH
+      directions:
+        * AIR START, no takeoff -> there is no launch field, so _last_af is None and the
+          restore did nothing; resupply still never fired for those pilots.
+        * ENGINE CUT IN THE AIR (glide, stall, battle damage) -> it re-parked the plane at a
+          field it may be nowhere near, potentially setting at_airfield WHILE AIRBORNE. Firing
+          a msg-60 rearm mid-flight is exactly what v277 exists to prevent - it rebuilds the
+          plane object and FREEZES the client. The settle/freshness guards make that unlikely,
+          not impossible, and 'engine off and looks static' is a far weaker guarantee than
+          'parked at a field'.
+
+      ROOT BUG STILL OPEN: at_airfield is only ever SET from StartPlace (spawn) and CLEARED on
+      engine-on (takeoff), with nothing to restore it after a landing - so _resupply_poll_loop's
+      first gate rejects any plane that took off and came back.
+      THE CORRECT FIX is to resolve the field FROM POSITION on engine-off. fa_scenes.json
+      carries 722 scenes across 14 terrains, so a nearest-field + altitude check handles the
+      air-start case AND correctly resolves to nothing for a mid-air engine cut. Do that rather
+      than reaching for _last_af again.
+
+==============================================================================
+
+v338: [RESUPPLY] engine-OFF re-park - SUPERSEDED, see v339 above for the full reasoning.
+      Restored at_airfield from _last_af when the client reported engine off, as an attempt to
+      make auto-resupply fire for a pilot who took off and landed again. Reverted in v339: it
+      was a no-op for air starts and could set at_airfield mid-flight after a battle-damage
+      engine cut. Kept as an entry so the attempt is not repeated.
+
+==============================================================================
+
+v337: [PLANES] byte-0 tab override (EXPERIMENTAL, now ON) + v336 nation-range fix.
+
+      v336 FIRST: the catalog filter's `_have_side` was written `0 <= s.nation < 5` in v334,
+      but NU/Neutral is camp 7. For an NU pilot that made _have_side False; with nothing
+      staff-hidden for an admin, kept == ids, which fails the `len(kept) != len(ids)` guard, so
+      NO filtered echo was sent and the client fell back to its own nation grouping. Range is
+      now `< 8` (camps 5/6 unused, harmless to admit).
+
+      v337: the 0x3a catalog echo controls only whether a plane is IN the hangar list - the
+      client picks the nation TAB from the GAME_DEF plane-info array (byte 0). So PLANE_TEAMS
+      camp 7 could keep the Me-163B out of other sides' lists but could not move it onto the NU
+      tab. apply_plane_byte0_override() writes byte 0 directly; {118: 0x80} = bit 7 = camp 7.
+      Placed AFTER apply_plane_teams (which rewrites byte 0 every run) and BEFORE both encoders
+      - it was first written into the all-literals fallback, where the normal real-LZ path would
+      have skipped it. Length-preserving, so pad alignment is untouched.
+      GUARD: a value of 0x00 is REFUSED outright and logged, naming the v332 CTD. That value can
+      never be written through this path again.
+      RESULT: bit 7 is ACCEPTED - no CTD, unlike v332's 0x00. So the top bits of that byte are
+      usable as camps, and it was specifically "no bits set" that the GAME_DEF parser rejected.
+      PLANE_BYTE0_OVERRIDE_ENABLED shipped False and was turned on after a live test.
+
+      *** KNOWN ISSUE - accepted for now, not fixed ***
+      With the override on, the NU tab shows the WRONG JET, and an admin still sees an Me-163B
+      on the JPN tab. So byte 0 moves a plane onto a tab, but the tab->slot mapping the client
+      uses for DISPLAY is not the same indexing as PLANE_ROSTER slot order - the entry that
+      appears on NU is some other airframe, and the JPN entry is not being vacated. Likely the
+      same class of problem as the 2026-06-30 correction that rebuilt PLANE_ROSTER from the
+      msg-58 catalog when it turned out the old list was in HANGAR DISPLAY order rather than
+      slot order. Next step if this is picked up again: dump the client's msg-58 catalog while
+      the override is active and compare display position against slot 118, rather than
+      assuming byte 0 alone re-tabs cleanly.
+      Alon's call: good enough for now.
+
+==============================================================================
+
+v336: (folded into the v337 entry above)
+
+==============================================================================
+
+v335: [PLANES] Me-163B moved to the NU/Neutral camp, and the staff gate is now ADMIN RIGHTS.
+      Per Alon: the real entitlement is admin status, not the pilot-name tag - and since the NU
+      side is already admin-only, putting the aircraft on that side makes the plane restriction
+      fall out of the side restriction for free.
+      * PLANE_TEAMS gains camp 7 (NU) holding the Me-163B; it was on camp 3 (Germany), not Japan
+        as the hangar suggested. Slot 118 -> camp 7, no plane assigned to two camps.
+        Verified: the Komet is now hidden for USA/GB/USSR/Germany/Japan and visible only on NU.
+      * WHY THIS CANNOT REPEAT THE v332 CTD: with PLANE_FILTER_VIA_CATALOG=True,
+        apply_plane_teams writes 0x1f into every plane's byte 0 REGARDLESS of camp, so a camp
+        value of 7 never reaches that byte. The camp only feeds _slot_camp_map(), i.e. the 0x3a
+        catalog filter. Flagged in the table: if PLANE_FILTER_VIA_CATALOG is ever flipped to
+        False, apply_plane_teams would write (1 << 7) = 0x80 there, and bit 7 of that byte is
+        UNTESTED - check before doing so.
+      * pilot_may_fly_staff_planes() now consults db_get_admin_rights() first and falls back to
+        the name-tag test (and to the tag alone if the DB call raises). Without this an admin
+        whose pilot name carries no tag would have been locked out - and with the Komet on the
+        admin-only NU side, that combination would have made it unflyable by ANYONE.
+      * The STAFF_ONLY_PLANES catalog filter is deliberately KEPT as a second, independent gate,
+        as requested - side membership and staff status now both have to hold.
+
+==============================================================================
+
+v334: [PLANES] The Me-163B stayed visible to non-staff - the catalog filter was never running.
+      Same omission as msg 28 in v333, in a second place. The 0x3a catalog filter - which is
+      what ACTUALLY hides planes, since the hangar gates on plane-ID membership in this echoed
+      list - was gated on `sub == 0x3a` alone. When the client sends its catalog in the PREFIXED
+      wrapper, v327 normalises sub to 0x00, so the filter never fired and the FULL unfiltered
+      catalog was echoed straight back. The 0x3a catalog is definitely seen prefixed in practice
+      ("cmd=0x00e2 ... inner type=0xa2 sub=0x3a" appears in the REFRAME notes).
+      TWO offset bugs came with it, exactly as in v333: in the prefixed form pl[0]/pl[1] are the
+      counter and cmd bytes, NOT bc/T, and the ID list starts 4 bytes later - so reading the
+      header from the wrong bytes gives a nonsense size and slices garbage. Base is now 4 for the
+      prefixed form, 0 otherwise.
+      ALSO CLOSED: the block was gated on a valid s.nation, so a pilot browsing the hangar
+      BEFORE picking a country got the full catalog, Komet included. The side filter needs a
+      nation; the staff restriction does not. It now runs whenever there is either a side to
+      filter by or something staff-only to remove.
+      Verified on both wire forms: ids [47,48,49,118] -> kept [47,48,49] either way, and under
+      the old code the prefixed form did not fire at all.
+
+      PATTERN WORTH REMEMBERING: v327 made prefixed messages routable by normalising sub to 0x00
+      so the pl[8] fallbacks fire - but only the handlers that ALREADY had a pl[8] fallback
+      benefited. Any handler still testing `sub == X` alone silently stops working the moment
+      the client uses the prefixed wrapper for that message. msg 28 (v333) and 0x3a (v334) were
+      both this. Still testing `sub == X` with no pl[8] path, and worth auditing next: the two
+      other 0x3a handlers (SEND_EXIT_UNRELIABLE reattach, SEND_CAREER_ON_HQ), and anything else
+      that greps as `sub == 0x..` without a matching `pl[8] ==`.
+
+==============================================================================
+
+v333: [REGRESSION + MP] Reverted the v332 GAME_DEF plane mask (it CTD'd the client), and
+      fixed prefixed damage being silently dropped.
+
+      (1) *** v332 REGRESSION - ARENA PAGE HARD CTD FOR NON-STAFF PILOTS. ***
+      v332 hid staff-only aircraft two ways; one of them was wrong. Setting GAME_DEF plane
+      record byte 0 to 0x00 crashes the client on the arena page. From the crash dump
+      (messages30):
+          Exception in Fighter Ace engine: logical error
+          Assertion failed (Len==0)
+          file ...\GameDef.cpp, line 1902
+      That is the GAME_DEF DESERIALISER - a consumption mismatch, the same family as the
+      GameDef.cpp:2076 Source.End() assert already noted in the LZ section. NOT the side picker.
+      So the v332 reasoning was wrong: byte 0 is not merely a camp bitmask the renderer
+      consults, it participates in how the record is PARSED, and 0x00 makes the parser consume
+      a different number of bytes and trip a length assert. A purely semantic "no camp" value
+      would have greyed the plane out or crashed in the picker - it would not fail a LENGTH
+      assertion in the parser.
+      The warning sign was there and was missed: apply_plane_teams only ever writes 0x1f or a
+      single set bit, NEVER zero, and stock data never contains 0x00 there either. v332
+      introduced a value the format does not allow.
+      CONCLUSION: byte 0 can select WHICH nations may fly a plane; it cannot express "nobody".
+      STAFF_HIDE_VIA_GAMEDEF=False, so the 212 is now byte-identical to v331 for staff and
+      non-staff alike. The Me-163B restriction still works, on the 0x3a catalog trim alone -
+      which is the game's own designed filter path here (PLANE_FILTER_VIA_CATALOG is True, so
+      apply_plane_teams deliberately leaves byte 0 at 0x1f and lets the catalog echo filter).
+      TESTING LESSON, recorded because it caused this: v332 was verified live by a pilot WITH
+      an @FA tag - which hides nothing and therefore exercises none of the new code. The
+      routing logic was tested; that the modified GAME_DEF still PARSES was not. Any future
+      change here must be tested on a NON-staff pilot.
+
+      (2) PREFIXED DAMAGE (msg 28 / sub 0x1c) WAS SILENTLY DROPPED - shots that registered on
+      the shooter's screen never reached the victim.
+      Damage was gated on `sub == 0x1c` alone. For a prefixed message sub is pl[4] (the inner
+      bc), which v327 normalises to 0x00 so the pl[8] fallbacks can fire - but damage never had
+      one. Every other double-wrapped type (chat 0x14, team 0x44, leave 0x40, delete 0x03,
+      0x17, 0x1f) already had a pl[8] fallback; 0x1c was simply missed when v327 went in.
+      EVIDENCE (run_20260725_203749 + messages69): ALL41_MAD's hits arrived as
+          cmd=0x0542 PFX type=0x82 sub=0x1c len=32
+          pl=00170542|01820000|1c0401090102...      <- pl[8]=0x1c, the real sub
+      and landed in SUPPLY-CAP, unrecognised. The server logged not ONE damage report from
+      ALL41_MAD all session (senders were only MILLHOUSE13, Snoman and Warrior), while
+      Warrior's client logged zero "You have been hit" lines.
+      TWO parts to the fix, both needed:
+        * the guard now also accepts pl[8] == 0x1c
+        * the record offsets were HARDCODED to 5 and 7, which are only right for the
+          non-prefixed form. In the prefixed form the record sits 4 bytes later. Base 5 on the
+          real packet yields victim=0x0082 hunter=0x1c00 - garbage matching no peer - so even
+          with the guard fixed the damage would have been attributed to nobody. _dbase is now
+          9 for the prefixed form, 5 otherwise. Verified on both real captures: each decodes to
+          victim=0x0104 hunter=0x0109, and 0x0109 is ALL41_MAD.
+
+      STILL OPEN from the same session: auto-resupply never fired at all - Warrior landed
+      damaged with the engine off and was never repaired, and the run contains ZERO resupply
+      activity of any kind (not even an attempt). Not yet investigated.
+
+==============================================================================
+
+v332: [PLANES] STAFF-ONLY AIRFRAMES - the Me-163B is restricted to @HQ / @FA / @HOST pilots.
+      It sits at PLANE_ROSTER slot 118 (0x76) and was showing up in the JAPANESE pool, which
+      is both historically wrong and not wanted in normal play.
+      TWO mechanisms are needed, and they do DIFFERENT jobs - doing only one is not enough:
+        (1) GAME_DEF plane-block byte 0 -> 0x00. The gate is FA.exe FUN_00438330,
+            flyable(plane,camp) = PLANE.field[0] & (1 << camp), and field[0] is record byte 0
+            (stock 0x1f = bits 0..4 = all five camps). Zeroing it leaves no camp bit set, so
+            the plane is flyable by NOBODY. Record length is unchanged, so no block growth, no
+            MTU pressure, no 'max/used' line, and the LZ pad alignment is untouched.
+            apply_plane_hide() runs AFTER apply_plane_teams() because that function rewrites
+            byte 0 of every record and would otherwise undo the mask, and it runs
+            unconditionally so the restriction holds even where per-team assignment is off.
+        (2) The 0x3a catalog echo trim. PLANE_FILTER_VIA_CATALOG is True, which means
+            apply_plane_teams deliberately leaves byte 0 at 0x1f and the real per-side filter
+            lives in the 0x3a echo - and THAT is what builds the hangar list. So masking byte 0
+            alone would leave the Komet visible-but-unselectable; trimming the catalog alone
+            would hide it from the list while leaving it flyable by any path that bypasses the
+            list. Both together hide it AND block it.
+      Decided PER PLAYER at serve time: the GAME_DEF is rebuilt on every arena entry and on
+      every on-demand 212, and both senders (send_arenalist_with_gamedefs,
+      handle_gamedef_request) already have the session in scope, so hide_planes threads down
+      through build_gamedef_212 -> build_lz_gamedef. No per-arena authoring, no client files,
+      nothing to distribute - which is what the long-dormant "per-arena plane pool" TODO would
+      otherwise have required.
+      Tag test is a SUBSTRING match so '@FA' also admits '@FA3' and '@FAVG', and the tag may
+      sit anywhere in the name ('Moira@HQ', 'Bopster@FA', '@HOST_Bob'). Verified that
+      'HQ_Bob' and 'FAKE@HO' do NOT pass.
+      Config: STAFF_ONLY_PLANES / STAFF_PLANE_TAGS. A name in STAFF_ONLY_PLANES that is not in
+      PLANE_ROSTER is warned about at startup rather than silently ignored, and the active
+      restriction is printed on boot.
+      CAVEAT: a pilot RENAMED into a staff tag gains access on their next GAME_DEF serve, and
+      one renamed out of it keeps access until then. Re-entering the arena refreshes it.
+
+==============================================================================
+
+v331: [MP] AIR-TO-AIR COLLISIONS ARE NOW RELAYED - msg 125 (0x7d, CollInfoToPlane).
+      Reported as "Snoman collides with Warrior, Snoman detects it, Warrior doesn't".
+      The server had NO handler for sub=0x7d at all. It fell through to the generic echo
+      path - which is why it only ever appeared tagged SUPPLY-CAP - so the sender got its own
+      message bounced back and THE OTHER PLANE WAS NEVER TOLD.
+      That is survivable only while BOTH clients happen to geometry-detect the same collision,
+      because then each kills itself off its own detection. But the two clients see each other
+      through interpolated, network-delayed positions, so routinely only ONE decides the hulls
+      intersected - and then the detector explodes while the other flies on unaware.
+      EVIDENCE: in run_20260725_135341 at 20:13:14 both DID detect (so that particular one
+      worked, mutually and correctly - both scored a kill, both were deleted). Warrior's client
+      log still shows the defect plainly: exactly one "out 125'23" and exactly one "in 125'23",
+      and the one that came back is HIS OWN ("NumberFrom=259" = Warrior's object). Snoman's 125
+      never reached him.
+      WIRE FORMAT, decoded from that capture against the client's own line
+      "Receive CollInfoToPlane. ExitCode=4, NumberTo=258, NumberFrom=259":
+          pl[4]    = 0x7d
+          pl[7:9]  = NumberTo   u16 LE - the OTHER plane
+          pl[9:11] = NumberFrom u16 LE - the sender's own plane
+      Warrior sent To=0x0102 From=0x0103; Snoman sent To=0x0103 From=0x0102 - both matching the
+      CREATE2/DELETE3 object numbers for that pair exactly.
+      FIX: route by NumberTo to that one peer rather than broadcasting - a collision concerns
+      exactly two planes - resolving the target with _peer_owning_object() (v326) so it still
+      lands if the target has already respawned onto a new Number.
+      Verified by replaying both captured packets through the new routing: each is delivered to
+      the other player, and in the asymmetric case the non-detecting client now gets told.
+
+      NOTE ON THE SUPPLIED LOGS: messages14.log (labelled Snoman) covers 19:47:42-19:58:16 and
+      the collision was at 20:13:14 - it ends 15 minutes early and contains no collision at all.
+      Only Warrior's side (messages67) plus the server log were usable here. Diagnosis did not
+      need Snoman's client in the end, but for the asymmetric case it would.
+
+      *** UPDATE - Snoman's real log (messages15.log) arrived and PROVES the asymmetric case. ***
+      First, a trap: Snoman's client clock runs ~25s BEHIND Warrior's and the server (his
+      "20:12:49.150" detection is the server's 20:13:14.272), and the two clients' in-game
+      clocks differ by three hours (04:12pm vs 01:13pm). Correlate on the SERVER log, never on
+      client timestamps.
+      With that aligned there were TWO collisions, not one:
+        #1  server ~20:13:14 - BOTH clients geometry-detected it independently, so both died
+            and both scored. It worked, but only by luck.
+        #2  server ~20:16:22 (Snoman's clock 20:15:57) - ONLY Snoman detected
+            ("Detect collision ... with plane Warrior. Dist=6.954231", ExitCode=0, a glancing
+            one). Warrior's log at that exact instant contains nothing but
+            "You have hit GBR Cdt Snoman (left wing)" - he was shooting, entirely unaware a
+            collision had happened. Warrior's whole session contains exactly ONE
+            "Detect collision"; Snoman's contains two.
+      And the clincher, across both clients and all three receipts: EVERY CollInfoToPlane
+      either client received names ITS OWN object as NumberFrom -
+            Warrior  NumberTo=258 NumberFrom=259  (Warrior is 0x0103=259)
+            Snoman   NumberTo=259 NumberFrom=258  (Snoman  is 0x0102=258)
+            Snoman   NumberTo=260 NumberFrom=257  (Snoman  is 0x0101=257)
+      so neither ever received the other's 125; each only ever got its own bounced back. That
+      is the bug end to end, on both sides.
+      Collision #2 through the new routing: Snoman's packet carries To=0x0104, which is
+      Warrior's object at that moment, so _peer_owning_object() resolves it to Warrior and the
+      relay lands - the case that was silently dropped before.
+      Also worth noting for later: #1 carried ExitCode=4 and #2 ExitCode=0, so that field
+      likely distinguishes a fatal collision from a glancing one. Not decoded yet; we relay the
+      packet verbatim, so the client decides either way.
+
+==============================================================================
+
+v330: [OPS] FIX v329's update pre-flight - it refused pulls that plain `git pull` does fine.
+      Alon's first run aborted with "7 uncommitted local change(s)", but six of the seven were
+      UNTRACKED ('??') runtime artifacts - __pycache__/, fa_server.db, logs/, nohup.out,
+      server.log, ticket.vr1 - which git does not track and which can never block a pull. Only
+      ' M ticket_base.vr1' was a real modification. v329 treated any `git status --porcelain`
+      output as dirty and bailed.
+      The deeper error was doing the check at all: GIT ALREADY MAKES EXACTLY THE RIGHT CALL.
+      `git pull --ff-only` refuses cleanly ("Your local changes would be overwritten by merge",
+      rc=1, working tree untouched) if an incoming commit would clobber a local edit, and
+      otherwise fast-forwards and leaves the edit in place. The pre-flight was both redundant
+      and stricter than git, which is why it blocked what Alon had been doing by hand for weeks.
+      NOW: untracked files are ignored (counted at DEBUG only); tracked modifications are listed
+      for visibility but do NOT abort; git arbitrates. A failing pull is still a hard abort with
+      no restart, and its message now points at the file to commit/stash. UPDATE_ALLOW_DIRTY is
+      gone - there is nothing left for it to override.
+      Verified live on a real repo: untracked junk + an unrelated tracked edit -> pull succeeds,
+      code updates, local edit preserved; remote then touches the same edited file -> rc=1,
+      abort, no restart, tree left exactly as it was with nothing half-applied.
+
+==============================================================================
+
+v329: [OPS] SELF-UPDATE - `update` console command + an admin button under the console.
+      Runs `git pull --ff-only` in the server directory and then restarts. One implementation:
+      the web button just queues the same `update` console command, so both entry points share
+      a code path and the progress streams to the web console for free (tag UPDATE).
+
+      RESTART BY EXITING, not by systemctl. Calling `systemctl restart <self>` from inside the
+      unit's own process is unreliable - systemd stops the unit, killing the process that issued
+      the command, and the restart can race - AND it needs root or a sudoers rule. Exiting needs
+      NO privileges and behaves identically under systemd, supervisor, docker and NSSM.
+      REQUIREMENT: the unit must have a restart policy. systemd:
+          Restart=always
+          RestartSec=2
+      If yours is Restart=on-failure instead, set UPDATE_EXIT_CODE=1 so the exit looks like a
+      failure and still triggers a restart. To drive an external restarter instead, set
+      UPDATE_RESTART_MODE='command' + UPDATE_RESTART_COMMAND=['sudo','systemctl','restart','...'].
+
+      PRE-FLIGHT CHECKS - it refuses rather than half-updating:
+        * not a git work tree            -> abort
+        * uncommitted local edits        -> abort, listing them (UPDATE_ALLOW_DIRTY to override).
+          A pull onto a dirty tree either refuses halfway or leaves a merge in progress, and the
+          server would then restart into a half-updated directory - far worse than not updating.
+        * `--ff-only`                    -> never a merge commit, never a conflicted tree; if the
+          branches have diverged it fails cleanly and NOTHING restarts
+        * HEAD unchanged                 -> already up to date, no restart
+      A concurrent second request is ignored (_update_lock, non-blocking).
+      Verified end-to-end against a real repo: clean/ahead -> restart; re-run -> no restart;
+      dirty tree -> abort; non-repo dir -> abort.
+
+      SAFETY: every subprocess call passes an argv LIST with no shell, so nothing in this path
+      can be command-injected; the button is admin-only (same gate as the console box) and the
+      requesting admin is named in the log. Timeouts on every git call.
+
+      ALSO FIXED WHILE ADDING THE BUTTON: LOG_CONSOLE_PAGE is a plain (non-raw) triple-quoted
+      string, so a `\n` written into its JavaScript becomes a REAL newline at import time and
+      breaks the enclosing JS string literal - taking the whole console page's script block with
+      it. The confirm() text needs `\\n`. Caught before shipping; worth remembering, the same
+      trap applies to any JS added to that page.
+
+==============================================================================
+
+v328: [PERF] Scaling work ahead of large sessions. Two changes, both measured.
+      BACKGROUND - profiling the hot paths against the real packet rate from
+      run_20260724_073916 (2.94 inbound pkt/s/player) showed raw CPU is NOT the first limit.
+      Relay fan-out is O(N^2) WITHIN an arena: 200 players in one arena is ~117,000 UDP
+      sends/s and ~57% of one core, but the same 200 across 8 arenas is ~14%. What falls over
+      first is disk I/O and thread pressure, not arithmetic.
+
+      (1) FILE LOG LEVEL NOW DEFAULTS TO INFO (was DEBUG).
+      DEBUG writes a line per packet, SYNCHRONOUSLY, on the packet path - 55 MB for a single
+      8-player session, and since packet volume is O(N^2) the write volume grows faster than
+      linearly. Added fa_logging.set_file_level() + get_levels(), and the console command is
+      now `loglevel console|file <LEVEL>` (bare `loglevel` reports both). So per-packet detail
+      is one command away for a reproduction run, with no restart, and back off afterwards.
+      The WARNING+ error file is deliberately NOT retunable - failures are always captured.
+      Worth knowing: the ring buffer feeding the WEB live console is populated BEFORE handler
+      filtering, so the on-screen console still shows DEBUG lines while the file sits at INFO -
+      live visibility is kept without paying the disk cost.
+      TRADE-OFF, stated plainly: at INFO you lose the RX/REL/PL hex dumps, TX/RELIABLE traces
+      and RELAY lines - exactly the material that solved v315, v324 and v327. Turn DEBUG back
+      on for small reproduction runs.
+
+      (2) THE POST-AUTH DISPATCH LOOP IS EVENT-DRIVEN INSTEAD OF POLLING.
+      It used to run `while not s.closing: <drain>; time.sleep(0.02)` - waking 50x/second per
+      session whether or not anything had arrived. Measured at 200 sessions: ~9,955 wakeups/s
+      and 8.8% of a core with ZERO traffic. It now waits on a per-session Event, signalled by
+      the RX path when a command is queued: ~388 wakeups/s and 3.6% at the same 200 sessions.
+      A plain Event is used ON PURPOSE rather than a Condition on s._lock: it shares no lock
+      with anything else, so it cannot deadlock against the four existing `with s._lock:` sites.
+      ORDER IS wait -> clear -> drain. Clearing BEFORE draining means a command queued in the
+      gap is still caught by that same drain, and one landing after it leaves the event set so
+      the next pass wakes immediately - a command can never be stranded, the worst case being
+      one harmless empty wakeup. The 0.5s timeout is only a backstop bounding how long
+      s.closing goes unnoticed at shutdown.
+      Latency IMPROVES: a queued command now wakes the thread immediately instead of waiting
+      out the rest of a 20ms sleep.
+      VERIFIED: 41,000 messages across 1 / 8 / 200 concurrent producers, zero lost, zero
+      duplicated.
+
+      NOT DONE, deliberately: the thread-per-recipient broadcast pattern (one OS thread per
+      recipient per chat line - 200 threads and ~23ms at 200 players) is still there. It wants
+      a small worker pool, which is a bigger change than these two and was left for its own
+      pass. Arena population is NOT capped, per Alon - the game itself handles 300+, so the
+      scaling answer there is a separate high-capacity arena server rather than a limit.
+
 ==============================================================================
 
 v327: [MP] *** PREFIXED MESSAGES SOLVED - AND PLAYER CHAT WAS BEING SILENTLY DROPPED. ***

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v337
+Fighter Ace LAN Server v340
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v337'
+VERSION = 'v340'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9236,6 +9236,24 @@ def _auto_resupply_check(s, sub, pl):
     if sub == 0x53 and len(body) >= 6 and (body[5] & 1) == 1:   # engine ON
         s.at_airfield = None
         return
+    # v339: REVERTED v338's engine-OFF re-park. It conflated "engine off" with "landed at a
+    # field", which is wrong in both directions:
+    #   * AIR START, no takeoff -> there is no launch field, so _last_af is None and the restore
+    #     did nothing; resupply still never fired for those pilots.
+    #   * ENGINE CUT IN THE AIR (glide, stall, battle damage) -> it re-parked the plane at a
+    #     field it may be nowhere near, potentially setting at_airfield while airborne. Firing a
+    #     msg-60 rearm mid-flight is exactly what v277 exists to prevent (it rebuilds the plane
+    #     object and FREEZES the client). The settle/freshness guards make that unlikely, not
+    #     impossible, and "engine off and looks static" is a far weaker guarantee than "parked
+    #     at a field".
+    # THE ROOT BUG IS STILL OPEN: at_airfield is only ever SET from StartPlace (spawn) and
+    # CLEARED on engine-on (takeoff), with nothing to restore it after a landing - so
+    # _resupply_poll_loop's first gate rejects any plane that took off and came back, which is
+    # why run_20260725_203749 contains ZERO resupply activity of any kind.
+    # THE CORRECT FIX is to resolve the field FROM POSITION on engine-off: fa_scenes.json already
+    # carries 722 scenes over 14 terrains, so a nearest-field + altitude check would handle the
+    # air-start case AND correctly resolve to nothing for a mid-air engine cut. Do that rather
+    # than reaching for _last_af again.
     if sub == 0x03:                                             # despawn / exit-to-HQ
         s.at_airfield = None
         return
@@ -9258,6 +9276,10 @@ def _auto_resupply_check(s, sub, pl):
             s.last_pos_telem_t = 0.0
             s.resupplied_this_stop = False
         s.at_airfield = _new_af
+        s._last_af = _new_af      # v339: retained but NOT read - v338's engine-OFF re-park that
+                                  # consumed it was reverted. Kept only because the eventual
+                                  # position-based field resolution may want a last-known field
+                                  # as a tie-breaker. Nothing depends on it today.
 
 def _resupply_poll_loop():
     """v277: background poll gating resupply on the plane's position being STATIC - but ONLY when
@@ -9380,6 +9402,12 @@ def _resupply_poll_loop():
 # drop-everything-that-isn't-a-delete behaviour.
 PREFIXED_NORMALISE_SUB = True
 
+# v340: subs that get a FULL re-frame (pl = pl[4:]) instead of v327's sub-normalisation.
+# ONLY for subs with no pl[8] double-wrap fallback - for those, normalising sub to 0x00
+# achieves nothing because no handler ever matches on it, so the message is silently lost.
+# Empty this set to revert to pure v327 behaviour.
+PREFIXED_REFRAME_SUBS = {0x03, 0x45, 0x7d}
+
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
     sub=pl[4] if len(pl)>4 else 0
@@ -9405,10 +9433,24 @@ def handle_post_auth(s, cmd, pl):
             and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0)
     if _pfx:
         _isub = pl[8]
-        if _isub == 0x03:                       # delete-notify - the one we know is broken
-            log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED delete-notify '
-                           f'[{hx(bytes(pl[:4]))}] -> re-framing from offset 4 '
-                           f'(was mis-read as ONumber 0x{int.from_bytes(bytes(pl[5:7]),"little"):04x})')
+        if _isub in PREFIXED_REFRAME_SUBS:      # 0x03 + the no-pl[8]-fallback subs (v340)
+            # v340: 0x45 (scene-supply 69) and 0x7d (collision 125) join 0x03 here.
+            # WHY THIS IS NOT THE BLANKET RE-FRAME THE else-BRANCH BELOW WARNS AGAINST:
+            # v327's hazard is shifting bytes under a handler that ALREADY reads pl[8].
+            # These two have no pl[8] fallback at all - that is precisely why they were dead -
+            # so re-framing them cannot shift anything that is currently being read.
+            # Measured in run_20260725_203749 (4h, 9 pilots), matched 1:1 against the
+            # handler's own log line: msg 69 plain 200/200 handled vs PREFIXED 0/29;
+            # msg 125 plain 23/23 vs PREFIXED 0/3. Total loss, not partial.
+            # Verified on all 32 captured prefixed payloads: after pl[4:] every one satisfies
+            # len == 4 + bc*16 + (T>>4), and every resulting (T,len) shape is one the plain
+            # handler has already processed (msg 69: 29/29, msg 125: 3/3).
+            _why = {0x03: 'delete-notify', 0x45: 'scene-supply 69',
+                    0x7d: 'collision 125'}.get(_isub, f'sub 0x{_isub:02x}')
+            _extra = (f' (was mis-read as ONumber '
+                      f'0x{int.from_bytes(bytes(pl[5:7]),"little"):04x})') if _isub == 0x03 else ''
+            log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED {_why} '
+                           f'[{hx(bytes(pl[:4]))}] -> re-framing from offset 4' + _extra)
             pl = pl[4:]
             bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
         else:
