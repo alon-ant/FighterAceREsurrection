@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v342
+Fighter Ace LAN Server v343
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v342'
+VERSION = 'v343'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6617,6 +6617,18 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         threading.Thread(target=_send, daemon=True).start()
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
                    f'-> peers in room {s.current_room} {reason}')
+    # v343: re-issue a start-place grant that raced this death (see SP_REGRANT_ON_DEATH).
+    _sp = getattr(s, '_last_sp_grant', None)
+    if SP_REGRANT_ON_DEATH and _sp and 'death' in str(reason).lower():
+        _t, _pkt, _af, _mid, _gn = _sp
+        _age = time.time() - _t
+        s._last_sp_grant = None                  # once only - never loop on repeated deletes
+        if _age <= SP_REGRANT_WINDOW_S:
+            log('FLY23', f'{s.current_pilot} start-place grant N={_gn} raced this death '
+                         f'(issued {_age:.3f}s before it) -> re-issuing after the delete')
+            threading.Thread(target=lambda: send_reply(
+                s, _pkt, f'<- StartPlaceList 23 RE-GRANT (AF={_af} N={_gn})', to=5.0),
+                daemon=True).start()
 
 # -- v234: TELEMETRY OPCODES -------------------------------------------------
 # The flying-state object update is [bc][T][00][00][OPCODE][tick u16][ONumber u16][state...].
@@ -6651,6 +6663,22 @@ TELEM_RESTAMP_MAX_LEN = 100  # v253: only re-stamp the telemetry FORM WE KNOW. T
                              #   parse - that is the same mistake as hand-authoring the record.
 STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (the failure above was
                              #   silent for ~3 minutes; never let a frozen tick go unnoticed again)
+
+# v343: START-PLACE / DEATH RACE. In every captured case the client sends its StartPlace
+# request (0x17) a few MILLISECONDS BEFORE it reports its own death (0x03), then the KILL
+# lands - all inside ~40ms. So we grant a start place to a plane that is already dying, the
+# client discards it along with the dead object, and NEITHER SIDE RE-ISSUES. The client then
+# sits on its own timer until "Time for waiting start place has been expired" (~15s), falls
+# back to HQ, and finds an empty plane list because it never re-entered a flyable state.
+# Measured (run_20260726_022244_1_ + messages20, _AvA_Insane):
+#     02:45:22.765 request -> GRANT N=0     02:45:22.807 KILL (42ms later)
+#     02:45:37.8   opens HQ                 02:45:38.5   client logs the expiry
+# Same 0x17 -> 0x03 -> KILL ordering in both of AC2E_Bigalon's deaths; one respawned fine and
+# one hung, so this is a RACE, not deterministic - which is why it comes and goes.
+# FIX: if a grant was issued in the window just before a death, re-send that same packet once
+# after the delete has gone out, so the client has a live grant to spawn on.
+SP_REGRANT_ON_DEATH = True   # flip False to disable instantly if it ever double-spawns
+SP_REGRANT_WINDOW_S = 2.0    # only re-issue a grant this recent; older ones are unrelated
 
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
@@ -7066,7 +7094,13 @@ def handle_fly_start_place(s, af, mid, n, via=''):
             log('PLAYER62', f're-fly: re-advertised {len(records)} missing peer(s) to '
                             f'{s.current_pilot}: {[p.current_pilot for p in _missing]}')
     pkt = bytes([0x00, 0x42, 0x00, 0x00, 0x17, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
-    log('FLY23', f'StartPlace request{via} AF={af} mid={mid} N=0x{n:02x} -> GRANT N={grant_n}')
+    # v343: remember this grant so a death landing inside SP_REGRANT_WINDOW_S can re-issue it.
+    s._last_sp_grant = (time.time(), pkt, af, mid, grant_n)
+    # v343: the pilot name was MISSING from this line, which made every grant unattributable -
+    # with 14 players you cannot tell whose start place was granted, and that blocked the
+    # diagnosis above for two sessions. Never remove it.
+    log('FLY23', f'{s.current_pilot} StartPlace request{via} AF={af} mid={mid} '
+                 f'N=0x{n:02x} -> GRANT N={grant_n}')
     threading.Thread(target=lambda: send_reply(s, pkt,
                      f'<- StartPlaceList 23 GRANT (AF={af} N={grant_n})', to=5.0),
                      daemon=True).start()

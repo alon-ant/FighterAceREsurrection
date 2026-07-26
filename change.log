@@ -7,6 +7,61 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v343: [SPAWN] start-place grant races the player's own death -> no respawn, empty plane list,
+      timeout. Plus the FLY23 log finally names the pilot.
+
+      SYMPTOM: die, then "waiting for a start position on the airfield" forever, exit to HQ to
+      an empty plane list, then the client times out. Reported by AC2E_Bigalon twice and seen
+      independently on _AvA_Insane. The client names it itself:
+          ERROR: Time for waiting start place has been expired
+
+      ROOT CAUSE - A RACE, which is why it comes and goes. The client sends its StartPlace
+      request (0x17) a few MILLISECONDS BEFORE it reports its own death (0x03), then the KILL
+      lands. All three inside ~40ms:
+          _AvA_Insane   02:45:22.765 0x17 -> GRANT N=0 (same ms)
+                        02:45:22.775 0x03 (own exit, flying=False)
+                        02:45:22.807 KILL by Snoman            <- 42ms after the grant
+                        02:45:37.8   opens HQ
+                        02:45:38.5   client logs the start-place expiry
+          AC2E_Bigalon  02:27:27 .829/.840/.868  -> respawned FINE
+          AC2E_Bigalon  02:29:37 .593/.604/.631  -> HUNG
+      Same ordering every time, different outcomes -> race. We grant a start place to a plane
+      that is already dying; the client drops it with the dead object; neither side re-issues;
+      the client waits out its own ~15s timer and falls back to HQ, where the plane list is
+      empty because it never re-entered a flyable state.
+
+      FIX: record each grant on the session (_last_sp_grant), and when a DEATH delete goes out
+      within SP_REGRANT_WINDOW_S of that grant, re-send the SAME packet once, after the delete.
+      SP_REGRANT_ON_DEATH=True gates it; flip False if it ever double-spawns.
+      Exercised before shipping: re-grants once on a 42ms race; does NOT fire on back-to-lobby;
+      does NOT fire on a 9s-old grant; fires only ONCE across two consecutive deletes; no-ops
+      when there was no prior grant.
+
+      ALSO: the FLY23 line did not include the pilot name. With 14 players in a room that made
+      every grant unattributable and cost two sessions of diagnosis - there is still a grant at
+      02:45:30.356 in that log that CANNOT be assigned to anyone. Never remove the name again.
+
+      HYPOTHESES KILLED ALONG THE WAY (do not re-run these):
+        * NOT admin/moderator power. Rights were only ever granted to Moira@HQ, AC2E_Bigalon,
+          Taurus@FA and Sparky@FA; _AvA_Insane was NEVER an admin and hit the identical
+          failure. Admin status is unrelated.
+        * NOT auto-resupply. Only 2 pilots were ever air-resupplied (_AvA_Insane x3,
+          AC2E_Bigalon x1) and _AvA_Insane - the most resupplied - never froze or stalled once,
+          while 5 pilots who were never resupplied did freeze.
+        * NOT reliable-channel loss. The grant went out in the SAME MILLISECOND as the request.
+          Reliable stalls are real and endemic (6 of 12 pilots) but every logged one RESUMED:
+          seven warns, seven recoveries, including a 119.2s-stale tick that came back.
+
+      STILL OPEN AND UNRELATED: auto-resupply grants a msg-60 rearm to AIRBORNE aircraft - the
+      "position static" test called a plane moving 34302 -> 24065 -> 5121 stationary, three
+      times, at altitudes 2591/2310/2167. That is the v277/v339 mid-air rearm hazard and it
+      still needs the position-based field resolution from fa_scenes.json. Also open: the
+      endemic reliable stalls; ACE88 broadcasting for already-deleted PlayerIndexes (visible
+      client-side as "AceOrRankChangedCB. PlayerIndex=N not found", 8x in messages20); and
+      "Unsupported message 8" - we are sending a message type the client has no handler for.
+
+==============================================================================
+
 v342: [MODERATOR/SAFETY] the moderator-op probe was claiming ordinary arena-exit deletes.
       Swallowed them for everyone, and EXECUTED them as kill/eject commands for anyone
       holding rights.
