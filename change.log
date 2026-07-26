@@ -7,6 +7,60 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v341: [WIRE/CRITICAL] relay_telemetry relayed the WHOLE remaining datagram as one msg-7
+      record. One malformed relay killed every client in the arena simultaneously.
+
+      SYMPTOM: 9 players CTD within ~3 seconds, all with the identical engine exception:
+          Exception in Fighter Ace engine: bounds error
+          class ARR<class NET::OBJECT *,2048>[2144] 0..2047
+          file ...\engine\containers\ring.hpp, line 27
+      Every client's last network line was `in 7'165`. Normal msg 7 is 84B (T=0x42) or
+      86B (T=0x62); 165B is not a legal size for it.
+
+      ROOT CAUSE: the telemetry scan did `c = pl[_off:]` then `_telem = c` - c is the rest
+      of the datagram, NOT one record, and nothing truncated it to the declared length.
+      A spawn carries the telemetry frame plus trailing bytes, so we forwarded the tail
+      wholesale. Receiving clients parse it as a single msg-7 record, read past the real 84B
+      into the trailing content, and derive a phantom ONumber from buffer garbage. Anything
+      >= 2048 indexes the NET::OBJECT ring out of range and aborts the engine.
+
+      FIX: `_need = 4 + c[0]*16 + (c[1] >> 4)` (Size = bc*16 + (T>>4), full record = 4+Size,
+      the same invariant v340 validated on 32/32 real payloads). Relay `c[:_need]`. Frames
+      SHORTER than their own header claims are dropped, never relayed. Both conditions log
+      once per session under [TELEM-GUARD] - never per-frame, telemetry runs at ~13/s.
+      Verified before shipping: 88B datagram -> relays 84B unchanged; 90B -> 86B unchanged;
+      169B (the fatal shape) -> 84B instead of 165B; 48B -> dropped.
+
+      EVIDENCE TRAIL (run_20260726_012319, 5 client logs, 1 vcncnet trace):
+        * Trigger is a SPAWN: 01:27:23.524 `out 4 spawn -> ServerConfirm Number=267 ident=2`
+          (_AvA_Insane, ONumber=0x010b). Object 0x010b has 17 of its 18 frames oversized;
+          every other object has 0 across 250+ frames each.
+        * The cloud server clock runs ~2s AHEAD of the clients - server 01:27:23.5 is client
+          01:27:21.5, which is when the trace shows 84B -> 165B. Always offset-correct before
+          correlating cloud-server and client logs.
+        * The over-read is directly visible client-side: "Get coord for missing object 1401"
+          appears exactly twice in 4 of 5 logs while every other object number is 256..270.
+          1401 is survivable, 2144 is not.
+        * Ghidra: dispatcher FUN_004f18a0 proves the first appspace byte IS the message type
+          and the table is 256 slots at 0xc81ed8, slot = base + id*4 (verified: _DAT_00c82038
+          = id 88 = AceOrRank). The bounds assert is a generic ARR<T,2048> macro - see
+          FUN_004f1d50 for the exact ring.hpp:27 / "%s[%i] 0..%i" call pair.
+        * NOTE FOR NEXT TIME: msg 7's slot (0xc81ef4) is NOT in the FUN_004f1490 registrar -
+          the lowest there is id 20 - yet no client ever logged "Unknown Type", so low IDs are
+          registered somewhere else. Don't re-derive this; it cost three probes.
+
+      NOT THE CAUSE: v340. Its re-frame path fired 4 times in the whole 23-minute log and
+      ZERO times within 30s of the crash; the last two REFRAME lines before the spawn are both
+      the v327 normalise path. v340 worked as intended in this same log (38 SUPPLY69,
+      3 COLLIDE125, including one re-framed collision and one re-framed supply request).
+
+      REGRESSION METRICS: (1) "Get coord for missing object <N outside 256..270>" in client
+      logs must be zero; (2) no msg 7 may ever appear outside the 84-88B band; (3) any
+      [TELEM-GUARD] line means a client is sending non-conforming datagrams - worth reading,
+      but it is now contained rather than fatal.
+
+==============================================================================
+
 v340: [WIRE] PREFIXED_REFRAME_SUBS - msg 69 (scene-supply) and msg 125 (collision) were
       being dropped 100% of the time in their prefixed form.
 

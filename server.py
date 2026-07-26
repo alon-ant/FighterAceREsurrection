@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v340
+Fighter Ace LAN Server v341
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v340'
+VERSION = 'v341'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6668,7 +6668,32 @@ def relay_telemetry(src, data):
         c = pl[_off:]
         if (len(c) >= 9 and c[2] == 0 and c[3] == 0
                 and c[4] in TELEM_OPCODES and (c[1] & 0x0f) == 0x02):
-            _telem = c
+            # v341: TRUNCATE TO THE DECLARED RECORD LENGTH BEFORE RELAYING.
+            # c is the whole REMAINING datagram, not one record. A spawn can carry the
+            # telemetry frame PLUS trailing bytes; relaying that tail wholesale hands every
+            # peer an oversized msg 7. They parse it as a single record, read past the real
+            # 84B into the trailing content, derive a phantom ONumber and index
+            # ARR<class NET::OBJECT *,2048> out of range -> engine "bounds error" (ring.hpp:27)
+            # -> instant CTD for EVERY player in the room, not just the sender.
+            # PROVEN: run_20260726_012319 @01:27:23.524, _AvA_Insane spawns ONumber=0x010b;
+            # msg 7 goes 84B -> 165B and stays there; all 9 clients die within ~3s with
+            # ARR<...>[2144] 0..2047. Client logs show the phantom objects the over-read
+            # produced: "Get coord for missing object 1401" (survivable) then 2144 (fatal).
+            # Size = bc*16 + (T>>4) per the note above, so the full record is 4 + Size.
+            _need = 4 + c[0] * 16 + (c[1] >> 4)
+            if len(c) < _need:
+                if not getattr(src, '_telem_short_logged', False):
+                    src._telem_short_logged = True
+                    log('TELEM-GUARD', f'{src.current_pilot} telemetry header declares '
+                                       f'{_need}B but only {len(c)}B present at off={_off} '
+                                       f'-> NOT relayed (logged once per session)')
+                continue
+            if len(c) > _need and not getattr(src, '_telem_trunc_logged', False):
+                src._telem_trunc_logged = True
+                log('TELEM-GUARD', f'{src.current_pilot} telemetry datagram carries '
+                                   f'{len(c) - _need}B of trailing data -> truncated to '
+                                   f'{_need}B (bc={c[0]} T=0x{c[1]:02x}); once per session')
+            _telem = c[:_need]
             break
     if _telem is None:
         return                          # not a flying-state object update (e.g. pre-spawn 00c2)
