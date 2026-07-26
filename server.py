@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v341
+Fighter Ace LAN Server v342
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v341'
+VERSION = 'v342'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9625,7 +9625,24 @@ def handle_post_auth(s, cmd, pl):
         _op = _mo = None
         if pl[4] in MOD_INBOUND_OPCODES:
             _op, _mo = pl[4], 4                      # direct
-        elif len(pl) > 8 and pl[8] in MOD_INBOUND_OPCODES:
+        # v342: SAFETY - this probe was claiming ORDINARY traffic. A client's arena-exit
+        # bulk delete is msg 3 carrying a list of [80 NN] client entries
+        # (pl = [bc][T][00][00][03][00][8001][8002]...), so pl[8] lands on 0x80 and the
+        # message was taken for a moderator op and SWALLOWED - the delete never ran, which
+        # left the leaving player's session inconsistent (run_20260726_020213: 17 hits
+        # across 10 pilots in 7.5 minutes, every one of them an ordinary arena exit).
+        # Worse, for a pilot who actually HOLDS rights it was EXECUTED: the delete list was
+        # parsed as a pilot NAME for killp/ejectp/crumblep/nofuelp. It resolved to garbage
+        # ("no target") that time, but a list that happens to decode to a real pilot name
+        # would have killed/ejected them - triggered by nothing more than a moderator
+        # leaving an arena. Two such executions in that one log (02:04:13, 02:07:09).
+        # A genuinely compound-wrapped message carries 0x00 in the sub slot (pl[4]) with the
+        # real sub at pl[8]; msg 3 carries 0x03 there. Require that marker.
+        # Verified: direct (pl[4]=0x80), compound (pl[4]=0x00) and prefixed (bc=0 ->
+        # pl[4]=0x00) moderator commands all still match; only the delete is released.
+        # IF MODERATOR COMMANDS STOP WORKING: a real one is arriving with pl[4] != 0x00 -
+        # log pl[:12] here and widen the marker rather than reverting this guard.
+        elif len(pl) > 8 and pl[4] == 0x00 and pl[8] in MOD_INBOUND_OPCODES:
             _op, _mo = pl[8], 8                      # compound-wrapped
         if _op is not None:
             _who = getattr(s, 'current_pilot', None)

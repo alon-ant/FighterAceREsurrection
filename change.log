@@ -7,6 +7,52 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v342: [MODERATOR/SAFETY] the moderator-op probe was claiming ordinary arena-exit deletes.
+      Swallowed them for everyone, and EXECUTED them as kill/eject commands for anyone
+      holding rights.
+
+      SYMPTOM (reported): shot down, could not respawn ("waiting for a start position on the
+      airfield" in an air-spawn arena), exited to HQ to an empty plane list, then the client
+      timed out. Client log messages42: 18 x `out 67'1` (the 0x43 room-confirm poll, 1 Hz)
+      with no answer, then `Error in Conductor: User has cancelled (-1)` / `Can't exit
+      AppSpace`, then `Local layer has timed out (-140)`.
+
+      ROOT CAUSE: the detector took pl[8] as a compound-wrapped moderator opcode without
+      checking that the message WAS compound-wrapped. A client's arena-exit bulk delete is
+      msg 3 carrying a list of [80 NN] client entries:
+          pl = 01 72 00 00 03 00 8001 8002 8003 8005 8006 8007 800b 800d 800e 8004 80
+      pl[8] is 0x80, so the delete was claimed as a moderator op.
+        * For a NON-moderator: swallowed. The delete never ran. 17 hits across 10 pilots in
+          7.5 minutes - ALL41_MAD, Celt, DBD_GCEXTREME, GetsumJ, KILO, MILLHOUSE13, Paddy,
+          Snoman, Warrior, _Butterz_. Every one an ordinary arena exit, not an attack.
+        * For a pilot WITH rights: EXECUTED. The delete list was parsed as a pilot NAME for
+          killp/ejectp/crumblep/nofuelp. Twice in that log (02:04:13 killp?, 02:07:09
+          nofuelp?), both landing on "no target" because the bytes decoded to garbage.
+          A list that happened to decode to a real pilot name would have killed or ejected
+          that player - caused by nothing more than a moderator leaving an arena. This was
+          the actual hazard; the hang was the milder half.
+
+      FIX: require the compound marker - a genuinely compound-wrapped message carries 0x00 in
+      the sub slot (pl[4]) with the real sub at pl[8]; msg 3 carries 0x03 there. One added
+      condition: `pl[4] == 0x00`.
+      VERIFIED against real payloads from the log before shipping: the two exit-delete shapes
+      are released, while DIRECT (pl[4]=0x80), COMPOUND (pl[4]=0x00) and PREFIXED (bc=0, so
+      pl[4]=0x00) moderator commands all still match.
+      IF MODERATOR COMMANDS EVER STOP WORKING: a real command is arriving with pl[4] != 0x00.
+      Log pl[:12] at that branch and widen the marker - do NOT revert the guard.
+
+      STILL OPEN, NOT FIXED HERE: the client polls 0x43 after returning to the lobby and is
+      never sent a JoinToGameAnswer 201, so it hangs and times out. In the same log the only
+      201s went to players JOINING (Moira@HQ 02:06:41, ARS_Endo 02:07:39); a player who died
+      and went back to lobby got none. _maybe_grant_create_entry covers the arena-CREATION
+      flow only. Whether the swallowed delete above was causing this or it is independent is
+      NOT established - fix the 201 re-entry grant next and re-test.
+
+      v341 STATUS in this run: TELEM-GUARD fired ZERO times across 7.5 minutes and 14
+      players - fully inert, no regression, and no mass CTD recurred.
+
+==============================================================================
+
 v341: [WIRE/CRITICAL] relay_telemetry relayed the WHOLE remaining datagram as one msg-7
       record. One malformed relay killed every client in the arena simultaneously.
 
