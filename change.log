@@ -7,6 +7,101 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v347: [RESUPPLY] SUPPLY_GRANT_FLAGS 0x08 -> 0x01. The msg-60 flag bits were mislabelled; the
+      repair/rearm branch was unreachable, and our own bit 3 was printing the "shortage"
+      messages we had been reading as evidence of a broken economy.
+
+      DECODED FROM THE CLIENT (FA.exe 0x005581c0, the msg-60 handler). Layout confirmed against
+      the wire - the handler reads flags at param+3, amount u16 at +4, amount2 u16 at +6, which
+      is exactly the 8 bytes the client logs as `in 60'8`:
+        bit0 0x01  the branch that formats amounts into messages 0x9f/0xa1, then calls
+                   FUN_004ebf00(amount) / FUN_004ec5c0(amount2), FUN_004ebd10(), and sets
+                   plane+0x1b4c = 1. That write and FUN_004ebd10 occur NOWHERE ELSE in the
+                   handler - unreachable with bit0 clear.
+        bit1 0x02  ignore amount,  set fuel to max (plane+0x4e8)
+        bit2 0x04  ignore amount2, set ammo to max (plane+0x500)
+        bit3 0x08  emit messages 0xe5 and 0xe6 at LAB_005584e5. DISPLAY ONLY - no state change,
+                   no economy test anywhere near it.
+        bit4 0x10  suppress fuel message;   bit5 0x20  suppress ammo message
+
+      TWO CONSEQUENCES:
+        (1) We were sending 0x08, so bit0 was clear and the repair/rearm calls were never
+            reached. Fuel arrived; repair and rearm did not. That matches every report.
+        (2) "No additional ammunition available" / "Insufficient aircraft units at this base to
+            supply your plane normally" are NOT the field economy reporting a shortage. Bit 3 is
+            their only gate, so we printed them on every grant regardless of stock. An earlier
+            session read them back as proof the economy was empty and nearly went off to fix a
+            non-existent bug. 0xa4 additionally fires whenever amount2 == 0.
+
+      HOW THE LABELS GOT WRONG: v285 recorded 0x08 as "incremental top-up + client-side
+      base-supply accounting" and it survived ~60 versions unchallenged. Identical failure to
+      DEATH_MEC_NIBBLES in v345, where the crash and menu-exit codes were swapped in a comment.
+      Both were plausible labels that had never been checked against the binary. When a constant
+      encodes client behaviour, decode it from FA.exe - do not infer it from what we intended.
+
+      DIRECTION OF msg 0x49 SETTLED WHILE DOING THIS: the client does NOT request supply. It
+      REPLIES. messages47 shows `in 60'8` -> EVENT text -> `out 73'39`, and 73 = 0x49 = the
+      SendRepairInfo built at FUN_004c8690 (39-byte body, opcode 0x49, FUN_007e3350(buf,0x27)).
+      A test with auto-resupply DISABLED (run_20260726_125335) confirmed it: full sortie,
+      landing, engine off, and the client sent nothing but chat. Do not re-run that experiment.
+
+      ALSO CORRECTED: sub=0x53 is NOT engine on/off. ...5300 always precedes a SPAWN, ...5301
+      always precedes an EXIT (sub=0x03 or the 0x3a HQ catalog) - verified across three sessions
+      and many pilots. So the v339-era rule "engine-ON clears at_airfield" actually fires when
+      the pilot climbs OUT, and at_airfield is never cleared during a sortie in ANY arena. The
+      v346 note calling this air-start-specific is wrong: the bug was general. It also means
+      resupply-after-landing already works on v346, and v346's movement gate is now the ONLY
+      thing preventing mid-air rearms.
+      STILL BROKEN, and this is what position resolution is actually for: at_airfield records
+      where you SPAWNED. Take off from field A, land at field B, and you are supplied from
+      field A's stock.
+
+      TEST: fly, land, stop. Expect the two "Insufficient..." lines to DISAPPEAR, new EVENT text
+      carrying actual quantities, and a visible repair/rearm rather than fuel only.
+      REVERT: SUPPLY_GRANT_FLAGS back to 0x08.
+
+==============================================================================
+
+v346: [RESUPPLY] auto msg-60 rearms were being granted to AIRBORNE aircraft. New ground gate.
+
+      SYMPTOM: pilot reports an in-flight repair while in combat at altitude.
+
+      ROOT CAUSE - two faults compounding:
+        (a) at_airfield is set at spawn and cleared ONLY on the engine-ON transition. In an
+            AIR-START arena that transition NEVER OCCURS - the pilot spawns with the engine
+            already running - so at_airfield stays set for the entire sortie. Confirmed on the
+            wire: the only 0x53 messages before those grants carry ...5300 (engine OFF); the
+            ...5301 for _AvA_Insane lands at 02:31:22, FIVE MINUTES AFTER his three grants.
+        (b) Gates (1)-(4) only prove the position REPEATED, which is also precisely what a
+            frozen conductor tick produces - and tick freezes are endemic (6 of 12 pilots).
+      Together: stalled telemetry in an air-start room reads as "stationary at an airfield".
+      7 grants to airborne aircraft in run_20260726_022244_1_, every one at AF=0, altitudes
+      2112-3084, positions scattered across the whole map. Firing a msg-60 in flight is exactly
+      what v277 exists to prevent - it rebuilds the plane object and can FREEZE the client.
+      NOTE this makes the endemic tick-freeze a CAUSE of a second bug, not just a symptom.
+
+      FIX: new gate (4b) - refuse the auto-grant when plane_movement(s) >= CRASH_MOVEMENT_MIN,
+      the same predicate plane_was_flying()/the DEATH classifier already rely on. No new
+      threshold was invented and no scene data is needed.
+
+      CALIBRATION (this is why a ground-start sample was requested before writing anything):
+        run_20260726_122104, ground start, room 49, AF=2, engine OFF throughout - TWO CORRECT
+        grants at pos=(4624,21449,3908) and (4184,18889,3902), and the exit logged
+        "exited UNDAMAGED and PARKED (movement=0)".
+        Airborne removals log movement=242665..301359.
+        So 0 vs ~250k - the existing threshold separates them cleanly.
+
+      REJECTED DESIGN - do not retry it: "clear at_airfield once the plane moves away from its
+      spawn position". The legitimate ground session TAXIED 2560 units in Y between its two
+      valid grants, so a moved-from-spawn rule would have broken the working case. This was
+      caught only because a real ground-start log was obtained first.
+
+      NOT DONE: v339's position-based field resolution from fa_scenes.json is still the eventual
+      answer for detecting a LANDING (so a pilot who takes off and returns can resupply again).
+      This version stops the harm; it does not restore that capability.
+
+==============================================================================
+
 v345: [SCORING] deliberate crashes were not counted as deaths. The MEC nibble table had the
       crash and the menu-exit the wrong way round.
 

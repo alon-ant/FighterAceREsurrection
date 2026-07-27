@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v345
+Fighter Ace LAN Server v348
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v345'
+VERSION = 'v348'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7297,6 +7297,58 @@ def broadcast_player_join(pilot_name, exclude_sess=None):
         threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- UI ADD [{pilot_name}]', to=3.0),
                          daemon=True).start()
 
+def teardown_ingame_presence(s, why='(disconnected)'):
+    """v348: send the SAME in-game teardown the msg-64 back-to-lobby path sends, from any
+    session-end path. See the block in the msg-64 handler for the v182/v191 reasoning.
+
+    THE BUG THIS FIXES: a session that ends WITHOUT msg 64 (client crash, socket reset,
+    reap-on-reconnect, timeout) told peers nothing. The lobby UI list was updated via
+    broadcast_player_leave(), the ClientNumber/PlayerIndex went straight back into the pool
+    via free_client_number(), and the next joiner was handed that recycled slot - while every
+    peer still had the DEPARTED pilot's name bound to it and their ghost plane object still
+    in the world. From then on the newcomer's hits, collisions and chat were attributed to
+    whoever used to hold the slot.
+
+    OBSERVED (run_20260726_090535_1_, room 53):
+        17:57:58  Moira@HQ  -> ClientNumber=0 PlayerIndex=0
+        18:00:30  Moira@HQ  spawns ONumber=0x0100, peers told
+        18:01:0x  Moira's session ends - NO LEAVE, NO REAP, NO DELETE3, NO msg-63 REMOVE
+        18:01:28  Taurus sends a delete for 0x0100 (Moira's ghost) -> server no longer knows
+                  that object at all -> "neither its own nor any peer's" -> swallowed
+        18:01:30  Cheech    -> ClientNumber=0 PlayerIndex=0   <- Moira's recycled slot
+        18:04:5x  Cheech (obj 0x0113) damages and collides with Taurus...
+                  ...and Taurus's client reports it as Moira@HQ.
+    That is exactly the reported symptom, and the client-side corroboration is the
+    "Add existing REMOTE_PLAYER" and "AceOrRankChangedCB. PlayerIndex=N not found" lines.
+
+    Same root cause explains the wider family: ghost planes that never disappear, hits that
+    do not register (routed at a stale object), and the PlayerIndex-not-found floods.
+    """
+    try:
+        if not getattr(s, 'entered_game', False) or getattr(s, 'current_room', None) is None:
+            return False
+        rem_pkt = build_change_player_63([(s.player_index, s.nation, CP_OP_REMOVE)])
+        rem_label = f'<- ChangePlayer 63 REMOVE ({s.current_pilot})'
+        if s.my_obj_number is not None:
+            # v191 ordering: the NetPlane holds a pointer to the REMOTE_PLAYER, so the type-3
+            # DELETE must reach a peer BEFORE the msg-63 REMOVE or a flying peer
+            # use-after-frees the dangling plane. broadcast_object_delete_3 sends both on one
+            # thread with the DELETE first.
+            broadcast_object_delete_3(s, reason=why, followup_pkt=rem_pkt,
+                                      followup_label=rem_label)
+        else:
+            for _p in [t for t in get_sessions_in_room(s.current_room) if t is not s]:
+                threading.Thread(target=lambda _x=_p: send_rel(_x, rem_pkt, rem_label, to=3.0),
+                                 daemon=True).start()
+        log('TEARDOWN', f'{s.current_pilot} PI={s.player_index} St={s.client_number} '
+                        f'obj={"0x%04x" % s.my_obj_number if s.my_obj_number is not None else "none"} '
+                        f'-> peers in room {s.current_room} told to drop plane+player {why}')
+        return True
+    except Exception as _e:
+        log('TEARDOWN', f'[warn] in-game teardown failed for '
+                        f'{getattr(s, "current_pilot", "?")}: {_e}')
+        return False
+
 def broadcast_player_leave(pilot_name, exclude_sess=None):
     pkt = build_ui_player_update(pilot_name, is_join=False)
     for sess in get_all_sessions():
@@ -7348,6 +7400,11 @@ def _reap_stale_sessions(acct, new_sess):
         x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
         try:
             if x.current_pilot:
+                # v348: tell IN-GAME peers to drop this pilot's plane AND player slot before
+                # the ClientNumber/PlayerIndex goes back in the pool below. Without this the
+                # next joiner inherits the slot while peers still map it to the departed
+                # pilot - see teardown_ingame_presence for the full case.
+                teardown_ingame_presence(x, why='(session ended)')
                 broadcast_player_leave(x.current_pilot, exclude_sess=x)
                 broadcast_system(f'[{x.current_pilot}] has left')
                 db_room_leave(x.current_pilot)
@@ -8725,7 +8782,7 @@ SUPPLY_WATCH_SUBS = None       # None = log everything (in-arena); or a set to f
 # v267 P2a: auto-resupply. When the player parks at an airfield and shuts the engine off, the server
 # sends the proven msg-60 supply grant (full repair + rearm). BLIND for all arenas for now - the TC
 # per-airfield supply gate is P2b.
-AUTO_RESUPPLY = True
+AUTO_RESUPPLY = False
 AUTO_RESUPPLY_DEBOUNCE = 5.0   # seconds; fire at most once per this window per player
 AUTO_RESUPPLY_SETTLE = 2.0     # seconds stationary (ground speed 0) before the resupply fires
 AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval for the stationary check
@@ -8795,7 +8852,28 @@ SUPPLY_DESTROY_LOSES_STORES = True
 # the client itself reports "insufficient aircraft units at the airfield, taking from tank
 # production to supply" and falls back to unit production. That is the behaviour 0x08 gives, and it
 # is what the original game did.
-SUPPLY_GRANT_FLAGS  = 0x08     # incremental top-up + client-side base-supply accounting
+# v347: BIT TABLE DECODED FROM THE CLIENT'S OWN msg-60 HANDLER (FA.exe 0x005581c0).
+# The message is 8 bytes - [id][..][..][flags @+3][amount u16 @+4][amount2 u16 @+6] - which is
+# exactly the `in 60'8` seen on the wire. Handler control flow:
+#   bit0 0x01 -> the branch that formats the amounts into messages 0x9f/0xa1, then calls
+#                FUN_004ebf00(amount) / FUN_004ec5c0(amount2), FUN_004ebd10(), and sets
+#                plane+0x1b4c = 1. THAT +0x1b4c WRITE AND FUN_004ebd10 APPEAR NOWHERE ELSE IN
+#                THE HANDLER - they are UNREACHABLE with bit0 clear. Prime suspect for why
+#                fuel arrives but repair/rearm never does.
+#   bit1 0x02 -> ignore amount,  set fuel to max (plane+0x4e8)
+#   bit2 0x04 -> ignore amount2, set ammo to max (plane+0x500)
+#   bit3 0x08 -> at LAB_005584e5, emit messages 0xe5 and 0xe6. DISPLAY ONLY: no state change
+#                and no economy test anywhere near it.
+#   bit4 0x10 -> suppress the fuel message;  bit5 0x20 -> suppress the ammo message
+# The old comment here was wrong in BOTH directions: 0x08 is not "incremental" (bit0 is), and
+# it does not enable "client-side base-supply accounting" - it only prints two lines. The
+# "Insufficient aircraft units at this base..." text we had been reading as the field economy
+# reporting a shortage was OUR OWN BIT 3 echoing back, on every grant, regardless of stock.
+# v285 recorded 0x08 as incremental and it went unchallenged for ~60 versions - the same
+# failure as DEATH_MEC_NIBBLES in v345. Check labels against the binary, not against intent.
+# TO REVERT: set this back to 0x08. Success looks like the two "Insufficient..." EVENT lines
+# disappearing, new EVENT text carrying actual quantities, and a visible repair/rearm.
+SUPPLY_GRANT_FLAGS  = 0x01     # bit0 - the only branch that reaches the repair/rearm calls
 SUPPLY_GRANT_FLAGS_ABS = 0x01  # (kept for probing: absolute SET of both, kg)
 # Per-grant increment offered to the aircraft, in kg. The client tops up only what the plane is
 # actually short of and clamps at its own capacity, so this is a CEILING per resupply, not a cost.
@@ -9424,6 +9502,37 @@ def _resupply_poll_loop():
                 # (4) settled long enough?
                 static_for = now - getattr(s, 'pos_static_since', now)
                 if static_for < AUTO_RESUPPLY_SETTLE:
+                    continue
+                # (4b) v346: IS THE PLANE ACTUALLY ON THE GROUND?
+                # Gates (1)-(4) only prove the position REPEATED - which is also exactly what a
+                # FROZEN CONDUCTOR TICK produces, and tick freezes are endemic (6 of 12 pilots in
+                # run_20260726_022244_1_). So a stalled telemetry stream reads as "parked".
+                # at_airfield does not save us: it is set at spawn and cleared ONLY on the
+                # engine-ON transition, which NEVER HAPPENS in an air-start arena because the
+                # pilot spawns with the engine already running. Confirmed on the wire - the only
+                # 0x53 messages before those grants carry ...5300 (engine OFF); the ...5301 for
+                # _AvA_Insane arrives at 02:31:22, five minutes AFTER his three grants. So
+                # at_airfield stays set for the entire sortie in every air-start room.
+                # RESULT BEFORE THIS GATE: 7 auto msg-60 grants to AIRBORNE aircraft, every one
+                # at AF=0, altitudes 2112-3084, positions scattered across the whole map. A msg-60
+                # rearm in flight is precisely what v277 exists to prevent - it rebuilds the plane
+                # object and can FREEZE the client.
+                # Reuse the predicate the DEATH classifier already depends on rather than invent a
+                # threshold. Calibrated against real logs: movement=0 for the legitimate ground
+                # resupply in run_20260726_122104 (parked, engine off, two correct grants) versus
+                # 242665-301359 for the airborne removals. Do NOT swap this for a position-delta
+                # test: that ground session TAXIED 2560 units between its two valid grants, so a
+                # "moved from spawn" rule would break the working case.
+                try:
+                    _pm = plane_movement(s)
+                except Exception:
+                    _pm = 0
+                if _pm >= CRASH_MOVEMENT_MIN:
+                    if not getattr(s, '_resup_air_logged', False):
+                        s._resup_air_logged = True
+                        log('RESUPPLY', f'{s.current_pilot} reads static at AF={s.at_airfield} but '
+                                        f'plane_movement={_pm} >= {CRASH_MOVEMENT_MIN} -> AIRBORNE, '
+                                        f'no auto-grant (logged once per session)')
                     continue
                 # (5) ONE-SHOT: v276 re-fired every DEBOUNCE seconds for as long as the plane sat
                 #     parked (168 grants in one remote session). Fire once per stop; the plane must
