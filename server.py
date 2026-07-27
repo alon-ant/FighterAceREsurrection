@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v349
+Fighter Ace LAN Server v350
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v349'
+VERSION = 'v350'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6690,6 +6690,11 @@ STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (t
 SP_REGRANT_ON_DEATH = True   # flip False to disable instantly if it ever double-spawns
 SP_REGRANT_WINDOW_S = 2.0    # only re-issue a grant this recent; older ones are unrelated
 
+# v350: sizes of a msg-7 appspace we have observed being handled safely by the client.
+# 84 = bc5/T=0x42, 86 = bc5/T=0x62, 88 = bc5/T=0x82. Anything else gets logged once by
+# relay_telemetry so the 165B frame that keeps killing peers can finally be identified.
+TELEM_NORMAL_SIZES = {84, 86, 88}
+
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
     pl = data[8:]
@@ -6736,6 +6741,28 @@ def relay_telemetry(src, data):
     if _telem is None:
         return                          # not a flying-state object update (e.g. pre-spawn 00c2)
     pl = _telem
+    # v350: INSTRUMENTATION - find where the 165-byte msg 7 actually comes from.
+    # Every CTD in this family ends with `in 7'165` then
+    #     bounds error class ARR<class NET::OBJECT *,2048>[<garbage>] 0..2047
+    # (2144, 2468, 53808 so far). Normal msg 7 is 84B (T=0x42) or 86B (T=0x62). It has been
+    # blamed on the relay over-read (v341) and on an orphaned bail-out object (v349); BOTH were
+    # wrong - v341's TELEM-GUARD has fired zero times since, and in run_20260727_130625 the
+    # v349 despawn went out 0.9s BEFORE the crash in the correct order and the peer still died.
+    # So: log the exact frame whenever the relayed appspace is not a size we have ever seen be
+    # safe, with the sender, the object number and the head bytes. Once per (pilot,size) per
+    # session - telemetry runs ~13/s and this must never flood.
+    _osz = len(pl)
+    if _osz not in TELEM_NORMAL_SIZES:
+        _seen = getattr(src, '_telem_odd_sizes', None)
+        if _seen is None:
+            _seen = set(); src._telem_odd_sizes = _seen
+        if _osz not in _seen:
+            _seen.add(_osz)
+            _onum = int.from_bytes(pl[7:9], 'little') if len(pl) >= 9 else -1
+            log('TELEM-SIZE', f'{src.current_pilot} relaying a {_osz}B msg-7 appspace '
+                             f'(normal {sorted(TELEM_NORMAL_SIZES)}) bc={pl[0]} T=0x{pl[1]:02x} '
+                             f'tick={int.from_bytes(pl[5:7], "little")} obj=0x{_onum:04x} '
+                             f'head={hx(bytes(pl[:24]))} - once per size per session')
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
