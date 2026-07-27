@@ -7,6 +7,65 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v351: [WIRE/CRITICAL] FOUND IT. A multi-record telemetry frame relayed verbatim CTDs every
+      recipient. This is the `in 7'165` that has been killing arenas since 26 July.
+
+      v350's instrumentation caught it on the very first run:
+        13:23:44.816 TELEM-SIZE Fantum  97B bc=5  T=0xd2 opcode 0x08 obj=0x0100
+        13:25:29.294 TELEM-SIZE Fantum 169B bc=10 T=0x52 opcode 0x07 obj=0x0104
+        13:25:33.352 TELEM-SIZE Fantum 178B bc=10 T=0xe2 opcode 0x08 obj=0x0104
+      bc=10, T=0x52 -> 160 + 5 = 165-byte appspace = the `in 7'165` seen in every crash log.
+      That is almost exactly TWO 84-byte records batched into one msg 7.
+
+      PROOF, from the same run:
+        13:25:29.294  server relays the 169B frame
+        13:25:29.517  AC2E_Bigalon CTD  ARR<NET::OBJECT*,2048>[49382]  (saw 2x `in 7'165`)
+        13:25:30.014  Moira@HQ     CTD  ARR<NET::OBJECT*,2048>[49382]  (saw 2x `in 7'165`)
+      SAME garbage index on both peers, 720ms apart, from one relayed frame. Fantum - the
+      SENDER - received ZERO `in 7'` frames and did not crash, because a client never gets its
+      own telemetry back. That is why the originator always survived and the bug kept looking
+      like it belonged to whoever was watching.
+      Indices seen from this defect across the week: 2144, 2468, 53808, 49382.
+
+      MECHANISM: the receiving client's msg-7 handler walks ONE record. It reads the first,
+      then treats the trailing record as an object index and indexes the 2048-slot
+      NET::OBJECT ring with it.
+
+      FIX: TELEM_MAX_BC = 5. Refuse to relay any telemetry frame with bc > 5. Every safe frame
+      ever observed is bc=5 (one record). Logged once per session under [TELEM-GUARD].
+      DROP rather than truncate: the record boundary inside the batch is not established, and
+      guessing one reproduces the same crash. A dropped tick is invisible - telemetry runs at
+      ~13/s and the next normal frame re-syncs the peer.
+
+      WHY THE TWO EARLIER ATTEMPTS MISSED IT - read this before touching either:
+        * v341 (relay over-read) truncates to the length the frame's own header declares. This
+          frame is SELF-CONSISTENT: bc=10 genuinely describes 165 bytes, so the guard passed it
+          and TELEM-GUARD correctly stayed silent. It is not a buffer over-read.
+        * v349 (orphaned bail-out plane) was a real bug and is still fixed, but it was not this
+          one: in run_20260727_130625 the despawn went out 0.9s before the crash in the correct
+          order (DELETE 0x0101 -> CONFIRM5 -> CREATE2 0x0104) and the peer still died.
+      Both were diagnosed from correlation without a controlling case. What finally worked was
+      logging the offending frame itself - one instrumentation pass, answer on the first run.
+
+      ALSO LEARNED: TELEM_OPCODES covers 0x07 AND 0x08 (byte[4] of the appspace). The 97B and
+      178B frames above are opcode 0x08. Both are relayed by this path.
+
+      OPEN: why Fantum's client batches two records at all - it may be a catch-up burst after
+      the STALE-TICK freeze that precedes several of these. If it turns out peers CAN handle a
+      batch when every referenced object is known to them, the better fix is to split the frame
+      into single records and relay each - but establish the record boundary from FA.exe first,
+      do not infer it from lengths.
+
+==============================================================================
+
+v350: [DIAGNOSTIC] log any relayed msg-7 appspace whose size is not in {84, 86, 88}, once per
+      (pilot, size) per session, with bc, T, tick, object number and the first 24 bytes.
+      Added after two wrong diagnoses of the same CTD signature (see v351). No behaviour
+      change. It identified the cause on its first live run - when a signature has survived two
+      fixes, instrument it rather than proposing a third mechanism.
+
+==============================================================================
+
 v349: [OBJECTS/CRITICAL] a bail-out plane that was never despawned killed every peer in the
       arena. THIS is the object overwrite - a new NetPlane taking a client station that an
       orphaned object still occupied.

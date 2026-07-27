@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v350
+Fighter Ace LAN Server v351
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v350'
+VERSION = 'v351'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6695,6 +6695,14 @@ SP_REGRANT_WINDOW_S = 2.0    # only re-issue a grant this recent; older ones are
 # relay_telemetry so the 165B frame that keeps killing peers can finally be identified.
 TELEM_NORMAL_SIZES = {84, 86, 88}
 
+# v351: MAXIMUM BLOCK COUNT WE WILL RELAY. bc is the 16-byte block count of the appspace;
+# every safe telemetry frame ever observed carries bc=5 (one object record). A frame with
+# bc=10 is TWO records batched into one msg 7, and the receiving client cannot walk it - it
+# reads the first record, treats the trailing record as an object index, and dies. Dropping a
+# telemetry tick is invisible at ~13/s; relaying one of these is a guaranteed CTD for EVERY
+# recipient. See the block in relay_telemetry for the evidence.
+TELEM_MAX_BC = 5
+
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
     pl = data[8:]
@@ -6763,6 +6771,35 @@ def relay_telemetry(src, data):
                              f'(normal {sorted(TELEM_NORMAL_SIZES)}) bc={pl[0]} T=0x{pl[1]:02x} '
                              f'tick={int.from_bytes(pl[5:7], "little")} obj=0x{_onum:04x} '
                              f'head={hx(bytes(pl[:24]))} - once per size per session')
+    # v351: DO NOT RELAY A MULTI-RECORD TELEMETRY FRAME. THIS IS THE CTD.
+    # v350's instrumentation caught it on the first run. Fantum's client emitted
+    #     bc=10 T=0x52 -> 160 + 5 = 165-byte appspace, opcode 0x07, obj=0x0104
+    # which is almost exactly TWO 84-byte records in one msg 7. We relayed it verbatim and
+    # BOTH recipients died on the SAME garbage index within 720ms of each other:
+    #     13:25:29.294  TELEM-SIZE Fantum relaying a 169B msg-7 appspace (bc=10 T=0x52)
+    #     13:25:29.517  AC2E_Bigalon  ARR<NET::OBJECT*,2048>[49382]  (saw 2x `in 7'165`)
+    #     13:25:30.014  Moira@HQ      ARR<NET::OBJECT*,2048>[49382]  (saw 2x `in 7'165`)
+    #     Fantum himself received ZERO `in 7'` frames and did not crash - the sender never
+    #     gets its own telemetry back, which is why the originator always survives and the
+    #     bug looks like it belongs to whoever is watching.
+    # The receiving client's msg-7 handler walks ONE record: it reads the first, then treats
+    # the trailing record as an object index and indexes the 2048-slot NET::OBJECT ring with
+    # it. Earlier indices from the same defect: 2144, 2468, 53808, 49382.
+    # WHY v341 DID NOT CATCH IT: v341 truncates to the length the frame's own header declares,
+    # and this frame is self-consistent - bc=10 really does describe 165 bytes. It is not a
+    # buffer over-read; it is a legitimately-framed batch the peer cannot parse. TELEM-GUARD
+    # correctly stayed silent throughout. Do not touch that guard on this signature.
+    # DROP, do not truncate: a record boundary inside the batch is not yet established, and
+    # guessing one produces the same crash. A dropped tick is invisible - telemetry runs at
+    # ~13/s and the next normal frame re-syncs the peer.
+    if pl[0] > TELEM_MAX_BC:
+        if not getattr(src, '_telem_bc_logged', False):
+            src._telem_bc_logged = True
+            log('TELEM-GUARD', f'{src.current_pilot} sent a MULTI-RECORD telemetry frame '
+                               f'(bc={pl[0]} > {TELEM_MAX_BC}, {len(pl)}B appspace) -> NOT '
+                               f'relayed. Relaying these CTDs every recipient '
+                               f'(logged once per session)')
+        return
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
