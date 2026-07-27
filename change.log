@@ -7,6 +7,51 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v352: [DIAGNOSTIC] log every distinct DAMAGE28 relay frame size once per (pilot, size) per
+      session, with bc, T, the length its own header implies, a MATCH/MISMATCH verdict, and the
+      first 24 bytes. No behaviour change.
+
+      WHY: on 2026-07-27 at 14:13 all four in-arena clients CTD'd within ~2.3s and the ONLY
+      traffic present was this relay - Gary hitting AC2E_Bigalon's obj 0x0110:
+        14:13:25.430 relay 46B | 25.948 100B | 29.076 19B | 29.609 68B | 30.110 19B
+        14:13:28.561 AC2E_Bigalon CTD | 14:13:30.043 Moira@HQ CTD | 14:13:30.320 Warrior CTD
+
+      TWO EXITS, ONE ROOT. `Length=-19` at Engine\Net\Network.cpp:249 is a record walk running
+      its remaining-length counter negative. The screenshot of the same crash shows
+      `Access violation at net, address:0x7410A8, v.addr:0xDEB800EB` at FA30\Main.cpp:2407 -
+      0xDEB800EB is not an offset off a valid base, it is a wild pointer read straight out of a
+      mis-walked buffer. Whichever check the corrupted data reaches first is the one that fires,
+      which is why the module varies ("at net" vs "at game").
+
+      NOT THE v351 TELEMETRY BUG: every crashed client saw ONLY `in 7'84`, zero 165s, and the
+      assert is Network.cpp:249 - not the msg-7 walk at line 167. v351 is holding.
+
+      CORRECTION TO AN EARLIER READ - IMPORTANT. "The sender never crashes" was diagnostic for
+      msg 7 (a client never receives its own relay) and it is what made Gary look immune here.
+      He was not: Gary took the SAME Main.cpp:2407 access violation four minutes later, at
+      14:17:23, differing only in module ("at game, address:0x7E2928"). Do not use
+      sender-immunity as evidence for this bug.
+
+      SUSPECT, EXPLICITLY UNPROVEN: at 14:13:24.926 Gary sent this message PREFIXED (inner
+      sub=0x1c bc=2 len=50). v327 normalises the sub to 0x00 but deliberately leaves the bytes
+      untouched, so if the 4-byte prefix is still attached when we relay `stored` verbatim,
+      peers walk a frame 4 bytes longer than its header claims. The observed overrun is 19, not
+      4 - so this is a lead, not a conclusion, and that gap is exactly why this version logs
+      rather than patching. Precedent: v350 did the same for msg 7 and identified the culprit
+      on its first live run, after two confident wrong diagnoses (v341, v349) had already been
+      shipped against that signature.
+
+      WHAT THE NEXT LOG DECIDES: if the header-implies figure MISMATCHes the actual size, the
+      frame is malformed on our side and the fix is a length/prefix correction. If it MATCHes,
+      the frame is self-consistent and this is the same record-walk desync as the msg-7 batch
+      case - see the TODO entry on splitting multi-record frames, and expect the fix to be a bc
+      ceiling like TELEM_MAX_BC rather than a length repair.
+
+      ALSO CONFIRMED FROM THE SCREENSHOT: the HUD reads Kills 1 / Lost Planes 2 / Lost Pilots 2,
+      so v345's death classification and the career push are both working in the live client.
+
+==============================================================================
+
 v351: [WIRE/CRITICAL] FOUND IT. A multi-record telemetry frame relayed verbatim CTDs every
       recipient. This is the `in 7'165` that has been killing arenas since 26 July.
 

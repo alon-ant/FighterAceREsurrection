@@ -1,12 +1,71 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v351
+Fighter Ace LAN Server v352
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
 why a particular line exists and are load-bearing at the point of use.
 
 TODO list:
+  [ ] AUTH ACK TAKES A FIXED ~15.4s AND THE CLIENT GIVES UP AT ~14s - v351, intermittent
+      "stuck at 82%" on join. Across 86 auths in server_8_.log virtually every one lands in a
+      15.29-15.67s band; the outliers are WORSE (T+19.189, T+20.285), never better. That tight
+      a spread is a constant in our auth path - a sleep, a socket timeout or a retry backoff -
+      not network jitter or computation.
+      OBSERVED FAILURE (Moira@HQ, messages43 + server_8_):
+        14:08:07.800 SYN Moira -> Identified
+        14:08:07.815 REAP reaped stale session (reconnect) - ghost cleared
+        14:08:07.817 SYN Ready: sid=10, active_sessions=4
+        ...          NO "== v197 AUTH ==" EVER FOLLOWS
+        14:08:21.732 client: "ERROR: vcncConnect fails"   <- ~14s after the SYN
+      Her immediate retry worked: sid=11 at 14:09:15.669, Auth ACKed T+15.410s, PILOTS OK.
+      So every successful login is winning a race by a margin that does not exist - we answer
+      ~1.4s AFTER the client's connect timeout, and the ones that succeed are presumably where
+      the client's timer starts slightly later than our T+0.
+      Loading sticks at 82% because the plane preload is the last thing before the connect;
+      the bar is not stuck on assets, the network layer never came up.
+      SYMPTOM SIGNATURE: client ends with `vcncConnect fails` then `User has cancelled (-1)`
+      (the second line is the player force-quitting, NOT a cause). Server shows SYN + Ready
+      with NO matching "== v197 AUTH ==" line for that sid.
+      TO FIX: find what T+0 is measured from at the "== v197 AUTH ==" / "Auth ACKed T+%s" pair
+      and remove the delay - it is the largest latency anywhere in the login path and buys
+      nothing. Also confirm the client's real connect timeout from FA.exe rather than inferring
+      14s from the single Moira sample.
+      NOT AN OBJECT/OVERWRITE BUG - do not go looking in the teardown or telemetry paths.
+
+  [ ] CREDIT THE HELD KILL WHEN A BAILED-OUT PLANE DESPAWNS - v349 left this open by design.
+      Bailing keeps the empty plane flying so the held kill can be credited when it comes down;
+      v349 despawns that plane if the pilot re-spawns first (it was CTDing every peer), which
+      means the kill can no longer be credited because nothing is left to come down.
+      AGREED BEHAVIOUR: credit the held kill on re-spawn AND on exit-to-menu.
+      The mechanism already exists - PENDING_KILL[victim_obj] = {'killer':.., 'why':.., 'at':..}
+      and score_on_death() pops and credits it. Call it at the v349 despawn site with
+      victim_obj=<abandoned plane>, plus the same at the menu-exit path.
+      BLOCKED ON: score_on_death(victim, death_payload, hunter_obj, victim_obj) - at a despawn
+      there is no client delete-notify to pass as death_payload, and it is not established
+      whether that parameter is dereferenced. This path writes lostpilots/fscore/rank into the
+      career DB PERMANENTLY with no rollback, so read the function body (~6318-6520) before
+      calling it. Do not guess the interface: an earlier attempt at this fix passed a
+      non-existent parameter to broadcast_object_delete_3 and would have thrown on every spawn.
+      NOTE bailing does NOT increment lostpilots (verified: Taurus stayed at 24 through his
+      bail), so crediting at re-spawn is moving the settlement point, not double-counting.
+
+  [ ] SPLIT MULTI-RECORD TELEMETRY INSTEAD OF DROPPING IT - v351 refinement, not urgent.
+      v351 refuses to relay any msg-7 frame with bc > 5 because a batched frame CTDs every
+      recipient. That is correct and confirmed working, but it discards legitimate position
+      updates - the sender's plane stutters for peers until the next single-record frame.
+      FA.exe's msg-7 handler (FUN_007e3a70) is a LOOP, so batches are legal by design:
+          record = [tick u16][ONumber u16][body], advance by 4 + *(int*)(obj->type + 4)
+      The body length is looked up from the RECEIVER's own object table, so the walk desyncs
+      when the receiver's plane type for an object differs from the sender's - which is why it
+      strikes right after a respawn reuses an object number with a different plane.
+      The fatal path is ONLY ONumber >= 2048 (ring.hpp:27 assert); a MISSING object is handled
+      gracefully ("Get coord for missing object %i" then the walk stops).
+      TO DO IT PROPERLY: establish the record boundary from FA.exe - specifically whether
+      obj->type+4 (the body size) varies by PLANE TYPE or only by object CLASS. If only by
+      class, the desync window is far narrower than assumed and splitting is straightforward.
+      Do NOT infer the boundary from observed lengths; guessing it reproduces the same crash.
+
   [ ] EXPOSE THE ARENA "SCORING ENABLED" CHECKBOX IN THE WEB EDITOR - v325, operational trap.
       The blank kills/deaths/planes-lost columns turned out to be this setting being unticked,
       not a missing message (see the corrected v226/v221 notes). It lives in the GAME_DEF
@@ -164,7 +223,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v351'
+VERSION = 'v352'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10169,6 +10228,44 @@ def handle_post_auth(s, cmd, pl):
                 threading.Thread(target=lambda _p=p: send_rel(_p, stored,
                                  f'<- DAMAGE 28 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
                                  daemon=True).start()
+            # v352: INSTRUMENTATION - identify the frame behind the Network.cpp:249 /
+            # Main.cpp:2407 CTD family. NO behaviour change; this only logs.
+            # On 2026-07-27 14:13 all four in-arena clients went down within ~2.3s while the
+            # ONLY traffic present was this relay (Gary hitting AC2E_Bigalon obj 0x0110):
+            #   14:13:25.430 relay 46B | 25.948 relay 100B | 29.076 19B | 29.609 68B | 30.110 19B
+            #   14:13:28.561 AC2E_Bigalon CTD   14:13:30.043 Moira@HQ CTD   14:13:30.320 Warrior CTD
+            # Two exits, same root: `Length=-19` at Engine\Net\Network.cpp:249 (a record walk
+            # running the remaining-length counter negative) and, from the screenshot,
+            # `Access violation at net, v.addr:0xDEB800EB` at FA30\Main.cpp:2407 - a wild
+            # pointer read straight out of a mis-walked buffer. Whichever check the corrupted
+            # data reaches first is the one that fires, which is why the module varies
+            # ("at net" vs "at game").
+            # NOT the v351 telemetry bug: every crashed client saw ONLY `in 7'84`, no 165s, and
+            # the assert is line 249, not the msg-7 walk at line 167.
+            # DO NOT rely on "the sender never crashes" here. That held for msg 7 (a client
+            # never receives its own relay) and it is what made Gary look immune, but Gary took
+            # the SAME Main.cpp:2407 crash four minutes later. Sender-immunity is not diagnostic
+            # for this one.
+            # SUSPECT, unproven: at 14:13:24.926 Gary sent this message PREFIXED
+            # (inner sub=0x1c bc=2 len=50). v327 normalises the sub to 0x00 but deliberately
+            # leaves the bytes untouched, so if the 4-byte prefix is still attached when we
+            # relay `stored` verbatim, peers walk a frame 4 bytes longer than its header claims.
+            # The observed overrun is 19, not 4, so that is a lead and not a conclusion -
+            # which is exactly why this version logs instead of guessing. The same approach on
+            # msg 7 (v350) identified the culprit on its first live run.
+            _dsz = len(stored)
+            _dseen = getattr(s, '_dmg28_sizes', None)
+            if _dseen is None:
+                _dseen = set(); s._dmg28_sizes = _dseen
+            if _dsz not in _dseen:
+                _dseen.add(_dsz)
+                _dbc = stored[0] if _dsz > 0 else -1
+                _dtb = stored[1] if _dsz > 1 else -1
+                _dneed = (4 + _dbc * 16 + (_dtb >> 4)) if _dsz > 1 else -1
+                log('DAMAGE28-SIZE', f'{s.current_pilot} relaying a {_dsz}B damage frame '
+                                    f'bc={_dbc} T=0x{_dtb:02x} header-implies={_dneed}B '
+                                    f'{"MATCH" if _dneed == _dsz else "*** MISMATCH ***"} '
+                                    f'head={hx(bytes(stored[:24]))} - once per size per session')
             log('DAMAGE28', f'{s.current_pilot} hit -> relay to {len(peers)} peer(s) '
                             f'in room {s.current_room} ({len(stored)}B)')
             return
