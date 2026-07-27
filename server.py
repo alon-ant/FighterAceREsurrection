@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v348
+Fighter Ace LAN Server v349
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -164,7 +164,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v348'
+VERSION = 'v349'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8501,6 +8501,53 @@ def _fire_server_confirm(s, via='', ident=None):
     s.last_pos = None; s.pos_static_since = None
     s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
     s.resupplied_this_stop = False
+    # v349: DESPAWN THE ABANDONED BAIL-OUT PLANE BEFORE THE NEW ONE REACHES PEERS.
+    # Bailing leaves the empty plane flying on purpose (the held kill is credited when it comes
+    # down). But if the pilot re-spawns first, peers end up with TWO live objects on the SAME
+    # client station (St): the new NetPlane overwrites the station binding while the old object
+    # stays in the 2048-slot NET::OBJECT ring with nothing pointing at it. The next update that
+    # references it walks off the end and the PEER dies with
+    #     bounds error  class ARR<class NET::OBJECT *,2048>[<garbage>] 0..2047
+    # MEASURED (server_4_ + messages54, room 53):
+    #   12:46:13.308 Fantum BAILED OUT -> parachuter 0x0105, plane 0x0104 keeps flying
+    #   12:46:33.501 parachuter 0x0105 landed -> deleted
+    #   ...            NO DELETE3 FOR 0x0104, EVER
+    #   12:46:57.728 Fantum re-spawns -> ServerConfirm Number=262 (0x0106)
+    #   12:46:58.275 CREATE2 Fantum St=1 ONumber=0x0106 -> AC2E_Bigalon
+    #   12:46:58.4   Bigalon: "Create NetPlane (Spit-Vb LF). St=1, ONumber=262", then
+    #                `in 7'165` -> ARR<NET::OBJECT*,2048>[2468] -> CTD
+    # Bigalon had already survived TWO earlier 165B frames and died on the first one to arrive
+    # after the duplicate station binding existed: the oversized frame is the trigger, the
+    # orphaned object is the cause. v341's TELEM-GUARD fired ZERO times in that run, so this is
+    # NOT the relay over-read v341 fixed - do not go looking there again.
+    # This runs at CONFIRM5, which is BEFORE the CREATE2 for the new plane, so peers get the
+    # DELETE first and the station is free when the new NetPlane lands.
+    # broadcast_object_delete_3 always addresses s.my_obj_number and that is already the NEW
+    # number by this point (set ~20 lines above), so the abandoned number is swapped in for the
+    # call and restored immediately. This is safe: the function builds the delete packet
+    # SYNCHRONOUSLY and the sender thread closes over the finished bytes (_del), so nothing
+    # reads s.my_obj_number after we put it back.
+    # KNOWN GAP, deliberate: the kill held against the abandoned plane can no longer be credited
+    # once it despawns, because nothing is left to come down. Accepted for now - a peer-wide CTD
+    # is worse than a lost credit. Revisit with the held-kill mechanism.
+    _bp = getattr(s, 'bailed_plane_obj', None)
+    if _bp is not None:
+        if _bp != number:
+            _saved_obj = s.my_obj_number
+            try:
+                s.my_obj_number = _bp
+                broadcast_object_delete_3(s, reason='(abandoned bail-out plane, re-spawn)',
+                                          clear_peer_created=False)
+                log('PARA', f'{s.current_pilot} re-spawned as 0x{number:04x} while the '
+                            f'bailed-out plane 0x{_bp:04x} was still live -> despawned it from '
+                            f'peers first (it had been flying empty for '
+                            f'{time.time() - getattr(s, "bailed_plane_at", time.time()):.1f}s)')
+            except Exception as _e:
+                log('PARA', f'[warn] could not despawn abandoned bail plane 0x{_bp:04x} '
+                            f'for {s.current_pilot}: {_e}')
+            finally:
+                s.my_obj_number = _saved_obj
+        s.bailed_plane_obj = None
     s.spawn_time = time.time()       # v279: starts the auto-resupply spawn grace window
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
@@ -10590,6 +10637,11 @@ def handle_post_auth(s, cmd, pl):
             # The parachuter gets its OWN slot.
             if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None:
                 s.para_obj_number = _pn
+                # v349: remember the plane the pilot just stepped out of. It deliberately keeps
+                # flying, but if they RE-SPAWN before it comes down it has to be despawned from
+                # peers first - see the cleanup at the CONFIRM5 spawn site.
+                s.bailed_plane_obj = s.my_obj_number
+                s.bailed_plane_at  = time.time()
                 s.para_body = bytes(pl[7:7 + PARACHUTER_HEADER_SIZE])
                 log('PARA', f'{s.current_pilot} BAILED OUT -> parachuter is object 0x{_pn:04x} '
                             f'(plane 0x{s.my_obj_number:04x} keeps flying). '
