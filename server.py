@@ -206,6 +206,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
 import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math, queue, subprocess
+import concurrent.futures   # v357f5: shared send-worker pool
 from datetime import datetime
 from collections import deque
 
@@ -223,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v356'
+VERSION = 'v362f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -321,6 +322,11 @@ def fa_timestamp():
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # v357f5 [PERF]: WAL journal. The mode is PERSISTENT in the DB file, so every later
+    # connection (all 38 per-call db_* opens, the web admin thread) inherits it - readers
+    # no longer block writers and commit fsync cost drops. Revert with journal_mode=DELETE.
+    try: conn.execute('PRAGMA journal_mode=WAL')
+    except sqlite3.Error: pass
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS accounts (
             account_name TEXT PRIMARY KEY,
@@ -3907,8 +3913,7 @@ def reflect_chat_20(s, channel, text, player_index=0):
     log('CHAT20', f'reflect ch={channel} {disp!r} from PI={s.player_index} '
                   f'-> {len(targets)} player(s) in room {room}')
     for sess in targets:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'<- chat-20 ch={channel} {disp!r}', to=3.0), daemon=True).start()
+        _submit_send(send_rel, sess, pkt, f'<- chat-20 ch={channel} {disp!r}', to=3.0)
 
 # v313: THE ARENA PILOTS ROSTER (the "Display Pilots" window).
 # PROVEN this session: msg 213's trailing strings ARE the arena pilot list. FUN_004ef6e0
@@ -4697,8 +4702,7 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
     _label = (f'<- AceOrRank 88 (PI={s.player_index} aces={aces} rank={rank})'
               f'{(" " + reason) if reason else ""}')
     for _t in _targets:
-        threading.Thread(target=lambda _x=_t: send_rel(_x, pkt, _label, to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, _t, pkt, _label, to=3.0)
     log('ACE88', f'AceOrRank -> {pilot} PI={s.player_index} aces={aces} rank={rank} '
                  f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room} '
                  f'{[t.current_pilot for t in _targets]}; the owner '
@@ -4751,9 +4755,9 @@ def broadcast_player_join_62(joiner, reason=''):
     pkt = build_msg13(build_add_player_62(rec))       # WRAP in msg-13 batch (was sent raw -> bc=62)
     n = 0
     for sess in peers:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'<- AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
-                         to=3.0), daemon=True).start()
+        _submit_send(send_rel, sess, pkt,
+                     f'<- AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
+                     to=3.0)
         n += 1
     log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}')
     # v355: peers now hold this player at their PlayerIndex. A later re-join MUST retract that
@@ -4796,9 +4800,9 @@ def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
         recipients.append(s)
     n = 0
     for sess in recipients:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'<- ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
-                         f'{(" " + reason) if reason else ""}', to=3.0), daemon=True).start()
+        _submit_send(send_rel, sess, pkt,
+                     f'<- ChangePlayer 63 ({s.current_pilot} side={side} op={op})'
+                     f'{(" " + reason) if reason else ""}', to=3.0)
         n += 1
     log('PLAYER63', f'broadcast camp-change {s.current_pilot} side={side} op={op} -> '
                     f'{n} session(s) incl. self')
@@ -4918,10 +4922,8 @@ def broadcast_arena_count(room, counts=None, reason=''):
     if not targets:
         return 0
     for sess in targets:
-        threading.Thread(
-            target=lambda _s=sess: send_rel(_s, pkt,
-                f'<- 213 live count (room {room_id} n={total})', to=3.0),
-            daemon=True).start()
+        _submit_send(send_rel, sess, pkt,
+                     f'<- 213 live count (room {room_id} n={total})', to=3.0)
     log('ARENACNT', f'live push room={room_id} {room[1]!r} counts={counts} n={total} '
                     f'-> {len(targets)} lobby session(s) {reason}')
     return len(targets)
@@ -5096,7 +5098,15 @@ class S:
     def mke(self, seq):
         e=threading.Event()
         with self._lock: self._evts[seq]=e; return e
-    def rme(self, seq): self._lock.acquire(); self._evts.pop(seq,None); self._lock.release()
+    def rme(self, seq):
+        # v359f5: remember recently-completed seqs so a late or duplicate ACK (normal
+        # once the server retransmits) is classified as benign instead of a disconnect.
+        with self._lock:
+            self._evts.pop(seq, None)
+            r = getattr(self, '_done_ring', None)
+            if r is None:
+                r = self._done_ring = deque(maxlen=64)
+            r.append(seq & 0x1FF)
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
@@ -5117,6 +5127,72 @@ except (AttributeError, OSError, ValueError) as _e:
     log('INIT', f'SIO_UDP_CONNRESET not disabled ({_e!r}) - 10054s handled in recv loop instead')
 sock.bind((HOST,PORT)); sock.settimeout(0.5)
 sids={}; sadrs={}; sl=threading.Lock(); running=True
+
+# ---------------------------------------------------------------------------
+# v357f5 [PERF] SHARED SEND POOL + DELAYED-ACK SENDER.  (server-fable5.py branch)
+#
+# (1) _submit_send / _send_pool: the per-recipient broadcast pattern spawned one OS
+#     thread per recipient per message (v328 measured ~200 threads and ~23ms per chat
+#     line at 200 players, and flagged it "wants a small worker pool ... left for its
+#     own pass" - this is that pass). Fan-out LOOP sites now submit to a fixed pool of
+#     SEND_POOL_WORKERS threads. Semantics are unchanged: each task still runs the same
+#     send_rel/send_reply call and blocks inside it awaiting the ACK, exactly as the
+#     old per-message thread did; the pool executes FIFO, so per-broadcast ordering is
+#     the submit order (the old scheme's thread scheduling gave no ordering at all).
+#     Single-recipient echo sites are DELIBERATELY untouched in this pass (1 thread per
+#     command, not O(N) - identical cost to v356, zero behavioural risk).
+#     SEND_POOL=False (or a pool failure) falls back to the old thread-per-message path.
+# (2) _ack_sender_loop: the reliable-RX path used to do `time.sleep(0.01)` INLINE ON
+#     THE ONE RX THREAD before every ACK - blocking telemetry relay, time pings and ACK
+#     processing for every player, 10ms per reliable message from any client (and
+#     DAMAGE28 rides the reliable channel, so this cost peaked mid-combat). The 10ms
+#     delay itself is PRESERVED - suspected client-side race: on LAN a sub-ms ACK can
+#     land before the client's send path finishes registering the packet in its
+#     reliable queue, so the ACK lookup would miss and the packet retransmits - but it
+#     is now served by this dedicated thread. The queue is FIFO and every entry carries
+#     the same delay, so ACKs leave in exactly the order (and at exactly the pace) the
+#     old inline code produced; only the RX thread no longer sleeps.
+#     ACK_ASYNC=False restores the v356 inline sleep verbatim.
+# FALSIFICATION (check FIRST, v353-style): if RELRX DUP counts rise, STALL-WATCH fires,
+# or spurious '[x] has left' broadcasts appear where v356 showed none, flip the flag(s)
+# back to False and compare before touching anything else.
+# ---------------------------------------------------------------------------
+SEND_POOL         = True
+SEND_POOL_WORKERS = 32
+_send_pool = concurrent.futures.ThreadPoolExecutor(
+    max_workers=SEND_POOL_WORKERS, thread_name_prefix='sendpool')
+
+def _submit_send(fn, *args, **kwargs):
+    """Run fn(*args, **kwargs) on the shared send pool; fall back to the legacy
+    one-thread-per-message pattern if the pool is disabled or unavailable."""
+    if SEND_POOL:
+        try:
+            _send_pool.submit(fn, *args, **kwargs)
+            return
+        except Exception:
+            pass                       # pool shut down/broken -> legacy path below
+    threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
+
+ACK_ASYNC   = True
+ACK_DELAY_S = 0.010                    # the historical 10ms pacing, preserved exactly
+_ack_q = queue.Queue()
+
+def _ack_sender_loop():
+    """Dedicated reliable-ACK sender. FIFO queue + a constant per-entry delay means
+    ACKs leave in submit order at the same 10ms pacing as the old inline sleep, without
+    ever blocking the RX thread. Runs as a daemon; exits when `running` drops."""
+    while running:
+        try:
+            due, pkt, addr = _ack_q.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        d = due - time.time()
+        if d > 0:
+            time.sleep(d)
+        try:
+            sock.sendto(pkt, addr)
+        except OSError:
+            pass
 
 # Globally-unique in-game object Number allocator. ServerConfirm (msg 5) stamps this
 # onto each spawning player's plane; the client echoes it back as the object id at
@@ -5197,18 +5273,40 @@ def send_unrel(s, payload, label=''):
     log('TX/UNREL', f'dseq={seq} type=0x{payload[1]:02x} {label}')
     return True
 
+REL_RETX_INTERVAL_S = 0.75   # v359f5: retransmit cadence inside the ACK wait window
+
 def send_rel(s, payload, label='', to=5.0):
+    # v359f5 [WIRE/CRITICAL]: RETRANSMISSION. The client's reliable RX is strictly
+    # in-order (vcnc 'QRcv :: Now expecting packet N'): ONE lost server->client
+    # reliable datagram wedged the whole downlink channel PERMANENTLY - the client
+    # discarded every later seq while waiting for the missing one. run_20260728_113009:
+    # creates ignored (one-way invisibility), msg-58 catalog ignored (EMPTY HQ plane
+    # menu), 208 ArenaList responses served and discarded over 200s. The same seq is
+    # now re-sent every REL_RETX_INTERVAL_S until ACKed or `to` expires; a late copy
+    # un-wedges the client's QRcv, which queues out-of-order arrivals and drains.
     seq=s.nrel(); e=s.mke(seq)
-    try: sock.sendto(build_rel(payload,seq),s.addr)
+    pkt=build_rel(payload,seq)
+    try: sock.sendto(pkt,s.addr)
     except OSError: s.rme(seq); return False
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
     _rec(s, 'S->C', 'RELTX',
          f'seq={seq} type=0x{payload[1]:02x} bc={bc} {label} pl={binascii.hexlify(bytes(payload[:24])).decode()}')
-    ok=e.wait(timeout=to); s.rme(seq)
-    log('TX/RELIABLE',f'seq={seq} {"ACKed OK" if ok else "TIMEOUT X"}')
+    deadline=time.time()+to; retx=0; ok=False
+    while True:
+        rem=deadline-time.time()
+        if rem<=0: break
+        ok=e.wait(timeout=min(REL_RETX_INTERVAL_S,rem))
+        if ok: break
+        if deadline-time.time()<=0: break
+        try: sock.sendto(pkt,s.addr)
+        except OSError: break
+        retx+=1
+        log('TX/RELIABLE', f'seq={seq} RETX#{retx} type=0x{payload[1]:02x} {label}')
+    s.rme(seq)
+    log('TX/RELIABLE',f'seq={seq} {"ACKed OK" if ok else "TIMEOUT X"}' + (f' after {retx} retx' if retx else ''))
     if not ok:
-        _rec(s, 'S->C', 'RELTX', f'seq={seq} TIMEOUT (no ACK in {to}s) type=0x{payload[1]:02x} {label}')
+        _rec(s, 'S->C', 'RELTX', f'seq={seq} TIMEOUT (no ACK in {to}s, {retx} retx) type=0x{payload[1]:02x} {label}')
     return ok
 
 def send_reply(s, payload, label='', to=5.0):
@@ -6106,16 +6204,29 @@ SEND_PARACHUTER     = True   # *** v253: BACK ON - and this time we KNOW what wa
                              #       class ARR<class NET::OBJECT *,2048>[20983] 0..2047
                              #   20983 is TICK-sized, not object-sized. We crashed it with our own
                              #   re-stamp, not with the parachuter record.
-PARA_SEND_CONFIRM   = False  # v253: OFF - this is the one that kills the client. Confirming the
-                             #   parachuter makes its owner transmit it, and that bigger telemetry
-                             #   form is what we then corrupt. v253 also stops re-stamping unknown
-                             #   forms (TELEM_RESTAMP_MAX_LEN), but I am NOT switching both back on at
-                             #   once - one variable at a time, given the record so far.
-                             #   Consequence: the canopy is CREATED and VISIBLE on peers, but does not
-                             #   move (its owner never transmits it). That is a real improvement over
-                             #   "invisible", and it cannot crash anyone.
-                             #   Turn this on ONLY after a clean run, to test whether the verbatim
-                             #   relay now carries the canopy safely.
+PARA_SEND_CONFIRM   = True   # v361f5: BACK ON - this was the missing half of the bail-out flow, and
+                             #   its absence is what FROZE THE CONDUCTOR after every bail (STALE-TICK
+                             #   fires at a constant +3.0-3.2s post-bail in runs 113009/120928/193858:
+                             #   the unconfirmed-own-object grace expiring). With no msg-5 confirm the
+                             #   client's sim loop stalls: the parachute descent crawls (35s -> 186s in
+                             #   run 193858), its reliable QSnd stops draining AND stops resending
+                             #   (vcnc: seq 54 'timeSinceLastSent 137888' vs ResendTime 5000, Q size
+                             #   26->48, then 'LOST CONECTION!! Resend time out' at quit), inbound
+                             #   dispatch dies (StartPlace grant + msg-58 catalog never processed ->
+                             #   'waiting for start position' timeout + EMPTY HQ MENU), and the exit
+                             #   handshake ends in conductor -102 errors.
+                             #   WHY THIS IS SAFE NOW (the v253 CTD cannot recur): the crash was never
+                             #   the confirm - it was our relay re-stamping byte 5 of the 118B canopy
+                             #   telemetry form the confirmed owner then transmits. Today that frame
+                             #   is DROPPED WHOLE by the v351 multi-record guard (TELEM_MAX_BC=5 caps
+                             #   relayed frames at 99B) BEFORE the re-stamp and BEFORE the tick
+                             #   harvest, so neither the peers nor our tick records can be poisoned.
+                             #   (TELEM_RESTAMP_MAX_LEN=100 is otherwise UNENFORCED - it is shadowed
+                             #   by the bc cap. Invariant to preserve: 4+16*TELEM_MAX_BC+15 <= 100.)
+                             #   Consequence unchanged from v253: the canopy is visible on peers but
+                             #   does not move (its telemetry is not relayed). Acceptable.
+                             #   REVERT PATH: if a bail still CTDs anyone, flip this False - single
+                             #   variable, exactly the v253 bisection discipline.
 PARA_SEND_CREATE    = True   # v253: ON - proven safe by Bigalon's own log (the object is built and
                              #   the ParaTrooper model loads).
 _SEND_PARACHUTER_TELEM_v254_DEAD = True # v256: DEAD - superseded by SEND_PARACHUTER_TELEM=False above.
@@ -6761,7 +6872,7 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
             send_rel(_s, _del, _dl, to=3.0)
             if _fu is not None:
                 send_rel(_s, _fu, _fl, to=3.0)
-        threading.Thread(target=_send, daemon=True).start()
+        _submit_send(_send)
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
                    f'-> peers in room {s.current_room} {reason}')
     # v343: re-issue a start-place grant that raced this death (see SP_REGRANT_ON_DEATH).
@@ -6930,11 +7041,24 @@ def relay_telemetry(src, data):
     # guessing one produces the same crash. A dropped tick is invisible - telemetry runs at
     # ~13/s and the next normal frame re-syncs the peer.
     if pl[0] > TELEM_MAX_BC:
+        # v362f5: HARVEST THE TICK BEFORE REJECTING THE FRAME. The multi-record form
+        # shares the standard header layout - tick at [5:7], ONumber at [7:9] - proven
+        # by the v350 TELEM-SIZE instrumentation itself, which parsed tick=15853
+        # obj=0x0101 (the parachuter) correctly out of the live 122B canopy frame in
+        # run_20260728_212105. Only the BODY layout is unknown; the body is still
+        # never relayed and never parsed. Without this, a bailed pilot transmits
+        # ONLY this form for the whole descent, the harvest starves, and the server
+        # falsely brands a healthy conductor as FROZEN (212105 21:25:13-22: three
+        # STALE-TICK warns while the tick was advancing 24107->24580 at a healthy
+        # ~52/s) - which also suspends re-stamping of peer telemetry TOWARD the
+        # bailer for the entire descent. Harvest fixes both; relay policy unchanged.
+        src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
+        src.last_telem_time = time.time()
         if not getattr(src, '_telem_bc_logged', False):
             src._telem_bc_logged = True
             log('TELEM-GUARD', f'{src.current_pilot} sent a MULTI-RECORD telemetry frame '
                                f'(bc={pl[0]} > {TELEM_MAX_BC}, {len(pl)}B appspace) -> NOT '
-                               f'relayed. Relaying these CTDs every recipient '
+                               f'relayed (tick harvested). Relaying these CTDs every recipient '
                                f'(logged once per session)')
         return
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
@@ -6987,8 +7111,8 @@ def relay_telemetry(src, data):
                 # 3s waiting for the reliable ACK; doing that inline froze the whole
                 # server for 3s mid-flight (no beacons/ACKs) -> the peer's keepalive
                 # desynced -> FATALLOSTCONNECTION ~30s later (messages54.log).
-                threading.Thread(target=send_create_object_for,
-                                 args=(src, p), kwargs={'with_client': _wc}, daemon=True).start()
+                # v357f5: via the send pool - still off the RX thread, no thread spawn.
+                _submit_send(send_create_object_for, src, p, with_client=_wc)
         # Re-stamp the object tick to the RECIPIENT's own latest tick so their move loop
         # sees a small +delta (object slightly behind -> interpolate) instead of the
         # sender's absolute tick, which is skewed ~tens of cycles vs the receiver and
@@ -7056,8 +7180,7 @@ def push_arena_players_213(s, reason=''):
     pkt = build_arena_players_213(room, counts=counts, names=roster)
     log('TEAM', f'push 213 room={room_id} counts={counts} roster={roster} {reason}')
     for sess in sessions:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt,
-                         f'<- 213 re-push ({reason})', to=3.0), daemon=True).start()
+        _submit_send(send_rel, sess, pkt, f'<- 213 re-push ({reason})', to=3.0)
 
 def handle_team_select(s, nation):
     """Client picked / left a side - msg 68 (0x44) = [0x44][nation:1][?:1]. nation 0..7
@@ -7358,8 +7481,7 @@ def handle_leave_arena(s):
             for sess in get_sessions_in_room(room_id):
                 if sess is s:
                     continue
-                threading.Thread(target=lambda _s=sess: send_rel(_s, rem_pkt, rem_label, to=3.0),
-                                 daemon=True).start()
+                _submit_send(send_rel, sess, rem_pkt, rem_label, to=3.0)
     s.entered_game = False
     # v260: ARENA ISOLATION - clear current_room on leave so a subsequent arena JOIN resolves the
     # new arena fresh. Previously current_room kept pointing at the OLD room, and the enter handler
@@ -7419,8 +7541,7 @@ def broadcast_system(message, exclude_sess=None):
     bcast = build_chat_broadcast('Server', message)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, '<- sys msg', to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, sess, bcast, '<- sys msg', to=3.0)
 
 def build_room_echo_pkt(db_id):
     """Build the type=0x92 sub=0xdc room creation echo for a room in the DB.
@@ -7480,8 +7601,7 @@ def broadcast_room_creation(db_id, exclude_sess=None):
     n = 0
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- broadcast new room db_id={db_id}', to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, sess, pkt, f'<- broadcast new room db_id={db_id}', to=3.0)
         n += 1
     log('ROOM-ECHO', f'broadcast room db_id={db_id} -> {n} other session(s)')
 
@@ -7496,8 +7616,7 @@ def broadcast_player_join(pilot_name, exclude_sess=None):
     pkt = build_ui_player_update(pilot_name, is_join=True)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- UI ADD [{pilot_name}]', to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, sess, pkt, f'<- UI ADD [{pilot_name}]', to=3.0)
 
 def teardown_ingame_presence(s, why='(disconnected)'):
     """v348: send the SAME in-game teardown the msg-64 back-to-lobby path sends, from any
@@ -7540,8 +7659,7 @@ def teardown_ingame_presence(s, why='(disconnected)'):
                                       followup_label=rem_label)
         else:
             for _p in [t for t in get_sessions_in_room(s.current_room) if t is not s]:
-                threading.Thread(target=lambda _x=_p: send_rel(_x, rem_pkt, rem_label, to=3.0),
-                                 daemon=True).start()
+                _submit_send(send_rel, _p, rem_pkt, rem_label, to=3.0)
         log('TEARDOWN', f'{s.current_pilot} PI={s.player_index} St={s.client_number} '
                         f'obj={"0x%04x" % s.my_obj_number if s.my_obj_number is not None else "none"} '
                         f'-> peers in room {s.current_room} told to drop plane+player {why}')
@@ -7556,8 +7674,7 @@ def broadcast_player_leave(pilot_name, exclude_sess=None):
     pkt = build_ui_player_update(pilot_name, is_join=False)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
-        threading.Thread(target=lambda _s=sess: send_rel(_s, pkt, f'<- UI REMOVE [{pilot_name}]', to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, sess, pkt, f'<- UI REMOVE [{pilot_name}]', to=3.0)
 
 def send_initial_ui_list(target_sess):
     for sess in get_all_sessions():
@@ -7798,8 +7915,7 @@ def _handle_chat_pl(s, pl):
     sessions = get_all_sessions()
     log('CHAT', f'Broadcasting to {len(sessions)} session(s)')
     for sess in sessions:
-        threading.Thread(target=lambda _s=sess: send_rel(_s, bcast, f'<- chat [{sender}]', to=3.0),
-                         daemon=True).start()
+        _submit_send(send_rel, sess, bcast, f'<- chat [{sender}]', to=3.0)
 
 COMPOUND_CMDS = {530, 578, 4610}
 
@@ -8113,7 +8229,17 @@ def handle_compound(s, outer_cmd, pl):
     # 'Congratulations! new Ace Status' + 'new Rank' announcements (Test2 log messages46: the EVENT
     # fires on the same line as the echoed 'in 25'7', only when it lands right after InsertPlayer -
     # hence 'sometimes garbage, sometimes clean'). Consume, NEVER echo. v220.
-    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x19):
+    # v360f5: 0x21 and 0x0e ADDED - this tuple was a stale copy of the direct path's
+    # NO_ECHO_SUBS, frozen before v222 (0x21) and v204 (0x0e) patched the direct set.
+    # THE PARACHUTE CTD: a bail-out ends with the parachuter hitting the ground; the
+    # client emits ExitEvent(-1) (out 33'8, Number=0xFFFF - its parachuter object is
+    # already gone). When that report arrives PREFIXED (cmd=0x0542), handle_post_auth
+    # skips the cmd==0 guards entirely and lands here - and 0x21 fell through this
+    # tuple to 'unknown inner -> echo inner'. The client then indexed
+    # ARR<NET::OBJECT*,2048>[65535] -> bounds error, ring.hpp:27 (messages63.log
+    # 09:16:09: out 33'8 -> in 33'8 21ms later -> CTD). Same guard-copy divergence
+    # class as v342. 0x0e (msg 14 reassign) closed for the identical reason.
+    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19):
         log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) - swallow')
         return
     # msg 31 (0x1f) compound-wrapped: ground-object damage report - consume, NEVER echo
@@ -8197,10 +8323,7 @@ def broadcast_scene_snapshot_42(room_id, reason=''):
     sess = [s for s in get_all_sessions()
             if getattr(s, 'entered_game', False) and s.current_room == room_id]
     for s in sess:
-        threading.Thread(
-            target=lambda _s=s: send_rel(_s, pkt, f'<- SCENE_SNAPSHOT 42 x{len(entries)} {reason}',
-                                         to=3.0),
-            daemon=True).start()
+        _submit_send(send_rel, s, pkt, f'<- SCENE_SNAPSHOT 42 x{len(entries)} {reason}', to=3.0)
     log('SCENE42', f'room {room_id}: msg 42 terrain={trn} scenes={len(entries)} '
                    f'({len(pkt)} bytes) -> {len(sess)} session(s) {reason}')
     return len(sess)
@@ -8341,9 +8464,7 @@ def broadcast_scene_36(room_id, records, reason=''):
     sess = get_sessions_in_room(room_id)
     _desc = ', '.join(f'scene={i} camp=0x{c:02x} prog={p:g}' for i, c, p in records)
     for s in sess:
-        threading.Thread(
-            target=lambda _s=s: send_rel(_s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0),
-            daemon=True).start()
+        _submit_send(send_rel, s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0)
     log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(sess)} session(s) {reason}')
     # v291: a destroyed scene loses its stored supplies immediately - measured at -15000 fuel the
     # instant a fuel factory died, well before the next production step. Only prog<=0 counts as a
@@ -8362,9 +8483,7 @@ def broadcast_scene_36(room_id, records, reason=''):
         _idx = [i for i, _c, _p in records]
         pkt30 = build_scene_state_30(_idx)
         for s in sess:
-            threading.Thread(
-                target=lambda _s=s: send_rel(_s, pkt30, f'<- SCENE_STATE 30 {_idx} {reason}', to=3.0),
-                daemon=True).start()
+            _submit_send(send_rel, s, pkt30, f'<- SCENE_STATE 30 {_idx} {reason}', to=3.0)
         log('SCENE30', f'room {room_id}: msg 30 {_idx} -> {len(sess)} session(s) {reason}')
     return len(sess)
 
@@ -8865,9 +8984,8 @@ def _ingame_own_object_removed(s, tb, stored):
             _pdel = build_delete_object_3(onumber=_onum, client_number=None)
             for _peer in get_sessions_in_room(s.current_room):
                 if _peer is not s:
-                    threading.Thread(target=send_rel, args=(_peer, _pdel,
-                                     f'<- delete PARACHUTER 0x{_onum:04x} ({s.current_pilot})'),
-                                     kwargs={'to': 3.0}, daemon=True).start()
+                    _submit_send(send_rel, _peer, _pdel,
+                                 f'<- delete PARACHUTER 0x{_onum:04x} ({s.current_pilot})', to=3.0)
             s.para_obj_number = None
             return
         if _onum is not None and _onum != s.my_obj_number:
@@ -9449,9 +9567,7 @@ def broadcast_production_info_71(room_id, scene_ids=None, probe=False, reason=''
             for sid in scene_ids]
     pkt = build_production_info_71(recs)
     for s in sess:
-        threading.Thread(
-            target=lambda _s=s: send_rel(_s, pkt, f'<- PRODUCTION_INFO 71 x{len(recs)}', to=3.0),
-            daemon=True).start()
+        _submit_send(send_rel, s, pkt, f'<- PRODUCTION_INFO 71 x{len(recs)}', to=3.0)
     log('PROD71', f'room {room_id}: msg 71 {"PROBE " if probe else ""}x{len(recs)} scene(s) '
                   f'({len(pkt)} bytes, 7+{len(recs)}*83) -> {len(sess)} session(s) {reason}')
     return len(recs)
@@ -9531,10 +9647,7 @@ def broadcast_production_40(room_id, reason=''):
             (stored['metal'], stored['fuel'], stored['ammo']),
             (capacity['metal'], capacity['fuel'], capacity['ammo']))
         for s in sess:
-            threading.Thread(
-                target=lambda _s=s, _p=pkt: send_rel(_s, _p, f'<- PRODUCTION 40 camp={camp}',
-                                                    to=3.0),
-                daemon=True).start()
+            _submit_send(send_rel, s, pkt, f'<- PRODUCTION 40 camp={camp}', to=3.0)
         sent.append(f'c{camp}:{stored["metal"]}/{stored["fuel"]}/{stored["ammo"]}')
     log('PROD40', f'room {room_id}: msg 40 x{len(sent)} camp(s) -> {len(sess)} session(s) '
                   f'{reason} [{" ".join(sent)}]')
@@ -10111,9 +10224,18 @@ def handle_post_auth(s, cmd, pl):
             # APPSPACE-type outer with inner 0x43 (e.g. [00120000|00120000]+43)
             # type=0x12 is used as the outer type by the retry counter in this case.
             if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0xd2 and not s.entered_game:
-                log('POST-AUTH','APPSPACE-scan sub=0xd2 -> echo inner')
-                threading.Thread(target=lambda: send_rel(s, build_appspace_pkt(bytes([0xd2])),
-                                 '<- APPSPACE-scan echo 0xd2', to=3.0), daemon=True).start()
+                # v358f5: this scan shape is the SAME ArenaList request arriving with the
+                # client's TIME-sync attach (vcnc 'Resync time!' piggybacks a TIME request
+                # onto the next reliable send -> [00 12 ...] wrapper). The old 1-byte echo
+                # made the client render an EMPTY Arenas page whenever the ~30s resync
+                # happened to land on the 210 (messages61.log: out 210'1 -> in 210'1, vs
+                # the healthy in 210'1110). Chat's wrapped form was handled (v327 family);
+                # this was the one fallback left as a placeholder. Serve the real list.
+                active_rooms = db_get_open_rooms()
+                log('POST-AUTH', f'APPSPACE-scan sub=0xd2 (TIME-attach shape) -> ArenaList ({len(active_rooms)} rooms)')
+                threading.Thread(target=lambda: send_arenalist_with_gamedefs(
+                    s, active_rooms, f'<- ArenaList 0xd2 scan-shape ({len(active_rooms)} rooms)'),
+                    daemon=True).start()
                 return
             if sub == 0x00 and len(pl) >= 9 and pl[5] == 0x12 and pl[8] == 0x43:
                 now = time.time()
@@ -10356,9 +10478,8 @@ def handle_post_auth(s, cmd, pl):
                                     f'prefix -> NOT relayed. head={hx(bytes(stored[:16]))}')
                     return
             for p in peers:
-                threading.Thread(target=lambda _p=p: send_rel(_p, stored,
-                                 f'<- DAMAGE 28 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
-                                 daemon=True).start()
+                _submit_send(send_rel, p, stored,
+                             f'<- DAMAGE 28 relay ({s.current_pilot}->{p.current_pilot})', to=3.0)
             # v352: INSTRUMENTATION - identify the frame behind the Network.cpp:249 /
             # Main.cpp:2407 CTD family. NO behaviour change; this only logs.
             # On 2026-07-27 14:13 all four in-arena clients went down within ~2.3s while the
@@ -11033,6 +11154,21 @@ def handle_post_auth(s, cmd, pl):
         # which is exactly why kills, deaths AND planes-lost all stayed 0 in the HUD / session
         # statistics. Relay it verbatim to everyone else in the room (never back to the sender).
         if tb == MSG_SCORE_EVENT_33:
+            # v360f5: an ExitEvent carrying object Number 0xFFFF (the parachuter
+            # ground-crash report, ExitEvent(-1)) is POISON to any client that
+            # receives it - the inbound handler (0x004f9ae0) indexes the NET::OBJECT
+            # ring by Number and ring[65535] is the bounds-error CTD. The sender-echo
+            # side was already guarded (v222); the PEER relay was not, so a -1 report
+            # arriving in this shape would have been relayed verbatim and crashed the
+            # peers instead. Valid records here carry small Numbers (0x01xx) - an
+            # adjacent ff ff inside the id/AddData/Number region (bytes 4:9)
+            # only occurs for the -1 form; the real valid bail sample (12:15:33,
+            # Number=0x0100) carries ff ff ff ff from byte 9 on, so the window must
+            # NOT extend past index 8.
+            if b'\xff\xff' in stored[4:9]:
+                log('EXIT33', f'ExitEvent from {s.current_pilot} carries Number=0xFFFF '
+                              f'({stored[:12].hex()}) -> poison, NOT relayed, NOT echoed')
+                return
             if RELAY_EXIT_EVENT_33 and getattr(s, 'current_room', None) is not None:
                 peers = [p for p in get_sessions_in_room(s.current_room) if p is not s]
                 log('EXIT33', f'ExitEvent from {s.current_pilot} ({len(stored)}B: '
@@ -11171,7 +11307,12 @@ def on_pkt(data, addr):
                 s._stall_warned=False
                 s._rec_dumped=False
                 log('STALL-WATCH', f'{s.current_pilot}: reliable RX RESUMED (cs={cs})')
-            time.sleep(0.01); sock.sendto(build_rel_ack(30,cs9),s.addr)
+            # v357f5 [PERF]: same 10ms-delayed ACK, served off-thread (see _ack_sender_loop).
+            _ackpkt = build_rel_ack(30, cs9)
+            if ACK_ASYNC:
+                _ack_q.put((time.time() + ACK_DELAY_S, _ackpkt, s.addr))
+            else:
+                time.sleep(ACK_DELAY_S); sock.sendto(_ackpkt, s.addr)
             cv=struct.unpack_from('>H',pl,2)[0] if len(pl)>=4 else 0
             if getattr(s,'entered_game',False):
                 _dtag=f' DUP#{s._rel_rx_dups}(retransmit)' if _dup else ''
@@ -11189,10 +11330,20 @@ def on_pkt(data, addr):
             return
         if pt==0 and sz==8:
             aseq=(dw>>20)&0x1FF
-            with s._lock: is_ack=aseq in s._evts
+            with s._lock:
+                is_ack = aseq in s._evts
+                is_late = (not is_ack) and aseq in getattr(s, '_done_ring', ())
             if is_ack:
                 s._ack_in_count=getattr(s,'_ack_in_count',0)+1
                 s.sig(aseq); return
+            if is_late:
+                # v359f5: duplicate or late ACK for a seq that already completed. Normal
+                # now that the server retransmits (the client may ACK every copy), and
+                # also covers an ACK landing just after the send_rel timeout. BENIGN -
+                # before this guard it was classified as a client disconnect and tore
+                # the session down (broadcast leave + session pop) on a live player.
+                s._late_ack_count=getattr(s,'_late_ack_count',0)+1
+                return
             s.closing=True
             if s.current_pilot:
                 broadcast_player_leave(s.current_pilot, exclude_sess=s)
@@ -11339,6 +11490,7 @@ threading.Thread(
 ).start()
 
 threading.Thread(target=_stall_watch, daemon=True).start()
+threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
 threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
 threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts

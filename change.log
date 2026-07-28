@@ -7,6 +7,360 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v363f5: [PARA/WIRE] COUNTER-WRAPPED PARACHUTER OUT-4 - the bail chain now fires for
+      BOTH wire forms. Closes the hole the 22:21 session exposed.
+
+      WHAT THE SESSION SHOWED (server.log 22:24-22:28): a healthy v362f5 run -
+      repeated spawn/death/respawn cycles, creates relayed both ways, every HQ
+      visit populated, zero hangs on confirmed spawns... and then the ONE bail of
+      the session (22:25:56) produced NO PARA line at all. The wire explains it:
+        22:25:57.902  SUPPLY-CAP type=0x02 sub=0x00 pl=00020000|00f20000040100...
+      The parachute's out-4 arrived in the COUNTER-IN-TYPE wrap (cmd stays 0,
+      per-session counter in the type slot). The _pfx reframe only handles cmd!=0,
+      and the wrapped-out-4 type-scan requires pl[5]==0x12 (the PLANE form) - the
+      0xf2 parachute form matched nothing and fell into the capture catch-all.
+      No Number lock-step, no ServerConfirm, no peer create, no landing delete -
+      and the conductor froze RIGHT ON THE SIGNATURE (22:26:00.823 STALE-TICK,
+      +3.2s). Strongest possible validation of the v361f5 theory, from its own
+      failure mode: the freeze appears exactly and only when the confirm is
+      missed. Same wrapper-blindness class as v358f5 (0xd2 scan) and v360f5
+      (compound 0x21) - a handler correct for one wire form, blind to its twin.
+
+      FIX: a reframe case at the top of handle_post_auth, beside the _pfx block:
+      when cmd==0, entered_game, len(pl)==23 and pl[4:9] == 00 f2 00 00 04, strip
+      the 4-byte wrapper and fall through - the direct-path PARA branch (validated
+      twice in run_212105) does everything else untouched. The signature cannot
+      false-positive: the direct parachute out-4 is invariably 19B (bc=0, T=0xf2,
+      Size=15), so its wrapped form is invariably exactly 23B. Verified against
+      the live packets: today's wrapped form matches; the 19B direct form, the
+      wrapped PLANE out-4 (pl[5]=0x12) and the bail-intent 0x21 all skip.
+
+      FALSIFICATION: on the next bails (do SEVERAL - the wrap choice is client
+      state we do not control, both forms must be seen over time), every bail must
+      produce a PARA 'BAILED OUT' line - via 'REFRAME counter-wrapped PARACHUTE
+      out-4' when wrapped - and ZERO STALE-TICK in the +3-4s window. If a bail
+      ever again shows neither PARA nor REFRAME, dump the SUPPLY-CAP payload:
+      there is a third wrapper form we have not met.
+
+      SESSION OBSERVATION (recorded, not chased): the missed-bail state also made
+      the bailed plane's prefixed delete (22:26:27, reframed OK) process without
+      DEATH accounting - unlike the direct-delete case at 19:42:56 which scored a
+      death. Tied to the inconsistent session state after the missed bail; with
+      detection fixed the flow reverts to the tested path. Revisit only if a
+      properly-detected bail still shows the asymmetry.
+      STILL OPEN: bail kill attribution; cs9 wrap; msg-67 lobby polls unanswered.
+
+==============================================================================
+
+v362f5: [TELEM] TICK HARVEST FROM GUARD-REJECTED FRAMES - kills the false STALE-TICK
+      during parachute descent and un-suspends re-stamping toward the bailer.
+
+      VALIDATION of v361f5 first (run_20260728_212105, TWO bails, one with a peer):
+        * bail #1 21:22:24: confirm=True, NO stale-tick after the bail, canopy form
+          (122B bc=7) hit the v351 guard exactly as predicted and was NOT relayed,
+          chute landed +20s, StartPlace -> CONFIRM5 258 -> clean respawn in ~60s.
+        * bail #2 21:25:06 with Test2 present: parachuter created on the peer,
+          landing delete, respawn as 0x0106, create relayed, telemetry resumed.
+        The post-bail conductor freeze is FIXED. v253's ARR[20983] did not recur.
+
+      REMAINING ARTIFACT this version removes: during bail #2's descent, three
+      STALE-TICK warns fired (21:25:13/17/22) - but the logged tick VALUES were
+      advancing 24107 -> 24319 -> 24580 (~52/s = a healthy conductor). The client
+      transmits ONLY the 122B canopy form during the descent; the v351 guard
+      rejected it BEFORE the tick harvest, so last_telem_tick starved and the
+      server mistook a healthy client for a frozen one - and, per the v234 rule,
+      suspended re-stamping of peer telemetry TOWARD the bailer for the whole
+      descent (mild degradation, sender-tick passthrough).
+
+      FIX: in the TELEM_MAX_BC rejection branch, harvest last_telem_tick/-time
+      from the frame HEADER before returning. Safe because the multi-record form
+      shares the standard header layout (tick@[5:7], ONumber@[7:9]) - proven by
+      the v350 TELEM-SIZE line itself, which parsed tick=15853 obj=0x0101 out of
+      the live canopy frame. The BODY remains unparsed and unrelayed - relay
+      policy is UNCHANGED; this touches nothing on the wire.
+
+      FALSIFICATION: a bail with a peer present must now show ZERO STALE-TICK
+      warns during the descent, and the peer's view of the bailer's world (and
+      vice versa) must stay smooth. If a STALE-TICK still fires mid-descent, the
+      canopy frame's header offsets are not what the v350 line suggested - revert
+      the harvest and dump the frame head.
+
+      SESSION OBSERVATIONS (benign, guards held, logged for the record):
+        * 21:25:32 counter-wrapped delete (pl=00260000|0042...) mis-read as
+          ONumber 0x0042 -> PEERDEL swallow; the real despawn happened correctly
+          at respawn. Pre-existing wrapped-delete parse gap, no harm - candidate
+          for a REFRAME extension later.
+        * 21:25:52 the client's delete for its own landed parachuter (0x0105) is
+          swallowed ('neither its own nor any peer's') - correct outcome, the
+          para lifecycle is server-terminated.
+      STILL OPEN: bail kill attribution; cs9 wrap; msg-67 lobby polls unanswered.
+
+==============================================================================
+
+v361f5: [PARA/CONDUCTOR] *** POST-BAIL CONDUCTOR FREEZE - PARA_SEND_CONFIRM back ON. ***
+      The missing msg-5 ServerConfirm for the parachuter's out-4 froze the bailing
+      client's ENTIRE conductor ~3s after every bail. One switch, four symptoms:
+      slow-motion parachute descent, 'waiting for start position' timeout, EMPTY HQ
+      plane menu (again - different cause than v359f5!), and conductor -102 errors
+      at exit. v360f5's CTD fix held (no crash this session); this was the layer under it.
+
+      EVIDENCE (run_20260728_193858 + messages64 + vcncnet...163920158 tail):
+        19:42:28  bail -> PARA line shows confirm=False (v253 bisection leftover)
+        19:42:31  STALE-TICK: Bigalon conductor FROZEN (3.2s old). The delay is
+                  +3.0-3.2s after bail in ALL THREE sessions today - the constant
+                  signature of the unconfirmed-own-object grace expiring, not noise.
+        16:42:28->16:45:34 (client clock) the parachute takes 186s to reach ground
+                  vs 35s in run 120928 - the sim loop is barely advancing.
+        16:44:09  the client's reliable TX wedges: vcnc tail shows QSnd stuck at
+                  seq 54 with timeSinceLastSent=137888ms against ResendTime=5000 -
+                  the resend timer, queue drain and inbound dispatch all run on the
+                  conductor, and the conductor is down. Q size grows 26->48 with
+                  the StartPlace request, the msg-58 catalog request and 22 msg-67
+                  polls that NEVER LEFT THE MACHINE (server log confirms: none of
+                  the 67s were ever received). Finally 'LOST CONECTION!! Resend
+                  time out' fires at quit, 137s late.
+        19:45:34  the ONE StartPlace that escaped via the counter-wrapped side path
+                  was received and GRANTED (N=0) - but the grant reply landed in a
+                  client that no longer dispatches inbound. Client: 'Time for
+                  waiting start place has been expired'.
+      NOT a wire bug: Bigalon<->server is LOOPBACK this session, and v359f5's
+      retransmission was never the problem - the client itself stopped sending,
+      resending and reading.
+
+      FIX: PARA_SEND_CONFIRM = True - the exact single-variable experiment v253's
+      own comment prescribed ('Turn this on ONLY after a clean run...'), seven
+      versions late. The v253 CTD (ARR[20983]) CANNOT recur: it was our re-stamp of
+      byte 5 of the 118B canopy telemetry form, and that frame is now dropped whole
+      by the v351 multi-record guard (TELEM_MAX_BC=5 caps relayed frames at 99B)
+      BEFORE both the re-stamp and the tick harvest. NOTE for future maintenance:
+      TELEM_RESTAMP_MAX_LEN=100 is defined but UNENFORCED - it is shadowed by the
+      bc cap; preserve the invariant 4+16*TELEM_MAX_BC+15 <= 100 if TELEM_MAX_BC
+      ever changes.
+
+      FALSIFICATION / what the next bail test must show:
+        * NO STALE-TICK for the bailer in the +3-4s window after the bail line
+        * descent lands in the normal 20-40s band; PARA landed-delete at +20s
+        * TELEM-GUARD 'MULTI-RECORD ... NOT relayed' MAY appear once for the bailer
+          (the canopy form hitting the v351 guard) - that is EXPECTED and benign
+        * StartPlace after landing: request received DIRECT (not just the wrapped
+          side path), grant processed, respawn completes; HQ list populates
+        * if ANY client CTDs on a bail: flip PARA_SEND_CONFIRM False (revert path)
+          and capture the vcnc + messages logs - the canopy form has changed shape.
+
+      STILL OPEN: bail kill attribution (unchanged); cs9 wrap; the msg-67 lobby
+      polls have no handler when a client re-enters the lobby mid-session (the 22
+      unanswered 67s here never reached us, but if a healthy client polls 67 in
+      the lobby we do not answer - low priority, verify after this fix).
+
+==============================================================================
+
+v360f5: [WIRE/CTD] *** PARACHUTE CTD - the compound echo path leaked ExitEvent(-1). ***
+      Bailing out could crash the BAILER's client ~35s later, at the moment the
+      parachuter touched the ground. Roulette odds: only when the client happened to
+      wrap that one report in the 0x0542 prefix. Latent in v356 and every build since
+      the prefixed/compound path existed; NOT an f5 regression.
+
+      THE CRASH (messages63.log, session run_20260728_120928):
+        09:15:33  out 33'15 ExitEvent(256) ScoreEvent=3        <- bail intent, valid Number
+        09:15:34  out 4'15                                     <- parachuter create
+        09:16:09.650  'Player crashed into ground' -> out 33'8 ExitEvent(-1):
+                      the parachuter object is already deleted, so the report
+                      carries Number = 0xFFFF
+        09:16:09.671  in 33'8   <- the server ECHOED it back, 21ms round trip
+        CTD: 'bounds error class ARR<class NET::OBJECT *,2048>[65535] 0..2047,
+              ring.hpp line 27' - the inbound msg-33 handler (0x004f9ae0) indexes
+              the NET::OBJECT ring by Number, and 65535 is out of bounds.
+
+      WHY THE EXISTING GUARDS DIDN'T FIRE (server side, 12:16:09.651):
+        The report arrived PREFIXED: REFRAME cmd=0x0542, pl=00040542|00820000|21 01ffff...
+        All three defences for msg 33 - NO_ECHO_SUBS (v218), NO_ECHO_TYPES (v222) and
+        the EXIT33 relay's 'never echo back to the sender' - live inside the cmd==0
+        branch of handle_post_auth. cmd=0x0542 skips that branch entirely and falls
+        through to handle_compound, whose OWN no-echo tuple was a stale pre-v222 copy:
+        (0x20,0x03,0x45,0x18,0x53,0x54,0x4d,0x19) - no 0x21, no 0x0e. inner_sub=0x21
+        fell to 'unknown inner -> echo inner' and the poison went straight back.
+        Same guard-copy-divergence class as v342 (a fix applied to one wrapper path
+        but not its twin).
+
+      FIX (two edits, one vector - Number=0xFFFF must never reach ANY client):
+      (1) handle_compound's no-echo tuple synced with the direct NO_ECHO_SUBS:
+          0x21 (msg 33, this CTD) and 0x0e (msg 14 reassign, v204 rationale) added.
+      (2) The direct-path EXIT33 peer relay now drops any ExitEvent whose
+          id/AddData/Number region (stored[4:9]) contains adjacent ff ff - the -1
+          form would otherwise be relayed VERBATIM to the peers and crash THEM
+          (same handler, same ring index). Window deliberately stops at index 8:
+          the real valid bail sample (12:15:33, Number=0x0100) carries ff ff ff ff
+          from byte 9 on.
+      Verified against real wire bytes: the fatal prefixed frame routes to swallow;
+      the valid direct bail is NOT blocked by the relay filter; synthetic -1 forms
+      with Number at 5:7 and 6:8 are both blocked. Compile-checked.
+
+      FALSIFICATION: bail-outs (both sides watching) must land the parachuter with
+      NO in 33 echo on the bailer and NO CTD; server log must show
+      'inner sub=0x21 (notify, must not echo) - swallow' at the ground-crash moment.
+      If a legitimate kill-credit event ever stops printing on peers after this
+      version, check the EXIT33 'poison' log line first - a false positive there
+      means a valid record carried ff ff inside bytes 4:9, and the filter needs a
+      proper per-form Number decode instead of the pattern check.
+
+      NOTE the same forensics exposed for the open bail-attribution issue (a): the
+      DIRECT sub=0x21 form (e.g. the 12:15:33 bail intent, type=0xf2 sub=0x21) is
+      swallowed by NO_ECHO_SUBS *before* the EXIT33 relay ever sees it - the relay
+      only fires on the type-byte shape (tb==0x21, sub==0x00). So bail reports that
+      arrive sub-form are never relayed and their hit records (the game's own
+      kill-attribution payload) are discarded. That is likely a big piece of why
+      bail kills score as 'solo crash'. Queued, not touched in this version.
+
+==============================================================================
+
+v359f5: [WIRE/CRITICAL] *** SERVER->CLIENT RELIABLE RETRANSMISSION - the 1.5-week bug. ***
+      One lost downlink reliable datagram wedged the client's ENTIRE reliable RX channel
+      permanently. Every symptom hunted since ~mid-July is this one mechanism:
+      one-way invisibility, dead score panels, and the EMPTY HQ PLANE MENU.
+
+      MECHANISM, from both ends:
+        * The client's reliable RX is STRICTLY IN-ORDER (vcnc: 'QRcv :: Received
+          expected packet N -> Now expecting packet N+1'; out-of-order arrivals are
+          queued in nQSize, delivered only once the gap fills).
+        * send_rel transmitted each seq EXACTLY ONCE and waited `to` for the ACK -
+          no retransmission, ever. A dropped datagram left a PERMANENT hole at seq N.
+        * The client then discarded/queued every later seq forever, while its own
+          TX direction kept working - producing the signature ASYMMETRY.
+
+      EVIDENCE (run_20260728_113009 + messages84 + messages62/vcnc on the Bigalon box):
+        11:52:13/17/53  create Test2 0x0107 -> Bigalon sent THREE times (the relay's
+                        re-create guard refiring) - never took: Bigalon flew blind to
+                        Test2 from here on ('Test2 could see me, not the other way').
+        11:53:09.452    STALL-WATCH: Bigalon reliable RX idle 21.8s, unreliable active,
+                        pending_tx=1 - the downlink hole, seen from the server side.
+        11:53:10.698    respawn create 0x0100 -> Bigalon: sent once into the wedged
+                        channel, discarded like everything else.
+        11:55:08        Bigalon exits to HQ -> client requests the msg-58 plane catalog
+                        -> response discarded -> EMPTY PLANE SELECTION MENU. Test2 did
+                        the identical HQ flow at 11:54:44 on a healthy channel and got
+                        out 58'120 -> in 58'76 normally - msg 58 IS the hangar menu.
+        11:55:44-11:57+ the client re-requests the ArenaList EVERY SECOND; the server
+                        serves 208 responses; the client discards all of them. The
+                        clearest possible picture of 'uplink alive, downlink wedged'.
+      PREDATES the f5 line entirely - v356 and every build before it had the same
+      single-shot send_rel; any session that lost one downlink datagram degraded this
+      way. Two machines on a real network made the loss likely enough to see daily.
+
+      FIX, two coupled changes (they MUST ship together):
+      (1) send_rel now RETRANSMITS the SAME seq every REL_RETX_INTERVAL_S (0.75s)
+          until ACKed or `to` expires. A late copy fills the client's QRcv hole and
+          the queued backlog drains - full recovery instead of a permanent wedge.
+          Healthy-path cost is ZERO: LAN ACKs arrive in ~10-15ms, far inside the
+          first retransmit interval. Logged as 'RETX#n' + 'ACKed OK after n retx'.
+      (2) LATE/DUP-ACK GUARD: rme() now records completed seqs in a 64-entry ring;
+          an 8-byte pt=0 packet whose seq is in the ring is a benign duplicate or
+          late ACK (counted in _late_ack_count), NOT a disconnect. Without this,
+          retransmission would be DANGEROUS: a client that ACKs every received copy
+          would have its second ACK land after rme() and be classified as a client
+          disconnect -> broadcast leave + session pop on a live player. Also fixes
+          the pre-existing late-ACK false-disconnect (an ACK arriving just after the
+          send_rel timeout killed the session the same way).
+      Verified in isolation: lost-first-copy recovers on RETX#1; completed seq
+      correctly classifies as benign; total loss times out after ~5 retx cleanly.
+
+      FALSIFICATION: healthy sessions must show zero or near-zero RETX lines and
+      unchanged TX/RELIABLE 'ACKed OK' latency. If RETX lines are FREQUENT on a calm
+      LAN, the ACKs themselves are being lost or misrouted - investigate before
+      trusting anything else. If a session ever tears down right after a burst of
+      RETX lines, the ring guard is not catching a dup-ACK shape - dump _late_ack_count
+      and the RELRX ring first.
+
+      STILL OPEN, deliberately untouched this pass: (a) bail-out kill attribution -
+      11:53:00 Test2's death after bailing scored 'solo crash/crashland', no hunter
+      credit (user-confirmed: the kill was earned); (b) cs9 wrap robustness - the
+      stall-watch fired at cs=241 with the 255->0 wrap approaching; the wrap toggle's
+      out-of-order mis-latch window is unfixed; (c) STALE-TICK 11:53:04 froze Test2's
+      conductor tick for 3.8s during respawn - the v277 guard did its job but the
+      root freeze is uncharacterised. One fix per version.
+
+==============================================================================
+
+v358f5: [UI] EMPTY ARENAS PAGE - the 0xd2 ArenaList request that arrives with a TIME-sync
+      attach was answered with a 1-byte echo instead of the list. LATENT since the scan
+      fallbacks were added; NOT introduced by v357f5 - surfaced today by timing luck.
+
+      EVIDENCE (messages61.log + vcncnet20260728081719584.log + run_20260728_111650.log):
+        08.17.45.001  client: 'Resync time!' (periodic ~30s NET-time resync; fired again
+                      at 08.18.15.058)
+        08.17.45.114  client sends out 210'1 with 'Attach TIME Sync request' -> 17B on
+                      the wire instead of 13B; the attach shifts the wrapper into the
+                      [00 12 ...] APPSPACE-scan shape (sub=0x00, pl[5]=0x12, pl[8]=0xd2)
+        08.17.45.115  server's 0xd2 scan branch answers build_appspace_pkt([0xd2]) ->
+                      client logs in 210'1 (healthy runs show in 210'1110, v164) ->
+                      client renders ZERO arenas.
+      COUNTER-PROOF the perf changes are innocent: the SECOND time-attach of the session
+      (08.17.55.943) landed on the chat send - and chat worked, because chat's wrapped
+      form has a complete handler (v327 family). The 0xd2 scan branch was the one
+      fallback still answering with a placeholder echo. ACKs were healthy throughout:
+      client-measured RTT 11-17ms (the preserved 10ms pacing + loopback), Resend Time
+      5000 never hit, zero retransmits in 15k vcnc lines.
+      WHY IT LOOKED NEW: whether the arena page populated depended on whether the Arenas
+      tab was opened inside the window where the resync attach claimed the 210. v356
+      sessions won that race; this one lost it.
+
+      FIX: the scan-shaped 0xd2 now routes to send_arenalist_with_gamedefs exactly like
+      the direct sub==0xd2 branch (212 GAME_DEFs first, then the list, per v164). Applied
+      to server-fable5.py only; server.py (v356) still carries the latent bug and should
+      pick this up whenever the f5 line is merged back. NOTE: make_fable5.py rebuilds
+      produce v357f5 (pre-fix) - do not --force-rebuild over this file without re-applying.
+
+==============================================================================
+
+v357f5: [PERF] PERFORMANCE-ONLY BUILD, shipped as server-fable5.py (server.py stays v356).
+      Built by make_fable5.py: 28 exact-text edits, each required to match exactly once in
+      the v356 source, py_compile-verified before write. `python make_fable5.py --show`
+      prints every edit. NO logic-bug fixes in this pass - those come after this build is
+      proven not-broken in a live session. Three changes, all with revert flags:
+
+      (1) RELIABLE-ACK 10ms DELAY MOVED OFF THE RX THREAD (_ack_sender_loop, ACK_ASYNC).
+      The RX path did `time.sleep(0.01)` inline before every reliable ACK - the ONE thread
+      that also serves telemetry relay, time pings and inbound ACK matching slept 10ms per
+      reliable message from ANY client. DAMAGE28 rides the reliable channel, so the cost
+      peaked exactly mid-combat, and a burst from one client delayed every player's relay.
+      The 10ms pacing itself is PRESERVED per-packet (suspected client-side race: on LAN a
+      sub-ms ACK can arrive before the client's send path finishes registering the packet
+      in its reliable queue -> ACK lookup miss -> permanent retransmit). ACKs are queued to
+      a dedicated sender thread; the queue is FIFO with a constant per-entry delay, so ACK
+      ORDER is identical to the old code and every packet still gets >=10ms of grace from
+      its own arrival. ONE KNOWN DIFFERENCE, stated plainly: a BURST of reliable packets
+      now gets its ACKs back-to-back ~10ms after each arrival, where the old inline sleep
+      also serialised them 10ms APART. If the client turns out to need the spacing (not
+      just the delay), ACK_ASYNC=False restores the v356 inline path verbatim.
+
+      (2) SEND POOL FOR BROADCAST FAN-OUT (_submit_send, SEND_POOL, 32 workers).
+      This is the v328 "wants a small worker pool ... left for its own pass" item. The 22
+      per-recipient fan-out LOOPS (chat x2, roster 62/63, scene 30/36/42, production
+      40/71, DAMAGE28 relay, teardown deletes, ace-88, system msgs, arena counts, room
+      echoes, UI add/remove, parachuter deletes, relay create-object) now submit to a
+      fixed ThreadPoolExecutor instead of spawning one OS thread per recipient per
+      message (v328 measured ~200 threads / ~23ms per chat line at 200 players). Each
+      task runs the same send_rel call and blocks on the ACK exactly as before; pool
+      execution is FIFO, which is MORE ordered than free thread scheduling was.
+      Single-recipient echo sites (one thread per command, not O(N)) are DELIBERATELY
+      untouched - identical cost to v356, zero behavioural risk. SEND_POOL=False (or any
+      pool failure) falls back to thread-per-message.
+      SIZING NOTE: 32 workers each blocking up to 3s on a dead client's ACK timeout means
+      a few unreachable clients can briefly serialise a large broadcast; on LAN ACKs
+      return in ms so the pool drains instantly. Raise SEND_POOL_WORKERS if arenas grow.
+
+      (3) SQLITE WAL (init_db). journal_mode=WAL is persistent in the DB file, so all
+      per-call db_* connections and the web admin inherit it - readers stop blocking
+      writers, commit cost drops. Creates fa_server.db-wal/-shm alongside the DB (normal).
+      Revert: PRAGMA journal_mode=DELETE.
+
+      FALSIFICATION - CHECK THIS FIRST (v353 discipline): a clean run must show RELRX DUP
+      counts comparable to v356, zero STALL-WATCH warnings, and no '[x] has left' lines
+      that v356 would not have produced. Any of those -> flip ACK_ASYNC / SEND_POOL to
+      False individually and re-test to isolate which change is at fault before touching
+      anything else. The two flags are independent by design.
+
+==============================================================================
+
 v356: [WIRE/CRITICAL] the malformed damage frames are PREFIXED frames relayed with the prefix
       still attached. Strip it instead of dropping - this is why hits did not register.
 
