@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v355
+Fighter Ace LAN Server v356
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -223,7 +223,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v355'
+VERSION = 'v356'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10322,14 +10322,39 @@ def handle_post_auth(s, cmd, pl):
             # crashed. Do not port TELEM_MAX_BC's shape to msg 28.
             # v352 logged every frame as header-MATCH because it only checked bc/T against the
             # overall length; the count field was never cross-checked. Both must agree.
-            _dl = len(stored)
-            if _dl < 10 or (_dl - 10) % 9 != 0 or stored[9] != (_dl - 10) // 9:
-                _exp = 10 + stored[9] * 9 if _dl > 9 else -1
-                log('DAMAGE28', f'{s.current_pilot} sent a MALFORMED damage frame: {_dl}B but '
-                                f'count={stored[9] if _dl > 9 else "?"} implies {_exp}B '
-                                f'(10 + count*9) -> NOT relayed. Relaying this desyncs every '
-                                f'recipient\'s record walk and CTDs them. head={hx(bytes(stored[:16]))}')
-                return
+            # v356: STRIP THE 4-BYTE PREFIX INSTEAD OF DROPPING THE FRAME.
+            # v355 refused to relay frames that failed the 10+count*9 structure test. That
+            # stopped the CTD but THREW THE DAMAGE AWAY, which is why hits still did not
+            # register ("I was shooting Moira, no hits reported, no damage").
+            # Every one of the 15 mismatches in server_11_ is a PREFIXED frame relayed with the
+            # prefix still attached - the real, well-formed frame begins at offset 4:
+            #   0011 0000 | 00f200001c... 23B = 4 + 19   (count 1)
+            #   0024 0000 | 018200001c... 32B = 4 + 28   (count 2)
+            #   0013 0000 | 02a200001c... 50B = 4 + 46   (count 4)
+            #   0003 0000 | 03c200001c... 68B = 4 + 64   (count 6)  <- the CTD frame exactly
+            #   000b 0000 | 021200001c... 41B = 4 + 37   (count 3)
+            # v327 normalises the sub for these but deliberately leaves the bytes untouched, and
+            # this relay forwards `stored` verbatim - so peers received a frame 4 bytes longer
+            # than its own header declares, desynced their record walk, and died on
+            # `Length=-19` (Network.cpp:249) or a wild pointer at Main.cpp:2407.
+            # Structure confirmed from BOTH ends: client-side `in 28'N` sizes across ten logs
+            # are exactly 6+count*9 (15,24,33,42,60,69,78,87,96) = our 10+count*9 minus the
+            # 4-byte [bc][T][00][00] header.
+            def _dmg_ok(b):
+                return len(b) >= 10 and (len(b) - 10) % 9 == 0 and b[9] == (len(b) - 10) // 9
+            if not _dmg_ok(stored):
+                if len(stored) > 4 and _dmg_ok(stored[4:]):
+                    if not getattr(s, '_dmg28_pfx_logged', False):
+                        s._dmg28_pfx_logged = True
+                        log('DAMAGE28', f'{s.current_pilot} damage frame carries a 4-byte prefix '
+                                        f'[{hx(bytes(stored[:4]))}] -> stripped, relaying the '
+                                        f'{len(stored) - 4}B frame (once per session)')
+                    stored = stored[4:]
+                else:
+                    log('DAMAGE28', f'{s.current_pilot} sent an UNRECOVERABLE damage frame: '
+                                    f'{len(stored)}B, fails 10+count*9 with and without a 4-byte '
+                                    f'prefix -> NOT relayed. head={hx(bytes(stored[:16]))}')
+                    return
             for p in peers:
                 threading.Thread(target=lambda _p=p: send_rel(_p, stored,
                                  f'<- DAMAGE 28 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
