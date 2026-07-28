@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 r"""
-Fighter Ace LAN Server v352
+Fighter Ace LAN Server v355
 ===========================
 Full per-version history: see change.log in this directory.
 Inline '# vNNN:' comments in the code body are kept where they are - they explain
@@ -223,7 +223,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v352'
+VERSION = 'v355'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4756,6 +4756,11 @@ def broadcast_player_join_62(joiner, reason=''):
                          to=3.0), daemon=True).start()
         n += 1
     log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}')
+    # v355: peers now hold this player at their PlayerIndex. A later re-join MUST retract that
+    # before taking the slot again, or the msg-62 add lands on an occupied index and the client
+    # no-ops it ("Add existing REMOTE_PLAYER") - see the block in the slot-assignment function.
+    # Set here rather than at room entry so it means "peers were TOLD", not "we intend to tell".
+    joiner._presence_advertised = True
 
 def broadcast_player_change_63(s, side, op=CP_OP_CAMP, reason=''):
     """Broadcast a msg 63 ChangePlayerCB for session s to EVERY player in the room,
@@ -5241,6 +5246,79 @@ def assign_player_slot(s, room_id):
     recompute if it would actually collide with a peer already in the target room. With
     <=8 players the first-assigned indices never collide, so identities stay put across
     every arena change."""
+    # v353: A RE-JOIN MUST TEAR DOWN THE PREVIOUS IN-GAME PRESENCE FIRST.
+    # v348 added teardown_ingame_presence() but only wired it into the REAP path, and the
+    # msg-64 back-to-lobby path has had its own teardown since v182. A pilot who exits to the
+    # HQ to change aircraft and then re-joins goes through NEITHER, so peers were never told to
+    # drop his plane or his REMOTE_PLAYER - and then he lands back in the SAME slot.
+    # OBSERVED (server_10_, room 53, ALL41_MAD):
+    #   15:02:08.392 LEAVE  _AvA_Insane pressed back-to-lobby (msg 64)   <- a proper leave
+    #   15:02:37.580 DELETE3 ALL41_MAD ONumber=0x0104 (death)
+    #   ...           NO [LEAVE] AND NO [TEARDOWN] FOR ALL41_MAD AT ALL
+    #   15:06:47.098 ROOM   ALL41_MAD -> room 53 ClientNumber=0 PlayerIndex=0 (assigned)
+    #   15:06:47.159 PLAYER62 broadcast join of ALL41_MAD -> 1 peer(s)
+    # Peers still held the old ALL41_MAD REMOTE_PLAYER at PlayerIndex 0 with his stale objects,
+    # so that msg-62 add hit an already-occupied index (the client's "Add existing
+    # REMOTE_PLAYER" no-op) and nobody rebuilt the binding. Reported symptom: he lost visual of
+    # every other aircraft and none of them could see him.
+    # 15 teardowns fired in that file - none of them his.
+    # WHY HERE rather than on another exit path: chasing individual exit routes has now missed
+    # this twice (v348 caught reap, v182 caught msg 64, this went through neither). Every route
+    # back into a room passes through THIS function, so tearing down here catches them all by
+    # construction, including routes not yet observed.
+    # THE GUARD IS THE POINT: entered_game is set when a session ENTERS the arena and cleared by
+    # every clean exit. So finding it still True at slot-assignment time IS the stale-presence
+    # signal - a first join has it False and no teardown fires.
+    # MUST RUN BEFORE THE `with sl:` BLOCK BELOW. teardown_ingame_presence ->
+    # broadcast_object_delete_3 -> get_sessions_in_room, which takes `sl`; `sl` is a plain Lock,
+    # not an RLock, so calling this inside the block self-deadlocks - the same trap the v323
+    # note above documents.
+    # v355: RE-JOIN TEARDOWN, SECOND ATTEMPT - now keyed on whether peers were actually TOLD.
+    # v353 tried this with `entered_game and current_room is not None` and it fired on FIRST
+    # joins, because both are already set by the time this function runs (see v354). The signal
+    # has to be "we have advertised this player to peers and never retracted it", which is
+    # exactly what _presence_advertised tracks: set where PLAYER62 announces the join, cleared
+    # by teardown_ingame_presence and by the msg-64 leave path.
+    # THE BUG (server_10_, room 53, ALL41_MAD): he exited to the HQ to change aircraft and
+    # re-joined. That route passes through neither the msg-64 leave (v182) nor the reap (v348),
+    # so peers were never told to drop his plane or his REMOTE_PLAYER - and he landed back in
+    # the SAME slot:
+    #   15:02:37.580 DELETE3 ALL41_MAD ONumber=0x0104 (death)
+    #   ...           NO [LEAVE] AND NO [TEARDOWN] FOR HIM AT ALL (15 fired that run, none his)
+    #   15:06:47.098 ROOM   ALL41_MAD -> room 53 ClientNumber=0 PlayerIndex=0 (assigned)
+    #   15:06:47.159 PLAYER62 broadcast join of ALL41_MAD -> 1 peer(s)
+    # The msg-62 add hit an already-occupied index (the client's "Add existing REMOTE_PLAYER"
+    # no-op) so neither side rebuilt: he lost visual of every aircraft and none could see him.
+    # WHY HERE: every route back INTO a room passes through this function, so this catches them
+    # all by construction. Chasing exit paths individually has already missed it twice.
+    # FALSIFICATION - CHECK THIS FIRST ON THE NEXT LOG: [TEARDOWN] must NOT appear on a FIRST
+    # join. If it does, _presence_advertised is being set too early and this must be disabled
+    # again, exactly as v353 was - a spurious REMOVE for an ARRIVING player causes the very
+    # invisibility this fixes, for everyone.
+    # MUST RUN BEFORE THE `with sl:` BLOCK: teardown_ingame_presence ->
+    # broadcast_object_delete_3 -> get_sessions_in_room takes `sl`, which is a plain Lock, not
+    # an RLock. Calling it inside the block self-deadlocks - same trap as the v323 note below.
+    if getattr(s, '_presence_advertised', False):
+        teardown_ingame_presence(s, why='(re-join: clearing previous presence)')
+    # v354: v353's TEARDOWN CALL IS DISABLED HERE - THE GUARD WAS WRONG.
+    # v353 assumed entered_game/current_room are only set once a session is really in the arena,
+    # so finding them True at slot-assignment time would mean stale presence. THEY ARE ALREADY
+    # SET BY THIS POINT IN A NORMAL JOIN. Proof (run_20260727_184141, a clean local test):
+    #   18:41:41 server start
+    #   18:42:06 SYN bigalon sid=1 active_sessions=0      <- FIRST join of the run
+    #   18:42:46.572 TEARDOWN AC2E_Bigalon ... room 45 (re-join: clearing previous presence)
+    #   18:42:46.572 ROOM     AC2E_Bigalon -> room 45 (peers=0, assigned)
+    # It fired on a first join and named the room being entered. Harmless there only because
+    # obj=none and peers=0; with peers present it would broadcast a msg-63 REMOVE for a player
+    # who is ARRIVING, producing exactly the invisibility v353 set out to fix.
+    # The bug v353 targeted is REAL and still open - see the TODO entry. The fix needs a signal
+    # that distinguishes "presence already advertised to peers" from "about to be advertised";
+    # entered_game is not that signal. A dedicated flag set where PLAYER62 announces the join
+    # and cleared by teardown_ingame_presence/the msg-64 leave would be, but it must be verified
+    # against a first-join log before being trusted.
+    # DO NOT re-enable this call without that flag.
+    if False and getattr(s, 'entered_game', False) and getattr(s, 'current_room', None) is not None:
+        teardown_ingame_presence(s, why='(re-join: clearing previous presence)')
     # v323 RACE FIX: the read-then-assign must be ATOMIC. This used to call
     # get_sessions_in_room() (which takes `sl` and releases it), and only afterwards
     # compute and store the index - so two players joining at the same instant both read
@@ -7257,6 +7335,7 @@ def handle_leave_arena(s):
     takes over (it will then re-request news/arena list itself)."""
     log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
+    s._presence_advertised = False   # v355: this path does its own teardown just below
     # v182: tell peers to drop this player's REMOTE_PLAYER object (msg 63 op=REMOVE)
     # BEFORE we clear s.entered_game / s.current_room, so the broadcast still scopes
     # to the room and resolves the player_index. op=0 (CP_OP_REMOVE) -> FUN_004fa9c0
@@ -7466,6 +7545,7 @@ def teardown_ingame_presence(s, why='(disconnected)'):
         log('TEARDOWN', f'{s.current_pilot} PI={s.player_index} St={s.client_number} '
                         f'obj={"0x%04x" % s.my_obj_number if s.my_obj_number is not None else "none"} '
                         f'-> peers in room {s.current_room} told to drop plane+player {why}')
+        s._presence_advertised = False   # v355: peers no longer hold this player
         return True
     except Exception as _e:
         log('TEARDOWN', f'[warn] in-game teardown failed for '
@@ -10224,6 +10304,32 @@ def handle_post_auth(s, cmd, pl):
                 pass
             peers = [x for x in get_sessions_in_room(s.current_room)
                      if x is not s and getattr(x, 'flying', False)]
+            # v355: VALIDATE THE DAMAGE FRAME'S RECORD STRUCTURE BEFORE RELAYING IT.
+            # msg 28 layout, established from 9 real frames captured by v352's instrumentation
+            # (bc 0..15, 19B..244B) - EVERY one fits exactly:
+            #     [bc][T][00][00][1c][..][..][..][..][count]  then count x 9-byte records
+            #     size == 10 + count*9,  count at byte[9]
+            #   19B->1  28B->2  46B->4  64B->6  73B->7  91B->9  109B->11  226B->24  244B->26
+            # The frames from the CTD run (server_9_) were 46, 100, 19, 68, 19 bytes. All are
+            # integral against that formula EXCEPT 68: (68-10)/9 = 6.444. That is the malformed
+            # one, and relaying it desyncs the recipient's record walk - remaining length runs
+            # negative and the client dies on
+            #     Length=-19   Engine\Net\Network.cpp:249
+            # or, when the garbage is dereferenced before any bounds check catches it,
+            #     Access violation at net, v.addr:0xDEB800EB   FA30\Main.cpp:2407
+            # CORRECTION TO AN EARLIER CALL: this is NOT a bc-ceiling problem like v351. bc runs
+            # to 15 (244B, 26 records) with no harm - the big frames are fine and the small ones
+            # crashed. Do not port TELEM_MAX_BC's shape to msg 28.
+            # v352 logged every frame as header-MATCH because it only checked bc/T against the
+            # overall length; the count field was never cross-checked. Both must agree.
+            _dl = len(stored)
+            if _dl < 10 or (_dl - 10) % 9 != 0 or stored[9] != (_dl - 10) // 9:
+                _exp = 10 + stored[9] * 9 if _dl > 9 else -1
+                log('DAMAGE28', f'{s.current_pilot} sent a MALFORMED damage frame: {_dl}B but '
+                                f'count={stored[9] if _dl > 9 else "?"} implies {_exp}B '
+                                f'(10 + count*9) -> NOT relayed. Relaying this desyncs every '
+                                f'recipient\'s record walk and CTDs them. head={hx(bytes(stored[:16]))}')
+                return
             for p in peers:
                 threading.Thread(target=lambda _p=p: send_rel(_p, stored,
                                  f'<- DAMAGE 28 relay ({s.current_pilot}->{_p.current_pilot})', to=3.0),
