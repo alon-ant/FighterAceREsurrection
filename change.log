@@ -7,6 +7,76 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v365f5: [OBJ-ID] RECYCLE_OBJ_NUMBERS = False - retire Number recycling (object-id plan, A).
+      Zero-risk single-flag change. Object Numbers are now strictly monotonic within a
+      session; a freed Number is NEVER re-issued (the pool/quarantine code stays in place
+      but dormant, so revert is one flag).
+      WHY: recycling began as a v-line EXPERIMENT to hunt the mid-flight spawn freeze by
+      shrinking the live Number set. That freeze is now fixed at its true root (the missing
+      parachuter ServerConfirm, v361f5), so the premise is gone and only the downside
+      remained. Recycling is the SUPPLY side of the object-overwrite / ghosting class: even
+      with v324's FIFO+quarantine, an internet peer that missed a delete (e.g. a wrapped
+      DELETE swallowed before v364f5) can still hold an old Number when the 300s quarantine
+      lapses and it is handed to a different plane on a different station -> two aircraft
+      share one Number -> wrong-plane / no-damage / ghost sightings, and the St-orphan
+      NET::OBJECT[garbage] CTD. The v324 comment already did the math that makes recycling
+      unnecessary: 0x0100..0xFFFF = 65,279 ids, ~120 spawns/session => hundreds of sessions
+      before wrap. Not reusing within a session therefore costs nothing.
+      RE CONTEXT: the server is ALREADY authoritative over Number - the client proposes only
+      a local `ident` (per-client counter) in its out-4 and BLOCKS on the msg-5 ServerConfirm
+      (FUN_007e5030 asserts NumberVar==-1 then writes the server's Number) before its sim
+      loop starts. So the overwrite bug was never clients choosing ids; it was id LIFECYCLE.
+      A (this change) removes reuse-collision. B (next) makes St / client_number
+      server-authoritative and reservation-based to close the two-objects-on-one-station
+      window that remains when a bail keeps a station while a new plane takes it.
+      FALSIFICATION: with recycling off, a full field session must show object Numbers only
+      ever INCREASING (watch CREATE2/CONFIRM5 lines - no Number should appear twice), and
+      the wrong-plane / no-damage / ghosting reports tied to Number reuse should not recur.
+      If ghosting persists with strictly-increasing Numbers, the remaining cause is St reuse
+      (mechanism 1), which is exactly what B targets - a clean separation of the two.
+      DEPLOY: stacks on v364f5; still the candidate line, v362f5-stable remains rollback.
+      STILL OPEN: object-id plan B (St authority); bail kill attribution; cs9 wrap; msg-67.
+
+==============================================================================
+
+RE-VERIFICATION (vcncnet.dll, Ghidra) - v364f5 UNWRAP CONFIRMED AGAINST THE ENCODER.
+      No code change. Loaded vcncnet.dll (the module that actually builds the wrapper -
+      it is a separate binary from FA.exe, which only holds import thunks) and read the
+      encoder directly. Findings:
+      * vcncSendMessage @0x1000baf5 and vcncAddMessageToList @0x1000be4c are the send
+        path. Each sub-message is emitted as [uCmd:2 BE][innerlen:2 BE][body], and the
+        whole sub-message is padded UP to a 4-byte multiple (uVar6=(len+3)&~3).
+      * The wrapper we strip is the outer sub-message header; uCmd's low byte is the
+        FA message Type T, whose HIGH NIBBLE is the size (Size=T>>4) - the same
+        bc*16+Size relation in the baseline notes, confirmed from the binary.
+      * THIS IS WHY v364f5's predicate is correct, not lucky: 8+pl[4]*16+(pl[5]>>4)==len
+        reduces, for a wrapped inner with bc=0, to 8+(T>>4)==len = [4B outer hdr]+
+        [4B inner hdr]+[T>>4 body]. That is the client's genuine framing invariant,
+        not a fitted heuristic. Re-checked: matches 25/25 distinct field samples.
+      * FA.exe dispatcher @0x004f18a0 confirmed: indexes (&DAT_00c81ed8)[msg[0]] and
+        calls handler(msg,len); unknown types are logged, not fatal. Validates the
+        dispatch-table formula and the type-byte model the whole server relies on.
+
+      TWO THEORETICAL EDGES the encoder revealed (NOT fixed - no observed frame hits
+      them, and a speculative pad-aware rewrite REGRESSED 13/25 real samples in test,
+      so the exact-equality predicate stays):
+        (a) 4-byte PADDING: a sub-message whose body is not already 4-aligned would
+            arrive with 1-3 pad bytes, and the exact-length check would REJECT it
+            (false negative -> that message swallowed, as pre-v364). Every field
+            sample was already aligned, so this is unobserved.
+        (b) MULTI-SUB-MESSAGE LISTS: vcncAddMessageToList concatenates several subs
+            under one send; the unwrap strips only the first 4B layer. A true 2-message
+            list would fail the equality and fall through un-stripped.
+      FALSIFICATION / when to revisit: if the field logs ever show a 'counter-wrap'
+      REFRAME MISS on a frame whose (len-8) is not a multiple of 4, edge (a) is real -
+      switch the check to `padded == len` AND simultaneously handle the direct-frame
+      collision that broke the naive attempt (the regression came from dropping the
+      exact-equality direct guard). If a swallowed message's payload decodes as two
+      stacked [00 T 00 00] headers, edge (b) is real - loop the strip. Until a real
+      frame exhibits either, leave v364f5 untouched.
+
+==============================================================================
+
 v364f5: [WIRE/FIELD] *** UNIVERSAL COUNTER-UNWRAP + TELEMETRY ANTI-SHADOW. ***
       First INTERNET field deployment (v362f5, 6 players) turned the counter/TIME-attach
       wrapper from an occasional LAN quirk into a constant: internet jitter makes clients

@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v364f5'
+VERSION = 'v365f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5201,14 +5201,22 @@ def _ack_sender_loop():
 # plane and B's plane carry different Numbers, so B treats A's update as a remote object.
 _obj_num_lock = threading.Lock(); _obj_num_next = 0x0100
 _obj_num_free = []   # [(Number, freed_monotonic)] - FIFO, and only reusable after a quarantine
-# EXPERIMENT (spawn-freeze hunt): the residual instant mid-flight freeze is cumulative in total
-# spawn count, plane-independent, with a provably clean server + reliable channel. The one thing
-# that grew unboundedly per spawn was the object Number (256,257,... never reused), a prime
-# suspect for a client-side per-object structure that never gets pruned. Recycling the player's
-# own Number when their plane is deleted keeps the working set tiny (spawn 50 reuses spawn 5's
-# Number) so it either stops the freeze or cleanly rules Numbers out. Safe in single-player (no
-# peers); the delete-notify means the client already dropped that object before we re-hand it.
-RECYCLE_OBJ_NUMBERS = True
+# v365f5: RECYCLING RETIRED. This flag was born as a spawn-freeze EXPERIMENT (shrink the
+# working set of Numbers to test whether an unbounded-per-spawn client structure caused the
+# mid-flight freeze). That freeze is now solved at its real root - the missing parachuter
+# ServerConfirm (v361f5) - so the experiment's premise is closed. What remained was pure
+# downside: recycling is the SUPPLY side of the object-overwrite/ghosting class. Even with the
+# v324 FIFO+quarantine, an internet peer that never received a delete (e.g. a wrapped DELETE
+# swallowed pre-v364f5) can still hold an old Number when the 300s quarantine expires and that
+# Number is re-issued to a different plane on a different station -> two aircraft share one
+# Number -> wrong-plane / no-damage / ghost, and the St-orphan CTD path. The Number space is
+# 0x0100..0xFFFF = 65,279 ids; at ~120 spawns/session that is hundreds of sessions before wrap,
+# so NEVER reusing a Number within a session costs nothing and removes the reuse-collision
+# class outright. Monotonic-only from here; the pool/quarantine code stays in place but dormant.
+# REVERT PATH: set True to restore v324 FIFO+quarantine recycling (single variable).
+# (This is change A of the object-id plan; B = server-authoritative St / station lifecycle,
+# the deeper fix for the two-objects-on-one-station window, is a separate later version.)
+RECYCLE_OBJ_NUMBERS = False
 # v324 OBJECT-NUMBER COLLISION FIX. Recycling used to be immediate and LIFO: free_obj_number()
 # appended and next_obj_number() popped from the END, so the number freed by the LAST death was
 # handed to the NEXT spawn - the worst possible choice, because that is precisely the object a
