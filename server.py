@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v369f5'
+VERSION = 'v370f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5090,7 +5090,20 @@ class S:
         # so the ACK lookup missed and EVERY reliable send from then on timed out - a slow
         # "everything eventually wedges" failure on long sessions. &0xFF keeps key, wire, and ACK
         # aligned across the wrap.
-        with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0xFF; return v
+        with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0xFF
+        if v == 0xFF:
+            # v370f5 [WIRE/INSTRUMENT]: the 256th reliable send of this session just went out.
+            # HYPOTHESIS UNDER TEST (run_20260729_184930): the client's reliable RX runs mod-512
+            # (its ACK fields are 9-bit) while our wire seq byte + _evts keys wrap at 256, so
+            # from the NEXT send on, the client's strictly-in-order QRcv expects seq 256, we can
+            # only ever say 0..255, and it silently discards EVERY reliable delivery for the
+            # next 256 messages (Bigalon's downlink died at delivered-message ~256, 19:05:01;
+            # all four long-session clients followed; empty HQ menus + one-way invisibility).
+            # Correlate this timestamp with the client-side delivery stop.
+            log('SEQ9', f'{getattr(self, "current_pilot", "?")} server->client reliable TX seq '
+                        f'WRAPPED 255->0 (256th reliable send) - if the QRcv-wrap hypothesis '
+                        f'holds, this client STOPS delivering reliable messages from now')
+        return v
     def sig(self, seq):
         with self._lock: e=self._evts.get(seq)
         if e: e.set(); return True
@@ -6122,6 +6135,53 @@ def send_score_event_to_killer(killer, mec=None, eec=None):
     log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} '
                    f'(MEC={mec},EEC={eec} -> type byte 0x{((mec & 0xf) << 4) | (eec & 0xf):02x})')
 
+CREDIT_BAIL_HUSK = True      # v370f5: single-flag revert for the husk-teardown kill credit below.
+                             #   False restores the v349-v369 behaviour (latch orphaned at despawn).
+
+def credit_bail_husk_kill(s, husk_obj, how):
+    """v370f5 [SCORE]: consume the held bail kill when the SERVER tears the empty husk down.
+
+    THE DROP (run_20260729_184930): the bail latch says 'credited when the empty plane comes
+    down' - but that only ever ran through the CLIENT-reported msg-3 death path. Both bails
+    with damage on record (18:59 latch->0x010f, 19:03 latch->0x011a=Bigalon) ended with the
+    RESPAWN-DESPAWN path removing the husk ('abandoned bail-out plane, re-spawn'), which never
+    scored: the PENDING_KILL latch was orphaned, Bigalon's kills sat at 9 all night, and the
+    v368/v369 banner never had a credit to announce (the v349 despawn comment documented the
+    dropped credit as a KNOWN GAP).
+
+    Consuming here = the server-side husk teardown IS 'the plane coming down'. score_on_death
+    pops the latch (double-credit impossible) and counts the victim's death with the bail
+    discount (why=='bail' -> plane cost only, pilot survived). Client-side, this path has NO
+    scoring exit-tail (the husk delete just broadcast is a plain type-3), so the shooter's
+    client needs BOTH msg-33 events a normal kill gets via its own pipeline:
+      * MEC=1/EEC=3 (Type 0x13) - the CREDIT: event 0x26 + score_obj+0x2fc, ticks the HUD.
+        Safe here precisely because no scoring exit-tail reached any client for this kill
+        (v242 disabled SEND_SCORE_EVENT_33 only because the client-scored exit-tail made it
+        a DOUBLE; this path has no first count).
+      * MEC=5/EEC=3 (Type 0x53) - the PLAYER_KILLED banner (v369 branch, still gated on
+        ANNOUNCE_BAIL_KILL).
+    Gated on the latch existing: a voluntary no-damage bail stays exactly as before (no death
+    charged at despawn) - blast radius is only the reported bug.
+    STILL OPEN: a bailer who QUITS mid-descent tears down via teardown_ingame_presence /
+    msg-64, which know nothing of bailed_plane_obj - husk orphaned on peers AND credit lost
+    on that route. Wire those after this path is field-proven."""
+    if not CREDIT_BAIL_HUSK or PENDING_KILL.get(husk_obj) is None:
+        return
+    try:
+        _killer, _kbailed = score_on_death(s, b'', hunter_obj=None, victim_obj=husk_obj)
+    except Exception as _e:
+        log('BAILKILL', f'[warn] husk-teardown credit failed for '
+                        f'{getattr(s, "current_pilot", "?")} obj 0x{husk_obj:04x}: {_e}')
+        return
+    if _killer is None:
+        return
+    send_score_event_to_killer(_killer)                    # Type 0x13 credit (see docstring)
+    if _kbailed and ANNOUNCE_BAIL_KILL:
+        send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=ANNOUNCE_BAIL_EEC)
+        log('BAILKILL', f'{_killer.current_pilot} gets credit + PLAYER_KILLED banner for the '
+                        f'bail kill on {s.current_pilot} (husk 0x{husk_obj:04x} torn down '
+                        f'{how}, announce-only MEC={ANNOUNCE_BAIL_MEC} EEC={ANNOUNCE_BAIL_EEC})')
+
 # -- Combat scoring constants ----------------------------------------
 KILL_SCORE_POINTS   = 100    # flat points for an air kill (global scoring); tune to taste
 ACE_KILLS_PER       = 5      # v219: career kills per 'ace' (classic 5-kill ace). Used by pilot_aces()
@@ -6184,24 +6244,25 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
-PARA_DESCENT_SECONDS = 45    # v369f5: raised 20 -> 45. RE of FA.exe this session proved the
-                             #   networked parachuter is ENTIRELY server-lifecycle-controlled: the
-                             #   client NEVER auto-lands or culls it (messages76: every 'Create
-                             #   NetParachuter' is removed only by a 'Server require delete ...
-                             #   bsr=1' - there is no client-side cull, so removing this delete
-                             #   would leave the canopy hanging FOREVER on peers, not landing).
-                             #   The chute is also a STATIC object on peers (we relay no canopy
-                             #   telemetry), so it cannot visually descend regardless of timing.
-                             #   20s made it vanish while still visibly aloft; 45s is a believable
-                             #   canopy duration for a high bail and the client tolerates the
-                             #   server holding the object that long. This is the correct INTERIM
-                             #   fix. The PROPER end-state is the parachuter STATE MACHINE
-                             #   (ParachuterState0/1/2 + the _V_FCB network variants; State2 =
-                             #   landed) that FA.exe expects - sending State2 lands the canopy with
-                             #   its real animation instead of a blunt object-delete. That needs
-                             #   the _V_FCB dispatch ids + payload layout RE'd and is a FUTURE
-                             #   MILESTONE (see change.log v369f5 notes). Also note EEC=0xe =
-                             #   GSET_CRASH_VIRTUAL_PARACHUTER exists for crashing a remote canopy.
+PARA_DESCENT_SECONDS = 300   # v370f5: 45 -> 300, DEMOTED TO A FAILSAFE. The 19:03 bail in
+                             #   run_20260729_184930 (Lufty, ~92s high-altitude descent) falsified
+                             #   TWO v369 claims: (1) the client DOES report its own landing - its
+                             #   parachuter msg-3 delete arrived at 19:05:05.884, and the 19:00:23
+                             #   bail (30s descent) shows the v248 handler relaying that delete to
+                             #   peers cleanly; (2) canopy telemetry IS relayed (after the timer
+                             #   delete the peers flooded 'Get coord for missing object 283' -
+                             #   impossible unless chute position frames were still arriving). So
+                             #   the REAL lifecycle is event-driven: the owner's landing delete
+                             #   ends the canopy (v248 handler, which clears para_obj_number and
+                             #   thereby cancels this timer thread). The 45s timer fired FIRST on
+                             #   long descents, deleting the canopy mid-air AND retiring the
+                             #   object so the real landing delete got swallowed ('neither its own
+                             #   nor any peer's'). 300s only catches an owner who crashes or
+                             #   disconnects under canopy, so peers can never keep an eternal
+                             #   chute. Revert: 45. (The ParachuterState/_V_FCB state-machine
+                             #   milestone from v369 still stands as the animated end-state;
+                             #   EEC=0xe = GSET_CRASH_VIRTUAL_PARACHUTER noted there remains
+                             #   valid.)
 PARA_PRIME_SCORE    = True   # v257: send the peer a msg-25 score block for the bailing pilot right
                              #   before the parachuter create, matching the 2009 wire ('in 25'46'
                              #   blocks precede object-only parachuter creates). May be what lets the
@@ -8930,9 +8991,11 @@ def _fire_server_confirm(s, via='', ident=None):
     # call and restored immediately. This is safe: the function builds the delete packet
     # SYNCHRONOUSLY and the sender thread closes over the finished bytes (_del), so nothing
     # reads s.my_obj_number after we put it back.
-    # KNOWN GAP, deliberate: the kill held against the abandoned plane can no longer be credited
-    # once it despawns, because nothing is left to come down. Accepted for now - a peer-wide CTD
-    # is worse than a lost credit. Revisit with the held-kill mechanism.
+    # v370f5: the GAP below is CLOSED - credit_bail_husk_kill() consumes the held kill at this
+    # despawn (run_20260729_184930: every damaged bail lost its credit exactly here).
+    # (Original v349 note, kept for history: the kill held against the abandoned plane could no
+    # longer be credited once it despawned, because nothing was left to come down. Accepted then
+    # because a peer-wide CTD is worse than a lost credit.)
     _bp = getattr(s, 'bailed_plane_obj', None)
     if _bp is not None:
         if _bp != number:
@@ -8950,6 +9013,10 @@ def _fire_server_confirm(s, via='', ident=None):
                             f'for {s.current_pilot}: {_e}')
             finally:
                 s.my_obj_number = _saved_obj
+            # v370f5: the server-side teardown IS 'the plane coming down' - consume the held
+            # kill NOW or it is orphaned forever (the v349 KNOWN GAP; both damaged bails in
+            # run_20260729_184930 lost their credit exactly here).
+            credit_bail_husk_kill(s, _bp, how='(re-spawn despawn)')
         s.bailed_plane_obj = None
         # v367f5: PEER RE-ADVERTISE AFTER A BAIL. During the long canopy descent the bailer's
         # conductor goes quiet, the server suspends re-stamping telemetry toward them (v234),
@@ -11245,8 +11312,9 @@ def handle_post_auth(s, cmd, pl):
                                 except Exception:
                                     pass
                             _s.para_obj_number = None
-                            log('PARA', f'parachuter 0x{_pn2:04x} ({_s.current_pilot}) landed after '
-                                        f'{PARA_DESCENT_SECONDS}s -> server delete sent')
+                            log('PARA', f'parachuter 0x{_pn2:04x} ({_s.current_pilot}) FAILSAFE '
+                                        f'delete after {PARA_DESCENT_SECONDS}s - the owner never '
+                                        f'reported a landing (crash/disconnect under canopy?)')
                         threading.Thread(target=_para_land, daemon=True).start()
             else:
                 log('POST-AUTH', 'parachute msg-4 consumed, not confirmed (SEND_PARACHUTER off or '
@@ -11445,6 +11513,27 @@ def on_pkt(data, addr):
             elif _prev_cs is not None and _prev_cs < 0x40 and cs >= 0xC0:    # rare backward wrap
                 s._rel_rx_hi = (getattr(s, '_rel_rx_hi', 0) ^ 1)
             cs9 = ((getattr(s, '_rel_rx_hi', 0) & 1) << 8) | cs
+            # v370f5 [WIRE/INSTRUMENT]: where does vcnc stamp the 9-bit seq on reliable DATA?
+            # The ACK layout is proven 9-bit (acked-seq bits 20-28, next-expected bits 8-16),
+            # so the DATA dword almost certainly carries the full seq too - and our TX sends a
+            # bare 0x20000000, the prime suspect for the 255->0 downlink wedge. The client's
+            # OWN data packets answer this for free: once ITS uplink cs9 passes 255, whichever
+            # dword field still equals cs9 is the live 9-bit field build_rel must mirror
+            # (-> v371f5's one-line TX fix). Log the first packet (baseline), the first
+            # nonzero sighting, and sparse post-wrap samples with match verdicts.
+            _dq20 = (dw >> 20) & 0x1FF; _dq8 = (dw >> 8) & 0x1FF
+            if getattr(s, '_rel_rx_count', 0) == 0:
+                log('SEQ9', f'{getattr(s, "current_pilot", "?")} first reliable DATA '
+                            f'dw=0x{dw:08x} cs={cs} bits20-28={_dq20} bits8-16={_dq8}')
+            elif (_dq20 or _dq8) and not getattr(s, '_seq9_seen', False):
+                s._seq9_seen = True
+                log('SEQ9', f'{getattr(s, "current_pilot", "?")} reliable DATA dword has '
+                            f'NONZERO seq fields: bits20-28={_dq20} bits8-16={_dq8} cs={cs} '
+                            f'cs9={cs9} dw=0x{dw:08x}')
+            if cs9 >= 0x100 and (getattr(s, '_rel_rx_count', 0) & 0xF) == 0:
+                log('SEQ9', f'{getattr(s, "current_pilot", "?")} POST-WRAP: cs={cs} cs9={cs9} '
+                            f'bits20-28={_dq20} bits8-16={_dq8} dw=0x{dw:08x} '
+                            f'(match20={_dq20 == cs9} match8={_dq8 == cs9})')
             # - reliable-RX diagnostics -
             _now=time.time()
             s._rel_rx_count=getattr(s,'_rel_rx_count',0)+1

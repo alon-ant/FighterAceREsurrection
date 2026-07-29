@@ -7,6 +7,87 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v370f5: [SCORE/PARA/WIRE] THREE deliverables from the run_20260729_184930 + messages77 field
+      analysis, shipped in one deploy (single test window tonight, per Alon). Each is
+      independently revertable.
+
+  (1) BAIL KILL CREDIT CONSUMED AT THE SERVER-SIDE HUSK TEARDOWN - the real reason v368/v369
+      never showed a banner. The run never tested the MEC=5 branch at all: all 13 deaths were
+      'solo crash/crashland', zero LATCHED / BAILKILL lines - yet the DAMAGE28 latch worked
+      perfectly (6x 'Lufty (obj 0x0115) DAMAGED by obj 0x011a' 19:03:11-27, then the BAIL
+      line 'kill is already held ... credited when the empty plane comes down'). The husk
+      never 'came down': the v349 respawn-despawn path removed it ('abandoned bail-out plane,
+      re-spawn', 19:05:06.140), and that path never scored - its own comment documented the
+      dropped credit as a KNOWN GAP. Both damaged bails (18:59 latch->0x010f, 19:03
+      latch->0x011a) died there; Bigalon's kills sat at 9 all night.
+      FIX: credit_bail_husk_kill() called at the despawn site. score_on_death(victim_obj=husk)
+      pops the PENDING_KILL latch (double-credit impossible) and counts the victim's death
+      with the bail discount (why=='bail' -> plane cost only). Client-side this path has NO
+      scoring exit-tail (the husk delete is a plain type-3), so the shooter gets BOTH msg-33
+      events a normal kill produces through its own pipeline: MEC=1/EEC=3 credit (Type 0x13 -
+      safe here because no scoring exit-tail reached any client for this kill; v242's
+      double-count reason does not apply on this path) and the MEC=5/EEC=3 PLAYER_KILLED
+      banner (v369 branch, still gated ANNOUNCE_BAIL_KILL). Gated on the latch existing, so
+      voluntary no-damage bails are untouched.
+      FALSIFY: shoot a pilot into a bail and let them RESPAWN before the husk lands. At their
+      respawn the server must log 'attribution: LATCHED (bail)' + BAILKILL; the shooter must
+      see the cyan banner AND the HUD kill tick, exactly once (Fighters Destroyed vs Assists
+      stay independent). NOTE: the shooter must not be seq-wrapped ((3) below) or the events
+      are sent-and-discarded - run the test EARLY in the shooter's session.
+      STILL OPEN: a bailer who QUITS mid-descent tears down via teardown_ingame_presence /
+      msg-64, which know nothing of bailed_plane_obj - husk orphaned on peers AND credit lost
+      on that route. Wire those after this path is field-proven.
+
+  (2) PARACHUTE LIFETIME IS NOW EVENT-DRIVEN; the timer is a 300s FAILSAFE (was the 45s hard
+      delete). The 19:03 bail (~92s real high-altitude descent) falsified two v369 claims:
+      the client DOES report its own landing (its parachuter msg-3 delete arrived at
+      19:05:05.884, and the 19:00:23 bail shows the v248 handler relaying that delete to
+      peers cleanly on a 30s descent), and canopy telemetry IS relayed (peers flooded 'Get
+      coord for missing object 283' AFTER the timer delete - impossible unless chute frames
+      were still arriving for it). The 45s timer fired FIRST on long descents, deleting the
+      canopy mid-air and retiring the object so the REAL landing delete was swallowed
+      ('neither its own nor any peer's'). With the timer at 300s the owner's landing delete
+      arrives first; the v248 handler relays it and clears para_obj_number, which cancels the
+      timer thread. Answer to 'can it be unlimited': the canopy now lives the FULL real
+      descent at any altitude; 300s only covers an owner who crashes/disconnects under
+      canopy, so peers can never keep an eternal chute. Revert: PARA_DESCENT_SECONDS=45.
+      FALSIFY: high bail -> peers keep the canopy the whole descent, it disappears at
+      touchdown (bsr=1); server logs the v248 'removed (landed or killed)' relay, NOT the new
+      FAILSAFE line; no missing-object floods for the chute after it lands.
+
+  (3) SEQ-WRAP INSTRUMENTATION (log-only, zero risk) for the MASTER BUG of the run: every
+      client that joined ~18:51-18:52 lost server->client RELIABLE DELIVERY at ~its 256th
+      delivered reliable message, uplink still alive. Evidence: Bigalon's last delivery
+      19:05:01.556 (delivered-datagram count ~256), then 542x 'Get coord for missing object
+      286' (= Lufty's respawn CREATE2 at 19:05:06.762, sent-and-discarded -> the one-way
+      invisibility) and 'out 58' at 19:07:26 answered-and-discarded -> EMPTY HQ PLANE MENU
+      (same for Lufty at 19:07:41; v359's notes predicted this exact signature for a QRcv
+      wedge). Taurus/Gary/ALL41_MAD stale-culled 0x011a (dif~29s, 19:07:52-56) instead of
+      processing the reliable DELETE3 sent 19:07:26.891 -> their downlinks were dead too.
+      Only Moira (joined 19:03) stayed healthy. The client's repeating 0x43/0xd2 polls at
+      19:08 are the same thing: answers served, never delivered.
+      HYPOTHESIS: vcnc's reliable engine is mod-512 (its ACK fields are 9-bit: acked-seq
+      bits 20-28, next-expected bits 8-16) while our TX stamps only the 8-bit byte[3] and a
+      bare 0x20000000 dword. At the client's 256th expected packet its strictly-in-order QRcv
+      wants seq 256; we can only ever say 0..255; every later reliable delivery is discarded
+      (wrap-induced version of the loss-induced wedge v359 fixed).
+      INSTRUMENTATION: (a) [SEQ9] log at our own TX wrap 255->0 per session - the predicted
+      wedge instant, to correlate with each client's delivery stop; (b) [SEQ9] logs of the
+      dword fields on client reliable DATA (first packet baseline, first nonzero sighting,
+      sparse post-wrap samples with match20/match8 verdicts): once any client's uplink cs9
+      passes 255, whichever dword field still equals cs9 is the live 9-bit field build_rel
+      must mirror -> that becomes v371f5's one-line TX fix and ends the empty-menu /
+      one-way-invisibility class. Ghidra route also open (reliable-data RX in vcncnet.dll,
+      near the ACK processor FUN_10006b0e) - the project currently has FA.exe loaded and
+      needs the DLL swapped in.
+      FIELD GUIDANCE TONIGHT: expect every client to wedge ~15-20 min after joining at
+      current broadcast volumes (empty menus, players turning invisible, arena lists not
+      refreshing). That is the bug being MEASURED, not a regression. A full client reconnect
+      resets the session seq and recovers instantly - tell pilots to reconnect when it hits,
+      and schedule the (1)/(2) test cases EARLY in each client's session.
+
+==============================================================================
+
 v369f5: [SCORE/PARA] TWO fixes, both grounded in a fresh FA.exe RE pass (ExitDataArrive
       FUN_004f8f20 + ScoreEvent handler FUN_004f9b0f decoded from machine code).
 
