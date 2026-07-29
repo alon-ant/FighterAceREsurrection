@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v370f5'
+VERSION = 'v371f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3443,6 +3443,18 @@ def build_status_request(sess, base_incr_ms):
     struct.pack_into('>I', p, 20, 0)
     return bytes(p)
 
+# v371f5 [RELIABLE-VOLUME]: idempotent SCOREBOARD state does not need reliable delivery - it is
+# re-pushed on every spawn/kill/HQ-open, so a dropped copy is corrected within seconds by the next.
+# Moving it off the reliable channel slashes reliable send volume (run_200156: 134 ACE88 + 75
+# STAT25 + 12 SCORE96 = ~221 of the ~256 sends that fill the window), so even a future receive-gap
+# stall (v359 covers single losses) is pushed far past any real session length. The 9-bit fix
+# above is the actual cure for the 256 wedge; this is defence in depth and a latency win. Each is
+# a single-flag revert if any handler turns out to require reliable delivery (none should - all
+# three are fire-and-forget state reports with no ordering dependency).
+SEND_ACE88_UNREL  = True     # msg 88 AceOrRankChangedCB - re-sent every spawn/kill/HQ-open
+SEND_STAT25_UNREL = True     # msg 25 stat block         - re-sent alongside every 88
+SEND_SCORE96_UNREL = True    # msg 96 ScoreTable         - request-driven, re-answered on each 0x60
+
 def build_rel_ack(cid, seq=0, next_exp=None):
     # CUMULATIVE ACK -- ROOT-CAUSE FIX for the 3rd-reentry CTD.
     # Bit layout (matches vcncNet's own ACK builder FUN_10002a76 / router FUN_100032da):
@@ -3483,7 +3495,13 @@ def build_data(cmd, sq=0):
     return bytes(p)
 
 def build_rel(payload, seq=0):
-    h=bytearray(8); h[0]=0; h[2]=0x20; h[3]=seq&0xFF
+    # v371f5: the reliable DATA seq is a 9-BIT field in the BIG-ENDIAN u16 at wire bytes[2:4]
+    # (proven: client stamp FUN_100070f6 writes `u16 & 0x1ff`, reads back the same). 0x2000 is
+    # the DATA-type flag that shares that u16 and has no bits in 0x1ff, so the seq's 9th bit is
+    # simply byte2's low bit. v370f5 hardcoded byte2=0x20 (9th bit stuck at 0) -> seq capped at
+    # 255 -> the 256th send collided with 0 and wedged the client's QRcv. Carry all 9 bits:
+    _s = seq & 0x1FF
+    h=bytearray(8); h[0]=0; h[2]=0x20 | (_s >> 8); h[3]=_s & 0xFF
     struct.pack_into('>I',h,4,0x20000000); return bytes(h)+bytes(payload)
 
 def build_appspace_pkt(data_bytes):
@@ -4576,8 +4594,11 @@ def send_stat_block_25(s, reason='', dst=None):
 
     pkt = build_msg13(build_stat_block_25(s.player_index, fields))
     _target = dst if dst is not None else s          # v257: allow sending s's block to a peer
-    threading.Thread(target=lambda: send_rel(_target, pkt,
-                     f'<- msg 25 stat block ({pilot}) {reason}', to=3.0), daemon=True).start()
+    if SEND_STAT25_UNREL:
+        send_unrel(_target, pkt, f'<- msg 25 stat block ({pilot}) {reason}')   # v371f5: idempotent
+    else:
+        threading.Thread(target=lambda: send_rel(_target, pkt,
+                         f'<- msg 25 stat block ({pilot}) {reason}', to=3.0), daemon=True).start()
     if STAT25_PROBE:
         log('STAT25', f'PROBE -> {pilot} PI={s.player_index}: markers {STAT25_PROBE_UNKNOWN}, '
                       f'f9/f10 = FLOAT {STAT25_PROBE_F9}/{STAT25_PROBE_F10}. {reason}')
@@ -4702,7 +4723,10 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
     _label = (f'<- AceOrRank 88 (PI={s.player_index} aces={aces} rank={rank})'
               f'{(" " + reason) if reason else ""}')
     for _t in _targets:
-        _submit_send(send_rel, _t, pkt, _label, to=3.0)
+        if SEND_ACE88_UNREL:
+            send_unrel(_t, pkt, _label)          # v371f5: idempotent, re-pushed constantly
+        else:
+            _submit_send(send_rel, _t, pkt, _label, to=3.0)
     log('ACE88', f'AceOrRank -> {pilot} PI={s.player_index} aces={aces} rank={rank} '
                  f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room} '
                  f'{[t.current_pilot for t in _targets]}; the owner '
@@ -5082,27 +5106,33 @@ class S:
     def nts(self): self.ts=(self.ts+1)&0xFF; return self.ts
     def ela(self): return time.time()-self.t0
     def nrel(self):
-        # Reliable TX seq. The wire carries this as the 8-bit byte[3] (build_rel: h[3]=seq&0xFF),
-        # and the server reads the client's reliable seq the same way (cs=data[3], 8-bit). So the
-        # counter MUST wrap at 256 to stay in lock-step with the wire and with _evts (keyed on
-        # this value). It was &0x1FF (9-bit): fine below 256, but at the 256th reliable send of a
-        # session the 9-bit key (256) no longer matched the 8-bit wire seq (0) the client ACKs,
-        # so the ACK lookup missed and EVERY reliable send from then on timed out - a slow
-        # "everything eventually wedges" failure on long sessions. &0xFF keeps key, wire, and ACK
-        # aligned across the wrap.
-        with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0xFF
-        if v == 0xFF:
-            # v370f5 [WIRE/INSTRUMENT]: the 256th reliable send of this session just went out.
-            # HYPOTHESIS UNDER TEST (run_20260729_184930): the client's reliable RX runs mod-512
-            # (its ACK fields are 9-bit) while our wire seq byte + _evts keys wrap at 256, so
-            # from the NEXT send on, the client's strictly-in-order QRcv expects seq 256, we can
-            # only ever say 0..255, and it silently discards EVERY reliable delivery for the
-            # next 256 messages (Bigalon's downlink died at delivered-message ~256, 19:05:01;
-            # all four long-session clients followed; empty HQ menus + one-way invisibility).
-            # Correlate this timestamp with the client-side delivery stop.
-            log('SEQ9', f'{getattr(self, "current_pilot", "?")} server->client reliable TX seq '
-                        f'WRAPPED 255->0 (256th reliable send) - if the QRcv-wrap hypothesis '
-                        f'holds, this client STOPS delivering reliable messages from now')
+        # Reliable TX seq. *** v371f5 [WIRE/CRITICAL]: 9-BIT, wraps at 512. ***
+        # PROVEN FROM vcncNet.dll this session. The reliable protocol is mod-512 in EVERY
+        # direction, and the DATA sequence is a 9-BIT field, not an 8-bit byte:
+        #   - FUN_100070f6 (the client's OWN reliable-seq stamp) writes seq into the u16 at wire
+        #     bytes[2:4] masked & 0x1ff  -> a full 9-bit value spanning byte2's low bit + byte3.
+        #   - FUN_10006124 (QRcv enqueue) advances nExpected as (n+1) % 0x200 and computes the
+        #     offset in 512-space; FUN_10006b0e (ACK proc) + FUN_10002a76 (ACK build) are all
+        #     9-bit / 0x200.
+        # v370f5 (&0xFF) truncated our TX seq to 8 bits: build_rel hardcoded h[2]=0x20, so wire
+        # bit 8 was ALWAYS 0 and we could only ever express 0..255. At send #256 the client's
+        # nExpected was 256 but our wire seq read back as 0; it computed nOffset = 0-256 = 256
+        # (mod 512), hit the `nOffset < 0x101` SEQUENCE-ERROR branch in FUN_10006124, and
+        # rejected that packet AND EVERY ONE AFTER (run_20260729_200156: all six clients died
+        # within 1s of their SEQ9 wrap; the QRcv slice shows `Now expecting 256` ->
+        # `Sequence Error - nOffset 256 QSize 0` -> `queue out of range`). The 2009 comment that
+        # justified &0xFF ('the wire seq is an 8-bit byte') was simply wrong about the field.
+        # Now: wrap at 512 and carry all 9 bits (build_rel below). _evts is keyed on this same
+        # 9-bit value, so ACK lookup, wire, and the client's nExpected all stay aligned across
+        # the 256 boundary and wrap together at 512, exactly as the client does.
+        with self._lock: v=self.rseq; self.rseq=(self.rseq+1)&0x1FF
+        if v == 0xFF or v == 0x1FF:
+            # v371f5 [INSTRUMENT]: log BOTH half-way marks. 255->256 is the boundary that used to
+            # wedge every session; if the fix holds the client now sails past it. 511->0 is the
+            # real wrap. A healthy client shows continued 'in' deliveries across both.
+            log('SEQ9', f'{getattr(self, "current_pilot", "?")} reliable TX seq crossed '
+                        f'{v} (9-bit, wraps at 512) - client downlink should stay LIVE across '
+                        f'this now (v370f5 wedged here)')
         return v
     def sig(self, seq):
         with self._lock: e=self._evts.get(seq)
@@ -10503,8 +10533,11 @@ def handle_post_auth(s, cmd, pl):
                 log('SCORE96', 'bare 0x60 = ScoreTable request -> answering msg 96 (small populated defs)')
                 resp = build_score_table_96(object_groups=SCORE_DEFS_DEFAULT)   # 0..31 type slots,
                 #   points in `extra` (= score-def+0xc); ~321B so it fits a single reliable packet.
-                threading.Thread(target=lambda: send_rel(s, resp,
-                                 '<- ScoreTable 96 (on request)', to=5.0), daemon=True).start()
+                if SEND_SCORE96_UNREL:
+                    send_unrel(s, resp, '<- ScoreTable 96 (on request)')   # v371f5: idempotent
+                else:
+                    threading.Thread(target=lambda: send_rel(s, resp,
+                                     '<- ScoreTable 96 (on request)', to=5.0), daemon=True).start()
                 return
             if sub == 0x66 and s.entered_game:
                 # Bare 0x66 (msg 102): function unknown (no inbound handler slot for

@@ -7,6 +7,67 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v371f5: [WIRE/CRITICAL] THE 256-MESSAGE RELIABLE WEDGE - ROOT-CAUSED FROM vcncNet.dll AND FIXED.
+      This is the master bug behind tonight's whole symptom cluster (empty plane menus, one-way
+      invisibility, hits not registering on the target). v370f5's SEQ9 instrumentation proved the
+      wedge is real and deterministic - all six clients in run_20260729_200156 lost their DOWNLINK
+      within one second of their SEQ9 wrap line - and a Ghidra pass on vcncNet.dll (loaded this
+      session in place of FA.exe) pinned the exact cause.
+
+      MECHANISM (proven, not hypothesised):
+        * The reliable protocol is 9-BIT / mod-512 in EVERY direction. The DATA sequence is a
+          9-bit field, NOT an 8-bit byte:
+            - FUN_100070f6 (the client's OWN reliable-seq stamp) writes seq into the big-endian
+              u16 at wire bytes[2:4] masked & 0x1ff - full 9-bit value, byte2's low bit is bit 8.
+            - FUN_10006124 (QRcv enqueue) advances nExpected as (n+1) % 0x200; FUN_10006b0e
+              (ACK proc) and FUN_10002a76 (ACK builder) are all 9-bit / 0x200.
+        * v370f5's nrel() wrapped TX seq at 256 (&0xFF) and build_rel hardcoded byte2=0x20, so the
+          wire's 9th seq bit was ALWAYS 0 - we could only express seq 0..255. At the 256th
+          reliable send our wire seq read back as 0 while the client's nExpected was 256; it
+          computed nOffset = 0-256 = 256 (mod 512), hit the `nOffset < 0x101` SEQUENCE-ERROR
+          branch in FUN_10006124, and REJECTED that packet and every reliable packet after it.
+          Downlink dead for the rest of the session. The QRcv slice shows it exactly:
+            Now expecting 255 -> Enqueue 255 (QSize 0, no gap) -> Now expecting 256
+            -> Sequence Error - nOffset 256 QSize 0 -> [Input] Reliable packet queue out of range!
+        * The queue was EMPTY (QSize 0) the whole time - this was never a lost-packet backlog,
+          it was pure seq truncation. The 2009-era source comment that justified &0xFF ('the wire
+          seq is an 8-bit byte') was simply wrong about the field width.
+
+      FIX (RELSEQ 9-bit, the actual cure):
+        * nrel() now wraps at 512 (&0x1FF).
+        * build_rel now carries all 9 bits: byte2 = 0x20 | (seq>>8), byte3 = seq & 0xFF. 0x2000 is
+          the DATA-type flag sharing that u16 and has no bits in 0x1ff, so the seq's 9th bit is
+          just byte2's low bit. Verified round-trip 0..513: the client reads back the exact seq at
+          every point INCLUDING across the old 256 cliff, and wraps cleanly at 512 as it does.
+        * _evts (ACK-wait keys) and _done_ring already store the 9-bit value, and the inbound ACK
+          path already extracts aseq=(dw>>20)&0x1FF - so ACK lookup, wire seq, and the client's
+          nExpected all stay aligned across 256 and wrap together at 512. No other change needed.
+      REVERT: restore &0xFF in nrel() + the old build_rel one-liner (both shown in-comment).
+
+      DEFENCE IN DEPTH (SEND_*_UNREL, separate single-flag reverts): idempotent SCOREBOARD state
+      re-pushed on every spawn/kill/HQ-open now goes UNRELIABLE - a dropped copy is corrected by
+      the next within seconds, and it was ~221 of the ~256 sends filling the window
+      (run_200156: 134 ACE88 + 75 STAT25 + 12 SCORE96). msg 88 (SEND_ACE88_UNREL), msg 25
+      (SEND_STAT25_UNREL), msg 96 (SEND_SCORE96_UNREL). This is NOT the fix (the 9-bit seq is) -
+      it is headroom that pushes any future receive-gap stall far past real session length, plus a
+      latency win. All three are fire-and-forget with no ordering dependency; if any turns out to
+      need reliable delivery, flip its flag.
+
+      Lifecycle events (CREATE2/DELETE3 object create+delete, ChangePlayer 63, the 0x3a catalog,
+      DA re-attach/201) DELIBERATELY STAY RELIABLE - they are edge-triggered and a single loss
+      desyncs permanently (ghost planes / invisibility), so they must never go unreliable.
+
+      FALSIFICATION: a long multi-player session where every client crosses its 256th reliable
+      send (SEQ9 'crossed 255' logged) with its downlink STAYING LIVE - continued client-side 'in'
+      deliveries after the wrap, no 'Sequence Error'/'queue out of range' in vcncnet, no empty HQ
+      menus, no 'Get coord for missing object' floods, hits registering both ways. Watch the
+      scoreboard/rank values update correctly after kills (confirms the 88/25/96 unreliable move
+      is safe); if a rank/score row goes stale, set that message's SEND_*_UNREL=False.
+      STILL OPEN: the v362 harvest-freshness root (bail conductor still goes stale under canopy);
+      cs9 wrap robustness; the ParachuterState2 _V_FCB landing-animation milestone (v369 notes).
+
+==============================================================================
+
 v370f5: [SCORE/PARA/WIRE] THREE deliverables from the run_20260729_184930 + messages77 field
       analysis, shipped in one deploy (single test window tonight, per Alon). Each is
       independently revertable.
