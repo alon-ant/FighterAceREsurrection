@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v368f5'
+VERSION = 'v369f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6137,7 +6137,7 @@ SEND_ACE_RANK_88    = True   # v219: send an authoritative msg-88 (AceOrRankChan
                              # NOTE: a team/room change must NOT zero a pilot's real score - we
                              # RE-READ the career values from the DB and re-push them. Set False to
                              # disable.
-ANNOUNCE_BAIL_KILL  = True   # v368f5: on a BAIL kill, send the shooter an ANNOUNCE-ONLY msg-33
+ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
                              #   down later as an empty husk with no such event to the shooter, so
@@ -6150,7 +6150,19 @@ ANNOUNCE_BAIL_KILL  = True   # v368f5: on a BAIL kill, send the shooter an ANNOU
                              #   (that was exactly why SEND_SCORE_EVENT_33/EEC=3 was disabled in
                              #   v242). Fires only on the bail path; a normal kill still self-
                              #   announces. Revert: set False (single variable).
-ANNOUNCE_BAIL_MEC   = 2      # MEC for the announce-only event (handler asserts MEC in {2,3})
+ANNOUNCE_BAIL_MEC   = 5      # v369f5: MEC=5 = PLAYER_KILLED. FUN_004f9b0f: the LOW nibble (EEC)
+                             #   selects the branch - EEC==1 is a SEPARATE minimal 'announce' path
+                             #   that (v368 error) produced the WRONG 'Player crashed into ...'
+                             #   message, NOT a kill banner. The real kill announcement is the
+                             #   SCORING branch (EEC!=1), where the HIGH nibble (MEC) picks the
+                             #   event: MEC=1 -> event 0x26 + sets score-obj+0x2fc=1 (this is our
+                             #   existing credit packet, Type 0x13); MEC=5 -> event 0x25, the
+                             #   string-labelled 'gse->Type>>4==5(PLAYER_KILLED)' path, which calls
+                             #   the SAME display builder (FUN_00478640 -> FUN_00469cf0) our normal
+                             #   kills use but does NOT set +0x2fc. So MEC=5/EEC=3 (Type 0x53)
+                             #   shows the kill banner WITHOUT re-setting the local tally flag our
+                             #   MEC=1 credit already set. Confirmed against FA.exe machine code.
+ANNOUNCE_BAIL_EEC   = 3      # v369f5: EEC=3 keeps us OUT of the low-nibble==1 announce branch
 SEND_SCORE_EVENT_33 = False  # v242: OFF. This sent the killer a SECOND, separate credit event
                              #   (msg-33 ScoreEvent) on top of the exit-tail delete. It was added
                              #   back in v203 when the kill wasn't registering AT ALL - but v229 made
@@ -6172,10 +6184,24 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
-PARA_DESCENT_SECONDS = 20    # v256: how long the canopy free-falls before the server lands it. The
-                             #   2009 log shows 5-21s scaling with bail ALTITUDE; 20s is a safe
-                             #   fixed value for now (a high bail). TODO: derive from the plane's
-                             #   last-known altitude once the type-7 altitude field is located.
+PARA_DESCENT_SECONDS = 45    # v369f5: raised 20 -> 45. RE of FA.exe this session proved the
+                             #   networked parachuter is ENTIRELY server-lifecycle-controlled: the
+                             #   client NEVER auto-lands or culls it (messages76: every 'Create
+                             #   NetParachuter' is removed only by a 'Server require delete ...
+                             #   bsr=1' - there is no client-side cull, so removing this delete
+                             #   would leave the canopy hanging FOREVER on peers, not landing).
+                             #   The chute is also a STATIC object on peers (we relay no canopy
+                             #   telemetry), so it cannot visually descend regardless of timing.
+                             #   20s made it vanish while still visibly aloft; 45s is a believable
+                             #   canopy duration for a high bail and the client tolerates the
+                             #   server holding the object that long. This is the correct INTERIM
+                             #   fix. The PROPER end-state is the parachuter STATE MACHINE
+                             #   (ParachuterState0/1/2 + the _V_FCB network variants; State2 =
+                             #   landed) that FA.exe expects - sending State2 lands the canopy with
+                             #   its real animation instead of a blunt object-delete. That needs
+                             #   the _V_FCB dispatch ids + payload layout RE'd and is a FUTURE
+                             #   MILESTONE (see change.log v369f5 notes). Also note EEC=0xe =
+                             #   GSET_CRASH_VIRTUAL_PARACHUTER exists for crashing a remote canopy.
 PARA_PRIME_SCORE    = True   # v257: send the peer a msg-25 score block for the bailing pilot right
                              #   before the parachuter create, matching the 2009 wire ('in 25'46'
                              #   blocks precede object-only parachuter creates). May be what lets the
@@ -9154,9 +9180,10 @@ def _ingame_own_object_removed(s, tb, stored):
         # husk). Send an ANNOUNCE-ONLY msg-33 (EEC=1) - it prints the message and jumps past
         # scoring, so it cannot double-count. Only on the bail path; a normal kill self-announces.
         if _killer is not None and _kbailed and ANNOUNCE_BAIL_KILL:
-            send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=1)
-            log('BAILKILL', f'{_killer.current_pilot} gets an announce-only ScoreEvent for the '
-                            f'bail kill on {s.current_pilot} (EEC=1, no double-score)')
+            send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=ANNOUNCE_BAIL_EEC)
+            log('BAILKILL', f'{_killer.current_pilot} gets a PLAYER_KILLED ScoreEvent for the '
+                            f'bail kill on {s.current_pilot} '
+                            f'(MEC={ANNOUNCE_BAIL_MEC} EEC={ANNOUNCE_BAIL_EEC} -> PLAYER_KILLED banner)')
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.

@@ -7,6 +7,49 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v369f5: [SCORE/PARA] TWO fixes, both grounded in a fresh FA.exe RE pass (ExitDataArrive
+      FUN_004f8f20 + ScoreEvent handler FUN_004f9b0f decoded from machine code).
+
+  (1) BAIL KILL BANNER - CORRECTED from v368f5's wrong branch.
+      v368f5 sent MEC=2/EEC=1 (Type 0x21) and produced the WRONG message: the field test
+      showed the aircraft 'crashed into ground' notification, not the cyan pilot-kill banner.
+      RE proved why. The msg-33 handler keys the branch on the LOW nibble (EEC):
+        EEC==1  -> a SEPARATE minimal path (NOT the kill banner) - this is what v368 hit.
+        EEC!=1  -> the SCORING branch, and there the HIGH nibble (MEC) selects the event:
+                   MEC=1 -> event 0x26, sets score-obj+0x2fc=1  (our existing CREDIT, Type 0x13)
+                   MEC=4 -> event 0x26
+                   MEC=5 -> event 0x25, the string-labelled PLAYER_KILLED path (0xa31ec8
+                            'gse->Type>>4==5(PLAYER_KILLED)'), calling the SAME banner builder
+                            (FUN_00478640 -> FUN_00469cf0) our normal kills use, and NOT
+                            setting +0x2fc.
+      ExitDataArrive (FUN_004f8f20) confirms the same MEC matrix (its EEC=5/6/0xb sub-cases
+      call FUN_00478640). FIX: ANNOUNCE_BAIL_MEC 2->5, ANNOUNCE_BAIL_EEC=3 -> Type 0x53 =
+      PLAYER_KILLED banner, no double-count (our MEC=1 credit already set +0x2fc; MEC=5
+      does not touch it). Single-flag revert via ANNOUNCE_BAIL_KILL=False.
+      FALSIFY: bail kill -> shooter sees the SAME cyan banner as a normal shoot-down (not a
+      'crashed into ground' line); kill count still increments exactly once.
+
+  (2) PARACHUTE 20s DELETE -> 45s (interim), with the proper fix scoped as a milestone.
+      Request was to stop the 20s hard delete because the canopy vanished on peers while
+      still visibly aloft. RE proved a straight removal would be WRONG: the networked
+      parachuter is ENTIRELY server-lifecycle-controlled - messages76 shows every 'Create
+      NetParachuter' is removed ONLY by a 'Server require delete ... bsr=1'; the client
+      NEVER auto-lands or self-culls a networked canopy. So with no server delete the chute
+      would hang FOREVER on peers. It is also a STATIC object on peers (we relay no canopy
+      telemetry) so it cannot visually descend at any timer value. 20s simply cut it too
+      early; 45s is a believable high-bail canopy duration and the client tolerates the
+      server holding the object that long. INTERIM fix = PARA_DESCENT_SECONDS 20 -> 45.
+      PROPER FIX (FUTURE MILESTONE): FA.exe drives the canopy via a STATE MACHINE -
+      ParachuterState0/1/2 with network variants ParachuterState{0,1,2}_V_FCB (strings at
+      0xaacd6a+), State2 = landed. Sending the real State2 message would land the canopy
+      with its proper animation instead of a blunt object-delete. EEC=0xe in ExitDataArrive
+      is GSET_CRASH_VIRTUAL_PARACHUTER (crash a remote canopy). Both need the _V_FCB
+      dispatch ids + payload layouts RE'd - a dedicated milestone, not a checkpoint tweak.
+      FALSIFY: after a bail, peers keep the canopy visible ~45s then it cleanly disappears
+      (bsr=1); no eternal frozen chutes; no CTD.
+
+==============================================================================
+
 v368f5: [SCORE] BAIL KILL - shooter gets the score but NO cyan kill banner. Announce it.
       Reported for months as 'bail kill not credited'; the credit was actually FINE - the
       MESSAGE was missing. run_20260729_165911 proves it: Bigalon shoots Gary, Gary bails,
