@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v371f5'
+VERSION = 'v372f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4553,7 +4553,7 @@ def db_get_pilot_stat25(name):
     out['fighter_score'] = out.pop('score')
     return out
 
-def send_stat_block_25(s, reason='', dst=None):
+def send_stat_block_25(s, reason='', dst=None, force_reliable=False):
     """Fill the HQ SCORES screen's CAREER column from the DB via msg 25.
 
     v240: EVERY row of that screen now has its own DB column (see init_db), and STAT25_MAP maps each
@@ -4594,7 +4594,13 @@ def send_stat_block_25(s, reason='', dst=None):
 
     pkt = build_msg13(build_stat_block_25(s.player_index, fields))
     _target = dst if dst is not None else s          # v257: allow sending s's block to a peer
-    if SEND_STAT25_UNREL:
+    # v372f5: force_reliable overrides the unreliable move for ORDERING-DEPENDENT sends. The
+    # parachuter prime (below) is one: the create-2 that follows binds the canopy to this score
+    # object, and if the prime is lost/reordered the peer creates the parachuter against a score
+    # object that does not exist yet -> FA 'There is no GamerClientScore for Client=N' CTD
+    # (VNet.cpp:474, messages07 ALL41_MAD 21:32). The general scoreboard refresh stays unreliable
+    # (idempotent); only the prime-before-create must be reliable.
+    if SEND_STAT25_UNREL and not force_reliable:
         send_unrel(_target, pkt, f'<- msg 25 stat block ({pilot}) {reason}')   # v371f5: idempotent
     else:
         threading.Thread(target=lambda: send_rel(_target, pkt,
@@ -5869,7 +5875,8 @@ def send_parachuter_create_for(src, dst):
         return False
     if PARA_PRIME_SCORE:
         try:
-            send_stat_block_25(src, reason=f'(parachuter prime -> {dst.current_pilot})', dst=dst)
+            send_stat_block_25(src, reason=f'(parachuter prime -> {dst.current_pilot})', dst=dst,
+                               force_reliable=True)   # v372f5: create-2 depends on this arriving first
         except Exception as _e:
             log('PARA', f'score-prime skipped: {_e}')
     rec = build_parachuter_record(body, st=src.client_number, onumber=src.para_obj_number,
@@ -6240,6 +6247,10 @@ ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the s
                              #   (that was exactly why SEND_SCORE_EVENT_33/EEC=3 was disabled in
                              #   v242). Fires only on the bail path; a normal kill still self-
                              #   announces. Revert: set False (single variable).
+ANNOUNCE_SYNTH_KILL = True   # v372f5: also announce SCORED kills whose relayed exit-tail was
+                             #   synthesised (no hunter reached the client -> no self-announce).
+                             #   Covers plane-explosion / damage-latched / husk-down kills, not just
+                             #   bails. Suppressed when a real hunter WAS relayed. Single-flag revert.
 ANNOUNCE_BAIL_MEC   = 5      # v369f5: MEC=5 = PLAYER_KILLED. FUN_004f9b0f: the LOW nibble (EEC)
                              #   selects the branch - EEC==1 is a SEPARATE minimal 'announce' path
                              #   that (v368 error) produced the WRONG 'Player crashed into ...'
@@ -9276,10 +9287,26 @@ def _ingame_own_object_removed(s, tb, stored):
         # cyan banner on the shooter's client (no ExitEvent hit-list reaches them for an empty
         # husk). Send an ANNOUNCE-ONLY msg-33 (EEC=1) - it prints the message and jumps past
         # scoring, so it cannot double-count. Only on the bail path; a normal kill self-announces.
-        if _killer is not None and _kbailed and ANNOUNCE_BAIL_KILL:
+        # v372f5 [SCORE]: GENERALISED KILL ANNOUNCE. A client only fires the cyan kill banner when
+        # the delete it receives carries the HUNTER object id (exit_entry[+3]). The victim's own
+        # client supplies that ONLY on the long 'shot-down' form; on the SHORT (3-byte, synthesised)
+        # exit-tail - which is what a damage-latched death and every bail/husk-down produce - the
+        # relayed delete names no hunter, so the shooter's client scores nothing to announce and the
+        # cyan banner never appears (run_210316 messages06: MEC=1/1, MEC=4/4, MEC=5/0 husk-downs all
+        # scored server-side but showed NO 'destroyed' banner; the husk-down even labelled the target
+        # by AIRCRAFT TYPE 'Spit-IXe(0)' because no pilot object was bound). The v368/v369 bail case
+        # was just the first instance of this whole class. FIX: whenever we scored a kill (killer
+        # known) but the relayed tail was SYNTHESISED (no real hunter reached the peers -> _hunter is
+        # None), send the killer the same PLAYER_KILLED announce-33 (MEC=5/EEC=3, type 0x53) the bail
+        # path uses. It prints the banner and jumps PAST scoring (FUN_004f9b0f), so it cannot double-
+        # count - and it is SUPPRESSED when a real hunter WAS relayed (_hunter is not None), because
+        # then the client self-announces and a second announce would duplicate the banner.
+        _synth_tail = (_hunter is None)
+        if (_killer is not None and ANNOUNCE_BAIL_KILL
+                and (_kbailed or (ANNOUNCE_SYNTH_KILL and _synth_tail))):
             send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=ANNOUNCE_BAIL_EEC)
             log('BAILKILL', f'{_killer.current_pilot} gets a PLAYER_KILLED ScoreEvent for the '
-                            f'bail kill on {s.current_pilot} '
+                            f'{"bail" if _kbailed else "synthesised-tail"} kill on {s.current_pilot} '
                             f'(MEC={ANNOUNCE_BAIL_MEC} EEC={ANNOUNCE_BAIL_EEC} -> PLAYER_KILLED banner)')
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)

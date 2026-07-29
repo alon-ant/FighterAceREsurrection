@@ -7,6 +7,63 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v372f5: [SCORE/CTD] Two fixes from the v371f5 field run (run_20260729_210316 + messages06/07).
+      The 9-bit seq fix HELD - three clients crossed 255 with downlinks staying LIVE (SEQ9
+      'crossed 255' for Bigalon/Taurus/Moira, continued 'in' deliveries after; no menus/
+      invisibility/wedge). These two are the remaining fallout.
+
+  (1) PARACHUTER-PRIME CTD - a v371f5 regression, now fixed. ALL41_MAD crashed at
+      'There is no GamerClientScore for Client=1' (VNet.cpp:474, messages07 21:32), immediately
+      after 'Create NetParachuter ONumber=303' for Taurus's (Client=1) bail. ROOT CAUSE: the
+      parachuter-create (msg-2) binds the canopy to the bailing pilot's score object, and the
+      msg-25 'parachuter prime' we send just before it is what CREATES that score object on the
+      peer. v371f5 moved ALL msg-25 to the unreliable channel - but THIS one is not idempotent,
+      it is an ORDERING PREREQUISITE: if the prime is dropped or arrives after the create, the
+      create references a score object that does not exist -> CTD. This is exactly the
+      ordering-dependency risk flagged when 25 went unreliable. FIX: send_stat_block_25 gains a
+      force_reliable arg; the parachuter prime passes force_reliable=True so it goes reliable
+      (guaranteed to arrive, and before the reliable create which takes a higher seq). The general
+      scoreboard refresh stays unreliable (genuinely idempotent). Revert: force_reliable is opt-in;
+      or set SEND_STAT25_UNREL=False to put all 25s back on reliable.
+      FALSIFY: repeated bails by multiple pilots, no 'GamerClientScore for Client=N' CTD on any
+      peer; the prime 25 logs as reliable (TX/RELIABLE) not unreliable for the parachuter path.
+
+  (2) MISSING CYAN KILL BANNER on non-bail kills - GENERALISED the v368/v369 announce. The banner
+      only fired for kills where the relayed delete carried the HUNTER id (the long shot-down exit
+      form). Damage-latched deaths, plane explosions, and husk-downs all relay the SHORT 3-byte
+      SYNTHESISED exit-tail (no hunter), so the shooter's client had nothing to announce even
+      though we scored the kill server-side. messages06: MEC=1/1, MEC=4/4 and MEC=5/0 husk-downs
+      all scored but showed NO 'destroyed' banner; the husk-down even labelled the dead target by
+      AIRCRAFT TYPE ('Spit-IXe(0)') because no pilot object was bound on the peer. The bail case
+      (v368/v369) was just the first instance of this whole class. FIX (ANNOUNCE_SYNTH_KILL): when
+      a kill is scored (_killer known) but the relayed tail was synthesised (_hunter is None), send
+      the killer the same PLAYER_KILLED announce-33 (MEC=5/EEC=3, type 0x53) the bail path uses. It
+      prints the banner and jumps PAST scoring (FUN_004f9b0f) so it cannot double-count, and it is
+      SUPPRESSED when a real hunter WAS relayed (the client self-announces then). Same latch-gated
+      path as the bail announce (PENDING_KILL is popped by score_on_death), so no double-fire with
+      the husk-teardown credit. Revert: ANNOUNCE_SYNTH_KILL=False (single flag) leaves only the
+      bail announce.
+      FALSIFY: exploding an enemy aircraft OR killing its pilot yields a cyan 'destroyed' banner
+      on the shooter EXACTLY ONCE; a clean shot-down (long form, real hunter) still shows exactly
+      one banner (not two); kill counts unchanged.
+
+      NOT CHANGED (deliberate, per the field notes):
+        * Bail plane/life accounting is already correct server-side: the plane loss is charged only
+          when the husk comes down (run_210316: '-170 (plane) [BAILED OUT - pilot survived]', no
+          pilot-death 100). The client showing the plane as lost the instant the pilot steps out is
+          a local HUD effect. The FRIENDLY-vs-ENEMY-territory bail rule (a bail over enemy ground
+          counts as a pilot death) we still cannot honour - we have no friendly/enemy ground
+          resolution yet. Tracked as a future milestone, not a v372 change.
+        * The husk-down showing the target by aircraft type is a CONSEQUENCE of the missing pilot
+          binding on the synthesised husk; fix (2) makes the shooter get the correct cyan banner,
+          which is the user-visible ask. Relabelling the husk's own delete line with the pilot name
+          would need the pilot object rebound to the husk - deferred (cosmetic once the banner is
+          right).
+      STILL OPEN: v362 harvest-freshness (bail conductor stale under canopy); cs9 wrap; the
+      friendly/enemy bail-territory rule; ParachuterState2 _V_FCB landing animation.
+
+==============================================================================
+
 v371f5: [WIRE/CRITICAL] THE 256-MESSAGE RELIABLE WEDGE - ROOT-CAUSED FROM vcncNet.dll AND FIXED.
       This is the master bug behind tonight's whole symptom cluster (empty plane menus, one-way
       invisibility, hits not registering on the target). v370f5's SEQ9 instrumentation proved the
