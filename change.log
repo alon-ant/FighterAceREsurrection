@@ -7,6 +7,67 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v364f5: [WIRE/FIELD] *** UNIVERSAL COUNTER-UNWRAP + TELEMETRY ANTI-SHADOW. ***
+      First INTERNET field deployment (v362f5, 6 players) turned the counter/TIME-attach
+      wrapper from an occasional LAN quirk into a constant: internet jitter makes clients
+      resync time continuously, so a large fraction of ALL datagrams arrive wrapped
+      ([00][ctr][00][00] | inner). Every field report maps to a swallowed wrap:
+        * GHOSTS (Gary, Warrior): 14 wrapped DELETE 0x03 hit the capture catch-all -
+          one single swallowed message carried FOUR object deletes (0x0109/0x0119/
+          0x011d/0x0117). Dead planes never removed from peers.
+        * HITS NOT REGISTERING (Warrior, Moira, Taurus 4-hits-counted-as-1): 16
+          wrapped DAMAGE28 0x1c never reached the damage relay.
+        * NO PLANES / NO ARENAS (Moira, Taurus x2, Gary, MAD): wrapped catalog/list
+          requests swallowed; plus wrapped room-polls 0x43 (14x), team-selects 0x44
+          (36x), ExitEvents 0x21, reassigns 0x0e, map/supply 0x40/0x53/0x54.
+        * DISPATCH TRACEBACK 23:28:15.713 (struct.error, buffer size 5): wrapped
+          CANOPY telemetry false-matched relay_telemetry's offset-0 scan (ctr low
+          nibble 0x2 + inner bc 0x07 = a TELEM_OPCODE), shadowing the correct
+          offset-4 match; v341 truncated 126B to a 5B stub off the wrapper's fake
+          declaration and the re-stamp crashed on it. For other counters the stub
+          is >=7B: garbage got tick-stamped and RELAYED while the real frame died.
+      The per-message scan handlers accumulated since v327 (chat), v352 (damage
+      prefix), v358 (0xd2), v363 (para out-4) were whack-a-mole against a universal
+      phenomenon. THREE EDITS:
+      (1) handle_post_auth: GENERIC unwrap beside the _pfx reframe - cmd==0,
+          pl[0]==0, inner header well-formed (pl[6:8]==0000), EXACT arithmetic
+          8+pl[4]*16+(pl[5]>>4)==len(pl), and direct interpretation WINS ties (a
+          real 19B para out-4 is never mistaken for a wrap). REPLACES/SUBSUMES the
+          v363f5 parachute-only block. Validated against all 25 distinct wrapped
+          payload shapes in the field log: 25/25 unwrap; every known direct form
+          untouched. Logs 'REFRAME ... counter-wrap ctr=... -> stripped' per unwrap
+          (deliberately chatty for the first field runs; demote later if noisy).
+      (2) relay_telemetry offset-0 ANTI-SHADOW: the offset-0 candidate must DECLARE
+          >=24B (real telemetry declares 84+, the wrapper <=19); offset 4 exempt.
+          Wrapped canopy/8-block frames now match correctly at offset 4; the
+          appended-4B-trailer forms that v341's truncation serves still match at 0.
+      (3) Re-stamp structural guard: pack_into only when len(relayed) >= 9 - the
+          struct.error class is impossible regardless of future wrapper forms.
+      NOTE: wrapped DAMAGE28 unwraps to the direct frame, so the v352 in-branch
+      prefix-strip does not double-fire (_dmg_ok passes on the unwrapped form).
+
+      FALSIFICATION for the next field session:
+        * REFRAME 'counter-wrap ... stripped' lines should be FREQUENT (that is the
+          measure of how much was being lost). Every stripped id must land in a
+          mature handler - watch for any 'stripped' immediately followed by a
+          SUPPLY-CAP of the same inner id (would mean the direct handler ALSO
+          missed it - a new gap, report it).
+        * Ghosting reports should drop to zero alongside DEATH/DELETE3 lines
+          appearing for previously-swallowed deletes; hit registration should match
+          shooters' client counts; 'no planes'/'no arenas' should not recur.
+        * ZERO DISPATCH tracebacks. TELEM-GUARD stub relays gone.
+        * WATCH: previously-swallowed messages are now PROCESSED for the first time
+          (36 team-selects!). If unexpected team switches or spurious deletes
+          appear, a formerly-dead message class is misbehaving in a live handler -
+          capture the REFRAME line + following handler lines.
+      DEPLOYMENT: v364f5 is the recommended deploy candidate (supersedes v362f5-
+      stable, whose gaps the field just demonstrated; v362f5-stable remains the
+      rollback point). STILL OPEN: bail kill attribution; cs9 wrap; msg-67 lobby
+      polls; the v363 para reframe was never individually field-tested (now
+      subsumed - the next wrapped bail exercises it via the generic path).
+
+==============================================================================
+
 v363f5: [PARA/WIRE] COUNTER-WRAPPED PARACHUTER OUT-4 - the bail chain now fires for
       BOTH wire forms. Closes the hole the 22:21 session exposed.
 

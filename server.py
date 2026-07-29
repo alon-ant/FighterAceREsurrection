@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v362f5'
+VERSION = 'v364f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6966,7 +6966,17 @@ def relay_telemetry(src, data):
     for _off in (0, 4):
         c = pl[_off:]
         if (len(c) >= 9 and c[2] == 0 and c[3] == 0
-                and c[4] in TELEM_OPCODES and (c[1] & 0x0f) == 0x02):
+                and c[4] in TELEM_OPCODES and (c[1] & 0x0f) == 0x02
+                # v364f5: ANTI-SHADOW - at offset 0 the candidate must DECLARE a
+                # plausible telemetry size (>=24B). The counter-wrap [00][ctr][00][00]
+                # around a bc=7/8 inner passes every other test here (ctr low-nibble 2
+                # for 1-in-16 counters, and pl[4] = inner bc = 0x07/0x08 = an opcode!)
+                # and SHADOWED the correct offset-4 match: v341 then truncated the
+                # 126B datagram to a 5B stub from the wrapper's fake declaration and
+                # the re-stamp crashed on the stub (DISPATCH traceback 23:28:15.713,
+                # field session). Real telemetry declares 84+; the wrapper declares
+                # <=19. Offset 4 is exempt - it follows a 4B prefix by construction.
+                and (_off == 4 or 4 + c[0]*16 + (c[1] >> 4) >= 24)):
             # v341: TRUNCATE TO THE DECLARED RECORD LENGTH BEFORE RELAYING.
             # c is the whole REMAINING datagram, not one record. A spawn can carry the
             # telemetry frame PLUS trailing bytes; relaying that tail wholesale hands every
@@ -7135,7 +7145,12 @@ def relay_telemetry(src, data):
                                       f'longer being recognised; peers will lose sight of objects.')
             else:
                 p._stale_tick_warned = False
-                struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
+                # v364f5: structural guard - never re-stamp a buffer too short to hold
+                # the full header (tick@5:7 + ONumber@7:9). Belt-and-braces below the
+                # anti-shadow fix: makes the 23:28:15 struct.error class impossible
+                # regardless of what future wrapper forms slip past the scans.
+                if len(relayed) >= 9:
+                    struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
         seq = getattr(p, '_relay_seq', 0) & 0xFF
         p._relay_seq = seq + 1
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
@@ -10024,6 +10039,33 @@ def handle_post_auth(s, cmd, pl):
             log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED (inner type=0x{pl[5]:02x} '
                            f'sub=0x{_isub:02x} bc={pl[4]} len={len(pl)}) -> '
                            f'{"sub normalised to 0x00 for the pl[8] handlers" if PREFIXED_NORMALISE_SUB else "IGNORED"}')
+    # *** v364f5: UNIVERSAL COUNTER-UNWRAP (subsumes the v363f5 parachute-only case). ***
+    # The 6-player INTERNET field session (server_12_.log, v362f5 deploy) proved the
+    # counter/TIME-attach wrapper ([00][ctr][00][00] | inner frame) is PERVASIVE, not
+    # occasional: internet jitter makes clients resync time constantly, and every message
+    # family arrived wrapped - 36x team-select 0x44, 16x DAMAGE28 0x1c, 14x room-poll
+    # 0x43, 14x DELETE 0x03 (one carried FOUR object deletes: the field's 'ghost
+    # planes'), wrapped ExitEvents, map/supply queries. Each unhandled wrap fell to the
+    # capture catch-all and was swallowed: ghosts (deletes lost), unregistered hits
+    # (damage lost), 'no planes'/'no arenas' (requests lost). The per-message scan
+    # handlers (v327 chat, v352 damage prefix, v358 0xd2, v363 para out-4) were
+    # whack-a-mole against a universal phenomenon. Strip the wrapper GENERICALLY and
+    # fall through to the mature direct-form handlers. Conditions (validated against
+    # all 25 distinct wrapped payload shapes in the field log - 25/25 unwrap, and every
+    # known direct form is left untouched):
+    #   * cmd==0 (the _pfx reframe above owns cmd!=0)     * pl[0]==0 (wrapper bc)
+    #   * NOT self-consistent as a direct frame - direct interpretation wins ties
+    #     (a real 19B para out-4 must never be mistaken for a wrap)
+    #   * inner header well-formed (pl[6:8] == 00 00)
+    #   * EXACT length arithmetic: 8 + pl[4]*16 + (pl[5]>>4) == len(pl)
+    if (not cmd and len(pl) >= 9 and pl[0] == 0x00 and pl[2] == 0 and pl[3] == 0
+            and 4 + (pl[1] >> 4) != len(pl)
+            and pl[6] == 0 and pl[7] == 0
+            and 8 + pl[4]*16 + (pl[5] >> 4) == len(pl)):
+        log('REFRAME', f'{s.current_pilot} counter-wrap ctr=0x{pl[1]:02x} around inner '
+                       f'type=0x{pl[5]:02x} id=0x{pl[8]:02x} len={len(pl)} -> stripped')
+        pl = pl[4:]
+        bc = pl[0]; tb = pl[1]; sub = pl[4]
     log('POST-AUTH',f'cmd={cmd}(0x{cmd:04x}) type=0x{tb:02x} sub=0x{sub:02x} bc={bc}(p3={bc*16+1}) sz={len(pl)}')
     stored=bytes(pl)
     _h4=hx(stored[:4]) if len(stored)>=4 else hx(stored)
