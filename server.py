@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v366f5'
+VERSION = 'v367f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8902,6 +8902,27 @@ def _fire_server_confirm(s, via='', ident=None):
             finally:
                 s.my_obj_number = _saved_obj
         s.bailed_plane_obj = None
+        # v367f5: PEER RE-ADVERTISE AFTER A BAIL. During the long canopy descent the bailer's
+        # conductor goes quiet, the server suspends re-stamping telemetry toward them (v234),
+        # and their client hits its ~29s stale-object timeout and DELETES every peer from its
+        # world ('Check discon. and del N (Pilot), dif=29320' in messages69_2). The peers never
+        # died, so nothing re-creates them on the returning bailer -> he respawns BLIND and hits
+        # do not register (the peer objects are gone from his world). v366's HQ-reentry path does
+        # not cover this: a bail->chute->refly never opens the HQ catalog and never changes
+        # airfield. Force the same recovery here - drop our addr from every peer's object-created
+        # set so the relay re-creates their object on us OBJECT-ONLY (station persists). Done
+        # inline (not via _hq_reentry_pending) because on a bail-respawn the FLY23 grant PRECEDES
+        # this ServerConfirm, so the FLY23 consumer already ran.
+        _n_readv = 0
+        for _p in get_sessions_in_room(s.current_room):
+            if _p is not s:
+                _pcp = _p.__dict__.get('_created_peers')
+                if _pcp is not None and s.addr in _pcp:
+                    _pcp.discard(s.addr)
+                    _n_readv += 1
+        if _n_readv:
+            log('PARA', f'{s.current_pilot} respawned from bail -> re-advertising {_n_readv} '
+                        f'peer(s) onto them (client GC-dropped peers during the descent)')
     s.spawn_time = time.time()       # v279: starts the auto-resupply spawn grace window
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client

@@ -7,6 +7,57 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v367f5: [PEER-VIS] BAIL-RESPAWN LEAVES THE BAILER BLIND - re-advertise peers on respawn.
+      v366f5 fixed the death->HQ->change-plane->refly invisibility (observer's HQ teardown).
+      This is the INVERSE: after a BAIL, the RETURNING BAILER cannot see anyone, and his
+      hits do not register - because his own client garbage-collected every peer during the
+      long parachute descent.
+
+      MECHANISM (run_20260729_165911 + messages69_2, Gary bails 17:05:31, respawns 17:06:21):
+        * Under canopy Gary's conductor goes quiet; the server sees his tick as 42.7s stale
+          (STALE-TICK 17:06:21.530) and, per the v234 rule, STOPS re-stamping peer telemetry
+          TOWARD Gary ('not re-stamping. peers will lose sight of objects').
+        * Gary's client, receiving no telemetry for Bigalon(258)/Taurus(259) for ~29s, hits
+          its stale-object timeout and DELETES them itself:
+            17:06:07.010 'Check discon. and del 258 (AC2E_Bigalon), (dif=29320)' -> DelObject
+            17:06:07.010 'Check discon. and del 259 (Taurus@FA), (dif=29180)'   -> DelObject
+        * Those peers never died, so nothing re-creates them on Gary. After respawn Gary's
+          world has no Bigalon/Taurus object: he is BLIND, and inbound hits reference objects
+          that are gone -> 'Get coord for missing object 258/259' flood, hits ignored.
+        * Server-side proof of the gap: after Gary's 17:06:21 respawn, ZERO CREATE2 fired
+          TOWARD Gary (contrast the working 17:02 entry, which created both peers onto him).
+      v366 does not cover this: a bail->chute->refly never opens the HQ catalog
+      (_hq_reentry_pending unset) and never changes airfield (af_changed false), so neither
+      re-advertise trigger ran. The bail-respawn was simply never wired to peer re-advertise.
+
+      FIX: at the bail-respawn detection in _fire_server_confirm (where bailed_plane_obj is
+      consumed), drop our addr from every peer's _created_peers so the relay re-creates their
+      object on us OBJECT-ONLY (NET::CLIENT station persists - no duplicate-station CTD). Same
+      proven recovery as v366/af_changed, hooked to the bail signal. Applied INLINE rather
+      than via _hq_reentry_pending because on a bail-respawn the FLY23 grant PRECEDES this
+      ServerConfirm (17:06:21.073 grant vs .336 confirm), so the FLY23 consumer already ran.
+      Runs for every bail-respawn (inside `if _bp is not None`, outside the `!= number`
+      despawn guard). Verified against the real sequence: both peers re-create onto Gary.
+
+      NOTE - deeper root also identified, deliberately NOT fixed here (one change per version):
+      the v362f5 tick-harvest fires ONCE per session on the canopy form (logged-once), and the
+      tick still went 42.7s stale during this descent - so the v234 telemetry-suspension still
+      kicks in and is the first domino. A future version should keep the bailer's conductor
+      considered-fresh for the whole descent (harvest the canopy tick every frame, or exempt a
+      known-parachuting session from the re-stamp suspension) so peers are never GC'd in the
+      first place. v367f5 is the robust backstop regardless: even if the client drops peers,
+      the respawn restores them.
+
+      FALSIFICATION: a bail with 2+ players, bailer waits out the full chute, then respawns ->
+      server must log 'respawned from bail -> re-advertising N peer(s)', the bailer must SEE
+      all peers immediately on respawn, and his hits must register. If the bailer is still
+      blind, check whether the peers were 'flying' at respawn (the relay create-gate requires
+      it) - if a peer was itself mid-respawn, its create may lag until it is airborne.
+      STILL OPEN: bail kill attribution (Gary's cyan kill message still not shown to shooter);
+      the v362 harvest-freshness root above; cs9 wrap; object-id plan B.
+
+==============================================================================
+
 v365f5: [OBJ-ID] RECYCLE_OBJ_NUMBERS = False - retire Number recycling (object-id plan, A).
       Zero-risk single-flag change. Object Numbers are now strictly monotonic within a
       session; a freed Number is NEVER re-issued (the pool/quarantine code stays in place
