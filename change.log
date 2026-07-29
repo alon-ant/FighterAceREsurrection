@@ -7,6 +7,49 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v373f5: [IDENTITY/CRITICAL] RECYCLED-SLOT MISATTRIBUTION - a departed player's telemetry straggler
+      resurrected his identity on peers. Reported against v371f5: "Taurus shot and hit ALL41_MAD
+      but Taurus's client showed him as AC2E_Bigalon, who had been out of the game for minutes."
+
+      TRACE (run_20260729_210316 + messages08, room 53):
+        21:03:55  AC2E_Bigalon -> ClientNumber=0 PlayerIndex=0 (holds PI 0 all session)
+        21:34:33  Bigalon presses back-to-lobby (msg 64). handle_leave_arena sends his DELETE3 +
+                  msg-63 REMOVE and clears _created_peers. entered_game -> False.
+        21:34:33.694  <-- THE BUG: a telemetry datagram of Bigalon's, already in flight before the
+                  leave, reaches relay_telemetry ~400ms later. Nothing there checked that the SOURCE
+                  had left, so the lazy-create block saw an empty _created_peers and RE-CREATED his
+                  object+player on ALL41_MAD ('create-object(object-only) AC2E_Bigalon -> ALL41_MAD').
+                  That re-bound PlayerIndex 0 to Bigalon on the peers, undoing the REMOVE.
+        21:35:35  ALL41_MAD recycles into the freed slot -> ClientNumber=0 PlayerIndex=0.
+                  Taurus still had PI 0 bound to the resurrected Bigalon -> renders/attributes
+                  ALL41_MAD's plane and hits as AC2E_Bigalon.
+
+      This is the same misattribution FAMILY as the v348/v353/v355 teardown fixes, but every one of
+      those closed a hole on the LEAVING/RE-JOINING path (make sure peers are TOLD to drop the
+      departing player). The leak this time was on the SENDER's TELEMETRY path: even with a correct
+      teardown, a single straggling flight datagram processed after the leave re-created the player
+      the teardown had just removed. The recycled-slot symptom then followed mechanically.
+
+      FIX: relay_telemetry now drops any frame whose SOURCE is no longer a live in-game participant
+      - gated at the top on `not entered_game or closing or _rejoin_pending or my_obj_number is
+      None`. A departed/leaving/reaping/not-yet-re-flown source can neither be relayed nor trigger a
+      lazy re-create. The RX is serialised and entered_game flips to False inside
+      handle_leave_arena/teardown_ingame_presence BEFORE any straggler is dequeued, so the check is
+      race-free. _rejoin_pending is popped in the StartPlace re-fly path BEFORE my_obj_number/flying
+      are set on re-entry, so a legitimately re-flown player is never gated. First-join players never
+      have _rejoin_pending set. Single-point guard; revert = delete the 4-line check.
+
+      FALSIFY: a player leaves via back-to-lobby (or crashes/times out) while a peer is watching,
+      and NO 'create-object ... <departed> -> <peer>' appears AFTER their DELETE3/TEARDOWN; a
+      different player then recycles the freed ClientNumber/PlayerIndex and every peer renders and
+      attributes hits/chat to the NEW occupant, never the old one. Watch specifically for a re-fly
+      after HQ: the re-joining player's OWN telemetry must still relay normally (guard clears in
+      time).
+      STILL OPEN: v362 harvest-freshness; cs9 wrap; friendly/enemy bail-territory rule;
+      ParachuterState2 _V_FCB landing animation.
+
+==============================================================================
+
 v372f5: [SCORE/CTD] Two fixes from the v371f5 field run (run_20260729_210316 + messages06/07).
       The 9-bit seq fix HELD - three clients crossed 255 with downlinks staying LIVE (SEQ9
       'crossed 255' for Bigalon/Taurus/Moira, continued 'in' deliveries after; no menus/

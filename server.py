@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v372f5'
+VERSION = 'v373f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7112,6 +7112,23 @@ TELEM_MAX_BC = 5
 
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
+    # v373f5 [IDENTITY/CRITICAL]: DROP a STRAGGLER telemetry frame from a source that has already
+    # LEFT the game. run_20260729_210316: AC2E_Bigalon (PI=0) pressed back-to-lobby at 21:34:33 -
+    # handle_leave_arena sent his DELETE3 + msg-63 REMOVE and cleared _created_peers - but ~400ms
+    # LATER a telemetry datagram of his that was already in flight hit this relay. entered_game was
+    # False by then, yet nothing here checked it, so the lazy-create block below saw an empty
+    # _created_peers and RE-CREATED his object+player on the peer (log: 'create-object(object-only)
+    # AC2E_Bigalon ... -> ALL41_MAD' at 21:34:33.694). That re-bound PlayerIndex 0 to Bigalon on the
+    # peers. 62s later ALL41_MAD recycled into the freed slot 0 (ClientNumber=0 PlayerIndex=0), and
+    # Taurus - who still had PI 0 bound to Bigalon from the resurrected create - rendered/attributed
+    # ALL41_MAD's plane as AC2E_Bigalon, who had been out of the game for minutes. Same class as the
+    # v348/v353/v355 teardown work, but the leak was on the SENDER side: a post-leave straggler.
+    # A departed/leaving/reaping source must never (a) be relayed or (b) trigger a lazy re-create.
+    # This is the single authoritative gate; entered_game goes False in handle_leave_arena/teardown
+    # BEFORE any straggler can be processed (the RX is serialised), so the check is race-free.
+    if (not getattr(src, 'entered_game', False) or getattr(src, 'closing', False)
+            or getattr(src, '_rejoin_pending', False) or src.my_obj_number is None):
+        return
     pl = data[8:]
     # The flying-state object-update appspace = [bc][T][00][00][07][tick u16][ONumber u16]...
     # T's LOW nibble is 0x2 (appspace-data channel); T's HIGH nibble is the SIZE
