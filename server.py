@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v365f5'
+VERSION = 'v366f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7421,13 +7421,22 @@ def handle_fly_start_place(s, af, mid, n, via=''):
     # persists, so no 'Client already exist' CTD). Same recovery the exit-to-HQ delete
     # path does via clear_peer_created. In-place respawn keeps the same airfield -> no
     # clear -> no duplicate-create.
-    if af_changed:
+    # v366f5: peers must re-advertise their objects onto us whenever OUR client rebuilt
+    # its world - that is EITHER an in-world airfield change OR any HQ/hangar re-entry
+    # (death->HQ->change plane->re-fly on the same airfield). Both tear down the peers'
+    # planes in our world; the recovery is identical (drop our addr from each peer's
+    # object-created set -> relay re-creates OBJECT-ONLY, station persists). The old code
+    # only handled af_changed, so a same-airfield plane swap after death left survivors
+    # invisible to us until they happened to die and respawn.
+    _hq_reentry = s.__dict__.pop('_hq_reentry_pending', False)
+    if af_changed or _hq_reentry:
         for _p in get_sessions_in_room(s.current_room):
             if _p is not s:
                 _pcp = _p.__dict__.get('_created_peers')
                 if _pcp is not None:
                     _pcp.discard(s.addr)
-        log('FLY23', f'airfield change ({old_af}->{af}) -> peers re-create objects on {s.current_pilot}')
+        _why = (f'airfield change ({old_af}->{af})' if af_changed else 'HQ re-entry (world rebuilt)')
+        log('FLY23', f'{_why} -> peers re-create objects on {s.current_pilot}')
     if s.__dict__.pop('_rejoin_pending', False):     # re-join only (first join did this at enter)
         # Re-announce US to PEERS - they removed us via msg-63 REMOVE on our exit, so this is
         # a clean re-add (fixes the phantom/garbage scoreboard row).
@@ -10998,6 +11007,16 @@ def handle_post_auth(s, cmd, pl):
                 log('CAREER', f'{s.current_pilot} opened the HQ screen (0x3a catalog) '
                               f'-> pushing rank/aces + stat block')
                 push_career_stats(s, reason='(HQ screen opened)')
+            # v366f5: opening the HQ/hangar screen means the client TORE DOWN its 3D world
+            # (every peer object DelObject'd), even on an in-arena DEATH->HQ->change-plane->
+            # re-fly that never leaves the arena and never changes airfield. Mark it so the
+            # next FLY re-advertises peers onto us. Without this, only af_changed or a true
+            # _rejoin_pending triggered the peer re-create, so a same-airfield plane swap
+            # after death left every surviving peer invisible to the returning pilot until
+            # that peer next died (Gary 0x0107 stayed uncreated on Bigalon 16:37->16:42,
+            # server_13_.log). Set regardless of debounce - the teardown happens on every
+            # HQ open, not just the career-pushed ones.
+            s._hq_reentry_pending = True
 
         # v334: accept the PREFIXED form as well. This filter is what actually hides planes
         # (the hangar gates on plane-ID membership in this echoed list), and it was gated on
