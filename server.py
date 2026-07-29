@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v367f5'
+VERSION = 'v368f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6019,10 +6019,18 @@ def build_exit_delete_object_3(onumber, exit_byte, entry=None, x=0.0, z=0.0):
 #     * PlayerIndex @[2:4] -> FUN_004f2530 resolves the SCORED player (the killer). It is
 #       the killer's PlayerIndex, NOT an object number (the log's 'Number=%i' prints the
 #       resolved player's object, which is why the capture looked like the killer's obj).
-#     * Type @[4]:  MEC = Type & 0x0f  (LOW nibble),  EEC = Type >> 4  (HIGH nibble)
-#       -- opposite nibble order to msg 3's exit byte (msg3 = (MEC<<4)|EEC). The handler
-#       ASSERTS EEC in {2,3} on the MEC==1 branch, runs the kill-credit path, and sets
-#       killer_plane+0xbf = 1 (kill tallied). The awarded POINTS are NOT in the payload ->
+#     * Type @[4]:  EEC = Type & 0x0f  (LOW nibble),  MEC = Type >> 4  (HIGH nibble)
+#       [v368f5 RE-CONFIRMED from FUN_004f9b0f machine code: 004f9b56 AND CL,0xf; CMP CL,1
+#        selects the branch on the LOW nibble (==1 -> announce), and 004f9b65/004f9c5a
+#        SHR ..,4 reads the HIGH nibble as the MEC event selector (1/4/5). So HIGH=MEC,
+#        LOW=EEC - matching (MEC<<4)|EEC below. A prior version of THIS comment had the two
+#        nibbles swapped; the builder was always correct, only the note was wrong.]
+#       -- SAME nibble order as msg 3's exit byte ((MEC<<4)|EEC). The handler has TWO
+#       MUTUALLY EXCLUSIVE branches keyed on the LOW nibble (EEC): EEC==1 -> ANNOUNCE-ONLY
+#       (loads kill-banner string 0x83 via FUN_0040a1b0, asserts the HIGH nibble/MEC in
+#       {2,3}, displays via FUN_0044e550->FUN_00469cf0, and JUMPS PAST scoring); EEC!=1 ->
+#       SCORING (HIGH nibble/MEC 1/4/5 -> FUN_00478640 mission event, sets killer+0x2fc=1,
+#       kill tallied). The awarded POINTS are NOT in the payload ->
 #       the killer's client computes them from its own local damage list (same source the
 #       scored-delete MEC=5 path uses); msg 33 is purely the TRIGGER.
 #     * b1 @[1] and the 9B tail are not read on the MEC=1/EEC=3 credit path -> zero filler.
@@ -6129,6 +6137,20 @@ SEND_ACE_RANK_88    = True   # v219: send an authoritative msg-88 (AceOrRankChan
                              # NOTE: a team/room change must NOT zero a pilot's real score - we
                              # RE-READ the career values from the DB and re-push them. Set False to
                              # disable.
+ANNOUNCE_BAIL_KILL  = True   # v368f5: on a BAIL kill, send the shooter an ANNOUNCE-ONLY msg-33
+                             #   (EEC=1) so the cyan kill banner prints. A normal kill announces
+                             #   from the victim's relayed ExitEvent hit-list; a bail plane comes
+                             #   down later as an empty husk with no such event to the shooter, so
+                             #   the HUD/scoreboard ticked (via the exit-tail delete) but NO banner
+                             #   ever showed (run_165911: Bigalon got the score, not the message).
+                             #   The msg-33 handler's two branches are mutually exclusive by EEC:
+                             #   EEC=3 SCORES (no banner), EEC=1 ANNOUNCES (banner, asserts MEC in
+                             #   {2,3}, then JUMPS PAST scoring). So we send EEC=1 MEC=2 here -
+                             #   announce ONLY, no second score -> no double-count/assist-inflation
+                             #   (that was exactly why SEND_SCORE_EVENT_33/EEC=3 was disabled in
+                             #   v242). Fires only on the bail path; a normal kill still self-
+                             #   announces. Revert: set False (single variable).
+ANNOUNCE_BAIL_MEC   = 2      # MEC for the announce-only event (handler asserts MEC in {2,3})
 SEND_SCORE_EVENT_33 = False  # v242: OFF. This sent the killer a SECOND, separate credit event
                              #   (msg-33 ScoreEvent) on top of the exit-tail delete. It was added
                              #   back in v203 when the kill wasn't registering AT ALL - but v229 made
@@ -6780,7 +6802,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
         if killer is not None:
             threading.Thread(target=_restate, args=(killer, '(kill)'), daemon=True).start()
 
-    return killer   # credited shooter (or None) -> caller sends it the SCORED delete
+    return killer, _bailed   # v368f5: also report bail so the caller can fire the announce-only
+                             # msg-33 (the bail path never self-announces on the shooter's client)
 
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                               followup_pkt=None, followup_label='', killer=None,
@@ -9084,10 +9107,10 @@ def _ingame_own_object_removed(s, tb, stored):
                          + (f', hunter=0x{_hunter:04x}' if _hunter is not None else '')
                          + ') -> drop plane, stay in arena, re-arm confirm')
 
-        _killer = None
+        _killer = None; _kbailed = False
         if scored:
             # Shot down - unambiguous (the entry names the HUNTER). Always a death.
-            _killer = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
+            _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
         elif is_death:
             # v232: A CRASH AND A CLEAN GROUND EXIT ARE IDENTICAL ON THE WIRE - both MissExitCode 26,
             # both followed by the same 0x3a catalog request, neither producing a leave event. So the
@@ -9112,7 +9135,7 @@ def _ingame_own_object_removed(s, tb, stored):
                 # return value, so even when a killer was identified, _killer stayed None and the
                 # SCORED DELETE was never sent to them - which is why Bigalon's client never
                 # registered the bailout kill even though Test2's client announced it.
-                _killer = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
+                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
             else:
                 log('DEATH', f'{s.current_pilot} exited UNDAMAGED and PARKED (MEC&0xf={mec_nib}, '
                              f'movement={_move}) -> clean exit, NOT a death')
@@ -9126,6 +9149,14 @@ def _ingame_own_object_removed(s, tb, stored):
         # killer, on top of the scored delete. v224: MEC/EEC nibbles fixed (type byte 0x13).
         if _killer is not None and SEND_SCORE_EVENT_33:
             send_score_event_to_killer(_killer)
+        # v368f5: the bail kill scored via the exit-tail delete above but never printed the
+        # cyan banner on the shooter's client (no ExitEvent hit-list reaches them for an empty
+        # husk). Send an ANNOUNCE-ONLY msg-33 (EEC=1) - it prints the message and jumps past
+        # scoring, so it cannot double-count. Only on the bail path; a normal kill self-announces.
+        if _killer is not None and _kbailed and ANNOUNCE_BAIL_KILL:
+            send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=1)
+            log('BAILKILL', f'{_killer.current_pilot} gets an announce-only ScoreEvent for the '
+                            f'bail kill on {s.current_pilot} (EEC=1, no double-score)')
         free_obj_number(s.my_obj_number)      # recycle this plane's Number for the next spawn
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.

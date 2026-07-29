@@ -7,6 +7,79 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 
+v368f5: [SCORE] BAIL KILL - shooter gets the score but NO cyan kill banner. Announce it.
+      Reported for months as 'bail kill not credited'; the credit was actually FINE - the
+      MESSAGE was missing. run_20260729_165911 proves it: Bigalon shoots Gary, Gary bails,
+      the empty plane comes down at 17:05:38 ->
+        KILL  attribution: LATCHED (bail) -> AC2E_Bigalon
+        SCORE AC2E_Bigalon +685 ... KILL AC2E_Bigalon destroyed Gary, kills=6, ACE streak 1
+      Every stat ticked. But Bigalon saw no cyan 'you destroyed Gary' banner - only the HUD/
+      scoreboard updated. So this was never an attribution bug (v244-v249 fixed that); it is
+      a NOTIFICATION gap specific to bails.
+
+      WHY: a normal kill announces on the shooter's client off the victim's ExitEvent
+      hit-list (msg-33, relayed to peers via RELAY_EXIT_EVENT_33). A bailed victim's plane
+      comes down LATER as an empty husk - its delete is a server-synthesised exit-tail, and
+      no ExitEvent hit-list naming the shooter ever reaches the shooter, so the client never
+      fires its banner. The score still lands because the exit-tail delete runs each client's
+      stat pipeline; only the announce is absent.
+      KEY: the msg-33 handler (0x004f9ae0) has TWO MUTUALLY EXCLUSIVE branches, selected by
+      EEC. EEC=3 -> SCORES (ticks the HUD, no banner). EEC=1 -> ANNOUNCE-ONLY (prints the
+      kill banner via string 0x83, asserts MEC in {2,3}, then JUMPS PAST the scoring code).
+      That is why we cannot just re-enable SEND_SCORE_EVENT_33 (EEC=3): it was turned OFF in
+      v242 precisely because a second EEC=3 event double-scored (tracked as an assist -
+      'Fighters Assists' mirrored 'Fighters Destroyed'). The banner lives on the OTHER branch.
+
+      FIX (ANNOUNCE_BAIL_KILL=True, single-flag revert): on the bail path only, after the
+      exit-tail delete has already scored the kill, send the shooter ONE announce-only msg-33
+      with EEC=1, MEC=2 (ANNOUNCE_BAIL_MEC). It prints the banner and jumps past scoring, so
+      it cannot double-count. score_on_death now returns (killer, bailed) so the caller knows
+      to fire it; a normal kill (bailed=False) still self-announces and does NOT get this.
+      Verified: announce fires ONLY on the bail kill (not on normal kills, not on solo
+      crashes); type bytes are 0x13 (score) vs 0x21 (announce) - distinct branches.
+
+      WATCH (cosmetic, tunable): the announce branch asserts MEC in {2,3}; MEC=2 is the
+      'collision' code, so the banner MIGHT read as a collision/ram kill rather than a clean
+      shoot-down, or word it differently than a normal kill. The kill COUNTS correctly either
+      way (already scored). If the wording is wrong, try ANNOUNCE_BAIL_MEC=3, and if the
+      client refuses both, the banner simply won't show and we revert with ANNOUNCE_BAIL_KILL
+      =False - no scoring impact. FA.exe was not loaded in Ghidra this pass (vcncnet.dll still
+      active) so the exact string-0x83 template wasn't re-read; confirm from the field log's
+      client-side 'ScoreEvent. Number=.. MEC=.. EEC=..' line and what banner text appears.
+
+      RE-CONFIRMED (v368f5, FA.exe FUN_004f9b0f machine code - done BEFORE the field test):
+      Read the handler instruction-by-instruction; the fix is CORRECT and double-count is
+      impossible:
+        * 004f9b51 MOV AL,[EDI+2] loads Type; 004f9b56 AND CL,0xf / CMP CL,1 branches on the
+          LOW nibble. Our announce Type=0x21 -> low nibble 1 -> ANNOUNCE branch. CONFIRMED.
+        * 004f9b65 SHR AL,4 / CMP 2 / CMP 3 asserts the HIGH nibble in {2,3}. Ours is 2 ->
+          assertion PASSES, no CTD. CONFIRMED.
+        * Announce branch (004f9bce+) loads string 0x83, displays via FUN_0044e550 ->
+          FUN_00469cf0, then JMP 004f9d33 - PAST all scoring. No double-count possible.
+        * Offset proof: our MEC=1/EEC=3 SCORING packets (Type=0x13) already credit kills in
+          the field, which only works if [EDI+2]==our wire[4] - so the announce Type offset
+          is right too.
+      NIBBLE ORDER CORRECTED: one stale source comment had msg-33's Type nibbles backwards
+      (MEC=low/EEC=high). Machine code proves HIGH=MEC, LOW=EEC; the builder was always
+      correct, only that comment was wrong - now fixed and annotated in-place.
+      REVISED WATCH (the MEC=2 'collision' worry above was UNFOUNDED): the high nibble 2 vs 3
+      only picks between two string-0x83 FORMAT variants (==3 pushes two extra args at
+      004f9c2e/004f9c35); BOTH announce a kill through the same display path, so MEC=2 does
+      NOT render as a collision - that concern came from the SCORING branch's MEC census.
+      The only thing not knowable statically is the exact localized banner wording
+      (FUN_0040a1b0(0x83) is a runtime string-table index): confirm phrasing in the field,
+      and if a different variant is wanted, ANNOUNCE_BAIL_MEC=3 selects the alternate format.
+
+      FALSIFICATION: shoot a pilot who then bails; when the empty plane comes down the shooter
+      must see a cyan kill banner AND the server must log 'BAILKILL ... announce-only'. The
+      kill count must increment EXACTLY ONCE (no assist inflation) - check the shooter's
+      Fighters Destroyed vs Fighters Assists stay independent. A normal (non-bail) kill must
+      be UNCHANGED: one banner, one credit, no BAILKILL line.
+      STILL OPEN: the v362 harvest-freshness root (bail conductor still goes stale); cs9 wrap;
+      object-id plan B.
+
+==============================================================================
+
 v367f5: [PEER-VIS] BAIL-RESPAWN LEAVES THE BAILER BLIND - re-advertise peers on respawn.
       v366f5 fixed the death->HQ->change-plane->refly invisibility (observer's HQ teardown).
       This is the INVERSE: after a BAIL, the RETURNING BAILER cannot see anyone, and his
