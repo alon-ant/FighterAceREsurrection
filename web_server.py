@@ -122,6 +122,7 @@ SRV = {
     'generate_ticket': None,
     'exec_console': None,
     'log_dir': None,
+    'date_read': None,
     'log': print
 }
 
@@ -1168,6 +1169,37 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     + 'font-weight:bold; color:#2a7;">' + str(sval) + '</span>'
                     + '<span style="color:#999; font-size:0.8em;"> (0 = off, 6 = strongest)</span>'
                     + '</label>')
+            # WAR DATE (v383): full date + opt-in checkbox. Default = settings_json override, else
+            # the GAME_DEF's own date (via the date_read bridge), else the stock 22-Jun-1941.
+            _wd_def = (22, 6, 1941)
+            try:
+                if SRV.get('date_read') and gdef:
+                    _dr = SRV['date_read'](bytes(gdef))
+                    if _dr:
+                        _wd_def = _dr
+            except Exception:
+                _wd_def = (22, 6, 1941)
+            war_on = bool(overrides.get('war_enabled'))
+            war_d  = overrides.get('war_day',   _wd_def[0])
+            war_m  = overrides.get('war_month', _wd_def[1])
+            war_y  = overrides.get('war_year',  _wd_def[2])
+            war_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'war_enabled' in overrides else ''
+            wardate_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_war_enabled" value="1"'
+                + (' checked' if war_on else '') + '> Restrict planes to this war date'
+                + war_edited + '</label>'
+                '<div style="display:flex; gap:10px; align-items:flex-end;">'
+                '<label style="font-size:0.85em; color:#333;">Day<br>'
+                '<input type="number" min="1" max="31" name="s_war_day" value="' + hesc(str(war_d))
+                + '" style="width:70px; padding:6px;"></label>'
+                '<label style="font-size:0.85em; color:#333;">Month<br>'
+                '<input type="number" min="1" max="12" name="s_war_month" value="' + hesc(str(war_m))
+                + '" style="width:70px; padding:6px;"></label>'
+                '<label style="font-size:0.85em; color:#333;">Year<br>'
+                '<input type="number" min="1935" max="1955" name="s_war_year" value="' + hesc(str(war_y))
+                + '" style="width:90px; padding:6px;"></label>'
+                '</div>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -1189,6 +1221,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Enemy defences (EvP)</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Strength of the terrain's automatic anti-aircraft defences that fire at players (0 = off, 6 = strongest). Applied the next time the arena is entered.</p>
                     {evp_html}
+                    <h3>War date (plane era)</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to restrict this arena to aircraft that had entered service by the date below, and push that date into the arena so the client shows it too (e.g. a 1943 arena hides 1944+ planes). Leave unticked for no restriction (all planes &mdash; today's behaviour). A stopgap for standing arenas; takes effect the next time the arena is entered.</p>
+                    {wardate_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -1778,6 +1813,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                         settings[skey] = max(0, min(6, int(round(float(v)))))
                     except ValueError:
                         pass
+            # WAR DATE (v383): opt-in checkbox + full date. The checkbox only posts when ticked, so
+            # its absence means off. The date values are stored regardless so toggling back on
+            # remembers them. The game server reads war_enabled/war_year/war_month/war_day per arena.
+            settings['war_enabled'] = 1 if qs.get('s_war_enabled', [''])[0].strip() else 0
+            for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
+                _wv = qs.get('s_' + _wk, [''])[0].strip()
+                if _wv != '':
+                    try:
+                        settings[_wk] = max(_lo, min(_hi, int(round(float(_wv)))))
+                    except ValueError:
+                        pass
             if rid:
                 conn = sqlite3.connect(SRV['db_path'])
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
@@ -1976,7 +2022,8 @@ def _web_watchdog(interval=30.0, timeout=10.0):
                       f'checks until one succeeds.')
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
-                     tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None):
+                     tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
+                     date_read_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -1986,6 +2033,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['get_logs'] = get_logs_fn                    # get_recent_logs(n, min_level) -> [str]
     SRV['exec_console'] = exec_console_fn            # v317: queue_console_command(line, src)
     SRV['log_dir'] = log_dir                         # v321: for the admin Logs tab
+    SRV['date_read'] = date_read_fn                  # v383: extract_date_from_gamedef(blob)->(d,m,y)
 
     migrate_web_db()
     _start_httpd_thread()
