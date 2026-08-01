@@ -5,9 +5,561 @@ Newest first. server.py keeps only the banner, the TODO list and the
 bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
+
+*** NEW BASELINE 2026-07-30: v373f5 is the current stable baseline and is now
+    the canonical server.py (server.py == server-fable5.py == v373f5, byte-
+    identical). The fable5 fork line has caught up to trunk; from here server.py
+    IS the fork. Prior stable rollback point on disk: server-fable5-v362f5-
+    stable.py. The one open caveat in this baseline is the v373f5 identity fix,
+    which is deployed and compile-verified but still UNTESTED in live play (see
+    its entry). Everything below it (through v371f5's 256-wedge cure) is
+    field-confirmed stable. ***
 ==============================================================================
 
-v373f5: [IDENTITY/CRITICAL] RECYCLED-SLOT MISATTRIBUTION - a departed player's telemetry straggler
+v386f5: [SESSION] Clean disconnect now actually closes the session (no more ghost after a
+      graceful client Exit/Quit). server.py only. Builds on v385f5's _teardown_session.
+
+      RE of vcncNet.dll (loaded into Ghidra) settled what the client does on a clean close
+      (FUN_007e71b0): a three-step handshake ExitAppSpace -> Disconnect -> Close, each blocking
+      on a server reply. vcncDisconnect (@0x1000b43c) sends reliable command 2 and treats a reply
+      whose command field == 0x64 as success (else / on timeout it logs 'Can't disconnect
+      server'). Our pl2[3]=0x64 IS that ack. On the wire the disconnect is a normal reliable
+      packet (command 2 at pl[2:4]) that arrives via the compound path (handle_compound ->
+      inner_cmd==2), so the server already parsed and answered it correctly.
+
+      THE BUG: the inner_cmd==2 handler sent the 0x64 reply and returned WITHOUT tearing the
+      session down. DEBUG capture run_20260801_002705 shows it exactly: client sends ExitAppSpace
+      then Disconnect, server replies (seq=25 'disconnect reply', ACKed OK), client pings a few
+      more seconds and vanishes (10054) - and the session is STILL live afterwards. Ghost.
+      (Earlier confusion: 'disconnect reply'/cmd==2 showed 0 in older logs because those sessions
+      were all ungraceful window-kills that never sent vcncDisconnect; and one client log showed
+      VCNCMD_FATALLOSTCONNECTION *before* the disconnect - that was the pre-v385f5 ghost-lockout
+      window, where the connection was already dead so vcncDisconnect never transmitted.)
+
+      FIX: both disconnect handlers (compound inner_cmd==2, and the non-compound post-auth cmd==2
+      fallback) now send the 0x64 ack and THEN call _teardown_session(why='(client
+      vcncDisconnect)'). send_rel is synchronous, so the client gets its ack before the session is
+      torn down; the teardown broadcasts the pilot delete and frees the ClientNumber/slot. Result:
+      a graceful Exit/Quit closes the session immediately and cleanly - the reconnect-reap
+      (v385f5) remains the backstop only for ungraceful CTDs that never send a disconnect.
+
+      NOTE: this does NOT tear down on ExitAppSpace (inner_cmd==5) - leaving the app space can be
+      a return-to-menu while staying connected; only the explicit Disconnect closes the session.
+
+      TEST: DEBUG on, clean menu-quit; expect 'inner vcncDisconnect -> disconnect reply +
+      teardown' then the session gone (no lingering 10054 ghost, active_sessions back to baseline).
+
+      REVERT: drop the two _teardown_session(why='(client vcncDisconnect)') calls.
+
+==============================================================================
+
+v385f5: [SESSION] Fix ghost-session / ClientNumber leak that locked an account out of arenas
+      (Taurus / account Sinistarr: could not see arenas, empty Arena screen, could not chat in
+      lobby, could not enter an arena for ~1 hour). server.py only.
+
+      CONFIRMED from server_2_.log: account Sinistarr reconnected 42 times; the reconnect-reap
+      (_reap_stale_sessions) fired only 3 times; global active_sessions climbed monotonically
+      (to 12) and only reset on a server restart. Classic ghost accumulation.
+
+      ROOT CAUSE: sessions were removed from `sids` by several routes, but only the reap and the
+      moderator-kick did the FULL cleanup. The others leaked:
+        - in-game disconnect (recv late-ack path): freed the start-place and broadcast leave,
+          but NEVER called free_client_number or teardown_ingame_presence -> the global
+          ClientNumber and the in-game player slot leaked on every ungraceful drop;
+        - compound + post-auth vcncExitAppSpace reply-timeout paths: bare `sids.pop` with NO
+          cleanup at all;
+        - heartbeat-3x-fail path: bare pop (never actually fires on Windows - sendto does not
+          fail there - so it was not the trigger here, but it leaked too).
+      Once a session leaves `sids`, its leaked ClientNumber/slot/roster entry live on in the
+      game+arena object tables where the reconnect-reap (which only walks `sids`) can never
+      reach them. They pile up across reconnects until slot/object-ids collide and the account
+      can no longer be placed into an arena - exactly the reported lockout.
+
+      FIX: one shared cleanup path, _teardown_session(x, why), used by ALL exit routes (reap,
+      heartbeat-loss, both exit-reply timeouts, in-game disconnect, and the reap on reconnect).
+      It broadcasts the pilot delete to peers (broadcast_player_leave = the msg-63 REMOVE),
+      tears down in-game presence, and returns the ClientNumber + start-place to the pool, then
+      pops the session. Idempotent (guarded by x._torn_down) so double-exit paths are safe. The
+      reconnect-reap now matches `not _torn_down` (was `not closing`) and delegates to the same
+      helper - so a new connection for an account authoritatively terminates any prior session
+      AND broadcasts the delete, preventing the object-id overwrites.
+
+      NOTE: pre-existing ghosts from before this build are cleared by a one-time server restart.
+      After restart, watch that repeated reconnects for one account either log a REAP line or a
+      clean teardown, that active_sessions returns to baseline instead of climbing, and that the
+      affected account can enter an arena again.
+
+      REVERT: restore the four bare-pop sites and the pre-v385 _reap_stale_sessions body.
+
+==============================================================================
+
+v384f5: [HANGAR] Fix each side showing only ~1/3 of its planes (the '9 GB planes' report).
+      PRE-EXISTING bug, NOT the war-date feature - the date filter (v383f5) was exonerated:
+      the short hangar appeared IDENTICALLY in dated and undated arenas, so the date push was
+      never the cause. server.py only; behind a flag.
+
+      SYMPTOM: a side's hangar showed a stride-3 subset of its roster - GB served 27 flyable
+      planes (DEBUG plane-teams confirmed byte0 US=22 GB=27 SU=19 GE=23 JP=19 in the 1945 arena)
+      but the client displayed only 9 = 27/3, at pool positions 0,3,6,9,12,15... That 3x is the
+      signature of the client's msg-58 pool decoder (FUN_004eff50) reading the 0x3a catalog echo
+      as (Size-1)/3 THREE-byte records while the bytes were flat 1-byte ids.
+
+      ROOT CAUSE: the client UPLOADS the catalog as flat 1-byte ids and expects the echo back as
+      3-byte records [id][ushort]. Under PLANE_FILTER_VIA_CATALOG=True (v381 and earlier) the
+      filtered re-echo emitted proper 3-byte records, so the pool was correct. When v382 flipped
+      to byte0 gating (PLANE_FILTER_VIA_CATALOG=False) to cure the nation-bleed, that re-echo
+      stopped running - 0x3a fell through to the DEFAULT echo, which bounces the upload back
+      VERBATIM (1-byte). Client then read (28-1)/3 = 9. The regression was invisible because we
+      only ever verified nation isolation via the 0x3a UPLOAD counts, never the hangar DISPLAY.
+
+      FIX: new flag CATALOG_ALWAYS_3BYTE_ECHO (True) makes the 3-byte RE-ENCODING of the 0x3a
+      echo unconditional. Per-side FILTERING still only runs under PLANE_FILTER_VIA_CATALOG
+      (byte0 gates the side under False, so no bleed returns); the echo is simply always
+      re-encoded 1-byte -> 3-byte. Verified in isolation: a 27-id GB catalog now yields Size=82
+      -> client reads (82-1)/3 = 27 (was Size=28 -> 9). Reuses the exact proven True-path packet
+      builder (build_ingame_pkt sets Size=n exactly, so no pad/garbage records).
+
+      REVERT: CATALOG_ALWAYS_3BYTE_ECHO=False restores the old verbatim-echo behaviour.
+
+      TEST on a THROWAWAY arena: enter, open the hangar, confirm the side now lists its FULL
+      roster (GB ~27-28, not 9). Watch run_*.log for 'cmd=0 sub=0x3a -> re-encoded N (3-byte
+      recs, ...)'. The 0x3a path has CTD history - if the arena page asserts, flip the flag off.
+
+==============================================================================
+
+v383f5: [WAR-DATE] Per-arena war-date plane filter + client date push. NEW FEATURE (engine +
+      web panel), opt-in per arena. Touches server.py AND web_server.py. DB backed up.
+      *** OPT-IN + DORMANT: nothing changes until an admin ticks a war date on an arena. ***
+
+      WHAT IT DOES: an arena can be marked with a full war DATE (day/month/year) from the web
+      Arena Management panel (Edit Settings -> War date). When set: (1) aircraft that had not
+      entered service by that date are hidden from that arena's hangars (a 1943 arena hides
+      1944+ planes); (2) the date is pushed into the arena's GAME_DEF so the CLIENT shows it too.
+      Unticked = no restriction (all planes), which is every existing arena's behaviour.
+
+      WHY OPT-IN: the probe (probe_arena_dates.py) confirmed all current arenas carry the stock
+      22-Jun-1941 default, so a blanket filter would strip every 1942+ plane from the everyday
+      arenas. The feature does nothing unless settings_json.war_enabled=1 for that arena.
+
+      HOW (all on the v382-proven-safe byte0 path, NO new wire mechanism):
+        * PLANE_SERVICE_YEAR: intro year per plane (121, keyed by name, vetted with the pilots).
+        * plane_camp_for_room / _session_slot_camp remap out-of-window planes to camp 7 (NU),
+          which apply_plane_teams already writes as byte0 0x80 - hidden from all standard sides,
+          NEVER 0x00, so no GameDef 1902 CTD. Zero new masking code.
+        * apply_war_date / _gamedef_date_offset push the Reality date bytes (day/month/year u16 LE)
+          into the decompressed GAME_DEF - length-preserving, same pipeline as the AA patch. Date
+          offset VERIFIED against 5 live arenas (all read 22/06/1941 = raw 16 06 95 07).
+        * web_server.py: 'War date (plane era)' section in the arena settings editor (checkbox +
+          day/month/year), stored in settings_json; a date_read bridge shows the arena's current
+          GAME_DEF date as the default. Server passes extract_date_from_gamedef as that bridge.
+
+      FLAGS / REVERT: WAR_DATE_ENABLED=False kills the whole feature (filter + push) in one flag;
+      WAR_DATE_PUSH_TO_CLIENT=False keeps the plane filter but stops rewriting the client's date.
+
+      TEST FIRST on a THROWAWAY arena (methodology): tick a date (e.g. 01/01/1943), enter, and
+      check (1) only <=1943 planes appear per side; (2) NO GameDef.cpp:1902 CTD; (3) the client's
+      in-game date reads 1943; (4) side-switching doesn't hang HQ. Watch run_*.log for the
+      'war-date @+... pushed to client' line. If anything asserts, untick the arena (or flip
+      WAR_DATE_ENABLED=False) - existing arenas are untouched either way.
+
+      NOTE (verification gap at deploy time): server.py was compile-verified byte-for-byte against
+      the tested replica. web_server.py edits were clean single-region inserts and the inserted
+      blocks parse in isolation + the server<->web bridge arg count matches (10/10), but the full
+      web_server.py was not compiled in the sandbox. The game server imports web_server at startup,
+      so a syntax error would surface immediately as an ImportError in the startup log - confirm a
+      clean 'Web interface running' line after restart.
+
+==============================================================================
+
+v382f5: [HANGAR] PLANE_FILTER_VIA_CATALOG False again - now SAFE, grounded on a full FA.exe RE of
+      the GAME_DEF codec. Fixes the per-side plane 'bleed' via the byte-0 flyability gate, and lays
+      the foundation for mixed-team/coalition arenas. DEPLOYED after v380f5's CTD; DB backed up.
+      *** TEST ON ONE THROWAWAY ARENA BEFORE BROAD USE - see falsify criteria. ***
+
+      THE RE (four functions read in FA.exe, base 0x400000, saved to re_findings.md):
+        - FUN_00438330  = flyability gate: flyable = *(gamedef+0x558+planeId*0x1c) & (1<<camp).
+                          Pure 32-bit bitmask AND. Record is 0x1c (28) bytes in memory.
+        - FUN_00575be0  = GameDef_Serialize: writes the wire blob. Per plane: byte0=mask; if mask==0
+                          STOP (1-byte record); else emit marker(0xff no-hascamp) + 2 limit bytes.
+        - FUN_0057bee0  = wire DESERIALIZER = THE crashing function (GameDef.cpp:1902 'Len==0').
+                          Its plane loop keys ONLY on (mask==0?) and (marker==0xff?) and copies the
+                          mask value VERBATIM into the flyability dword - it never validates it:
+                              mask==0             -> 1-byte record   <-- the ONLY dangerous value
+                              mask!=0 & [1]==0xff  -> 4-byte [mask][0xff][lim][lim]
+                              mask!=0 & [1]!=0xff  -> 6-byte hascamp form
+        - FUN_0057f610  = .cfg text parser: PlanesAvailable does mask|=(1<<camp); PlanesProhibited
+                          does mask&=~(1<<camp). Confirms byte0 == per-camp bitmask.
+
+      WHAT THIS SETTLES: the v380 (and v332) CTD was NOT 'bit 7 illegal' and NOT 'per-camp masks are
+      unsafe'. It was ONLY that the v380 guard wrote byte0=0x00 for the NU planes. 0x00 flips the
+      reader to its 1-byte branch while the server's fixed 4-byte writer emits 4 bytes -> the block
+      desyncs -> leftover Len!=0 -> the 1902 assertion. Every NONZERO mask (0x01..0x10 per nation,
+      0x80 for NU, or a coalition mask like 0x03/0x1c) parses IDENTICALLY to the stock 0x1f. Proven
+      from the crashing function itself, not inferred from the writer.
+
+      THE FIX (apply_plane_teams, False path): byte0 = (1<<camp) for camps 0..4
+      (US=0x01 GB=0x02 SU=0x04 GE=0x08 JP=0x10); byte0 = 0x80 for camps 5..7 (NU) - a non-standard
+      camp bit, so FUN_00438330 hides those planes from all five WWII sides while keeping the record
+      the 4-byte form (mask nonzero). NEVER 0x00. Verified across all 121 slots: correct per-nation
+      masks, the four NU planes (Me-163B/Ouragan/Tunnan/HA-200) all 0x80, and ZERO planes at 0x00.
+      The other 0x00 writer, apply_plane_hide, stays OFF (STAFF_HIDE_VIA_GAMEDEF=False), so no 0x00
+      reaches the arena-page block from any path. apply_plane_byte0_override still sets Me-163B=0x80
+      (now a no-op vs the teams pass) and continues to hard-refuse 0x00.
+
+      MIXED TEAMS (future): the gate is a bitmask, so a coalition arena is a one-line change here -
+      OR the member camps' bits instead of a single bit: US+GB -> 0x03, GE+JP+SU -> 0x1c. No new
+      mechanism; FUN_00438330 already coalition-filters correctly. Noted at the code site.
+
+      FALSIFY (throwaway arena first): (1) each side's hangar shows ONLY its own nation's planes
+      (bleed gone); (2) NO GameDef.cpp:1902 CTD on the arena page; (3) side-switching does not hang
+      the HQ menu. If (2) or (3) fail, flip PLANE_FILTER_VIA_CATALOG back to True (one flag) -> the
+      bleed returns but the arena page is stable. KNOWN OPEN: whether 0x80 actually surfaces the NU
+      planes ON the NU tab (vs merely hiding them from standard sides) is not yet observed - check
+      an admin's NU hangar in the same test.
+
+==============================================================================
+
+v381f5: [HANGAR - REVERT of v380f5] PLANE_FILTER_VIA_CATALOG back to True. v380f5 (False) CTD'd
+      EVERY client at the arena page: GameDef.cpp:1902 'Assertion failed (Len==0)' (messages89.log),
+      the same assertion as the historical v332 CTD. Server restored to the known-good runtime
+      behaviour (== v379f5).
+
+      CORRECTED ROOT CAUSE: the crash was NOT the standard per-nation 1<<camp masks (US=0x01 ...
+      JP=0x10). It was the camp>=5 guard I added in v380, which wrote byte0 = 0x00 for the four NU
+      planes (Me-163B, Ouragan, Tunnan, HA-200). 0x00 = no camp bit set is EXACTLY the value the
+      GAME_DEF parser rejects - it is the documented v332 trigger, and apply_plane_byte0_override
+      already hard-REFUSES 0x00 for this precise reason. My guard wrote 0x00 directly in
+      apply_plane_teams, bypassing that refusal, and it landed in the arena-page GAME_DEF served to
+      everyone -> universal CTD. I had the v380 hazard exactly backwards: I wrote 0x00 to AVOID the
+      (untested) bit-7 0x80, but 0x00 is itself the crash.
+
+      THE DEEPER, DURABLE CONCLUSION: the GAME_DEF byte-0 flyability gate CANNOT express 'hidden from
+      all standard sides' safely. Every nonzero byte-0 value files the plane on SOME nation tab;
+      0x00 crashes the parser; bits 5/6/7 are untested. apply_plane_hide does write 0x00 but only on
+      non-arena-page paths that never reach the shared arena GAME_DEF. This is the actual reason
+      PLANE_FILTER_VIA_CATALOG=True has to exist: the 0x3a echo removes NU/staff planes from the LIST
+      so their byte0 can stay the safe 0x1f. => The byte-0 gate is a DEAD END for the per-side
+      'bleed' as long as any NU/staff-only plane is in the pool. Do NOT set False again; it CTDs
+      every client.
+
+      NET STATE: the hangar 'bleed' (all nations' planes visible on every side) is a KNOWN COSMETIC
+      ISSUE, reverted to the stable pre-v380 behaviour. A real fix would have to drive the nation-tab
+      display by some mechanism OTHER than GAME_DEF byte0, OR remove all NU/staff-only planes from
+      the pool so byte0 masking becomes safe - neither attempted here. The v380 camp>=5 guard line
+      remains in apply_plane_teams as DEAD CODE (only reachable on the False path, which is now off);
+      left in place so the hazard is documented at the site, but it must be changed from 0x00 before
+      False is ever revisited.
+
+==============================================================================
+
+v380f5: [HANGAR] PLANE_FILTER_VIA_CATALOG = True -> False. Switches per-side hangar filtering from
+      the 0x3a catalog echo (which never actually filtered the DISPLAY) to the native GAME_DEF
+      byte-0 flyability gate. Addresses the 'other nations' planes bleed into every side' symptom.
+
+      WHY (settled after the v375-v379 detour): the client draws each plane's nation TAB from the
+      GAME_DEF plane-info array byte 0 (FUN_006de570; documented in the apply_plane_byte0_override
+      docstring), NOT from the 0x3a echo. Under True, apply_plane_teams writes byte0=0x1f (all camps)
+      for every plane, so the GAME_DEF says 'every plane belongs to every side' and the hangar shows
+      the full all-nation list on every side - exactly the bleed. The 0x3a echo only ever controlled
+      list MEMBERSHIP, never the nation-tab display, so it could not fix the bleed no matter what it
+      sent. This was NOT an ordering bug: Me-163B is correctly hidden for a non-mod, which proves the
+      byte0-override at slot 118 hit the right plane => the GAME_DEF plane block is in PLANE_ROSTER
+      order, and all three orderings (PLANE_ROSTER, the 0x3a upload id-space, the GAME_DEF block)
+      agree. (This is also why v378's Preload-order reorder was wrong and was reverted in v379.)
+
+      FIX: False makes apply_plane_teams write byte0 = (1<<camp) per plane, so FUN_00438330 greys
+      wrong-nation planes and each side's hangar shows only its own aircraft. Verified per slot:
+      US=0x01 GB=0x02 SU=0x04 GE=0x08 JP=0x10, correctly assigned to Pe-8->SU, A6M2->JPN,
+      Dauntless->GB, C-47A/SBD-2->USA, etc.
+
+      SAFETY (the v332 bit-7 CTD): under False, camp 7 (NU) would make apply_plane_teams write
+      1<<7 = 0x80, the UNTESTED byte-0 value that caused the v332 arena-page CTD (crashes the page
+      for EVERYONE, not just the viewer). GUARDED: apply_plane_teams now writes 0x00 for any camp
+      >= 5 (NU + unused 5/6) instead of 1<<camp. The NU planes (Me-163B, and the v377 movers
+      Ouragan/Tunnan/HA-200) therefore get byte0=0x00 = flyable by no standard nation. Me-163B is
+      then set to 0x80 by PLANE_BYTE0_OVERRIDE (the TESTED single-slot path, already live-verified
+      as 'hidden for non-mod'); apply_plane_hide also zeroes staff planes. Confirmed NO plane
+      receives 0x80 from the bulk apply_plane_teams loop.
+
+      KNOWN LIMITATION / FOLLOW-UP: the three NON-Me-163B NU movers (Ouragan 113, Tunnan 112,
+      HA-200 46) now get byte0=0x00 and have NO override, so under False they appear on NO nation
+      tab - effectively hidden from everyone including NU admins. They were staff/NU-only anyway so
+      this is not a regression from normal play, but if they should be flyable on the NU tab they
+      need adding to PLANE_BYTE0_OVERRIDE ({..., 113:0x80, 112:0x80, 46:0x80}). NOT done here
+      because 0x80-as-NU-tab is only proven for Me-163B via 'hidden', not via 'appears on NU' -
+      verify the Me-163B actually shows on an admin's NU tab first, then extend the override.
+
+      THE OPEN RISK (why this is a live test, not a settled fix): True was originally chosen because
+      the byte0 gate shrinks the per-side flyable list on a side change, which historically forced a
+      heavy leave/re-entry handshake that HUNG the HQ menu. The reliability work since (v371 256-
+      wedge cure, universal counter-unwrap, event-driven queue drain) targets exactly that wedge, so
+      the hang may no longer occur - but this is UNVERIFIED. FALSIFY: (1) each side's hangar shows
+      ONLY its own nation's planes (bleed gone); (2) switching sides at the team-select/HQ screen
+      does NOT freeze the menu. If (2) fails, flip PLANE_FILTER_VIA_CATALOG back to True (one flag)
+      and the bleed returns but side-switching is smooth - then the fix is to repair the side-change
+      handshake rather than the filter path.
+
+==============================================================================
+
+v379f5: [IDENTITY/CRITICAL - REVERT of v378f5] Rolled PLANE_ROSTER back to the v377f5 order. v378f5
+      was WRONG and made the hangars worse (run_20260730_104631: GB/SU/JP planes bled into every
+      side).
+
+      MY MISTAKE in v378: I read the client-side log's 'Preload available planes' list as the
+      plane-id namespace and re-ordered PLANE_ROSTER to match it. The Preload list is the model
+      LOAD order, NOT the id space. Proof I should have run BEFORE deploying: decode the client's
+      own 0x3a upload bytes against each candidate order and see which yields clean contiguous
+      nation runs.
+        - against the v377 (old) order: USA x16, GB x17, SU x14, GE x16, JPN x12, then the bomber
+          tail grouped by nation - CLEAN. This is the real id space.
+        - against the Preload order (v378): USA planes interleaved with Tu-2/Ju-52/D3A at positions
+          13-15 - SCRAMBLED.
+      The v377 order was correct all along; the six 'wrong flag' planes are a SEPARATE, still-open
+      issue (see below), not evidence the roster was wrong.
+
+      This revert is a wholesale restore: PLANE_ROSTER, PLANE_BYTE0_OVERRIDE (back to Me-163B id
+      118), and the L2D2 comment are all returned to their v377f5 text; only VERSION differs
+      (v379f5). Verified on disk: roster == v377f5 order exactly; compiles clean.
+
+      STILL OPEN (the ACTUAL remaining bug): even under the correct v377 order, the user reports
+      other nations' planes 'bleed into' each side's hangar list. The filter fires and sends the
+      right kept-set (verified), so the bleed is either (a) the client rendering planes the filter
+      did NOT remove because len(kept)==len(ids) short-circuits the echo on some side, or (b) a
+      record-format / count issue in the 3-byte echo the client then mis-slots. NEXT STEP: capture
+      one side's hangar with `loglevel file DEBUG` on, so the full sent-catalog hex is logged, and
+      compare the exact bytes sent vs the planes the client shows. Do NOT touch PLANE_ROSTER again
+      without first decoding the live 0x3a upload against it and confirming clean nation runs.
+
+==============================================================================
+
+v378f5: [IDENTITY/CRITICAL] PLANE_ROSTER RE-ALIGNED TO THE CLIENT'S PLANE-ID SPACE. This is the
+      true root cause behind the ENTIRE multi-session hangar saga (v375-v377): the wrong-flag
+      planes, the nation moves "not working", and the mislabeled hangars. It was never the filter
+      and never the per-plane teams.
+
+      GROUND TRUTH (client-side log messages85.log): the client's 'Preload available planes' list
+      IS the client's internal aircraft order - i.e. THE plane-id namespace that every 0x3a catalog
+      byte, spawn ONumber, and kill/telemetry record is expressed in. Comparing it to the server's
+      PLANE_ROSTER: SAME 121 names, but the ORDER disagreed at 110 of 121 positions. So the server
+      was speaking a different plane-id dialect than the client: it filtered/echoed the catalog
+      using ITS ids, the client rendered them using ITS ids, and every position where the two
+      diverged showed the wrong aircraft. Concretely, that produced EXACTLY the reported symptoms:
+        - USA hangar showed Dauntless + Dakota (GB variants); GB was missing both.
+        - GB showed Pe-8 + Li-2 (SU); SU showed Ju-88 + Ju-52 (GE); GE showed HA-200 + D3A.
+        - JPN showed SBD-2 + C-47A (USA) and was MISSING the A6M2.
+      All of it is one bug: a scrambled id<->name table.
+
+      FIX: PLANE_ROSTER re-ordered to EXACTLY equal the client Preload order (verified list ==
+      client order, 121 planes, same set). Because EVERY other plane attribute - PLANE_VALUE_2004,
+      PLANE_VALUE_NAMES, BOMBER_PLANE_NAMES, PLANE_TEAMS, STAFF_ONLY_PLANES - is keyed BY NAME, they
+      all follow the reorder automatically; PLANE_ROSTER is the ONLY positional (index-keyed) table.
+      Two hardcoded id-literals were updated to match the new order:
+        - PLANE_BYTE0_OVERRIDE: Me-163B 118 -> 65 (its client-preload id).
+        - the L2D2 "client omits id 107" comment -> id 120 (L2D2's new id). (STAFF_ONLY_PLANE_IDS is
+          computed by name via enumerate(PLANE_ROSTER), so it needed no change.)
+
+      VERIFIED before deploy (simulated the real 0x3a upload against the new roster + PLANE_TEAMS):
+        - all 13 of the user's specific complaints resolve: USA loses Dauntless/Dakota, GB gains
+          both and loses Pe-8/Li-2, SU loses Ju-88/Ju-52, GE loses HA-200/D3A, JPN loses SBD-2/
+          C-47A and REGAINS the A6M2.
+        - per-side kept counts (real catalog): USA 24, GB 28, SU 21, GE 23, JPN 19.
+        - value/class spot-check by new id: F4U-4C(id13)=2000, A6M2(id68)=1150 fighter, SBD-2(id80)
+          =650 bomber, Pe-8(id97)=1150 bomber - all correct; 4 newsletter anchors still exact;
+          bomber count still 41.
+      Compiles clean; on-disk byte-identical to the tested replica.
+
+      IMPORTANT GOING FORWARD: PLANE_ROSTER is now INDEX-LOCKED to the client. Do NOT reorder it
+      without a fresh client Preload capture. If a future client build adds/reorders planes, re-pull
+      the Preload list and re-align. The old (pre-v378) order should be considered CORRUPT - any
+      historical scoring or spawn decode done under it mapped some ids to the wrong plane.
+
+      ROLLBACK: previous build is v377f5 (this session). server.py.bak and
+      server-fable5-v362f5-stable.py remain on disk as older fallbacks. FALSIFY: open the hangar on
+      each side at INFO - the POST-AUTH 'catalog filtered' line still fires, and now each side shows
+      only its own aircraft, correctly labeled; JPN shows the A6M2; GB shows Dauntless and Dakota.
+
+      NOTE on the six "wrong flag" planes from the v377 note: they are resolved by THIS fix, not a
+      client-side limitation as v377 concluded. The v377 reasoning (that the markings were baked
+      client-side) was wrong - the planes were mislabeled because the server sent the wrong ids, and
+      correcting the id space fixes them.
+
+==============================================================================
+
+v377f5: [HANGAR/ECONOMY-DATA + CLEANUP] Nation moves + close-out of the v375/v376 diagnostic
+      detour. THREE parts:
+
+      (1) THE FILTER WAS NEVER BROKEN - RESOLVED. The v375/v376 hunt for a "dead" side-catalog
+      filter was chasing a LOGGING artifact, not a code fault. Proof chain:
+        * v376f5's CATDIAG2 fired with guard1=True, guard2=True, kept=25 (USA) / 29 (GB) on real
+          hangar opens (run_20260730_082408, _083652) - the filter enters, computes, and reaches
+          the send. build_ingame_pkt is a 3-line byte-packer that cannot raise on that input, and
+          the send_reply thread is spawned right after.
+        * The reason NO run ever showed the 'catalog filtered' confirmation: fa_logging._TAG_LEVELS
+          maps 'POST-AUTH' -> DEBUG, and the file log level defaults to INFO
+          (FILE_LOG_LEVEL_DEFAULT='INFO'). Every POST-AUTH line, including the filter confirmation,
+          is DEBUG and is filtered out of run_*.log. It was NEVER muted - 'logunmute POST-AUTH' had
+          no effect because mute and level are independent gates. CATDIAG/CATDIAG2 aren't in
+          _TAG_LEVELS so they default to INFO and showed, which is the ONLY reason they were
+          visible while POST-AUTH wasn't.
+        LESSON: 'grep TAG = 0 hits' does not mean the code path is untaken if TAG is DEBUG and the
+        file is at INFO. Check the tag's level before concluding a feature is dead. The earlier
+        'the filter has never fired' claim was wrong on exactly this point.
+
+      FIX for visibility: the filter-confirmation line is now emitted with level='INFO' (the tag
+      stays POST-AUTH; only that one call is lifted) so the proof-of-fire line shows at the normal
+      file level from now on. To see the full DEBUG firehose for a repro, still use `loglevel file
+      DEBUG` and set it back after (DEBUG ~= 55MB / 8-player session).
+
+      Removed the v375 CATDIAG block and the two v376 CATDIAG2 lines - they served their purpose.
+      The filter body is back to its pre-diagnostic form (behaviour unchanged; verified the block
+      is byte-clean of CATDIAG).
+
+      (2) NATION MOVES (PLANE_TEAMS). Now safe to apply because the per-side filter is confirmed
+      working - a moved plane actually shows on its new side's hangar:
+        * Dauntless (id 60)  USA(default) -> GB (camp 1). The FAA Fleet Air Arm Dauntless. This is
+          a SEPARATE roster entry from the US Navy "SBD-2" (id 104), which STAYS USA. (The user's
+          earlier "SBD-2 -> US" note was the same display confusion; SBD-2 was already USA.)
+        * Ouragan (id 113)   GB -> NU (camp 7). French Dassault MD.450 - post-war, not a WWII
+          Allied type.
+        * Tunnan  (id 112)   GB -> NU (camp 7). Swedish SAAB J29.
+        * HA-200  (id 46)    GE -> NU (camp 7). Spanish Hispano HA-200 Saeta - post-war, not Axis.
+      NOTE: NU (camp 7) is the ADMIN-ONLY side, so Ouragan/Tunnan/HA-200 are now STAFF-VISIBLE
+      ONLY (same gating as the Me-163B), not flyable by everyone. That is the correct reading of
+      "move to NEU"; if any of them should instead be world-flyable, they need a real national
+      side, not NU. Per-side kept counts after the move (on the real client catalog): USA 24, GB
+      28, SU 22, GE 24, JPN 18, NU 4 (staff).
+
+      (3) THE SIX "WRONG FLAG" PLANES (Pe-8, Li-2 shown GB; Ju-88, Ju-52 shown SU; A6M2, L2D2
+      shown GE) are NOT a server bug and are NOT fixed here - deliberately. They are ALREADY on
+      the correct team in PLANE_TEAMS, and the per-side filter (now confirmed working) shows each
+      side only its own planes. The wrong ROUNDEL/paint is the client rendering each aircraft's
+      built-in national marking from FA.exe model data, which the server does not control and
+      cannot change without a client mod (out of scope). KNOWN CLIENT-SIDE COSMETIC LIMITATION.
+
+      FALSIFY (all three): open the hangar on a side at INFO level -> expect a POST-AUTH 'catalog
+      filtered 119->N' line (now visible). On GB, Dauntless present and Ouragan/Tunnan absent; on a
+      staff pilot's NU side, Ouragan/Tunnan/HA-200 present. REVERT: the four PLANE_TEAMS moves are
+      independent one-line list edits; the INFO bump is the single level='INFO' arg.
+
+==============================================================================
+
+v376f5: [DIAG/HANGAR] Deeper filter instrumentation - v375f5's CATDIAG RULED OUT the queue-ordering
+      theory. run_20260730_081813 shows, on two hangar opens:
+        CATDIAG ... sub=0x3a _cat_pfx=False FILTER_FLAG=True nation=1 _have_side=True ... (GB)
+        CATDIAG ... sub=0x3a _cat_pfx=False FILTER_FLAG=True nation=4 _have_side=True ... (JPN)
+      EVERY gate is True and s.nation is correctly set - so the outer `if` MUST enter - yet still
+      no `catalog filtered` line appears and no exception/thread-death follows (SUPPLY-CAP/ACE88/
+      STAT25 keep flowing). Replaying the exact captured bytes through the filter by hand SUCCEEDS
+      (size=120 fits, ids=119, GB keeps 29 / JPN keeps 18, guard2 True) - so the code as written
+      should build+send+log. The live code does not. That contradiction can only be resolved by
+      seeing the filter body execute, so this version logs CATDIAG2 at two inner points: right
+      after entering the outer if (with _b/size/guard1), and right after computing kept (with
+      ids/sc_entries/kept/guard2). Diagnostic only, two log lines, no behaviour change.
+      NEXT: one hangar-open on a side. If NO CATDIAG2 appears despite CATDIAG showing all-True, the
+      running bytes differ from source at that if (investigate deploy/caching). If CATDIAG2 ENTERED
+      appears but guard1/guard2 is False, it pins the exact inner guard. If both are True but still
+      no filtered echo, the issue is the send path. Nation moves + filter fix still held pending.
+
+==============================================================================
+
+v375f5: [DIAG/HANGAR] Instrumentation for the SIDE-CATALOG FILTER, which a catalog capture proved
+      has NEVER fired. Investigating the reported "wrong flag" planes (Pe-8/Li-2 shown GB, Ju-88/
+      Ju-52 shown SU, A6M2/L2D2 shown GE) led to a bigger finding than a per-plane teams error:
+
+      GROUND TRUTH (run_20260730_074736, Bigalon's 0x3a upload decoded):
+        * The client's catalog is a fixed 119-id DISPLAY-ORDER list (it omits id 107 L2D2 and id
+          118 Me-163B). Our PLANE_ROSTER maps every id->name CORRECTLY against it - the roster is
+          NOT shifted, so the earlier off-by-one theory is disproved.
+        * Simulating the server's own side-filter on that real upload yields PERFECT national
+          groupings (USA 25, GB 29, SU 22, GE 25, JPN 18) - Pe-8->SU, Ju-88->GE, A6M2->JPN all
+          correct. So when the filter FIRES, the hangar is right.
+        * But `catalog filtered` appears in ZERO runs (every log checked). The per-side filter has
+          never once executed, so the client always falls back to its OWN built-in nation grouping
+          - which is the wrong-flag source. This is a WHOLE-FEATURE outage, not six mislabeled
+          planes.
+
+      Static analysis narrowed it to the filter's outer guard evaluating False at runtime even
+      though sub==0x3a, PLANE_FILTER_VIA_CATALOG==True, and the pilot is on a side: the remaining
+      suspect is s.nation being None when the QUEUED 0x3a is drained (handle_post_auth runs off the
+      post_auth_cmds queue, so it can process the catalog after a later 'LEFT team' reset nation to
+      None). The CAREER block (same function, needs only entered_game) fires; the filter (needs
+      _have_side) does not - consistent with nation==None at filter time.
+
+      THIS VERSION adds a CATDIAG log on every 0x3a that reaches the filter, dumping sub, _cat_pfx,
+      the filter flag, s.nation, _have_side, _hide count, and entered_game. Diagnostic only - no
+      behaviour change, one log line. Next hangar-open session will show exactly which gate is
+      False, then the real fix follows (likely: resolve the catalog against the side the client is
+      actually browsing rather than s.nation, or re-run the filter when nation is set).
+      FALSIFY/READ: open the hangar on a side; expect a CATDIAG line. If it shows nation=None while
+      the pilot is on a side, the queue-ordering hypothesis is confirmed.
+
+      NOTE on the requested NATION MOVES (Dauntless->GB, Ouragan/Tunnan/HA-200->NEU): deliberately
+      NOT applied yet. They are PLANE_TEAMS edits that only take visible effect once the filter
+      actually fires, so they are held until v375f5's diagnosis lands the filter fix - otherwise
+      they would be invisible and untestable.
+
+==============================================================================
+
+v374f5: [ECONOMY] JULY 2004 TC SCORING MODEL implemented from the 2004_07 official Fighter Ace
+      newsletter ("Scoring Changes - What they are and what they mean"). This REPLACES the older
+      ~2001 scoring.htm model (v249) with the 2004 TC rebalance. Master flag TC_ECONOMY_2004 (True);
+      set False for the exact v249 model back. All values below validated against the newsletter's
+      own worked examples on the deployed file.
+
+      WHAT CHANGED (the 2004 model is different IN KIND from v249):
+        * KILL = a FLAT Destroy Plane Bonus (500 pts), NOT the victim's plane value and NOT a rank
+          ratio. In v249 a kill paid plane_value + (target_rank/killer_rank)x100; that whole
+          mechanic is gone in 2004.
+        * LOSS = the victim's plane BASE value scaled by the victim's RANK, via the rank/scoring
+          modifier table (Cdt 5% ... Gen/FM 100%), plus a flat pilot loss penalty if the pilot
+          actually died. A bail over friendly ground survives -> plane cost only. Crash-land in
+          friendly territory is half (already handled). The newsletter's worked example reproduces
+          exactly: base-2000 F4U-4C -> Cdt pays 100, LtCol 1000, Gen 2000.
+        * The rank/scoring table ABANDONED all level differences in 2004 - the only rank effect now
+          is the flat percentage above.
+
+      CONSTANTS (all VERBATIM from the newsletter's final adjusted list):
+        RANK_LOSS_MODIFIER_2004 = Cdt 5, Sgt 10, 2Lt 15, 1Lt 20, Cpt 30, Maj 40, LtCol 50, Col 60,
+          BGen 70, MGen 80, LtGen 90, Gen 100, FM 100 (%).
+        PILOT_LOSS_PENALTY_2004 = 500 *** FLAGGED VALUE ***: the newsletter self-contradicts - the
+          prose says the pilot loss penalty was raised 250->1000, but the final "complete list ...
+          after these adjustments" shows 500. Defaulted to 500 (the final list) per the maintainer;
+          change the one constant to 1000 for the headline value.
+        DESTROY_PLANE_BONUS_2004=500, DAMAGE_PLANE_BONUS_2004=250, DESTROY_HUMAN_PARACHUTE_PEN=500,
+          DESTROY_AI_PARATROOPER_BONUS=50, TRIGGER_SCENE_BONUS_2004=1000, CAPTURE_SCENE_BONUS_2004=
+          2000. (Kill/loss are wired now; the parachute/paratrooper/scene bonuses are defined and
+          ready for when those events are attributed - nothing consumes them yet, like the existing
+          GROUND_TARGET_VALUES.)
+        TANK_VALUES_2004 = GE Tiger 500, SU KV-1 500, SU T-34 400, GE Panther 400, GB Cromwell 250,
+          US Sherman 250, JP Type 97 100 (verbatim; defined for when ground scoring lands).
+
+      PLANE VALUES (PLANE_VALUE_2004): *** PARTLY DERIVED - READ THIS ***. The newsletter gives only
+      FOUR explicit 2004 values (Ki-100 800, Seafire III 600, Spit F Vb Trop 400, Hurricane IID 400)
+      and a qualitative range (fighters 1000..2000, F4U-4C/Tempest near 2000, dedicated bombers
+      lower). The full 121-plane table lived on Information/scoring.htm, which we DO NOT HAVE. So:
+      the 4 explicit values are set EXACTLY; F4U-4C and Tempest are pinned to 2000 (the newsletter
+      names them as the top of the band); the remaining ~115 are DERIVED by rescaling the v249
+      relative ordering into the stated bands (fighters 1000..2000, bombers 600..1200). These are a
+      faithful interpolation, NOT authoritative 2004 numbers. IF THE REAL scoring.htm TABLE SURFACES,
+      replace the PLANE_VALUE_2004 dict wholesale - the mechanics around it are already correct.
+
+      NOT WIRED YET (defined, waiting on their subsystems): the damage-plane bonus (needs per-hit
+      damage attribution from msg 28 - see the ASSIST work), the parachute/paratrooper bonuses
+      (need parachuter-hit detection), the scene trigger/capture bonuses and tank/ground values
+      (need ground scoring), and the newsletter's Team Balance modifier (score x enemy/your team
+      ratio - needs live per-team head-counts; noted for a later pass).
+
+      REVERT: TC_ECONOMY_2004=False restores the v249 model exactly (kill_score + old plane table +
+      flat 100/100). FALSIFY: fly a fresh session and read the SCORE log - a kill shows
+      "+500 = Destroy Plane Bonus"; a death shows "-N = plane BASE x RANK% + 500 pilot loss"; a
+      low-rank pilot pays a tiny fraction of a high-rank pilot for the same airframe; a bail shows
+      plane cost only, no pilot-loss penalty.
+
+==============================================================================
+
+v373f5: [IDENTITY/CRITICAL] *** UNTESTED IN LIVE PLAY AS OF THIS BASELINE - fix deployed and
+      compile-verified, but the falsification run below has NOT yet been observed. *** RECYCLED-SLOT
+      MISATTRIBUTION - a departed player's telemetry straggler
       resurrected his identity on peers. Reported against v371f5: "Taurus shot and hit ALL41_MAD
       but Taurus's client showed him as AC2E_Bigalon, who had been out of the game for minutes."
 

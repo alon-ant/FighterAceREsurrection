@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v373f5'
+VERSION = 'v386f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1182,6 +1182,63 @@ def gamedef_startground_offset(d):
 # MTU (TC 1585B -> 801B), so the oversized-packet stall that emptied the arena list is gone.
 PLANE_TEAMS_ENABLED = True
 
+# ---------------------------------------------------------------------------------------------
+# WAR-DATE PLANE FILTER (v383f5). Per-arena: hide aircraft that had not entered service by the
+# arena's war date, so a 1939 arena shows only early types and a 1945 arena shows everything.
+# STOPGAP: this is set from the web Arena Management panel (per-arena, opt-in) for standing/
+# static arenas; the intent is that an arena creator eventually sets the date from the game
+# client. HOW IT WORKS (all on the v382-proven-safe byte0 path, no new wire mechanism):
+#   * Filtering is done in plane_camp_for_room / _session_slot_camp: a plane whose service year
+#     is AFTER the arena year is remapped to camp 7 (NU), which apply_plane_teams already turns
+#     into byte0 0x80 - hidden from every standard side, NEVER 0x00, so no GameDef 1902 CTD.
+#   * The arena's war DATE is also pushed into the GAME_DEF (Reality date bytes) so the CLIENT
+#     shows it too - length-preserving, same decompress->patch->re-encode pipeline as the AA
+#     patch. See apply_war_date / _gamedef_date_offset.
+# OPT-IN: nothing happens unless an arena's settings_json has war_enabled=1 (set on the web
+# panel). Existing arenas (which all carry the stock 22-Jun-1941 default) are untouched, so
+# turning this on does not suddenly strip late planes from the everyday arenas.
+# REVERT: WAR_DATE_ENABLED=False disables the whole feature (filter + push) in one flag;
+# WAR_DATE_PUSH_TO_CLIENT=False keeps the plane filter but stops rewriting the client's date.
+WAR_DATE_ENABLED = True
+WAR_DATE_PUSH_TO_CLIENT = True
+
+# First-pass service-entry YEAR per plane, keyed BY NAME (auto-carries with PLANE_ROSTER order).
+# Vetted with the test pilots; 1946+ types are post-war and hide in any WWII-dated arena.
+PLANE_SERVICE_YEAR = {
+    # USA
+    'F4F-3': 1940, 'P-39D': 1941, 'P-40C': 1941, 'P-40E-1': 1941, 'SBD-2': 1941, 'B-25D': 1942,
+    'C-47A': 1942, 'F4F-4': 1942, 'F4U-1a': 1942, 'P-38G': 1942, 'TBF-1c': 1942,
+    'A-20Gu': 1943, 'B-17G': 1943, 'F6F-3': 1943, 'P-47D': 1943, 'B-25J': 1944, 'B-29': 1944,
+    'F4U-1c': 1944, 'P-38L': 1944, 'P-51D': 1944, 'F4U-4': 1945, 'F4U-4C': 1945,
+    'FH-1_Phantom': 1947, 'F-86E': 1951,
+    # GB
+    'Hurr-Ia': 1938, 'Spit-Ia': 1938, 'Martlet_I': 1940, 'DB-7B': 1941, 'Dauntless': 1941,
+    'Hurr-IIC': 1941, 'Spit-Vb_F': 1941, 'Tomahawk': 1941, 'Hurr-IID': 1942, 'Kittyhawk': 1942,
+    'Lancaster': 1942, 'Mosquito_B_IV': 1942, 'Seafire': 1942, 'Spit-IXc': 1942, 'Spit-Vb_LF': 1942,
+    'Typhoon': 1942, 'Avenger_II': 1943, 'Dakota_Mk.II': 1943, 'Mitchell_II': 1943,
+    'Mosquito_"Tse-Tse"': 1944, 'Mosquito_B_IX': 1943, 'Mosquito_FB_VI': 1943, 'Spit-IXe': 1943,
+    'Meteor_F1': 1944, 'Mitchell_III': 1944, 'Spit-XIV': 1944, 'Tempest': 1944, 'DH.100': 1946,
+    # SU
+    'I-16': 1935, 'Li-2': 1940, 'Hurr-IIb': 1941, 'IL-2': 1941, 'LaGG-3': 1941, 'MiG-3': 1941,
+    'Pe-2': 1941, 'Pe-8': 1941, 'Kittyhawk-Ia': 1942, 'Yak-1b': 1942, 'A-20Gs': 1943,
+    'La-5FN': 1943, 'P-39Q': 1943, 'IL-10': 1944, 'La-7': 1944, 'Tu-2': 1944, 'Yak-3': 1944,
+    'Yak-9U': 1944, 'Yak-9UT': 1945, 'MiG-9': 1946, 'Tu-4': 1949, 'MiG-15bis': 1950,
+    # GE
+    'Bf-109E-1/B': 1939, 'He-111': 1939, 'Ju-52/3m': 1939, 'Ju-88': 1939, 'Bf-109E-4/B': 1940,
+    'Bf-110C-4': 1940, 'Bf-109F-4/B': 1941, 'Do-217E-2': 1941, 'Bf-110G-2': 1942, 'Do-217J-1': 1942,
+    'FW-190A-4/U3': 1942, 'Ju-87D-3': 1942, 'Bf-109G-6/R2': 1943, 'Bf-109G-6/R6': 1943,
+    'Ju-87G-2': 1943, 'Bf-109K-4': 1944, 'FW-190A-8/R2': 1944, 'FW-190A-8/R3': 1944,
+    'FW-190A-8/R6': 1944, 'FW-190D-9': 1944, 'FW-190F-8': 1944, 'Me-262A-1': 1944,
+    'Ta-152H-1': 1945, 'Pulqui': 1947,
+    # JPN
+    'A6M2': 1940, 'D3A': 1940, 'L2D2': 1943, 'B5N2': 1941, 'G5N1': 1941, 'Ki-43-IIa': 1942,
+    'A6M5a': 1943, 'G4M2': 1943, 'Ki-44-IIc': 1943, 'Ki-44-IIc37': 1943, 'Ki-61': 1943,
+    'J2M3': 1944, 'Ki-67': 1944, 'Ki-84-1a': 1944, 'N1K2-J': 1944, 'A6M7': 1945, 'J9Y': 1945,
+    'Ki-100': 1945, 'Ki-84-1c': 1945,
+    # NU
+    'Me-163B': 1944, 'Tunnan': 1951, 'Ouragan': 1952, 'HA-200': 1955,
+}
+
 # FILTER MECHANISM (2026-06-30). Two ways to make each side see only its own aircraft:
 #   True  (catalog echo): leave every plane flyable by ALL camps in the GAME_DEF
 #         (byte0 = 0x1f) and instead trim the per-side plane list the server ECHOES back on
@@ -1192,7 +1249,33 @@ PLANE_TEAMS_ENABLED = True
 #         Correct teams + clean display, BUT the per-side flyable LIST shrinks/empties on a
 #         side change, forcing the heavy leave/re-entry flow -> HQ menu hang.
 # Flip to False to fall straight back to the byte0 build if the filtered echo doesn't take.
-PLANE_FILTER_VIA_CATALOG = True
+#
+# v380f5: SET TO FALSE. [REVERTED in v381f5 - see below.] The catalog echo (True) never filtered
+# the DISPLAY: the client draws each plane's nation TAB from the GAME_DEF plane-info array byte 0
+# (FUN_006de570 / see the apply_plane_byte0_override docstring), which under True is written
+# all-flyable (0x1f) for every plane - so every nation's planes bleed into every side's hangar.
+#
+# v381f5: REVERTED to True after v380f5 (False) CTD'd every client (GameDef.cpp:1902 Len==0).
+#
+# v382f5: BACK TO False - but now SAFE, and grounded on a full read of the FA.exe GAME_DEF codec
+# (writer FUN_00575be0, wire reader FUN_0057bee0 = the crashing fn, gate FUN_00438330, .cfg parser
+# FUN_0057f610). The wire reader's plane-record loop keys ONLY on (mask==0?) and (marker==0xff?),
+# and copies the mask value VERBATIM into the plane's flyability dword without validating it:
+#     mask==0             -> 1-byte record            <-- the ONLY dangerous value
+#     mask!=0 & [1]==0xff  -> 4-byte [mask][0xff][l][l]  (exactly what apply_plane_teams writes)
+#     mask!=0 & [1]!=0xff  -> 6-byte hascamp form
+# So the v380 CTD was NOT 'bit 7 is illegal' and NOT 'per-camp masks are unsafe'. It was ONLY that
+# my v380 guard wrote 0x00 for the NU planes: 0x00 flips the reader to the 1-byte branch while the
+# server's fixed 4-byte writer emits 3 extra bytes -> stream desync -> Len!=0 at the end -> 1902.
+# ANY nonzero mask (0x01..0x10 per-nation, 0x80 for NU/bit7, or a coalition mask like 0x03/0x1c) is
+# parsed identically to the stock 0x1f and is SAFE. The fix is therefore: write real per-camp masks,
+# and for NU/camps>=5 write 0x80 (NOT 0x00) so the record stays the 4-byte form. See the camp guard
+# in apply_plane_teams. apply_plane_hide (the other 0x00 writer) stays OFF (STAFF_HIDE_VIA_GAMEDEF
+# is False), so no 0x00 reaches the arena-page block from any path.
+# Falsify (test on ONE throwaway arena FIRST): (1) each side's hangar shows ONLY its own nation's
+# planes; (2) NO GameDef.cpp:1902 CTD; (3) side-switching does not hang the HQ menu. If (2) or (3)
+# fail, flip back to True (one flag).
+PLANE_FILTER_VIA_CATALOG = False
 # The client's msg-58 DOWNLOAD decoder FUN_004eff50 (LobbyRcv.cpp:0x209) parses (Size-1)/3
 # records of 3 BYTES each: [planeID:1][ushort LE:2]. The UPLOAD is flat 1-byte ids, but the
 # ECHO must be 3-byte records or the count is read as (Size-1)/3 of garbage (1-byte GE echo
@@ -1200,6 +1283,17 @@ PLANE_FILTER_VIA_CATALOG = True
 # membership in the list (hangar consumer FUN_006de570 gates on the GAME_DEF plane-info array,
 # not this ushort), so the ushort is ancillary; 0 is safe. Bump if planes show greyed.
 CATALOG_RECORD_USHORT = 0
+
+# v384f5: the 0x3a catalog echo must ALWAYS be re-encoded to 3-byte records, independent of
+# PLANE_FILTER_VIA_CATALOG. The client UPLOADS flat 1-byte ids; if we bounce them back verbatim
+# (which is what happens on the default echo path when PLANE_FILTER_VIA_CATALOG is False) the
+# client's msg-58 decoder reads (Size-1)/3 and the hangar POOL collapses to ~1/3 of the side's
+# planes (the stride-3 symptom: 27 GB planes -> 9 shown). Under True the filtered re-echo already
+# emitted 3-byte records and masked this; when v382 flipped to byte0 gating (False) the re-echo
+# stopped and the pool silently shrank. This flag makes the 3-byte RE-ENCODING unconditional;
+# per-side FILTERING still only runs under PLANE_FILTER_VIA_CATALOG (byte0 gates the side under
+# False, so no bleed returns). Set False to restore the old verbatim-echo behaviour.
+CATALOG_ALWAYS_3BYTE_ECHO = True
 
 # Stock FA 4.20 plane roster in GAME_DEF SLOT/ID order (slot = list index = the plane ID the
 # GAME_DEF plane block is keyed by). The serve-time rewrite is keyed by slot; this maps
@@ -1209,6 +1303,13 @@ CATALOG_RECORD_USHORT = 0
 # Rebuilt into true ID order via the msg-58 catalog, which maps display-position->plane-ID.
 # ID 107 is the only plane the client omits from its catalog (the L2D2 transport) -> never
 # shown; placed here for completeness.
+# v379f5 [REVERT]: v378f5 re-ordered PLANE_ROSTER to the client's 'Preload available planes' list
+# and this WORSENED the hangars (GB/SU/JP planes bled into every side). LESSON: the client's Preload
+# list is the model LOAD order, NOT the plane-id space. The plane-id space is what THIS table already
+# encodes - proof: decoding the client's own 0x3a upload bytes against this (old) table yields clean
+# contiguous nation runs (USA x16, GB x17, SU x14, GE x16, JPN x12, then the bomber tail by nation),
+# whereas decoding them against the Preload order scrambles them. v378f5 reverted wholesale; this
+# order stands. Do NOT confuse Preload/load-order with the id namespace again.
 PLANE_ROSTER = [
     "F4F-3","P-39D","P-40C","P-40E-1","F4F-4","F4U-1a","P-38G","F6F-3","P-47D","F4U-1c",
     "P-51D","P-38L","F4U-4","Hurr-Ia","Spit-Ia","Spit-Vb_LF","Hurr-IIC","Spit-Vb_F","Typhoon","Spit-IXc",
@@ -1283,12 +1384,20 @@ PLANE_TEAMS = {
     # gate.
     7: [  # NU / Neutral - admin-only side
         "Me-163B",
+        # v377f5: post-war non-Allied/Axis jets that do not belong on any WWII national side.
+        # Ouragan (French Dassault MD.450) and Tunnan (Swedish SAAB J29) moved off GB; HA-200
+        # (Spanish Hispano HA-200 Saeta) moved off Germany. NU is admin-only, so these become
+        # staff-visible only - consistent with how the Me-163B is gated.
+        "Ouragan","Tunnan","HA-200",
     ],
     1: [  # Great Britain
         "Hurr-Ia","Spit-Ia","Martlet_I","Tomahawk","Hurr-IIC","Spit-Vb_F","Hurr-IID","Kittyhawk",
         "Spit-Vb_LF","Seafire","Spit-IXc","Spit-IXe","Typhoon","Spit-XIV","Tempest","Meteor_F1",
-        "DH.100","Ouragan","Tunnan","Mosquito_B_IV","Lancaster","Mitchell_II","Avenger_II","DB-7B",
+        "DH.100","Mosquito_B_IV","Lancaster","Mitchell_II","Avenger_II","DB-7B",
         "Mosquito_FB_VI",'Mosquito_"Tse-Tse"',"Mitchell_III","Mosquito_B_IX","Dakota_Mk.II",
+        # v377f5: FAA Dauntless (the Fleet Air Arm SBD variant) moved USA(default)->GB. Distinct
+        # roster entry from the US Navy "SBD-2" (id 104), which stays USA.
+        "Dauntless",
     ],
     2: [  # USSR
         "I-16","MiG-3","LaGG-3","Hurr-IIb","Kittyhawk-Ia","Yak-1b","P-39Q","La-5FN","Yak-3",
@@ -1298,7 +1407,7 @@ PLANE_TEAMS = {
     3: [  # Germany
         "Bf-109E-1/B","Bf-109E-4/B","Bf-110C-4","Bf-109F-4/B","FW-190A-4/U3","Bf-110G-2",
         "Bf-109G-6/R2","FW-190A-8/R6","FW-190F-8","FW-190A-8/R3","Bf-109G-6/R6","FW-190A-8/R2",
-        "FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","Pulqui","HA-200","Ju-88",
+        "FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","Pulqui","Ju-88",
         "Do-217E-2","Ju-87D-3","He-111","Do-217J-1","Ju-87G-2","Ju-52/3m",
     ],
     4: [  # Japan
@@ -1318,19 +1427,55 @@ def _slot_camp_map(teams):
             name_camp[nm] = camp
     return {i: name_camp.get(nm, 0) for i, nm in enumerate(PLANE_ROSTER)}
 
+def _war_year_for_room(room_id):
+    """(enabled, year) for a room's war-date filter. enabled only if WAR_DATE_ENABLED and the
+    arena opted in (settings_json war_enabled truthy) and a war_year is present. Reads the
+    per-room settings via db_get_room_settings; returns (False, None) on anything missing."""
+    if not WAR_DATE_ENABLED or room_id is None:
+        return (False, None)
+    try:
+        st = db_get_room_settings(room_id)
+    except Exception:
+        return (False, None)
+    if not isinstance(st, dict) or not st.get('war_enabled'):
+        return (False, None)
+    try:
+        y = int(st.get('war_year'))
+    except (TypeError, ValueError):
+        return (False, None)
+    return (True, y)
+
+def _apply_war_date_filter(slot_camp, room_id):
+    """Remap out-of-window planes to camp 7 (NU/hidden) in a {slot:camp} map. A plane whose
+    PLANE_SERVICE_YEAR is AFTER the arena year is hidden (apply_plane_teams -> byte0 0x80).
+    No-op (returns the map unchanged) when the arena hasn't opted in. Never mutates the input."""
+    enabled, year = _war_year_for_room(room_id)
+    if not enabled or not slot_camp:
+        return slot_camp
+    out = dict(slot_camp)
+    for slot, camp in list(out.items()):
+        if 0 <= slot < len(PLANE_ROSTER):
+            svc = PLANE_SERVICE_YEAR.get(PLANE_ROSTER[slot])
+            if svc is not None and svc > year:
+                out[slot] = 7          # NU/hidden -> 0x80 in apply_plane_teams (safe, never 0x00)
+    return out
+
 def plane_camp_for_room(room):
-    """slot->camp map for this room (per-room override else global), or None if disabled."""
+    """slot->camp map for this room (per-room override else global), or None if disabled.
+    Out-of-window planes (later than the arena's war date) are remapped to the hidden camp."""
     if not PLANE_TEAMS_ENABLED:
         return None
     teams = ROOM_PLANE_TEAMS.get(room[0], PLANE_TEAMS) if room else PLANE_TEAMS
-    return _slot_camp_map(teams)
+    base = _slot_camp_map(teams)
+    return _apply_war_date_filter(base, room[0] if room else None)
 
 def _session_slot_camp(s):
     """slot->camp map for the session's current room (per-room override else global table).
-    Used by the 0x3a catalog-echo filter to keep only the player's current side's plane IDs."""
+    Used by the 0x3a catalog-echo filter to keep only the player's current side's plane IDs.
+    Also drops war-date-hidden planes from the echo (they map to camp 7, not the player's side)."""
     rid = getattr(s, 'current_room', None)
     teams = ROOM_PLANE_TEAMS.get(rid, PLANE_TEAMS) if rid is not None else PLANE_TEAMS
-    return _slot_camp_map(teams)
+    return _apply_war_date_filter(_slot_camp_map(teams), rid)
 
 def _gamedef_plane_block(d):
     """Locate the plane block in a DECOMPRESSED GAME_DEF: returns (start, count, blen) where
@@ -1383,7 +1528,17 @@ def apply_plane_teams(d, slot_camp):
             rec[slot * 4] = 0x1f                  # all camps flyable; per-side filter is the 0x3a echo
         else:
             camp = slot_camp.get(slot, 0) & 7
-            rec[slot * 4] = 1 << camp             # byte0 = camp bitmask (US=0x01 ... JP=0x10)
+            # v382f5: write the plane's real camp mask as byte 0. Camps 0..4 -> a single bit
+            # (US=0x01 GB=0x02 SU=0x04 GE=0x08 JP=0x10). Camps 5..7 (NU is 7) -> 0x80 (bit 7):
+            # a NON-standard camp bit, so FUN_00438330 hides the plane from all five WWII sides,
+            # while keeping the mask NONZERO so the wire record stays the 4-byte [mask][0xff][l][l]
+            # form the reader FUN_0057bee0 expects. The ONE value that must never be written here is
+            # 0x00: it makes the reader take the 1-byte branch while this fixed 4-byte writer emits
+            # 4, desyncing the block -> GameDef.cpp:1902 'Len==0' (the v332 and v380 CTD). 0x80 is
+            # NOT special to the reader (it copies the mask verbatim, branching only on mask==0? and
+            # marker==0xff?), so it is as safe as the stock 0x1f. For a future coalition arena, OR
+            # the member camps' bits here instead (US+GB=0x03, GE+JP+SU=0x1c).
+            rec[slot * 4] = (1 << camp) if camp < 5 else 0x80
         # marker rec[+1] stays 0xff (no-hascamp form); limits rec[+2],rec[+3] preserved
     d[s + 3:s + 3 + blen] = rec
     return s, blen, blen
@@ -1906,6 +2061,99 @@ def apply_aa_quality(d, values=EVP_AA_QUALITY):
         d[off + i] = max(0, min(255, int(v)))
     return off, old
 
+def _gamedef_date_offset(d):
+    """Offset of the Reality DATE bytes [day(1)][month(1)][year(2 LE)] in a DECOMPRESSED
+    GAME_DEF, or None. Same replay of FUN_0057bee0's walk that _gamedef_aa_offset uses, but it
+    STOPS at param_1[0x57] (=day). VERIFIED against 5 live arenas (all stock 22-Jun-1941 =
+    raw 16 06 95 07). day at +0, month at +1, year u16 LE at +2."""
+    try:
+        n = len(d)
+        p = 0
+        if n < 1 or d[p] != 0x8a:
+            return None
+        p += 1
+        def adv(k):
+            nonlocal p
+            p += k
+            if p > n:
+                raise ValueError('overrun')
+        def cstr():
+            nonlocal p
+            while p < n and d[p] != 0:
+                p += 1
+            p += 1
+            if p > n:
+                raise ValueError('overrun')
+        adv(4); adv(4); adv(4)               # 3 dwords param_1[0..2]
+        blen = d[p]; adv(1); adv(blen)       # len byte + variable blob
+        adv(2); adv(2); adv(2)               # words 0x23,0x24,0x25
+        cstr(); cstr(); cstr()               # 3 cstrings
+        adv(1)                               # byte 0x2a
+        cstr()                               # cstring
+        adv(2); adv(2)                       # words 0x2f,0x30
+        adv(0x20)                            # 0x20 block 0x31..38
+        adv(1)                               # byte 0x39 TERRAIN
+        adv(1)                               # byte 0x3b
+        adv(4)                               # dword 0x3c
+        adv(0x24)                            # 0x24 block 0x3d..45
+        adv(1); adv(1); adv(1); adv(1); adv(1)          # bytes 0x47..0x4b
+        cstr()                               # cstring5 (Script)
+        if p + 4 > n:
+            return None
+        return p                             # param_1[0x57] = DAY (then month, year u16)
+    except Exception:
+        return None
+
+def extract_date_from_gamedef(game_def_raw):
+    """(day, month, year) from a stored (compressed) GAME_DEF blob, or None. Read-only; used to
+    show the arena's current date on the web panel as the default."""
+    d = decompress_gamedef(game_def_raw)
+    if not d:
+        return None
+    off = _gamedef_date_offset(d)
+    if off is None or off + 4 > len(d):
+        return None
+    day = d[off]; month = d[off + 1]; year = d[off + 2] | (d[off + 3] << 8)
+    if not (1 <= day <= 31 and 1 <= month <= 12 and 1900 <= year <= 2000):
+        return None
+    return (day, month, year)
+
+def apply_war_date(d, day, month, year):
+    """In-place set the Reality DATE (day, month, year) in a DECOMPRESSED GAME_DEF. Length-
+    preserving (4 bytes: [day][month][year u16 LE]) so the struct never shifts. SAFETY: only
+    patches if the located bytes currently look like a valid date; else no-op. Returns
+    (offset, (old_day,old_month,old_year)) on success, None on no-op."""
+    off = _gamedef_date_offset(d)
+    if off is None or off + 4 > len(d):
+        return None
+    od, om, oy = d[off], d[off + 1], d[off + 2] | (d[off + 3] << 8)
+    if not (1 <= od <= 31 and 1 <= om <= 12 and 1900 <= oy <= 2000):
+        return None                          # doesn't look like the date block - refuse
+    try:
+        day = max(1, min(31, int(day))); month = max(1, min(12, int(month)))
+        year = max(1900, min(2000, int(year)))
+    except (TypeError, ValueError):
+        return None
+    d[off] = day; d[off + 1] = month
+    d[off + 2] = year & 0xff; d[off + 3] = (year >> 8) & 0xff
+    return off, (od, om, oy)
+
+def war_date_from_settings(arena_settings):
+    """(enabled, day, month, year) from a per-arena settings dict, or (False, ...) if the arena
+    hasn't opted in. Defaults day/month to 1/1 when only a year is set."""
+    if not isinstance(arena_settings, dict) or not arena_settings.get('war_enabled'):
+        return (False, 1, 1, 1941)
+    try:
+        year = int(arena_settings.get('war_year'))
+    except (TypeError, ValueError):
+        return (False, 1, 1, 1941)
+    def _i(k, dflt):
+        try:
+            return int(arena_settings.get(k, dflt))
+        except (TypeError, ValueError):
+            return dflt
+    return (True, _i('war_day', 1), _i('war_month', 1), year)
+
 def _gamedef_tc_offsets(d):
     """Locate the [TC] parameters inside a DECOMPRESSED GAME_DEF. Returns a dict of
     field-name -> byte offset, or None.
@@ -2180,6 +2428,20 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                               f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')
         else:
             log('GAMEDEF212', 'EvP AA: quality bytes not located/verified; left as-is')
+    # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
+    # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
+    # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
+    # plane_camp), independent of this push - WAR_DATE_PUSH_TO_CLIENT gates only the client date.
+    if WAR_DATE_ENABLED and WAR_DATE_PUSH_TO_CLIENT:
+        _we, _wd, _wm, _wy = war_date_from_settings(arena_settings)
+        if _we:
+            _wr = apply_war_date(d, _wd, _wm, _wy)
+            if _wr:
+                _woff, _wold = _wr
+                log('GAMEDEF212', f'war-date @+{_woff}: {_wold[0]:02d}/{_wold[1]:02d}/{_wold[2]} '
+                                  f'-> {_wd:02d}/{_wm:02d}/{_wy} (pushed to client)')
+            else:
+                log('GAMEDEF212', 'war-date: date bytes not located/verified; left as-is')
     # --- [TC] economy block: InitialStorage + the limited-field load fractions -----------------
     # Without this the scenes ship empty (HQ shows "0 supplies"), so the client has no economy to
     # negotiate: it never sends msg 59 and can never apply GetFuelWhenLimFuel/GetAmmoWhenLimAmmo.
@@ -6586,6 +6848,102 @@ RANK_BONUS_SCALE = 100
 # They are separate EVENTS that combine: a plane destroyed costs its value, and a dead pilot costs a
 # further 100. (Bailing out over ENEMY territory counts as a death - the page says so under "Pilot
 # Deaths" - but we cannot yet tell friendly from enemy ground, so a bail costs the plane only.)
+# ==========================================================================================
+# v374f5 [ECONOMY]: JULY 2004 TC SCORING MODEL. Source: 2004_07 official Fighter Ace newsletter
+# ("Scoring Changes - What they are and what they mean"). This REPLACES the older ~2001
+# scoring.htm model (v249) that scored a kill as plane_value + rank-ratio bonus. The 2004 model is
+# different in kind:
+#   * A KILL is a FLAT bonus (Destroy Plane Bonus), NOT the victim's plane value. The plane VALUE is
+#     what the victim LOSES, scaled by the victim's RANK via the rank/scoring modifier table.
+#   * Base plane values were expanded into a 1000..2000 band for fighters (top fighter-bombers like
+#     the F4U-4C and Tempest near 2000); dedicated bombers priced GENERALLY LOWER to incentivise
+#     flying them for attack work.
+#   * Rank no longer changes the LEVEL cost (all level differences abandoned in the 2004 rebalance);
+#     only the flat per-rank percentage below applies.
+# Gated by TC_ECONOMY_2004. False -> the exact v249 model (kill_score/plane_value fall back to the
+# 2001 table and the flat +100/-100). One flag, full revert.
+TC_ECONOMY_2004 = True
+
+# Rank/scoring modifier - the PERCENTAGE of a loss's base cost that a pilot of each rank actually
+# pays. VERBATIM from the newsletter ("Following is the entire rank/scoring table"). Index = rank 0..12
+# (Cdt..Gen); FM shares Gen's 100%. No level differences (that whole axis was abandoned in 2004).
+RANK_LOSS_MODIFIER_2004 = [
+    0.05,  # 0  Cadet
+    0.10,  # 1  Sergeant
+    0.15,  # 2  Second Lieutenant
+    0.20,  # 3  First Lieutenant
+    0.30,  # 4  Captain
+    0.40,  # 5  Major
+    0.50,  # 6  Lieutenant Colonel
+    0.60,  # 7  Colonel
+    0.70,  # 8  Brigadier General
+    0.80,  # 9  Major General
+    0.90,  # 10 Lieutenant General
+    1.00,  # 11 General
+    1.00,  # 12 Field Marshal (shares Gen)
+]
+def rank_loss_modifier_2004(rank):
+    try: r = int(rank)
+    except (TypeError, ValueError): r = 0
+    r = max(0, min(r, len(RANK_LOSS_MODIFIER_2004) - 1))
+    return RANK_LOSS_MODIFIER_2004[r]
+
+# Bonuses / penalties - VERBATIM from the newsletter's final "complete list ... after these
+# adjustments". Pilot Loss Penalty is a FLAG: the prose says it was raised 250->1000, but the final
+# list shows 500; default 500 (the list), override if the live feel wants the 1000 headline value.
+PILOT_LOSS_PENALTY_2004      = 500    # penalty to the pilot for losing their plane (flagged value)
+DESTROY_PLANE_BONUS_2004     = 500    # killer's flat reward for destroying an enemy aircraft
+DAMAGE_PLANE_BONUS_2004      = 250    # for a damaging hit that doesn't kill (needs damage attribution)
+DESTROY_HUMAN_PARACHUTE_PEN  = 500    # PENALTY for shooting a human in his parachute
+DESTROY_AI_PARATROOPER_BONUS = 50     # bonus for downing an AI paratrooper
+TRIGGER_SCENE_BONUS_2004     = 1000   # bonus for triggering a capturable scene
+CAPTURE_SCENE_BONUS_2004     = 2000   # bonus for capturing a scene
+
+# TABLE 1B - JULY 2004 plane values. The four marked (*) are the EXACT values the newsletter lists
+# ("a few minor adjustments to specific plane values"): Ki-100 800, Seafire III 600, Spit F Vb (Trop)
+# 400, Hurricane IID 400. The newsletter did NOT reproduce the full 121-plane table (it pointed to
+# Information/scoring.htm, which we do not have), so the REMAINING values are DERIVED: the v249
+# relative ordering rescaled into the newsletter's stated bands - fighters 1000..2000 (F4U-4C/Tempest
+# near the top, as the text says), dedicated bombers 600..1200 (priced lower on purpose). These are a
+# faithful interpolation, NOT the authoritative 2004 numbers; if the real scoring.htm table ever
+# surfaces, replace this dict wholesale. Rounded to 50.
+PLANE_VALUE_2004 = {
+    'F4F-3': 1200, 'P-39D': 1250, 'P-40C': 1050, 'P-40E-1': 1050, 'F4F-4': 1200,
+    'F4U-1a': 1550, 'P-38G': 1500, 'F6F-3': 1600, 'P-47D': 1450, 'F4U-1c': 1650,
+    'P-51D': 1450, 'P-38L': 1550, 'F4U-4': 1650, 'Hurr-Ia': 1100, 'Spit-Ia': 1200,
+    'Spit-Vb_LF': 1300, 'Hurr-IIC': 1250, 'Spit-Vb_F': 400, 'Typhoon': 1550, 'Spit-IXc': 1500,
+    'Seafire': 600, 'Spit-IXe': 1500, 'Spit-XIV': 1550, 'Tempest': 2000, 'I-16': 1050,
+    'LaGG-3': 1250, 'Hurr-IIb': 1250, 'Kittyhawk-Ia': 1050, 'Yak-1b': 1250, 'P-39Q': 1400,
+    'La-5FN': 1250, 'Yak-3': 1400, 'Yak-9U': 1400, 'La-7': 1450, 'Bf-109E-4/B': 1150,
+    'Bf-109F-4/B': 1300, 'FW-190A-4/U3': 1400, 'FW-190A-8/R6': 1450, 'FW-190A-8/R3': 1450, 'Bf-109G-6/R2': 1350,
+    'FW-190A-8/R2': 1450, 'Bf-109G-6/R6': 1350, 'FW-190D-9': 1450, 'Me-262A-1': 2000, 'Bf-109K-4': 1550,
+    'Ta-152H-1': 1600, 'HA-200': 1000, 'A6M2': 1150, 'Ki-44-IIc37': 1400, 'A6M5a': 1200,
+    'Ki-61': 1400, 'J2M3': 1400, 'N1K2-J': 1450, 'Ki-84-1a': 1450, 'A6M7': 1250,
+    'Ki-100': 800, 'B-25D': 800, 'TBF-1c': 800, 'A-20Gu': 800, 'B-17G': 1100,
+    'Dauntless': 650, 'Mosquito_B_IV': 750, 'Avenger_II': 800, 'DB-7B': 800, 'Mosquito_FB_VI': 800,
+    'Mitchell_III': 800, 'Pe-8': 1150, 'Pe-2': 750, 'IL-2': 650, 'A-20Gs': 800,
+    'Tu-2': 800, 'Tu-4': 1100, 'Ju-88': 750, 'Do-217E-2': 1000, 'He-111': 800,
+    'Do-217J-1': 1000, 'Ju-87G-2': 650, 'D3A': 600, 'G5N1': 900, 'G4M2': 850,
+    'Ju-87D-3': 650, 'MiG-3': 1250, 'J9Y': 2000, 'C-47A': 650, 'Dakota_Mk.II': 650,
+    'Li-2': 650, 'Ju-52/3m': 650, 'Mosquito_B_IX': 750, 'Mosquito_"Tse-Tse"': 800, 'Mitchell_II': 800,
+    'B-29': 1200, 'Martlet_I': 1200, 'Ki-44-IIc': 1400, 'Ki-43-IIa': 1400, 'Tomahawk': 1000,
+    'Kittyhawk': 1050, 'Hurr-IID': 400, 'Yak-9UT': 1400, 'Bf-109E-1/B': 1150, 'Ki-84-1c': 1450,
+    'FW-190F-8': 600, 'F4U-4C': 2000, 'Bf-110C-4': 1700, 'Bf-110G-2': 1700, 'SBD-2': 650,
+    'Lancaster': 1050, 'B5N2': 700, 'L2D2': 650, 'Ki-67': 850, 'MiG-15bis': 2000,
+    'F-86E': 2000, 'Meteor_F1': 1900, 'Tunnan': 1900, 'Ouragan': 1800, 'B-25J': 800,
+    'IL-10': 650, 'MiG-9': 1900, 'DH.100': 1800, 'Me-163B': 1700, 'FH-1_Phantom': 1800,
+    'Pulqui': 1800,
+}
+def plane_value_2004(plane_id):
+    try:
+        name = PLANE_ROSTER[int(plane_id)]
+    except (TypeError, ValueError, IndexError):
+        return 1500 if not is_bomber_plane(plane_id) else 900
+    v = PLANE_VALUE_2004.get(name)
+    if v is not None:
+        return v
+    return 900 if is_bomber_plane(plane_id) else 1500
+
 PILOT_DEATH_PENALTY = 100    # "Pilot death: Lose 100 points"
 
 # TABLE 1 - the value of each aircraft. Straight from the page where it lists the plane; FA 4.20 has
@@ -6642,6 +7000,14 @@ GROUND_TARGET_VALUES = {
 }
 GROUND_BOMB_MULTIPLIER = 4   # "If using bombs destroys a moving ground unit, the score is quadrupled"
 
+# v374f5: JULY 2004 TANK VALUES (verbatim from the newsletter - "The value of tanks was also
+# increased to give extra incentive to tank destroyers"). Keyed by the newsletter's own labels;
+# wired in when ground scoring is implemented (nothing consumes it yet, same as GROUND_TARGET_VALUES).
+TANK_VALUES_2004 = {
+    'GE_Tiger': 500, 'SU_KV-1': 500, 'SU_T-34': 400, 'GE_Panther': 400,
+    'GB_Cromwell': 250, 'US_Sherman': 250, 'JP_Type_97': 100,
+}
+
 # ASSISTS (not yet implemented - see the changelog): "the kill is awarded to the attacker who did the
 # MOST damage. If the other attacker did 20% OR MORE damage as well, he will be awarded an Assist."
 # That is the real rule the user described, and it needs per-attacker damage accumulation from msg 28.
@@ -6651,8 +7017,11 @@ DEATH_SCORE_PENALTY = 50     # DEPRECATED by v249 - superseded by PILOT_DEATH_PE
                              # Left defined so any stale reference still resolves.
 
 def plane_value(plane_id):
-    """v249: the official point value of an aircraft (Table 1). This is what a killer GAINS for
-    shooting it down and what its owner LOSES for losing it."""
+    """v249: the official point value of an aircraft (Table 1). This is what its owner LOSES for
+    losing it (and, in the pre-2004 model only, what a killer gained for shooting it down).
+    v374f5: under TC_ECONOMY_2004 this returns the JULY 2004 value (1000..2000 fighter band)."""
+    if TC_ECONOMY_2004:
+        return plane_value_2004(plane_id)
     try:
         name = PLANE_ROSTER[int(plane_id)]
     except (TypeError, ValueError, IndexError):
@@ -6723,6 +7092,16 @@ def db_apply_score_delta(name, delta, bomber=False):
                      (f_score, new_rank, name))
     conn.commit(); conn.close()
     return (new_total, new_rank, old_rank)
+
+def _vs_victim_rank(victim):
+    """v374f5: the victim's current career rank (0..12) for the 2004 loss modifier. Reads the DB the
+    same way the kill-credit path does, so a rank-up mid-session is reflected immediately."""
+    try:
+        if victim is not None and getattr(victim, 'current_pilot', None):
+            return int(db_get_pilot_stat25(victim.current_pilot).get('rank', 0))
+    except Exception:
+        pass
+    return 0
 
 def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     """Persist a death into the DB and apply the LIVE ace rule (server-authoritative).
@@ -6839,8 +7218,14 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     if killer is not None and killer.current_pilot:
         _ks = db_get_pilot_stat25(killer.current_pilot)
         _vs = db_get_pilot_stat25(victim.current_pilot) if victim.current_pilot else {'rank': 0}
-        _pts, _base, _bonus = kill_score(getattr(victim, 'plane_type', None),
-                                         int(_vs.get('rank', 0)), int(_ks.get('rank', 0)))
+        if TC_ECONOMY_2004:
+            # v374f5: 2004 model - a kill is the FLAT Destroy Plane Bonus. The victim's plane value
+            # is NOT the killer's reward (it is the victim's loss); there is no rank-ratio bonus in
+            # the 2004 tables. _base/_bonus kept only for the log line's shape.
+            _pts, _base, _bonus = DESTROY_PLANE_BONUS_2004, DESTROY_PLANE_BONUS_2004, 0
+        else:
+            _pts, _base, _bonus = kill_score(getattr(victim, 'plane_type', None),
+                                             int(_vs.get('rank', 0)), int(_ks.get('rank', 0)))
         killer.k_score = getattr(killer, 'k_score', 0) + _pts
         _sc, _rk, _old = db_apply_score_delta(killer.current_pilot, _pts, bomber=_killer_bomber)
         _pn = (PLANE_ROSTER[killer.plane_type]
@@ -6849,11 +7234,16 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
         _vn = (PLANE_ROSTER[victim.plane_type]
                if isinstance(getattr(victim, 'plane_type', None), int)
                and 0 <= victim.plane_type < len(PLANE_ROSTER) else '?')
-        log('SCORE', f'{killer.current_pilot} +{_pts} = {_base} ({_vn}) + {_bonus} rank bonus '
-                     f'[{RANK_NAMES[min(int(_vs.get("rank",0)), len(RANK_NAMES)-1)]} / '
-                     f'{RANK_NAMES[min(int(_ks.get("rank",0)), len(RANK_NAMES)-1)]}] '
-                     f'-> {"BOMBER" if _killer_bomber else "FIGHTER"} score (flying {_pn}) '
-                     f'| total {_sc}')
+        if TC_ECONOMY_2004:
+            log('SCORE', f'{killer.current_pilot} +{_pts} = Destroy Plane Bonus (killed {_vn}) '
+                         f'-> {"BOMBER" if _killer_bomber else "FIGHTER"} score (flying {_pn}) '
+                         f'| total {_sc}')
+        else:
+            log('SCORE', f'{killer.current_pilot} +{_pts} = {_base} ({_vn}) + {_bonus} rank bonus '
+                         f'[{RANK_NAMES[min(int(_vs.get("rank",0)), len(RANK_NAMES)-1)]} / '
+                         f'{RANK_NAMES[min(int(_ks.get("rank",0)), len(RANK_NAMES)-1)]}] '
+                         f'-> {"BOMBER" if _killer_bomber else "FIGHTER"} score (flying {_pn}) '
+                         f'| total {_sc}')
         if _rk != _old:
             _nm = RANK_NAMES[_rk] if 0 <= _rk < len(RANK_NAMES) else '?'
             log('RANK', f'{killer.current_pilot} PROMOTED rank {_old} -> {_rk} ({_nm}) '
@@ -6863,12 +7253,27 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     # costs the plane only - the pilot walked away (over friendly ground at least; the page counts a
     # bail over ENEMY territory as a death, but we cannot yet tell friendly ground from enemy).
     if victim.current_pilot:
-        _plane_cost = plane_value(getattr(victim, 'plane_type', None))
-        _loss = _plane_cost + (0 if _bailed else PILOT_DEATH_PENALTY)
-        _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
-        log('SCORE', f'{victim.current_pilot} -{_loss} = {_plane_cost} (plane)'
-                     f'{"" if _bailed else f" + {PILOT_DEATH_PENALTY} (pilot death)"}'
-                     f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
+        _base_cost = plane_value(getattr(victim, 'plane_type', None))
+        if TC_ECONOMY_2004:
+            # v374f5: 2004 model. The plane's BASE value is scaled by the victim's RANK modifier
+            # (Cdt pays 5%, Gen pays 100%), and the pilot pays a further flat PILOT_LOSS_PENALTY if
+            # they actually died (a bail over friendly ground survives -> plane cost only). The
+            # rank/scoring table is the only rank effect now (no level differences).
+            _rmod = rank_loss_modifier_2004(_vs_victim_rank(victim))
+            _plane_cost = int(round(_base_cost * _rmod))
+            _pilot_pen = 0 if _bailed else PILOT_LOSS_PENALTY_2004
+            _loss = _plane_cost + _pilot_pen
+            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
+            log('SCORE', f'{victim.current_pilot} -{_loss} = {_plane_cost} '
+                         f'(plane {_base_cost} x {int(_rmod*100)}% rank)'
+                         f'{"" if _bailed else f" + {_pilot_pen} (pilot loss)"}'
+                         f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
+        else:
+            _loss = _base_cost + (0 if _bailed else PILOT_DEATH_PENALTY)
+            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
+            log('SCORE', f'{victim.current_pilot} -{_loss} = {_base_cost} (plane)'
+                         f'{"" if _bailed else f" + {PILOT_DEATH_PENALTY} (pilot death)"}'
+                         f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
         if _rk != _old:
             _nm = RANK_NAMES[_rk] if 0 <= _rk < len(RANK_NAMES) else '?'
             log('RANK', f'{victim.current_pilot} DEMOTED rank {_old} -> {_rk} ({_nm}) '
@@ -7905,36 +8310,58 @@ def free_client_number(sess):
     except Exception:
         pass
 
+def _teardown_session(x, why='(session ended)', tag='SESSION', msg=None):
+    """v385f5: the SINGLE cleanup path for a session leaving by ANY route - heartbeat loss,
+    exit-reply timeout, in-game disconnect, reconnect-reap, or kick. Before this, several of
+    those paths did a bare `sids.pop` (or, at 12081, freed only the start-place): they never
+    called free_client_number / teardown_ingame_presence / broadcast_player_leave, so a dropped
+    client leaked its ClientNumber, in-game slot AND lobby-roster entry. Those ghosts survive
+    in the game/arena object tables even after the session is gone from sids, so the
+    reconnect-reap (which only walks sids) can never reach them - they accumulate across
+    reconnects until slots/object-ids collide and the account can no longer enter an arena
+    (the Sinistarr/Taurus case: 42 reconnects, reap fired 3x, active_sessions climbing to 12
+    and only resetting on restart). Routing every exit through here broadcasts the pilot delete
+    to peers and returns the ClientNumber + start-place to the pool, so no ghost is left behind.
+    Idempotent: the first call wins (guarded by _torn_down) so double-exit paths are safe."""
+    if getattr(x, '_torn_down', False):
+        return
+    x._torn_down = True
+    x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
+    try:
+        if x.current_pilot:
+            # tell IN-GAME peers to drop this pilot's plane AND player slot before the
+            # ClientNumber/PlayerIndex goes back in the pool - otherwise the next joiner
+            # inherits the slot while peers still map it to the departed pilot.
+            teardown_ingame_presence(x, why=why)
+            broadcast_player_leave(x.current_pilot, exclude_sess=x)   # the msg-63 REMOVE "delete"
+            broadcast_system(f'[{x.current_pilot}] has left')
+            db_room_leave(x.current_pilot)
+        _free_start_place(x)
+        free_client_number(x)   # return the global ClientNumber to the pool
+    except Exception as _e:
+        log(tag, f'teardown cleanup error: {_e}')
+    with sl:
+        sadrs.pop(x.addr, None); sids.pop(x.sid, None)
+    if msg:
+        log(tag, msg)
+
 def _reap_stale_sessions(acct, new_sess):
     """Reap any prior session bound to the SAME account (a reconnect after a CTD/timeout).
     On Windows the dead client is never detected on sendto (the failure surfaces as a 10054 on
     recvfrom), so without this the old session's heartbeat thread + lobby-roster entry linger
     as a ghost across reconnects. One account == one live connection here, so any OTHER session
     on this account is stale. new_sess is not yet registered in sids at call time, so it is
-    never itself reaped; clean each stale one exactly like a graceful leave so the reconnecting
-    client starts fresh (no duplicate pilot in the roster, no orphaned start-place / room row)."""
+    never itself reaped; clean each stale one via _teardown_session (full cleanup) so the
+    reconnecting client starts fresh. v385f5: match is `not _torn_down` (not `not closing`) so a
+    session mid-teardown is still caught, and every removal route now shares one cleanup path -
+    this is the authoritative "a new connection terminates existing sessions for the account
+    and broadcasts the pilot delete" the reconnect is meant to guarantee."""
     with sl:
         stale = [x for x in list(sids.values())
-                 if x.account == acct and x is not new_sess and not x.closing]
+                 if x.account == acct and x is not new_sess and not getattr(x, '_torn_down', False)]
     for x in stale:
-        x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
-        try:
-            if x.current_pilot:
-                # v348: tell IN-GAME peers to drop this pilot's plane AND player slot before
-                # the ClientNumber/PlayerIndex goes back in the pool below. Without this the
-                # next joiner inherits the slot while peers still map it to the departed
-                # pilot - see teardown_ingame_presence for the full case.
-                teardown_ingame_presence(x, why='(session ended)')
-                broadcast_player_leave(x.current_pilot, exclude_sess=x)
-                broadcast_system(f'[{x.current_pilot}] has left')
-                db_room_leave(x.current_pilot)
-            _free_start_place(x)
-            free_client_number(x)   # return the global ClientNumber to the pool
-        except Exception as _e:
-            log('REAP', f'cleanup error: {_e}')
-        with sl:
-            sadrs.pop(x.addr, None); sids.pop(x.sid, None)
-        log('REAP', f'reaped stale session for account="{acct}" (reconnect) - ghost cleared')
+        _teardown_session(x, why='(session ended)', tag='REAP',
+                          msg=f'reaped stale session for account="{acct}" (reconnect) - ghost cleared')
 
 def handle_syn(data, addr):
     acct_row = identify_account_from_syn(data)
@@ -8060,8 +8487,7 @@ def login(s):
                     errors += 1
                     if errors >= 3:   # 3 consecutive failures -> client gone
                         log('SESSION', 'Heartbeat failed 3x - closing session')
-                        s.closing = True
-                        with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+                        _teardown_session(s, why='(heartbeat lost)')   # v385f5: full cleanup, not a bare pop
                         break
     threading.Thread(target=_hb,daemon=True).start()
     deadline=time.time()+300.0   # (kept for reference - no longer bounds the loop, v199)
@@ -8182,14 +8608,21 @@ def handle_compound(s, outer_cmd, pl):
         log('COMPOUND', 'inner vcncExitAppSpace -> exit reply')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s, bytes(pl2), 'exit appspace reply'):
-            s.closing = True
-            with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+            _teardown_session(s, why='(exit reply timed out)')   # v385f5: full cleanup, not a bare pop
         return
 
     if inner_cmd == 2:
-        log('COMPOUND', 'inner vcncDisconnect -> disconnect reply')
+        # v386f5: vcncDisconnect - the client's CLEAN close (ExitAppSpace -> Disconnect -> Close).
+        # RE of vcncNet.dll (vcncDisconnect @0x1000b43c): the client sends reliable command 2 and
+        # blocks until it gets a reply whose command field == 0x64; pl2[3]=0x64 is that ack, and the
+        # DEBUG capture (run_20260801_002705) confirms the client ACKs it (seq=25 ACKed OK). But the
+        # old handler only replied and returned, leaving the session LIVE after the client closed ->
+        # ghost (the exact 'clean disconnect not cleaned up' bug). Send the ack, THEN tear the
+        # session down so the disconnect actually closes it server-side.
+        log('COMPOUND', 'inner vcncDisconnect -> disconnect reply + teardown')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         send_rel(s, bytes(pl2), 'disconnect reply')
+        _teardown_session(s, why='(client vcncDisconnect)')
         return
 
     if inner_type == 0x12 and inner_sub == 0xe1:
@@ -11268,25 +11701,39 @@ def handle_post_auth(s, cmd, pl):
         # Camps 5 and 6 are unused, so admitting them is harmless; the range just has to reach 7.
         _have_side = s.nation is not None and 0 <= s.nation < 8
         _hide = hidden_plane_ids_for(s) if STAFF_HIDE_VIA_CATALOG else frozenset()
-        if (sub == 0x3a or _cat_pfx) and PLANE_FILTER_VIA_CATALOG and (_have_side or _hide):
+        # v384f5: run whenever we can re-encode the catalog to 3-byte records. Under
+        # PLANE_FILTER_VIA_CATALOG we ALSO trim to the current side / staff-hidden set; otherwise
+        # we re-encode every uploaded id unchanged (byte0 gates the side under False). Either way
+        # the client's msg-58 pool decoder needs 3-byte records, so this must not fall through to
+        # the verbatim default echo (which the client reads as (Size-1)/3 -> ~1/3 of the planes).
+        _do_filter = PLANE_FILTER_VIA_CATALOG and (_have_side or _hide)
+        if (sub == 0x3a or _cat_pfx) and (_do_filter or CATALOG_ALWAYS_3BYTE_ECHO):
             _b = 4 if _cat_pfx else 0
             size = pl[_b] * 16 + (pl[_b + 1] >> 4)
             if 1 <= size and _b + 4 + size <= len(pl):
                 ids = list(pl[_b + 5:_b + 4 + size])
-                sc = _session_slot_camp(s) if _have_side else {}
-                kept = [i for i in ids
-                        if (not _have_side or sc.get(i, 0) == s.nation) and i not in _hide]
-                if kept and len(kept) != len(ids):
+                if _do_filter:
+                    sc = _session_slot_camp(s) if _have_side else {}
+                    kept = [i for i in ids
+                            if (not _have_side or sc.get(i, 0) == s.nation) and i not in _hide]
+                else:
+                    kept = ids          # no per-side trim; byte0 gates the side. Just re-encode.
+                if kept:
                     rec = b''.join(struct.pack('<BH', i & 0xff, CATALOG_RECORD_USHORT & 0xffff) for i in kept)
                     fpkt = build_ingame_pkt(bytes([0x3a]) + rec)
                     _dropped = [i for i in ids if i in _hide]
-                    log('POST-AUTH', f'cmd=0 sub=0x3a -> side {s.nation} catalog filtered '
-                                     f'{len(ids)}->{len(kept)} (3-byte recs, {1 + 3 * len(kept)}B)'
+                    # v377f5: emit at INFO (not the POST-AUTH default of DEBUG) so this one
+                    # confirmation line - proof the hangar re-echo fired - is visible at the normal
+                    # INFO file level. The v375/v376 detour happened precisely because this line was
+                    # DEBUG-suppressed and its absence was misread as the echo never running.
+                    _mode = (f'side {s.nation} catalog filtered {len(ids)}->{len(kept)}'
+                             if _do_filter else f're-encoded {len(kept)}')
+                    log('POST-AUTH', f'cmd=0 sub=0x3a -> {_mode} (3-byte recs, {1 + 3 * len(kept)}B)'
                                      + (f' [staff-only removed: '
                                         + ', '.join(PLANE_ROSTER[i] for i in _dropped
                                                     if 0 <= i < len(PLANE_ROSTER)) + ']'
-                                        if _dropped else ''))
-                    threading.Thread(target=lambda p=fpkt: send_reply(s, p, 'echo 0x3a (side-filtered, 3B)', to=5.0), daemon=True).start()
+                                        if _dropped else ''), level='INFO')
+                    threading.Thread(target=lambda p=fpkt: send_reply(s, p, 'echo 0x3a (3B)', to=5.0), daemon=True).start()
                     return
 
         # Echo-by-default for everything else (lobby AND in-game). The session that
@@ -11499,13 +11946,15 @@ def handle_post_auth(s, cmd, pl):
         sock.sendto(bytes(rec),s.addr)
         time.sleep(0.05); sock.sendto(build_data(106,s.nsq()),s.addr)
     elif cmd==2:
+        # v386f5: vcncDisconnect (non-compound path) - reply with the 0x64 ack the client waits for,
+        # then tear down so a clean disconnect closes the session (see the compound handler).
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64; send_rel(s,bytes(pl2),'disconnect reply')
+        _teardown_session(s, why='(client vcncDisconnect)')
     elif cmd==5:
         log('POST-AUTH','vcncExitAppSpace (cmd=5)')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s,bytes(pl2),'exit appspace reply'):
-            s.closing=True   # reply timed out -> client gone, stop heartbeat
-            with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+            _teardown_session(s, why='(exit reply timed out)')   # v385f5: full cleanup, not a bare pop
     elif cmd==512:
         pilots=db_get_pilots(s.account) if s.account else []
         resp=build_e1_pilot_list(pilots)
@@ -11658,13 +12107,9 @@ def on_pkt(data, addr):
                 # the session down (broadcast leave + session pop) on a live player.
                 s._late_ack_count=getattr(s,'_late_ack_count',0)+1
                 return
-            s.closing=True
-            if s.current_pilot:
-                broadcast_player_leave(s.current_pilot, exclude_sess=s)
-                broadcast_system(f'[{s.current_pilot}] has left')
-                db_room_leave(s.current_pilot)
-            _free_start_place(s)   # release start-place slot on disconnect
-            with sl: sadrs.pop(addr,None); sids.pop(s.sid,None); return
+            # v385f5: full cleanup (also frees ClientNumber + tears down in-game presence,
+            # which the old partial path leaked on every ungraceful drop -> ghost slots).
+            _teardown_session(s, why='(disconnect)'); return
         # CAPTURE (diagnostic): in-game packets that are neither reliable-data (pt=1)
         # nor ack/disconnect (pt=0) - the UNRELIABLE flight-telemetry stream a flying
         # client streams (currently dropped). Rate-limited hex sample of the payload
@@ -11799,7 +12244,8 @@ threading.Thread(target=console_handler, daemon=True).start()
 threading.Thread(
     target=start_web_server, 
     args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read,
-          ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR),
+          ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR,
+          extract_date_from_gamedef),
     daemon=True
 ).start()
 
