@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v386f5'
+VERSION = 'v387f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5287,7 +5287,7 @@ class S:
     def __init__(self, cid, addr):
         self.sid = next(_session_counter)
         self.cid=cid; self.addr=addr; self.sq=0; self.ts=0
-        self.rx=0; self.closing=False; self.t0=time.time()
+        self.rx=0; self.closing=False; self.t0=time.time(); self.last_rx=self.t0  # v387f5: last inbound-packet time (idle reaper)
         self.rseq=0; self._lock=threading.Lock(); self._evts={}
         # v328: signalled whenever a post-auth command is queued, so the dispatch loop can
         # WAIT instead of polling every 20ms. A plain Event (not a Condition on _lock) is
@@ -5438,6 +5438,15 @@ except (AttributeError, OSError, ValueError) as _e:
     log('INIT', f'SIO_UDP_CONNRESET not disabled ({_e!r}) - 10054s handled in recv loop instead')
 sock.bind((HOST,PORT)); sock.settimeout(0.5)
 sids={}; sadrs={}; sl=threading.Lock(); running=True
+
+# v387f5: dead-client idle reaper. Covers the one exit path that v386f5 (clean disconnect) and
+# v385f5 (reconnect-reap) don't: an ungraceful CTD whose client never comes back. A live client
+# streams time-pings (clock sync, ~5s cadence) + ACKs continuously, so a session with ZERO inbound
+# for IDLE_REAP_S is provably gone; last_rx is stamped on EVERY inbound packet, so this cannot clip
+# a live-but-idle client. Set IDLE_SESSION_REAP=False to disable; raise IDLE_REAP_S if ever needed.
+IDLE_SESSION_REAP = True
+IDLE_REAP_S = 60.0
+IDLE_REAP_SCAN_S = 15.0
 
 # ---------------------------------------------------------------------------
 # v357f5 [PERF] SHARED SEND POOL + DELAYED-ACK SENDER.  (server-fable5.py branch)
@@ -11999,6 +12008,7 @@ def on_pkt(data, addr):
             log('RX/PORTMOVE', f'time-ping from {addr[0]}:{addr[1]} adopted into session '
                                f'(was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if not s: return
+    s.last_rx = time.time()   # v387f5: liveness beacon for the idle reaper (time-pings keep it fresh)
     # v215: capture the connection id the client stamps in its own packets (wire bytes 0-1) so our
     # STATUS request can carry the value the client expects. The 12-byte TIME pings carry it (e.g.
     # 001e...); grab it once. Falls back to a beacon-style default in build_status_request if unseen.
@@ -12249,6 +12259,30 @@ threading.Thread(
     daemon=True
 ).start()
 
+def _idle_session_reaper():
+    """v387f5: tear down sessions that have gone completely silent - an ungraceful CTD whose client
+    never reconnects (so neither the clean-disconnect teardown nor the reconnect-reap ever fires).
+    A live client sends time-pings + ACKs every few seconds, so >IDLE_REAP_S with no inbound at all
+    means it's gone. Only AUTH-established sessions are eligible (a mid-auth session can be briefly
+    quiet). Routed through _teardown_session so peers get the pilot delete and the ClientNumber/slot
+    is freed - identical cleanup to every other exit path."""
+    while running:
+        time.sleep(IDLE_REAP_SCAN_S)
+        if not IDLE_SESSION_REAP:
+            continue
+        now = time.time()
+        with sl:
+            victims = [x for x in list(sids.values())
+                       if x.auth_done and not getattr(x, '_torn_down', False)
+                       and now - getattr(x, 'last_rx', x.t0) > IDLE_REAP_S]
+        for x in victims:
+            silent = now - getattr(x, 'last_rx', x.t0)
+            _teardown_session(x, why='(idle %.0fs - dead client)' % silent, tag='IDLE-REAP',
+                              msg='reaped idle session sid=%s account="%s" pilot=%s - no inbound for '
+                                  '%.0fs (ungraceful CTD, no reconnect)'
+                                  % (x.sid, x.account, getattr(x, 'current_pilot', None), silent))
+
+threading.Thread(target=_idle_session_reaper, daemon=True).start()  # v387f5: dead-client idle reaper
 threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply

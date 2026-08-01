@@ -16,6 +16,39 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v387f5: [SESSION] Dead-client idle reaper - the last uncovered exit path. server.py only.
+      Completes the session-cleanup set alongside v385f5 (reconnect-reap) and v386f5 (clean
+      disconnect). This one covers an ungraceful CTD whose client NEVER reconnects: no
+      vcncDisconnect is sent (so v386f5 can't fire) and the account never comes back (so the
+      v385f5 reconnect-reap can't fire), leaving a single lingering ghost until a server restart.
+
+      WHY 60s IS SAFE (not a live-player killer): a live client streams two-way TIME pings
+      (clock-sync RESYNC, ~5s cadence - the game needs continuous sync for telemetry timing) plus
+      reliable ACKs the whole time. DEBUG capture run_20260801_002705 measured max inbound gap =
+      8.3s over a 40s session, median 0.01s. So a session with ZERO inbound for 60s is provably a
+      dead client, not an idle one. Earlier worry about a 226s 'silence' (server_2_.log, Warrior)
+      was an artifact of INFO-level logging hiding the sz=8/sz=12 ping/ACK traffic - those packets
+      were flowing; they're just DEBUG-only.
+
+      MECHANISM: on_pkt stamps s.last_rx on EVERY inbound packet that resolves to a session (so
+      time-pings/ACKs keep a live session fresh - it can't be clipped). A daemon reaper scans every
+      IDLE_REAP_SCAN_S (15s) and, for each AUTH-established, not-already-torn session whose last
+      inbound is older than IDLE_REAP_S (60s), calls _teardown_session (same cleanup as every other
+      exit: broadcast the pilot delete, free ClientNumber + start-place, pop). Mid-auth sessions are
+      excluded (they can be briefly quiet during the ~15s handshake). Reaping a dead in-game
+      session is desirable - it broadcasts the leave so peers drop the stale plane.
+
+      FLAGS: IDLE_SESSION_REAP=True (set False to disable), IDLE_REAP_S=60.0, IDLE_REAP_SCAN_S=15.0.
+
+      TEST: connect a client, hard-kill it (Task Manager / pull the plug - NO clean quit), do NOT
+      reconnect. Within ~60-75s expect 'IDLE-REAP  reaped idle session ... no inbound for Ns
+      (ungraceful CTD, no reconnect)' and active_sessions back to baseline. Regression check: a
+      normally-connected idle client sitting in the lobby/arena for minutes must NOT be reaped.
+
+      REVERT: IDLE_SESSION_REAP=False (single-flag).
+
+==============================================================================
+
 v386f5: [SESSION] Clean disconnect now actually closes the session (no more ghost after a
       graceful client Exit/Quit). server.py only. Builds on v385f5's _teardown_session.
 
