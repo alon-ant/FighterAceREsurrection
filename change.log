@@ -16,6 +16,82 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v389f5: [PERF/SCALE] Move the telemetry-relay sendto() off the single RX thread - the throughput
+      ceiling behind the load-related faults (KILO's dropped auth, and consistent with Lufty's
+      state desync + ALL41_MAD's freeze). server.py only. Step toward the 50-player goal.
+
+      THE CEILING: relay_telemetry builds one CUSTOMISED packet per flying peer (recipient tick
+      re-stamp + per-peer _relay_seq) and did sock.sendto() for each one INLINE on the recv thread
+      - O(N) syscalls per frame, O(N^2)/s across a room. Broadcasts (send pool), ACKs (async
+      sender) and lazy object-creates were already off the RX thread; this highest-frequency path
+      was not. While the RX thread is buried in that syscall storm it isn't calling recvfrom(),
+      the OS buffer overflows, and inbound datagrams are dropped - v388 enlarged the buffer to
+      absorb bursts, this removes the sustained per-frame cost so it scales.
+
+      FIX: the RX thread still BUILDS every per-peer packet (userspace only; ALL shared per-peer
+      relay state - _created_peers, _relay_seq, last_telem_tick - stays on the RX thread, so NO new
+      cross-thread races are introduced) and appends (addr, pkt) to a batch. After the peer loop it
+      hands the whole batch to ONE dedicated relay-send thread (_relay_send_loop) that performs the
+      sendto() syscalls. One thread draining a FIFO queue of per-frame batches preserves per-peer
+      ordering EXACTLY: each peer's _relay_seq is still strictly increasing and its packets still
+      leave in that order (verified in isolation: 200 frames x 5 peers, every peer in-order).
+
+      WHY IT'S SAFE: the offload is send-only and order-preserving; nothing about parsing,
+      state, dedupe or create logic changes. RELAY_SEND_ASYNC=False restores the verbatim inline
+      sendto for instant A/B comparison.
+
+      REMAINING CEILING (for >50): the RX thread still PARSES every packet and BUILDS the O(N)
+      per-peer packets serially. If that becomes the limit, the next step is a sharded RX-worker
+      model (recv thread -> per-session-hashed ordered worker queues) so parsing/build parallelise
+      too - bigger and race-sensitive, deferred until measurement shows it's needed.
+
+      TEST: populated session - watch that a late joiner during a fight reaches '== v197 AUTH ==',
+      that STALL-WATCH 'reliable RX idle' warnings drop sharply, and that planes still move
+      smoothly (relay ordering intact). Startup shows a 'relay-send' thread. If anything looks off
+      (stutter, dupes, lost objects), set RELAY_SEND_ASYNC=False and restart to compare.
+
+      REVERT: RELAY_SEND_ASYNC=False (single-flag).
+
+==============================================================================
+
+v388f5: [PERF] Enlarge OS socket buffers so a new client's auth isn't dropped under load.
+      server.py only. Fixes KILO's 'loads 100% -> blank splash -> awaiting-server-connection
+      timer -> closes, never gets in'.
+
+      DIAGNOSIS (run_20260801_023556 + KILO client log messages23): KILO connected during a
+      10-player dogfight. SYN was handled (sid=116 'Ready') - SYNs run on their own thread - but
+      the client's reliable AUTH DATA (client logged 'UserName KILO' / 'out 222' at 18:19:08)
+      NEVER reached the server: there is no 'SEQ9 first reliable DATA' and no '== v197 AUTH ==' for
+      that session. The client sat on a blank splash ~44s and closed (client log ends 18:19:52).
+      A quieter retry 4 min later (sid=117) auth'd and got in fine. Meanwhile the log carried 228
+      STALL-WATCH 'reliable RX idle' warnings (up to 65s) during the fight.
+
+      ROOT CAUSE: the recv loop dispatches SYNs to threads but runs on_pkt for EVERY other packet
+      (telemetry relay, ACKs, reliable auth/command DATA) SYNCHRONOUSLY on the single recv thread.
+      While it is busy relaying a dogfight to ~10 peers it is not calling recvfrom(), and the
+      default Windows UDP receive buffer (~64KB) overflows during the burst - so the kernel drops
+      inbound datagrams, KILO's auth among them. Nothing in the server even sees the packet, which
+      is why it left no trace.
+
+      FIX: request SO_RCVBUF and SO_SNDBUF of 4 MB each right after socket creation (logged with the
+      value the kernel actually grants - Windows typically honors it, Linux doubles it). ~64x the
+      default buffer holds the inbound burst until the recv thread loops back to recvfrom, so a new
+      client's auth (and existing players' reliable packets) survive a busy fight. SNDBUF is raised
+      too so the relay's own sendto bursts don't stall.
+
+      SCOPE / FOLLOW-UP: this absorbs BURSTS, which is the KILO case. It does not raise steady-state
+      throughput - the synchronous single-thread relay is still the ceiling (~10-12 players is the
+      edge; the 228 stall warnings reflect that pressure). If populated sessions keep growing, the
+      next step is to decouple recvfrom from processing (fast recv thread -> per-session ordered
+      worker queues) so relay work never blocks the socket drain. Deferred: bigger, concurrency-
+      sensitive change; the buffer bump is the safe high-value fix for the reported symptom.
+
+      TEST: at the next populated session, a late joiner during a fight should now reach
+      '== v197 AUTH ==' and load in instead of hanging on the splash. Startup logs the granted
+      SO_RCVBUF/SO_SNDBUF. REVERT: delete the setsockopt loop.
+
+==============================================================================
+
 v387f5: [SESSION] Dead-client idle reaper - the last uncovered exit path. server.py only.
       Completes the session-cleanup set alongside v385f5 (reconnect-reap) and v386f5 (clean
       disconnect). This one covers an ungraceful CTD whose client NEVER reconnects: no

@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v387f5'
+VERSION = 'v389f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5421,6 +5421,22 @@ class S:
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+# v388f5: enlarge the OS socket buffers. The recv loop processes non-SYN packets (telemetry
+# relay, ACKs, RELIABLE auth/command DATA) SYNCHRONOUSLY on this one thread, so while it is busy
+# relaying a busy dogfight to ~10 peers it is NOT calling recvfrom() - and with the tiny default
+# UDP RCVBUF (~64KB on Windows) the kernel drops inbound datagrams during that burst. That is how
+# a NEW client's reliable auth vanished mid-fight (KILO sid=116: SYN Ready, but no 'SEQ9 first
+# reliable DATA' ever arrived -> blank splash -> client timed out; the quieter retry sid=117 got
+# in fine). A multi-MB RCVBUF holds the burst until the thread loops back to recvfrom, so auth and
+# other reliable packets survive. SNDBUF is bumped too so the relay's own sendto() bursts don't
+# stall. The kernel may cap these; we log the value it actually granted.
+for _optname, _val in (('SO_RCVBUF', 4 * 1024 * 1024), ('SO_SNDBUF', 4 * 1024 * 1024)):
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, getattr(socket, _optname), _val)
+        _got = sock.getsockopt(socket.SOL_SOCKET, getattr(socket, _optname))
+        log('INIT', f'{_optname} requested {_val} -> granted {_got} bytes')
+    except OSError as _e:
+        log('INIT', f'{_optname} set failed ({_e!r}) - keeping OS default')
 # -- Windows UDP WSAECONNRESET trap (FATAL server-recovery fix) ----------------------------
 # When the server sendto()s a client that has CTD'd / closed its port, Windows posts an ICMP
 # port-unreachable and then raises WSAECONNRESET (WinError 10054) on the NEXT recvfrom() -
@@ -5492,6 +5508,29 @@ def _submit_send(fn, *args, **kwargs):
         except Exception:
             pass                       # pool shut down/broken -> legacy path below
     threading.Thread(target=fn, args=args, kwargs=kwargs, daemon=True).start()
+
+# v389f5 [PERF/SCALE] Async telemetry-relay send. relay_telemetry builds one customised packet
+# PER flying peer (recipient-specific tick re-stamp + per-peer seq) and used to sock.sendto() each
+# one INLINE on the single RX thread - O(N) syscalls per frame, O(N^2)/s across the room. That is
+# the throughput ceiling (KILO's auth was dropped mid-dogfight when the RX thread couldn't get back
+# to recvfrom; v388's big RCVBUF buys burst headroom, this removes the sustained load for the 50-
+# player goal). The RX thread still BUILDS the per-peer packets (cheap userspace work; all shared
+# per-peer state stays on the RX thread, so no new races) and hands the batch to ONE dedicated
+# relay-send thread that does the sendto() syscalls. One thread + FIFO batches keeps per-peer
+# ordering identical to the inline loop (the _relay_seq the client dedupes on is still strictly
+# increasing per peer). RELAY_SEND_ASYNC=False restores the inline sendto verbatim.
+RELAY_SEND_ASYNC = True
+_relay_send_q = queue.Queue()
+def _relay_send_loop():
+    while running:
+        batch = _relay_send_q.get()
+        if not batch:
+            continue
+        for _addr, _pkt in batch:
+            try:
+                sock.sendto(_pkt, _addr)
+            except OSError:
+                pass
 
 ACK_ASYNC   = True
 ACK_DELAY_S = 0.010                    # the historical 10ms pacing, preserved exactly
@@ -7693,6 +7732,7 @@ def relay_telemetry(src, data):
              if x is not src and getattr(x, 'flying', False)]
     if not peers:
         return
+    _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
     for p in peers:
         if SEND_CREATE_OBJECT and src.my_obj_number is not None:
             _cp = src.__dict__.setdefault('_created_peers', set())
@@ -7744,10 +7784,15 @@ def relay_telemetry(src, data):
         seq = getattr(p, '_relay_seq', 0) & 0xFF
         p._relay_seq = seq + 1
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
-        try:
-            sock.sendto(pkt, p.addr)
-        except OSError:
-            pass
+        if RELAY_SEND_ASYNC:
+            _relay_batch.append((p.addr, pkt))   # v389f5: defer the sendto syscall off the RX thread
+        else:
+            try:
+                sock.sendto(pkt, p.addr)
+            except OSError:
+                pass
+    if _relay_batch:
+        _relay_send_q.put(_relay_batch)           # v389f5: one FIFO batch -> ordered per-peer delivery
     # rate-limited so we can see the relay working without flooding the console
     _now = time.time()
     if _now - getattr(src, '_relay_log_ts', 0.0) >= 1.0:
@@ -12282,6 +12327,7 @@ def _idle_session_reaper():
                                   '%.0fs (ungraceful CTD, no reconnect)'
                                   % (x.sid, x.account, getattr(x, 'current_pilot', None), silent))
 
+threading.Thread(target=_relay_send_loop, daemon=True, name='relay-send').start()  # v389f5: async telemetry-relay sendto
 threading.Thread(target=_idle_session_reaper, daemon=True).start()  # v387f5: dead-client idle reaper
 threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
