@@ -16,6 +16,41 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v390f5: [INTERNET/CRITICAL] Fix the '100%% loading -> blank splash -> closes' hang for clients on
+      a high-latency (internet) link. This is the real KILO/bigalon bug - NOT load, NOT the buffer.
+      server.py only, one-line gate change.
+
+      DIAGNOSIS (run_20260802_190259 + bigalon game log messages06 + vcncNet log): server now runs
+      on GCP (34.72.115.211, ~200ms RTT), not LAN. bigalon connected, auth'd (Auth ACKed T+1.469s
+      @19:04:16), then got a DEAD 15s gap and its pilot list was NEVER sent - AC2E_Bigalon appears
+      exactly once in the whole server log (the startup DB dump), never in the session. The client
+      sat on the splash and issued a clean vcncDisconnect @19:04:49. Other (slower-connecting)
+      clients that session got their pilot lists fine.
+
+      ROOT CAUSE: a race exposed only by latency. login() runs in a thread; it send_rel's the auth
+      reply and BLOCKS a full RTT waiting for the ACK, and only THEN sets s.auth_done=True. The
+      client fires its pilot-list request (reliable cv=512) the instant it receives the auth reply
+      - i.e. ~0.5 RTT before the server's send_rel returns. The reliable-command dispatch was
+      'if cv==4: start login; elif s.auth_done: queue; return' with NO else - so a cv=512 arriving
+      in that ~1-RTT window while auth_done was still False was ACKed but SILENTLY DROPPED. No
+      pilot list is ever sent, the client's lobby never populates, blank splash, timeout, close.
+      On LAN the RTT is sub-millisecond so auth_done flips before the request arrives and the
+      window doesn't exist - which is precisely why this never reproduced locally and only bit once
+      the server moved to the internet.
+
+      FIX: gate becomes 'elif s.auth_done or s._login_started'. _login_started is set the moment
+      cv==4 is seen, so from the start of auth any non-cv4 reliable command is QUEUED into
+      post_auth_cmds instead of dropped. The dispatch loop runs inside login() AFTER auth_done, so
+      the queued command is still handled strictly post-auth (handle_post_auth unchanged) - we only
+      stop throwing it away. A stray reliable packet arriving before cv==4 is ever seen is still
+      dropped (login not started), so nothing pre-auth is processed.
+
+      TEST: internet clients - especially fast-connecting / warm-cache ones - should now reach the
+      pilot-selection screen and load in every time instead of hanging on the splash. Watch for the
+      PILOTS line for each account right after its 'Auth ACKed'. REVERT: restore 'elif s.auth_done:'.
+
+==============================================================================
+
 v389f5: [PERF/SCALE] Move the telemetry-relay sendto() off the single RX thread - the throughput
       ceiling behind the load-related faults (KILO's dropped auth, and consistent with Lufty's
       state desync + ALL41_MAD's freeze). server.py only. Step toward the 50-player goal.

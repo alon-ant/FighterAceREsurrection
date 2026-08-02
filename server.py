@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v389f5'
+VERSION = 'v390f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12142,7 +12142,20 @@ def on_pkt(data, addr):
                 if not getattr(s,'_login_started',False):
                     s._login_started=True
                     threading.Thread(target=login,args=(s,),daemon=True).start()
-            elif s.auth_done:
+            elif s.auth_done or getattr(s, '_login_started', False):
+                # v390f5 [INTERNET/CRITICAL]: queue non-cv4 reliable commands from the moment login
+                # STARTS, not only after auth_done flips. login() sets auth_done only AFTER it
+                # send_rel's the auth reply and blocks a full RTT for the ACK; the client fires its
+                # pilot-list request (cv=512) the instant it receives that reply, so on a high-RTT
+                # internet link (server on GCP ~200ms) the request lands in the ~1-RTT window while
+                # auth_done is still False - and the old 'elif s.auth_done' with no else SILENTLY
+                # DROPPED it (ACKed, never queued) -> no pilot list -> blank splash -> the '100%'
+                # loading hang (KILO earlier, bigalon run_20260802_190259: auth 19:04:16, then a
+                # dead 15s gap, pilot list never sent, client disconnected). LAN's sub-ms RTT closed
+                # the window, which is exactly why it never reproduced locally. The dispatch loop
+                # runs from login() AFTER auth_done, so anything queued during the window is drained
+                # only then (handle_post_auth still executes strictly post-auth) - we merely stop
+                # DROPPING it. _login_started is set at cv==4, so the gate opens the instant auth begins.
                 with s._lock: s.post_auth_cmds.append((cv,pl))
                 s._cmd_evt.set()          # v328: wake the dispatch loop immediately
             return
