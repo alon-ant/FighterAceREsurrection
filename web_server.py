@@ -1200,6 +1200,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<input type="number" min="1935" max="1955" name="s_war_year" value="' + hesc(str(war_y))
                 + '" style="width:90px; padding:6px;"></label>'
                 '</div>')
+            # FIGHTERS ONLY (v391): opt-in checkbox. The game server hides every non-fighter
+            # (bombers, attackers, transports - the BOMBER_PLANE_IDS scoring classification)
+            # via the same camp-7/byte0 mechanism as the war-date filter.
+            fo_on = bool(overrides.get('fighters_only'))
+            fo_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'fighters_only' in overrides else ''
+            fighters_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_fighters_only" value="1"'
+                + (' checked' if fo_on else '') + '> Fighters only'
+                + fo_edited + '</label>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -1224,6 +1234,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>War date (plane era)</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to restrict this arena to aircraft that had entered service by the date below, and push that date into the arena so the client shows it too (e.g. a 1943 arena hides 1944+ planes). Leave unticked for no restriction (all planes &mdash; today's behaviour). A stopgap for standing arenas; takes effect the next time the arena is entered.</p>
                     {wardate_html}
+                    <h3>Fighters only</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
+                    {fighters_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -1817,6 +1830,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             # its absence means off. The date values are stored regardless so toggling back on
             # remembers them. The game server reads war_enabled/war_year/war_month/war_day per arena.
             settings['war_enabled'] = 1 if qs.get('s_war_enabled', [''])[0].strip() else 0
+            # FIGHTERS ONLY (v391): checkbox only posts when ticked; absence means off.
+            settings['fighters_only'] = 1 if qs.get('s_fighters_only', [''])[0].strip() else 0
             for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
                 _wv = qs.get('s_' + _wk, [''])[0].strip()
                 if _wv != '':
