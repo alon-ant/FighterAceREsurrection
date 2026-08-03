@@ -77,6 +77,25 @@ TODO list:
       the same terrain, one with scoring ticked and one without - that isolates the byte without
       any RE), then add it to the editor alongside the EvP sliders. The same diff technique will
       pick up the other pre-block checkboxes/dropdowns while we're in there.
+  [ ] READ THE 'EXIT = CRASH' RULE FROM THE GAME_DEF - v400f5 follow-up. v400f5 fixed the bug
+      (an undamaged airborne exit was always counted as a death) by adding a per-arena
+      settings_json 'exit_is_crash' opt-in, DEFAULT OFF, edited from the web arena panel. That
+      is our OWN flag, not FA's - so a loaded arena's real .gdf setting is NOT honoured; the
+      web checkbox is the only source. GOAL: decode FA's own exit-crash bit from the GAME_DEF
+      blob and populate the SAME key from it, so an arena created/loaded with the rule set in
+      its .gdf behaves correctly without anyone re-ticking the web box.
+      WHY IT'S CLEAN TO ADD: the classifier already reads ONLY _exit_is_crash_for_room(); it
+      never needs to change. This TODO is purely 'find the byte and feed the same key'.
+      LIKELY SAME REGION as the scoring-enabled flag above (the GAME_DEF pre-plane-block area
+      that holds the arena rule checkboxes), so the SAME diff-two-blobs technique applies: make
+      two arenas on one terrain, one with 'exit = crash' ticked in the FA arena editor and one
+      without, diff the GAME_DEF blobs, and the single differing byte/bit is it. Confirm the
+      client-side reader in FA.exe (the mission-exit / Msn_Exit path that decides crash-vs-exit)
+      references that offset before trusting it. Then have db_get_room_settings / the settings
+      reader surface it as exit_is_crash when the web override is absent, so precedence is:
+      web override (explicit) > GAME_DEF bit > default OFF.
+      FOR NOW: the web-server setting stays as the source of truth - this is an enhancement,
+      not a fix; v400f5 is complete and correct on its own.
   [ ] CLIENT-SIDE PARSE-ERROR FLOOD ("unknown message" flood) - OPEN, cosmetic-but-noisy.
       Symptom: the CLIENT debug log fills at ~30 lines/second with
           ERROR: Wrong char 13, pos 1 in line '<junk>'      (also seen as "Wrong char 11")
@@ -224,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v398f5'
+VERSION = 'v400f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5666,6 +5685,39 @@ def _submit_send(fn, *args, **kwargs):
 # increasing per peer). RELAY_SEND_ASYNC=False restores the inline sendto verbatim.
 RELAY_SEND_ASYNC = True
 _relay_send_q = queue.Queue()
+
+# v399f5 [PERF] Lightweight load counters for the high-capacity project. Counters are plain
+# unlocked int/float adds (GIL-benign races can undercount by a hair - acceptable and cheaper
+# than any lock on the hot paths); the snapshot thread reads+resets a window every
+# PERF_STATS_INTERVAL seconds and emits ONE [PERF] line, skipping fully idle windows.
+# Key metric: rxthread_busy%% = time spent inside packet dispatch / wall time - when this
+# approaches 100%% the single RX thread is saturated and relay latency follows.
+# REVERT: PERF_STATS=False silences the output; the counters themselves cost ~nothing.
+PERF_STATS = True
+PERF_STATS_INTERVAL = 30.0
+_perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0,
+         'disp_t': 0.0, 'disp_max': 0.0, 'disp_n': 0, 'rq_max': 0}
+
+def _perf_stats_loop():
+    while running:
+        time.sleep(PERF_STATS_INTERVAL)
+        if not PERF_STATS:
+            continue
+        w = dict(_perf)
+        for k in _perf: _perf[k] = 0 if isinstance(_perf[k], int) else 0.0
+        if w['rx'] == 0 and w['tx'] == 0:
+            continue                      # idle window - keep the log clean
+        iv = PERF_STATS_INTERVAL
+        with sl:
+            ns = len(sids)
+            nf = sum(1 for x in sids.values() if getattr(x, 'flying', False))
+        log('PERF', 'window=%.0fs rx=%.1fpps/%.1fKBs tx=%.1fpps/%.1fKBs '
+                    'rxthread_busy=%.1f%% disp_avg=%.2fms disp_max=%.2fms '
+                    'relay_q_max=%d sessions=%d flying=%d'
+            % (iv, w['rx']/iv, w['rxb']/iv/1024.0, w['tx']/iv, w['txb']/iv/1024.0,
+               100.0*w['disp_t']/iv,
+               (1000.0*w['disp_t']/w['disp_n']) if w['disp_n'] else 0.0,
+               1000.0*w['disp_max'], w['rq_max'], ns, nf))
 def _relay_send_loop():
     while running:
         batch = _relay_send_q.get()
@@ -5674,6 +5726,7 @@ def _relay_send_loop():
         for _addr, _pkt in batch:
             try:
                 sock.sendto(_pkt, _addr)
+                _perf['tx'] += 1; _perf['txb'] += len(_pkt)   # v399f5
             except OSError:
                 pass
 
@@ -5695,6 +5748,7 @@ def _ack_sender_loop():
             time.sleep(d)
         try:
             sock.sendto(pkt, addr)
+            _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5
         except OSError:
             pass
 
@@ -5780,7 +5834,10 @@ def build_unrel(payload, seq=0):
 
 def send_unrel(s, payload, label=''):
     seq = s.nundgram()
-    try: sock.sendto(build_unrel(payload, seq), s.addr)
+    try:
+        _p = build_unrel(payload, seq)
+        sock.sendto(_p, s.addr)
+        _perf['tx'] += 1; _perf['txb'] += len(_p)   # v399f5
     except OSError: return False
     log('TX/UNREL', f'dseq={seq} type=0x{payload[1]:02x} {label}')
     return True
@@ -5798,7 +5855,9 @@ def send_rel(s, payload, label='', to=5.0):
     # un-wedges the client's QRcv, which queues out-of-order arrivals and drains.
     seq=s.nrel(); e=s.mke(seq)
     pkt=build_rel(payload,seq)
-    try: sock.sendto(pkt,s.addr)
+    try:
+        sock.sendto(pkt,s.addr)
+        _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5
     except OSError: s.rme(seq); return False
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
@@ -5811,7 +5870,9 @@ def send_rel(s, payload, label='', to=5.0):
         ok=e.wait(timeout=min(REL_RETX_INTERVAL_S,rem))
         if ok: break
         if deadline-time.time()<=0: break
-        try: sock.sendto(pkt,s.addr)
+        try:
+            sock.sendto(pkt,s.addr)
+            _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5 (retx)
         except OSError: break
         retx+=1
         log('TX/RELIABLE', f'seq={seq} RETX#{retx} type=0x{payload[1]:02x} {label}')
@@ -6963,6 +7024,46 @@ CRASH_MOVEMENT_MIN      = 64    # total |delta| across the 3 axes over the windo
                                 #   LOGGED on every removal, so tune it from real numbers if a slow
                                 #   taxi ever trips it.
 COUNT_EXIT_TO_HQ_AS_DEATH = False
+
+# -- v400f5: THE ARENA 'EXIT = CRASH' RULE -------------------------------------
+# FA arenas have a rule governing whether LEAVING THE PLANE WHILE AIRBORNE costs you the plane:
+#   * rule OFF: an UNDAMAGED pilot who exits in flight walks away clean - NO death, NO plane loss.
+#              (You must still land+repair to clear DAMAGE, but an undamaged bug-out is free.)
+#   * rule ON : you must LAND and be undamaged to exit for free; exiting airborne = a crash = death.
+# THE BUG this fixes: the v243 MOVEMENT test (was-it-flying?) was added to catch the UNDAMAGED
+# CRASH (fly into the ground, no enemy fire, no msg 28). But an undamaged AIRBORNE EXIT-TO-MENU is
+# byte-identical to that crash - same MEC, same zero-vs-hundreds movement - so treating "flying"
+# as an unconditional death ALSO booked every clean airborne exit as a death. That is exactly the
+# arena rule above, and the server was applying it as if it were always ON. Now the movement
+# signal only counts as a death when the arena's exit-crash rule is ON (or the pilot was damaged,
+# which is a death under BOTH rule states). Rule OFF + undamaged + airborne = clean exit.
+# SOURCING: mirrors the war-date / fighters-only opt-in exactly - a per-arena settings_json key
+# 'exit_is_crash' (web arena editor checkbox), read via db_get_room_settings. DEFAULT OFF, which
+# is the behaviour the field reported as correct. A DB hiccup fails to OFF (fails clean, never
+# books a spurious death). A later Ghidra pass can populate this same key from FA's own .gdf
+# exit-crash bit so a loaded arena's real setting is honoured; the classifier below won't need to
+# change when that lands - it only ever asks _exit_is_crash_for_room().
+# NOTE on 'undamaged': took_damage latches PLAYER-inflicted (msg-28) damage only. An AA/flak hit
+# the pilot survives and then exits with is not latched here, so under rule OFF such an exit is
+# treated as clean. That matches the practical intent of the rule (voluntary bug-out) and is the
+# pre-existing damage-signal scope; widening it is a separate change.
+EXIT_IS_CRASH_ENABLED = True   # master switch for the feature; False = ignore the arena flag
+                               # entirely and NEVER count an undamaged airborne exit as a death
+                               # (i.e. rule-OFF semantics everywhere). The per-arena opt-in below
+                               # only matters while this is True.
+
+def _exit_is_crash_for_room(room_id):
+    """True iff this arena's 'exit = crash' rule is ON: settings_json exit_is_crash truthy AND
+    the feature enabled. Mirrors _fighters_only_for_room; False on anything missing so a DB
+    hiccup fails to rule-OFF (an undamaged airborne exit stays a clean exit, never a spurious
+    death)."""
+    if not EXIT_IS_CRASH_ENABLED or room_id is None:
+        return False
+    try:
+        st = db_get_room_settings(room_id)
+    except Exception:
+        return False
+    return bool(isinstance(st, dict) and st.get('exit_is_crash'))
 DEATH_CONFIRM_DELAY = 4.0    # s: a crash and an EXIT-TO-HQ carry the SAME byte (both MEC 26), so the
                              #   solo death credit is deferred and cancelled if the player leaves the
                              #   arena inside this window. Must exceed the observed removal ->
@@ -7938,6 +8039,8 @@ def relay_telemetry(src, data):
                 pass
     if _relay_batch:
         _relay_send_q.put(_relay_batch)           # v389f5: one FIFO batch -> ordered per-peer delivery
+        _q = _relay_send_q.qsize()                # v399f5: watch the relay backlog
+        if _q > _perf['rq_max']: _perf['rq_max'] = _q
     # rate-limited so we can see the relay working without flooding the console
     _now = time.time()
     if _now - getattr(src, '_relay_log_ts', 0.0) >= 1.0:
@@ -9909,9 +10012,16 @@ def _ingame_own_object_removed(s, tb, stored):
             _damaged = bool(getattr(s, 'took_damage', False))
             _move    = plane_movement(s)
             _flying  = _move >= CRASH_MOVEMENT_MIN
-            if _damaged or _flying or COUNT_EXIT_TO_HQ_AS_DEATH:
-                _why = ('DAMAGED' if _damaged else '') + ('+' if _damaged and _flying else '') \
-                       + (f'IN FLIGHT (movement={_move})' if _flying else '')
+            # v400f5: FLYING alone is a death ONLY when this arena's exit-crash rule is ON.
+            # DAMAGED is a death under BOTH rule states (you can't exit-clean while damaged).
+            # Rule OFF + undamaged + airborne = a clean voluntary exit, NOT a death. This is the
+            # fix for "undamaged in-flight exit still counted as a death": _flying used to book
+            # the death unconditionally.
+            _exit_crash = _exit_is_crash_for_room(s.current_room)
+            _flying_kills = _flying and _exit_crash
+            if _damaged or _flying_kills or COUNT_EXIT_TO_HQ_AS_DEATH:
+                _why = ('DAMAGED' if _damaged else '') + ('+' if _damaged and _flying_kills else '') \
+                       + (f'IN FLIGHT (movement={_move}, exit=crash arena)' if _flying_kills else '')
                 log('DEATH', f'{s.current_pilot} {_why} at removal (MEC&0xf={mec_nib}) '
                              f'-> counts as a death')
                 # v244: CAPTURE the killer here too. This branch used to DISCARD score_on_death's
@@ -9920,7 +10030,9 @@ def _ingame_own_object_removed(s, tb, stored):
                 # registered the bailout kill even though Test2's client announced it.
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
             else:
-                log('DEATH', f'{s.current_pilot} exited UNDAMAGED and PARKED (MEC&0xf={mec_nib}, '
+                _state = ('PARKED' if not _flying
+                          else 'AIRBORNE but this arena\'s exit-crash rule is OFF')
+                log('DEATH', f'{s.current_pilot} exited UNDAMAGED, {_state} (MEC&0xf={mec_nib}, '
                              f'movement={_move}) -> clean exit, NOT a death')
         else:
             log('DEATH', f'{s.current_pilot} plane removed with exit=0x{exitb:02x} '
@@ -12512,6 +12624,7 @@ def _idle_session_reaper():
                                   % (x.sid, x.account, getattr(x, 'current_pilot', None), silent))
 
 threading.Thread(target=_relay_send_loop, daemon=True, name='relay-send').start()  # v389f5: async telemetry-relay sendto
+threading.Thread(target=_perf_stats_loop, daemon=True, name='perf-stats').start()  # v399f5: load counters snapshot
 threading.Thread(target=_idle_session_reaper, daemon=True).start()  # v387f5: dead-client idle reaper
 threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
@@ -12522,11 +12635,16 @@ threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: li
 _drop_ts=0.0
 
 def _guarded(fn, data, addr):
+    _t0 = time.perf_counter()                     # v399f5: dispatch timing
     try:
         fn(data, addr)
     except Exception:
         logx('DISPATCH', f'{fn.__name__} failed addr={addr} sz={len(data)} '
                          f'hdr={hx(data[:16])}')
+    finally:
+        _dt = time.perf_counter() - _t0
+        _perf['disp_t'] += _dt; _perf['disp_n'] += 1
+        if _dt > _perf['disp_max']: _perf['disp_max'] = _dt
 
 while running:
     try: data,addr=sock.recvfrom(65536)
@@ -12549,6 +12667,7 @@ while running:
     except Exception as e: log('ERROR',str(e)); continue
     if not data: continue
     pt=data[0]; sz=len(data)
+    _perf['rx'] += 1; _perf['rxb'] += sz          # v399f5
     if sz==912 and pt==0:
         threading.Thread(target=_guarded, args=(handle_syn, data, addr), daemon=True).start()
     elif sz==8 and data[2]==2: _guarded(on_pkt, data, addr)

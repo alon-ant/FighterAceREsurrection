@@ -27,6 +27,60 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v400f5: [SCORING/BUGFIX] The arena 'EXIT = CRASH' rule. FA arenas govern whether leaving
+      the plane WHILE AIRBORNE costs you: rule OFF -> an UNDAMAGED in-flight exit is a clean
+      bug-out (no death, no plane lost); rule ON -> you must land (undamaged) to exit for
+      free, and exiting airborne is a crash = death.
+      THE BUG (reported): even with the rule effectively OFF, an undamaged pilot who exited
+      in flight was booked a death. ROOT CAUSE: the v243 MOVEMENT test (_ingame_own_object_
+      removed) was added to catch the UNDAMAGED CRASH - fly into the ground, no enemy fire, no
+      msg-28 - by asking 'was the plane moving when removed?'. But an undamaged AIRBORNE
+      EXIT-TO-MENU is byte-identical to that crash (same MEC 26 -> exit 0xa0, same hundreds-
+      per-tick movement), so treating _flying as an UNCONDITIONAL death signal also booked
+      every clean airborne exit. The server was applying the exit-crash rule as if always ON.
+      FIX: _flying now counts as a death ONLY when the arena's exit-crash rule is ON. DAMAGED
+      remains a death under BOTH rule states (can't exit clean while damaged). New per-arena
+      opt-in, DEFAULT OFF (the reported-correct behaviour): settings_json 'exit_is_crash',
+      web arena-editor checkbox, read via _exit_is_crash_for_room() - mirrors the war-date /
+      fighters-only pattern exactly, fails to rule-OFF on any DB error. Master switch
+      EXIT_IS_CRASH_ENABLED. Gate is now: _damaged or (_flying and exit_crash_rule) or
+      COUNT_EXIT_TO_HQ_AS_DEATH.
+      SCOPE NOTE: 'undamaged' = took_damage, which latches PLAYER (msg-28) damage only; an
+      AA/flak hit the pilot survives and then exits with is treated as clean under rule OFF.
+      That matches the rule's intent (voluntary bug-out) and is the pre-existing damage scope.
+      A later Ghidra pass can populate exit_is_crash from FA's own .gdf bit without touching
+      the classifier - it only ever calls _exit_is_crash_for_room().
+      web_server.py: 'Exit = crash' checkbox in the arena-settings editor (GET render + POST
+      save), same shape as fighters_only.
+      FALSIFY: rule OFF (default) - an UNDAMAGED pilot who exits mid-flight is NOT a death and
+      keeps his plane (log: 'exited UNDAMAGED, AIRBORNE but ... rule is OFF -> clean exit').
+      Rule ON - the same airborne exit IS a death. A DAMAGED exit is a death under EITHER
+      state. A parked clean exit is never a death either way. An undamaged fly-into-ground
+      crash in a rule-OFF arena will now NOT count (accepted tradeoff: with the rule off the
+      two are wire-identical; enable the rule if crashes must count).
+      REVERT: EXIT_IS_CRASH_ENABLED=False restores rule-OFF semantics everywhere (undamaged
+      airborne exit never a death); full revert = drop the v400f5-tagged lines and the gate
+      returns to the old unconditional _flying test.
+
+v399f5: [PERF/TOOLING] Load counters for the HIGH-CAPACITY project (target: comfortable
+      headroom above the 15-player record; 6 players confirmed symptom-free). One [PERF]
+      log line every 30s (idle windows skipped): rx/tx packets-per-second and KB/s,
+      rxthread_busy%% (time inside packet dispatch / wall time - THE saturation metric for
+      the single RX thread), disp_avg/disp_max per-packet processing ms, relay_q_max
+      (telemetry backlog depth), sessions and flying counts.
+      IMPLEMENTATION: unlocked int/float adds on the hot paths (GIL-benign undercount
+      accepted, cheaper than any lock); counted at all five sendto sites (relay batch loop,
+      ACK sender, send_unrel, send_rel first-tx and retx), rx counted in the main loop,
+      dispatch timed in _guarded, relay queue depth sampled at batch put. Snapshot thread
+      'perf-stats' reads+resets the 30s window.
+      Also this deploy: GAMEDEF_DEBUG=False (operator change - the per-212 decompressed hex
+      dumps are off now that the plane-id work is banked; re-enable only when diffing
+      GAME_DEF fields).
+      FALSIFY: with pilots flying, a [PERF] line appears every 30s with plausible pps
+      (each flying client ~5 PPS up, relay tx ~= flying*(flying-1)*PPS) and busy%% well
+      under 100; an idle server logs nothing.
+      REVERT: PERF_STATS=False silences output; full revert = drop the v399f5-tagged lines.
+
 v398f5: [DATA] JP FIGHTER BLOCK + SBD-2 LOCATED - completes the plane-id map. Field facts:
       (1) the JP entry literally reads 'Douglas SBD-2 Dauntless' -> the SBD-2 record is a
       real, VISIBLE id inside JP's camp, so v397f5's 'SBD-2 = omitted id 107' was wrong;

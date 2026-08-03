@@ -1210,6 +1210,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<input type="checkbox" name="s_fighters_only" value="1"'
                 + (' checked' if fo_on else '') + '> Fighters only'
                 + fo_edited + '</label>')
+            # EXIT = CRASH (v400f5): opt-in checkbox. When ON, leaving the plane while airborne
+            # counts as a crash/death; the pilot must land (and be undamaged) to exit for free.
+            # When OFF (default), an undamaged in-flight exit is a clean bug-out - no death.
+            ec_on = bool(overrides.get('exit_is_crash'))
+            ec_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'exit_is_crash' in overrides else ''
+            exitcrash_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_exit_is_crash" value="1"'
+                + (' checked' if ec_on else '') + '> Exit while airborne counts as a crash'
+                + ec_edited + '</label>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -1237,6 +1247,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Fighters only</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
                     {fighters_html}
+                    <h3>Exit = crash</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to make LEAVING THE PLANE WHILE AIRBORNE count as a crash (a death and a lost plane) &mdash; pilots must land, and be undamaged, to exit for free. Leave unticked (the default) and an undamaged in-flight exit is a clean bug-out that costs nothing. An exit while <em>damaged</em> is a death either way. Takes effect the next time the arena is entered.</p>
+                    {exitcrash_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -1832,6 +1845,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             settings['war_enabled'] = 1 if qs.get('s_war_enabled', [''])[0].strip() else 0
             # FIGHTERS ONLY (v391): checkbox only posts when ticked; absence means off.
             settings['fighters_only'] = 1 if qs.get('s_fighters_only', [''])[0].strip() else 0
+            # EXIT = CRASH (v400f5): checkbox only posts when ticked; absence means off (the
+            # default - an undamaged airborne exit is a clean bug-out, not a death).
+            settings['exit_is_crash'] = 1 if qs.get('s_exit_is_crash', [''])[0].strip() else 0
             for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
                 _wv = qs.get('s_' + _wk, [''])[0].strip()
                 if _wv != '':
