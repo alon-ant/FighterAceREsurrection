@@ -224,7 +224,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v390f5'
+VERSION = 'v398f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1202,41 +1202,86 @@ PLANE_TEAMS_ENABLED = True
 WAR_DATE_ENABLED = True
 WAR_DATE_PUSH_TO_CLIENT = True
 
-# First-pass service-entry YEAR per plane, keyed BY NAME (auto-carries with PLANE_ROSTER order).
-# Vetted with the test pilots; 1946+ types are post-war and hide in any WWII-dated arena.
+# v396f5: availability dates REGENERATED from FA's OWN canon - the ACWIKI 'Fighter Ace Planes
+# Inventory' (the list the official Campaign Rules use; local copy under Program Files ACWIKI).
+# Keyed BY NAME (auto-carries with PLANE_ROSTER order). These supersede the researched
+# historical estimates: FA's dates are game-canon and differ in places by YEARS (IL-2 is the
+# m3 at Dec 1942, Ju-88 Feb 1941, He-111 Oct 1941, Yak-3 Oct 1943, DB-7B Mar 1943, Mitchell II
+# Feb 1942, Mosquito B IV Dec 1941, DH.100 Jun 1948, Tu-4 Aug 1946, L2D2 Feb 1941...).
+# Post-war types hide in any WWII-dated arena by year alone.
 PLANE_SERVICE_YEAR = {
-    # USA
-    'F4F-3': 1940, 'P-39D': 1941, 'P-40C': 1941, 'P-40E-1': 1941, 'SBD-2': 1941, 'B-25D': 1942,
-    'C-47A': 1942, 'F4F-4': 1942, 'F4U-1a': 1942, 'P-38G': 1942, 'TBF-1c': 1942,
-    'A-20Gu': 1943, 'B-17G': 1943, 'F6F-3': 1943, 'P-47D': 1943, 'B-25J': 1944, 'B-29': 1944,
-    'F4U-1c': 1944, 'P-38L': 1944, 'P-51D': 1944, 'F4U-4': 1945, 'F4U-4C': 1945,
-    'FH-1_Phantom': 1947, 'F-86E': 1951,
-    # GB
-    'Hurr-Ia': 1938, 'Spit-Ia': 1938, 'Martlet_I': 1940, 'DB-7B': 1941, 'Dauntless': 1941,
-    'Hurr-IIC': 1941, 'Spit-Vb_F': 1941, 'Tomahawk': 1941, 'Hurr-IID': 1942, 'Kittyhawk': 1942,
-    'Lancaster': 1942, 'Mosquito_B_IV': 1942, 'Seafire': 1942, 'Spit-IXc': 1942, 'Spit-Vb_LF': 1942,
-    'Typhoon': 1942, 'Avenger_II': 1943, 'Dakota_Mk.II': 1943, 'Mitchell_II': 1943,
-    'Mosquito_"Tse-Tse"': 1944, 'Mosquito_B_IX': 1943, 'Mosquito_FB_VI': 1943, 'Spit-IXe': 1943,
-    'Meteor_F1': 1944, 'Mitchell_III': 1944, 'Spit-XIV': 1944, 'Tempest': 1944, 'DH.100': 1946,
-    # SU
-    'I-16': 1935, 'Li-2': 1940, 'Hurr-IIb': 1941, 'IL-2': 1941, 'LaGG-3': 1941, 'MiG-3': 1941,
-    'Pe-2': 1941, 'Pe-8': 1941, 'Kittyhawk-Ia': 1942, 'Yak-1b': 1942, 'A-20Gs': 1943,
-    'La-5FN': 1943, 'P-39Q': 1943, 'IL-10': 1944, 'La-7': 1944, 'Tu-2': 1944, 'Yak-3': 1944,
-    'Yak-9U': 1944, 'Yak-9UT': 1945, 'MiG-9': 1946, 'Tu-4': 1949, 'MiG-15bis': 1950,
-    # GE
-    'Bf-109E-1/B': 1939, 'He-111': 1939, 'Ju-52/3m': 1939, 'Ju-88': 1939, 'Bf-109E-4/B': 1940,
-    'Bf-110C-4': 1940, 'Bf-109F-4/B': 1941, 'Do-217E-2': 1941, 'Bf-110G-2': 1942, 'Do-217J-1': 1942,
-    'FW-190A-4/U3': 1942, 'Ju-87D-3': 1942, 'Bf-109G-6/R2': 1943, 'Bf-109G-6/R6': 1943,
-    'Ju-87G-2': 1943, 'Bf-109K-4': 1944, 'FW-190A-8/R2': 1944, 'FW-190A-8/R3': 1944,
-    'FW-190A-8/R6': 1944, 'FW-190D-9': 1944, 'FW-190F-8': 1944, 'Me-262A-1': 1944,
-    'Ta-152H-1': 1945, 'Pulqui': 1947,
-    # JPN
-    'A6M2': 1940, 'D3A': 1940, 'L2D2': 1943, 'B5N2': 1941, 'G5N1': 1941, 'Ki-43-IIa': 1942,
-    'A6M5a': 1943, 'G4M2': 1943, 'Ki-44-IIc': 1943, 'Ki-44-IIc37': 1943, 'Ki-61': 1943,
-    'J2M3': 1944, 'Ki-67': 1944, 'Ki-84-1a': 1944, 'N1K2-J': 1944, 'A6M7': 1945, 'J9Y': 1945,
-    'Ki-100': 1945, 'Ki-84-1c': 1945,
-    # NU
-    'Me-163B': 1944, 'Tunnan': 1951, 'Ouragan': 1952, 'HA-200': 1955,
+    # --- USA ---
+    'F4F-3': 1940, 'P-39D': 1941, 'P-40C': 1941, 'P-40E-1': 1941, 'F4F-4': 1942, 'F4U-1a': 1942,
+    'P-38G': 1942, 'F6F-3': 1943, 'P-47D': 1943, 'F4U-1c': 1943, 'P-51D': 1944, 'P-38L': 1944,
+    'F4U-4': 1944, 'F4U-4C': 1945, 'FH-1_Phantom': 1946, 'F-86E': 1950, 'SBD-2': 1940,
+    'C-47A': 1941, 'B-25D': 1942, 'TBF-1c': 1942, 'A-20Gu': 1943, 'B-17G': 1943, 'B-25J': 1944,
+    'B-29': 1944,
+    # --- GB ---
+    'Hurr-Ia': 1938, 'Spit-Ia': 1938, 'Martlet_I': 1940, 'Spit-Vb_LF': 1941, 'Tomahawk': 1941,
+    'Hurr-IIC': 1941, 'Spit-Vb_F': 1941, 'Hurr-IID': 1941, 'Typhoon': 1941, 'Kittyhawk': 1941,
+    'Spit-IXc': 1942, 'Seafire': 1942, 'Spit-IXe': 1943, 'Spit-XIV': 1944, 'Tempest': 1944,
+    'Meteor_F1': 1944, 'DH.100': 1948, 'Ouragan': 1951, 'Tunnan': 1954, 'Dauntless': 1940,
+    'Mosquito_B_IV': 1941, 'Lancaster': 1942, 'Mitchell_II': 1942, 'Dakota_Mk.II': 1942,
+    'Avenger_II': 1943, 'DB-7B': 1943, 'Mosquito_FB_VI': 1943, 'Mosquito_"Tse-Tse"': 1943,
+    'Mosquito_B_IX': 1944, 'Mitchell_III': 1944,
+    # --- SU ---
+    'I-16': 1939, 'MiG-3': 1941, 'LaGG-3': 1941, 'Hurr-IIb': 1942, 'Kittyhawk-Ia': 1942,
+    'Yak-1b': 1942, 'La-5FN': 1943, 'P-39Q': 1943, 'Yak-3': 1943, 'Yak-9U': 1944, 'La-7': 1944,
+    'Yak-9UT': 1945, 'MiG-9': 1946, 'MiG-15bis': 1950, 'Pe-8': 1940, 'Pe-2': 1941, 'Li-2': 1941,
+    'IL-2': 1942, 'A-20Gs': 1943, 'Tu-2': 1944, 'IL-10': 1945, 'Tu-4': 1946,
+    # --- GE ---
+    'Bf-109E-1/B': 1939, 'Bf-109E-4/B': 1940, 'Bf-110C-4': 1940, 'Bf-109F-4/B': 1941,
+    'FW-190A-4/U3': 1942, 'Bf-110G-2': 1942, 'Bf-109G-6/R2': 1943, 'FW-190A-8/R6': 1944,
+    'FW-190F-8': 1944, 'Bf-109G-6/R6': 1944, 'FW-190A-8/R3': 1944, 'FW-190A-8/R2': 1944,
+    'Me-163B': 1944, 'Me-262A-1': 1944, 'FW-190D-9': 1944, 'Bf-109K-4': 1944, 'Ta-152H-1': 1945,
+    'Pulqui': 1947, 'HA-200': 1965, 'Ju-52/3m': 1939, 'Ju-88': 1941, 'Do-217E-2': 1941,
+    'Ju-87D-3': 1941, 'He-111': 1941, 'Do-217J-1': 1942, 'Ju-87G-2': 1943,
+    # --- JPN ---
+    'A6M2': 1940, 'Ki-43-IIa': 1942, 'Ki-44-IIc': 1943, 'Ki-44-IIc37': 1943, 'A6M5a': 1943,
+    'Ki-61': 1944, 'J2M3': 1944, 'N1K2-J': 1944, 'Ki-84-1a': 1944, 'Ki-84-1c': 1945,
+    'Ki-100': 1945, 'A6M7': 1945, 'J9Y': 1945, 'D3A': 1940, 'B5N2': 1940, 'L2D2': 1941,
+    'G5N1': 1941, 'G4M2': 1943, 'Ki-67': 1944,
+}
+
+# v394f5 month table; v396f5: REGENERATED from the same ACWIKI canonical list as the year
+# table above - now COMPLETE (all 121 planes, no # ?? guesses; each (year, month) pair is FA's
+# published availability date verbatim). Semantics unchanged from v394f5:
+# same convention as the year table. A plane is available when (service_year, service_month)
+# <= (war_year, war_month); UNLISTED planes default to month 1 (available from January of
+# their service year), which reproduces the pre-v394 year-only behaviour EXACTLY - so this
+# table only ever tightens dates it actually lists, never loosens anything. Sources: squadron
+# service entry / first combat, rounded toward the earlier month when they straddle. Rows
+# marked # ?? are the least certain (obscure variants / FA-specific types) - correct freely;
+# deleting a row just reverts that plane to whole-year behaviour. Post-war jets are unlisted
+# on purpose (a WWII-dated arena hides them by YEAR alone).
+PLANE_SERVICE_MONTH = {
+    # --- USA ---
+    'F4F-3': 12, 'P-39D': 3, 'P-40C': 6, 'P-40E-1': 12, 'F4F-4': 6, 'F4U-1a': 7, 'P-38G': 8,
+    'F6F-3': 1, 'P-47D': 6, 'F4U-1c': 12, 'P-51D': 3, 'P-38L': 4, 'F4U-4': 11, 'F4U-4C': 6,
+    'FH-1_Phantom': 10, 'F-86E': 12, 'SBD-2': 12, 'C-47A': 12, 'B-25D': 1, 'TBF-1c': 5,
+    'A-20Gu': 2, 'B-17G': 11, 'B-25J': 1, 'B-29': 3,
+    # --- GB ---
+    'Hurr-Ia': 3, 'Spit-Ia': 12, 'Martlet_I': 9, 'Spit-Vb_LF': 2, 'Tomahawk': 4, 'Hurr-IIC': 4,
+    'Spit-Vb_F': 8, 'Hurr-IID': 9, 'Typhoon': 9, 'Kittyhawk': 10, 'Spit-IXc': 7, 'Seafire': 8,
+    'Spit-IXe': 4, 'Spit-XIV': 4, 'Tempest': 6, 'Meteor_F1': 7, 'DH.100': 6, 'Ouragan': 12,
+    'Tunnan': 1, 'Dauntless': 12, 'Mosquito_B_IV': 12, 'Lancaster': 2, 'Mitchell_II': 2,
+    'Dakota_Mk.II': 4, 'Avenger_II': 2, 'DB-7B': 3, 'Mosquito_FB_VI': 5, 'Mosquito_"Tse-Tse"': 6,
+    'Mosquito_B_IX': 5, 'Mitchell_III': 8,
+    # --- SU ---
+    'I-16': 6, 'MiG-3': 3, 'LaGG-3': 6, 'Hurr-IIb': 2, 'Kittyhawk-Ia': 3, 'Yak-1b': 10,
+    'La-5FN': 3, 'P-39Q': 4, 'Yak-3': 10, 'Yak-9U': 4, 'La-7': 5, 'Yak-9UT': 3, 'MiG-9': 11,
+    'MiG-15bis': 1, 'Pe-8': 6, 'Pe-2': 1, 'Li-2': 12, 'IL-2': 12, 'A-20Gs': 2, 'Tu-2': 1,
+    'IL-10': 1, 'Tu-4': 8,
+    # --- GE ---
+    'Bf-109E-1/B': 3, 'Bf-109E-4/B': 1, 'Bf-110C-4': 6, 'Bf-109F-4/B': 8, 'FW-190A-4/U3': 7,
+    'Bf-110G-2': 12, 'Bf-109G-6/R2': 7, 'FW-190A-8/R6': 2, 'FW-190F-8': 2, 'Bf-109G-6/R6': 3,
+    'FW-190A-8/R3': 3, 'FW-190A-8/R2': 3, 'Me-163B': 5, 'Me-262A-1': 7, 'FW-190D-9': 8,
+    'Bf-109K-4': 11, 'Ta-152H-1': 3, 'Pulqui': 8, 'HA-200': 12, 'Ju-52/3m': 8, 'Ju-88': 2,
+    'Do-217E-2': 3, 'Ju-87D-3': 7, 'He-111': 10, 'Do-217J-1': 2, 'Ju-87G-2': 2,
+    # --- JPN ---
+    'A6M2': 10, 'Ki-43-IIa': 10, 'Ki-44-IIc': 2, 'Ki-44-IIc37': 5, 'A6M5a': 10, 'Ki-61': 1,
+    'J2M3': 2, 'N1K2-J': 6, 'Ki-84-1a': 6, 'Ki-84-1c': 1, 'Ki-100': 4, 'A6M7': 5, 'J9Y': 8,
+    'D3A': 1, 'B5N2': 4, 'L2D2': 2, 'G5N1': 4, 'G4M2': 9, 'Ki-67': 7,
 }
 
 # FILTER MECHANISM (2026-06-30). Two ways to make each side see only its own aircraft:
@@ -1301,8 +1346,40 @@ CATALOG_ALWAYS_3BYTE_ECHO = True
 # CORRECTED 2026-06-30: the prior list was in the client's HANGAR DISPLAY order, not slot
 # order, so name->slot put camp bits on the wrong planes (Germany showed allied bombers).
 # Rebuilt into true ID order via the msg-58 catalog, which maps display-position->plane-ID.
-# ID 107 is the only plane the client omits from its catalog (the L2D2 transport) -> never
-# shown; placed here for completeness.
+# v395f5 [CRITICAL CORRECTION]: the 2026-06-30 rebuild carried a 2-entry PHASE ERROR through
+# the bomber/transport tail. The client omits exactly two ids from its catalog uploads (107 and
+# 118); the rebuild assumed those were L2D2 and Me-163B, when the truth (proven 2026-08-03 by
+# zipping the client's own 121-line Preload load-order list with the 119-id full native catalog
+# upload from run_20260726, anchored at F4F-3=0, F4U-4C=101, Me-163B=118) is Me-163B=118 and
+# DAUNTLESS=107 - so every mapping after the Dauntless's load position was shifted by one:
+# 34 slots renamed (60-89 region, 105-108, 115). Field symptom that exposed it: GB's hangar
+# showed 'Pe-8' (client id 87, which we had as Mosquito_B_IX) and 'Li-2' (client id 84, our
+# 'Dakota'), while missing the real Dakota (83) and the Dauntless. NOTE: id 107 (the FAA
+# Dauntless) is the plane the client omits from its catalog -> it can never appear in any
+# hangar; it keeps its GB camp harmlessly. L2D2 is id 86 and IS in the catalog (shows on JPN).
+# All plane tables are keyed BY NAME, so this rename auto-heals teams, war dates, months,
+# fighter/bomber classification and scoring values for all 34 slots at once.
+# v397f5 [FINAL TAIL CORRECTION]: the two omitted catalog ids are 118 (Me-163B) and 107 - and
+# 107 is the US 'SBD-2' (Preload pos 80), NOT the Dauntless (pos 87). Both alignments give
+# byte-identical GB/SU/GE/JP maps (why every prior test passed); they differ only in the seven
+# US-bomber slots. Field discriminator (2026-08-03): the SBD-type shown on the US side wears
+# FAA/GB markings -> it is the client's id 90 = 'Dauntless'. Corrected: 56=TBF-1c, 57=A-20Gu,
+# 58=B-17G, 59=B-25J, 90=Dauntless(GB!), 104=B-25D, 114=B-29, 107=SBD-2 (catalog-omitted ->
+# the US-skinned SBD-2 can never appear for regular pilots; USA keeps it harmlessly).
+# Net display change: GB gains its FAA Dauntless (27 @1945/12), US drops to 21.
+# v398f5 [JP FIGHTER BLOCK + SBD-2 FOUND]: the JP hangar's literal 'Douglas SBD-2 Dauntless'
+# entry proved the SBD-2 record is a REAL, VISIBLE id inside JP's camp - so id 107 cannot be
+# the SBD-2. Constraint solve over all skip placements against every field-confirmed name
+# (GB 27 exact, US bombers exact, JP bombers exact, anchors 0/101/118/90) leaves one family:
+# both catalog skips sit BELOW Preload pos 80, forcing SBD-2 = id 55 (u[78]), and the second
+# omitted plane is in the JP-fighter/NU stretch. Field pin: JP's MISSING fighter is the A6M2
+# -> the Zero is id 46 (ex-'HA-200', parked in NU camp = why it was never seen), and the
+# omitted id 107 is the HA-200 (NU; the Pulqui-vs-HA-200 choice at 107/120 is NU-internal,
+# invisible, and gameplay-irrelevant; b=68 'Zero omitted' is excluded because the Zero was
+# demonstrably flyable in live FA 4.20). 14 slots renamed: 46=A6M2, 47=Ki-43-IIa, 48=A6M5a,
+# 49=Ki-61, 50=J2M3, 51=N1K2-J, 52=Ki-84-1a, 53=Ki-84-1c, 54=Ki-100, 55=SBD-2(USA!),
+# 92=Ki-44-IIc37, 93=Ki-44-IIc, 99=A6M7, 107=HA-200. Name-keyed tables auto-heal everything:
+# US regains a SHOWABLE US-skinned SBD-2 (22), JP regains the Zero and loses the stray (19).
 # v379f5 [REVERT]: v378f5 re-ordered PLANE_ROSTER to the client's 'Preload available planes' list
 # and this WORSENED the hangars (GB/SU/JP planes bled into every side). LESSON: the client's Preload
 # list is the model LOAD order, NOT the plane-id space. The plane-id space is what THIS table already
@@ -1315,14 +1392,14 @@ PLANE_ROSTER = [
     "P-51D","P-38L","F4U-4","Hurr-Ia","Spit-Ia","Spit-Vb_LF","Hurr-IIC","Spit-Vb_F","Typhoon","Spit-IXc",
     "Seafire","Spit-IXe","Spit-XIV","Tempest","I-16","LaGG-3","Hurr-IIb","Kittyhawk-Ia","Yak-1b","P-39Q",
     "La-5FN","Yak-3","Yak-9U","La-7","Bf-109E-4/B","Bf-109F-4/B","FW-190A-4/U3","FW-190A-8/R6","FW-190A-8/R3","Bf-109G-6/R2",
-    "FW-190A-8/R2","Bf-109G-6/R6","FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","HA-200","A6M2","Ki-44-IIc37","A6M5a",
-    "Ki-61","J2M3","N1K2-J","Ki-84-1a","A6M7","Ki-100","B-25D","TBF-1c","A-20Gu","B-17G",
-    "Dauntless","Mosquito_B_IV","Avenger_II","DB-7B","Mosquito_FB_VI","Mitchell_III","Pe-8","Pe-2","IL-2","A-20Gs",
-    "Tu-2","Tu-4","Ju-88","Do-217E-2","He-111","Do-217J-1","Ju-87G-2","D3A","G5N1","G4M2",
-    "Ju-87D-3","MiG-3","J9Y","C-47A","Dakota_Mk.II","Li-2","Ju-52/3m","Mosquito_B_IX",'Mosquito_"Tse-Tse"',"Mitchell_II",
-    "B-29","Martlet_I","Ki-44-IIc","Ki-43-IIa","Tomahawk","Kittyhawk","Hurr-IID","Yak-9UT","Bf-109E-1/B","Ki-84-1c",
-    "FW-190F-8","F4U-4C","Bf-110C-4","Bf-110G-2","SBD-2","Lancaster","B5N2","L2D2","Ki-67","MiG-15bis",
-    "F-86E","Meteor_F1","Tunnan","Ouragan","B-25J","IL-10","MiG-9","DH.100","Me-163B","FH-1_Phantom",
+    "FW-190A-8/R2","Bf-109G-6/R6","FW-190D-9","Me-262A-1","Bf-109K-4","Ta-152H-1","A6M2","Ki-43-IIa","A6M5a","Ki-61",
+    "J2M3","N1K2-J","Ki-84-1a","Ki-84-1c","Ki-100","SBD-2","TBF-1c","A-20Gu","B-17G","B-25J",
+    "Mosquito_B_IV","Lancaster","DB-7B","Mosquito_FB_VI",'Mosquito_"Tse-Tse"',"Mosquito_B_IX","Pe-2","IL-2","A-20Gs","Tu-2",
+    "IL-10","Ju-88","Do-217E-2","Ju-87D-3","Do-217J-1","Ju-87G-2","D3A","B5N2","G4M2","Ki-67",
+    "He-111","MiG-3","C-47A","Dakota_Mk.II","Li-2","Ju-52/3m","L2D2","Pe-8","Mitchell_III","Avenger_II",
+    "Dauntless","Martlet_I","Ki-44-IIc37","Ki-44-IIc","Tomahawk","Kittyhawk","Hurr-IID","Yak-9UT","Bf-109E-1/B","A6M7",
+    "FW-190F-8","F4U-4C","Bf-110C-4","Bf-110G-2","B-25D","Mitchell_II","G5N1","HA-200","J9Y","MiG-15bis",
+    "F-86E","Meteor_F1","Tunnan","Ouragan","B-29","Tu-4","MiG-9","DH.100","Me-163B","FH-1_Phantom",
     "Pulqui",
 ]
 
@@ -1428,36 +1505,102 @@ def _slot_camp_map(teams):
     return {i: name_camp.get(nm, 0) for i, nm in enumerate(PLANE_ROSTER)}
 
 def _war_year_for_room(room_id):
-    """(enabled, year) for a room's war-date filter. enabled only if WAR_DATE_ENABLED and the
-    arena opted in (settings_json war_enabled truthy) and a war_year is present. Reads the
-    per-room settings via db_get_room_settings; returns (False, None) on anything missing."""
+    """(enabled, year, month) for a room's war-date filter. enabled only if WAR_DATE_ENABLED and
+    the arena opted in (settings_json war_enabled truthy) and a war_year is present. Reads the
+    per-room settings via db_get_room_settings; returns (False, None, None) on anything missing.
+    v394f5: month comes from the same settings the web editor already stores (war_month); a
+    MISSING or invalid month falls back to 12 - i.e. whole-year semantics, identical to the
+    pre-v394 year-only filter - so arenas that never set a month lose nothing. war_day is
+    deliberately ignored: the service tables are month-granular at best."""
     if not WAR_DATE_ENABLED or room_id is None:
-        return (False, None)
+        return (False, None, None)
     try:
         st = db_get_room_settings(room_id)
     except Exception:
-        return (False, None)
+        return (False, None, None)
     if not isinstance(st, dict) or not st.get('war_enabled'):
-        return (False, None)
+        return (False, None, None)
     try:
         y = int(st.get('war_year'))
     except (TypeError, ValueError):
-        return (False, None)
-    return (True, y)
+        return (False, None, None)
+    try:
+        m = int(st.get('war_month'))
+    except (TypeError, ValueError):
+        m = 12
+    if not (1 <= m <= 12):
+        m = 12
+    return (True, y, m)
 
 def _apply_war_date_filter(slot_camp, room_id):
     """Remap out-of-window planes to camp 7 (NU/hidden) in a {slot:camp} map. A plane whose
-    PLANE_SERVICE_YEAR is AFTER the arena year is hidden (apply_plane_teams -> byte0 0x80).
+    (PLANE_SERVICE_YEAR, PLANE_SERVICE_MONTH) is AFTER the arena (war_year, war_month) is
+    hidden (apply_plane_teams -> byte0 0x80). Month-granular since v394f5; war_day ignored.
     No-op (returns the map unchanged) when the arena hasn't opted in. Never mutates the input."""
-    enabled, year = _war_year_for_room(room_id)
+    enabled, year, month = _war_year_for_room(room_id)
     if not enabled or not slot_camp:
         return slot_camp
     out = dict(slot_camp)
     for slot, camp in list(out.items()):
         if 0 <= slot < len(PLANE_ROSTER):
-            svc = PLANE_SERVICE_YEAR.get(PLANE_ROSTER[slot])
-            if svc is not None and svc > year:
+            name = PLANE_ROSTER[slot]
+            svc = PLANE_SERVICE_YEAR.get(name)
+            # v394f5: month-granular. Hide iff (service_year, service_month) > (war_year,
+            # war_month). Unlisted month -> 1 (January of the service year), which is exactly
+            # the old year-only behaviour for that plane.
+            if svc is not None and (svc, PLANE_SERVICE_MONTH.get(name, 1)) > (year, month):
                 out[slot] = 7          # NU/hidden -> 0x80 in apply_plane_teams (safe, never 0x00)
+    return out
+
+# ---------------------------------------------------------------------------------------------
+# FIGHTERS-ONLY PLANE FILTER (v391f5). Per-arena, opt-in: hide every bomber / attacker /
+# transport so the arena is pure fighter-vs-fighter. Same request family as the war-date
+# filter and the SAME proven mechanism end to end - the plane set is decided in the
+# {slot:camp} map, so both the GAME_DEF byte0 write (apply_plane_teams) and the 0x3a
+# catalog echo (_session_slot_camp) see the identical decision:
+#   * a non-fighter slot is remapped to camp 7 (NU) -> apply_plane_teams writes byte0 0x80
+#     (hidden from every standard side, NEVER 0x00 - so the GameDef.cpp:1902 CTD class is
+#     structurally impossible here, exactly as with the war-date remap).
+#   * "non-fighter" = BOMBER_PLANE_IDS (the v242 scoring classification): level/dive/torpedo
+#     bombers, dedicated attackers AND transports. Fighter-bombers on fighter airframes
+#     (Bf-109 /B variants, Typhoon, Hurr-IID...) are classed as fighters there and so STAY -
+#     which matches the sensible reading of a "fighters only" arena.
+# WHY server-side at all: FA.exe has no native per-era or per-class hangar restriction to
+# switch on. Definitive RE (2026-08-02): the hangar gate FUN_006de570 admits a plane via
+# free-selection ((MyRights & DAT_00bf53ec) != 0 && !(PLN_DEF+0xb & 1)) or via the byte-0
+# camp mask - and the gamedef Year/Month fields (0x4d8/0x4d9) are parsed but read by NOTHING
+# in the hangar path. So byte0 is the only lever, and it is the one we already own. (The
+# free-selection path is inert for players: msg 218 MyRights is only ever sent non-zero to
+# moderators, so a moderator MAY still see the full hangar in a filtered arena - that is the
+# existing staff behaviour, not a leak.)
+# OPT-IN per arena: settings_json fighters_only=1 (web arena editor checkbox). Nothing
+# changes for arenas that don't opt in. REVERT: FIGHTERS_ONLY_ENABLED=False kills the whole
+# feature in one flag; the war-date filter is untouched either way (independent functions).
+FIGHTERS_ONLY_ENABLED = True
+
+def _fighters_only_for_room(room_id):
+    """True iff this room opted into the fighters-only filter (settings_json fighters_only
+    truthy) and the feature is enabled. Mirrors _war_year_for_room; False on anything
+    missing so a DB hiccup fails OPEN (all planes shown) rather than stripping a hangar."""
+    if not FIGHTERS_ONLY_ENABLED or room_id is None:
+        return False
+    try:
+        st = db_get_room_settings(room_id)
+    except Exception:
+        return False
+    return bool(isinstance(st, dict) and st.get('fighters_only'))
+
+def _apply_fighters_only_filter(slot_camp, room_id):
+    """Remap every non-fighter slot (BOMBER_PLANE_IDS: bombers, attackers, transports) to
+    camp 7 (NU/hidden -> byte0 0x80) in a {slot:camp} map. No-op when the arena hasn't
+    opted in. Never mutates the input. Chained AFTER the war-date filter at both call
+    sites; the two are order-independent (both only ever remap TO camp 7, never away)."""
+    if not _fighters_only_for_room(room_id) or not slot_camp:
+        return slot_camp
+    out = dict(slot_camp)
+    for slot in BOMBER_PLANE_IDS:
+        if slot in out:
+            out[slot] = 7          # NU/hidden -> 0x80 in apply_plane_teams (safe, never 0x00)
     return out
 
 def plane_camp_for_room(room):
@@ -1467,7 +1610,8 @@ def plane_camp_for_room(room):
         return None
     teams = ROOM_PLANE_TEAMS.get(room[0], PLANE_TEAMS) if room else PLANE_TEAMS
     base = _slot_camp_map(teams)
-    return _apply_war_date_filter(base, room[0] if room else None)
+    base = _apply_war_date_filter(base, room[0] if room else None)
+    return _apply_fighters_only_filter(base, room[0] if room else None)   # v391f5
 
 def _session_slot_camp(s):
     """slot->camp map for the session's current room (per-room override else global table).
@@ -1475,7 +1619,8 @@ def _session_slot_camp(s):
     Also drops war-date-hidden planes from the echo (they map to camp 7, not the player's side)."""
     rid = getattr(s, 'current_room', None)
     teams = ROOM_PLANE_TEAMS.get(rid, PLANE_TEAMS) if rid is not None else PLANE_TEAMS
-    return _apply_war_date_filter(_slot_camp_map(teams), rid)
+    sc = _apply_war_date_filter(_slot_camp_map(teams), rid)
+    return _apply_fighters_only_filter(sc, rid)   # v391f5
 
 def _gamedef_plane_block(d):
     """Locate the plane block in a DECOMPRESSED GAME_DEF: returns (start, count, blen) where
@@ -2325,7 +2470,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # room (Ocean=1 vs English Channel=6) can be diffed field-by-field to pin the terrain
     # byte. Harmless; remove once the terrain field is located.
     if GAMEDEF_DEBUG:
-        log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}')
+        log('GAMEDEF212', f'decompressed hex ({len(d)}B): {bytes(d).hex()}', level='INFO')  # v390: force INFO so GAMEDEF_DEBUG dump isn't swallowed by the DEBUG-level GAMEDEF212 tag
     # v165: CORRECTION - the ushort at 14+camps_block_len (param_1[0x23]) is NOT the
     # terrain. It is the PLANE-SET id: FUN_0057bee0 feeds it straight to FUN_004c7cd0,
     # which loads "PLANES\Planes_%d.txt" (or "Planes.txt" when 0). v164 stamped 6 here,
@@ -10938,7 +11083,33 @@ def handle_post_auth(s, cmd, pl):
             return
 
     if cmd == 0:
-        if tb == 0x12:
+        # v392f5: the 0x3a HANGAR CATALOG must NOT enter this appspace dispatch. The appspace
+        # type byte ENCODES THE SIZE (T = ((size & 0xF) << 4) | 2, bc = size >> 4 - the LENGTH
+        # RULE), so ANY client upload whose payload is exactly 16k+1 bytes arrives with T=0x12
+        # and lands here by accident. That is precisely a catalog of 16 plane ids (1 sub byte +
+        # 16 ids = 17 = 0x11 -> bc=1, T=0x12). This block has no 0x3a case, so its catch-all
+        # swallowed the request, the 3-byte re-echo below never fired, and that side's hangar
+        # POOL stayed EMPTY - permanently, because the client's retry re-sends the identical
+        # 17-byte payload. Surfaced by the v391f5 fighters-only filter, which shrank GB to
+        # exactly 16 fighters (run_20260803_000702: GB type=0x12 -> no re-encode line, empty
+        # hangar; US/SU/GE/JP at 15/13/16/14B -> T=0xf2/0xd2/0x02/0xe2 -> all echoed fine).
+        # Any side hitting a multiple of 16 planes (via war-date, fighters-only, or roster
+        # edits) reproduces it, so the escape keys on the CATALOG SHAPE, not the side:
+        # direct sub==0x3a, or the prefixed form (sub normalised to 0x00, real sub at pl[8])
+        # which today can only be rescued - inside this block sub==0x00 shapes are consulted
+        # solely for pl[8]==0xd2/0x43, so pl[8]==0x3a was equally catch-all-swallowed.
+        # v393f5: the escape must cover the WHOLE tb dispatch chain, not just 0x12. The same
+        # length-rule collision hits every size-shaped tb with a handler: plane count n maps to
+        # size n+1 -> T, so n%16==0 -> 0x12 (v392f5), n%16==1 -> 0x22 (block default = VERBATIM
+        # echo -> client reads (2-1)/3 = 0 records: 1 plane owned, 0 shown), n%16==3 -> 0x42
+        # (verbatim echo -> (4-1)/3 = 1 record = FIRST uploaded id only: GB at war-date 1940
+        # kept 3 fighters and showed just the Hurricane), n%16==4 -> 0x52 (block else = SWALLOW,
+        # 'accepted (not echoed)': USA at 1941 kept 4 fighters and showed none). The 0x62/0x82/
+        # 0x92 blocks are sub-gated (0xe4/0xc8/0xdc) and immune. All four vulnerable blocks now
+        # take `and not _catalog_3a`; the escaped catalog falls through to the one true 0x3a
+        # re-encode handler below, same as every non-colliding size always did.
+        _catalog_3a = (sub == 0x3a) or (sub == 0x00 and len(pl) > 8 and pl[8] == 0x3a)
+        if tb == 0x12 and not _catalog_3a:
             if sub == 0xe1:
                 pilots=db_get_pilots(s.account) if s.account else []
                 resp=build_e1_pilot_list(pilots)
@@ -11348,7 +11519,7 @@ def handle_post_auth(s, cmd, pl):
             _ingame_own_object_removed(s, tb, stored)
             return
 
-        if tb == 0x22:
+        if tb == 0x22 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
             if sub == 0xe2 and s.account:
                 name_raw=pl[6:] if len(pl)>6 else b''
                 new_name=name_raw.split(b'\x00')[0].decode('ascii',errors='replace')
@@ -11368,7 +11539,7 @@ def handle_post_auth(s, cmd, pl):
                     slot=db_next_slot(s.account); db_ensure_pilot(new_name,s.account,slot)
             threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe2',to=5.0),daemon=True).start(); return
 
-        if tb == 0x42:
+        if tb == 0x42 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
             if sub == 0xe3:
                 name_raw = pl[8:] if len(pl)>8 else b''
                 pname = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
@@ -11453,7 +11624,7 @@ def handle_post_auth(s, cmd, pl):
         # sub=0xd9 = related team info (same issue)
         # DO NOT echo: echoing type=0x52 back to FA.exe causes infinite retry loops
         # and fills the squadron page with GAME_DEF garbage when triggered by wrong 0xce data.
-        if tb == 0x52:
+        if tb == 0x52 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
             if sub == 0xe0:
                 # v316: sub=0xe0 is the "Display Pilots" roster request, NOT "EnterArena".
                 # It was labelled EnterArena because a 0xe0 is often seen shortly before

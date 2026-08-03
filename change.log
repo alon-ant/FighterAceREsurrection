@@ -6,6 +6,17 @@ bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
+*** BANKED BASELINE 2026-08-03: v398f5 is the current stable banking point.
+    Field-confirmed on this date: the COMPLETE plane-id map (v395+v397+v398 -
+    all 121 slots anchored to the client's own Preload/upload data; both
+    Dauntlesses, the Zero at 46, SBD-2 at 55, omitted ids 107/118), FA-canon
+    war-date tables with month granularity (v394+v396, historical dates
+    verified live: Pearl Harbor / Barbarossa / BoB hangars exact), and the
+    generalized catalog LENGTH-RULE escape (v393). Rollback point: this file
+    at v398f5. Previous baseline note (2026-07-30, v373f5) retained below for
+    history; its identity-fix caveat has long since been superseded by weeks
+    of live play. NEXT PROJECT: high-capacity gameplay. ***
+
 *** NEW BASELINE 2026-07-30: v373f5 is the current stable baseline and is now
     the canonical server.py (server.py == server-fable5.py == v373f5, byte-
     identical). The fable5 fork line has caught up to trunk; from here server.py
@@ -15,6 +26,221 @@ they explain why a specific line is the way it is and must stay with it.
     its entry). Everything below it (through v371f5's 256-wedge cure) is
     field-confirmed stable. ***
 ==============================================================================
+
+v398f5: [DATA] JP FIGHTER BLOCK + SBD-2 LOCATED - completes the plane-id map. Field facts:
+      (1) the JP entry literally reads 'Douglas SBD-2 Dauntless' -> the SBD-2 record is a
+      real, VISIBLE id inside JP's camp, so v397f5's 'SBD-2 = omitted id 107' was wrong;
+      (2) the JP fighter MISSING from the hangar is the A6M2 (Zero).
+      METHOD: exhaustive solve over all (skip-a, skip-b) placements of the two catalog-omitted
+      preload entries, constrained by every field-confirmed name (GB's 27 exact, US bombers
+      exact incl. Dauntless=90, JP bombers exact, anchors F4F-3=0, F4U-4C=101, Me-163B=118).
+      Result: both skips lie BELOW preload pos 80, which forces 'SBD-2' onto upload slot
+      u[78] = id 55 (a slot that has carried the JP camp bit since day one - the stray
+      explained), and the second omitted plane is in the JP-fighter/NU stretch. The 'missing
+      Zero' pins it: the A6M2 is id 46 - the slot previously labelled 'HA-200' and parked in
+      the NU camp, which is exactly why no side ever displayed it - and the omitted id 107 is
+      the HA-200. (The Zero-omitted variant is excluded on gameplay-history grounds: the Zero
+      was flyable in live FA 4.20. The residual Pulqui<->HA-200 choice at ids 107/120 is
+      NU-internal, invisible and irrelevant.)
+      FIX: 14 slots renamed - 46=A6M2, 47=Ki-43-IIa, 48=A6M5a, 49=Ki-61, 50=J2M3, 51=N1K2-J,
+      52=Ki-84-1a, 53=Ki-84-1c, 54=Ki-100, 55=SBD-2, 92=Ki-44-IIc37, 93=Ki-44-IIc, 99=A6M7,
+      107=HA-200. Name-keyed tables auto-heal camps/dates/classification/scoring.
+      NET EFFECT @21.12.45: US 21 -> 22 (regains a SHOWABLE, US-skinned SBD-2 at id 55);
+      JP 19 -> 19 but composition fixed (regains the Zero at 46, loses the SBD stray);
+      GB stays 27; SU/GE unchanged. Both ACWIKI Dauntlesses now displayable on correct sides.
+      FALSIFY @21.12.45: (1) JP shows the A6M2 and NO SBD-type; (2) US shows a US-marked
+      SBD-2; (3) counts US22/GB27/SU19/GE23/JP19; (4) @08.12.1941 JP = {A6M2, D3A, B5N2,
+      G5N1, L2D2} with the Zero rendering as a Zero. If JP instead shows a small JET (HA-200
+      Saeta) where the Zero should be, the alignment is the excluded b=68 variant -> revert
+      46 to HA-200/NU and accept the Zero as client-unshowable (unlikely).
+      REVERT: restore the v397f5 PLANE_ROSTER block - one list, data only.
+
+v397f5: [DATA] US-bomber block PHASE CORRECTION - the field report 'wrong variant on US team'
+      disambiguated the one remaining alignment unknown. The client omits exactly two ids from
+      catalog uploads ({107,118}); v395f5 assumed the second omitted plane (107) was the
+      'Dauntless' (Preload pos 87). The two candidate skips (pos 80 'SBD-2' vs pos 87
+      'Dauntless') produce BYTE-IDENTICAL maps for GB/SU/GE/JP - which is why every v395/v396
+      field test passed either way - and differ ONLY in the seven US-bomber slots.
+      DISCRIMINATOR: with our USA bit on id 90, the client rendered an SBD-type wearing FAA/GB
+      markings on the US side ('SBD-2 (Douglas Dauntless) - GB variant'). Under pos-87 skip,
+      US id 104 would render the US-skinned SBD-2; under pos-80 skip, US id 90 renders the
+      FAA 'Dauntless'. The field saw the FAA bird -> skip is at pos 80: id 107 = 'SBD-2'.
+      FIX (8 slots renamed): 56=TBF-1c, 57=A-20Gu, 58=B-17G, 59=B-25J, 90=Dauntless,
+      104=B-25D, 114=B-29, 107=SBD-2. Name-keyed tables auto-heal camps/dates/class/scoring.
+      NET EFFECT @21.12.45: GB 26 -> 27 (gains its FAA Dauntless, correct GB variant, per
+      ACWIKI GB roster); US 22 -> 21 (the US-skinned SBD-2 is the catalog-omitted plane and
+      can never appear for regular pilots - a CLIENT limitation, like the Komet); SU/GE/JP
+      unchanged (19/23/19). NOTE: the 'SBD-2' sighted on the JP side is expected to be the
+      D3A slot rendering an SBD-like model (client art) - id 76 carries the Val record; if a
+      JP entry literally reads 'SBD-2'/'B-25D' as TEXT after this fix, reopen.
+      FALSIFY @21.12.45: (1) US=21, GB=27, SU=19, GE=23, JP=19; (2) the Dauntless (GB skin)
+      now appears on GB and NOT on US; (3) US bombers read TBF-1c, A-20Gu, B-17G, B-25J,
+      B-25D, B-29, C-47A with no SBD-type at all.
+      REVERT: restore the v396f5 PLANE_ROSTER block - one list, data only.
+
+v396f5: [DATA] [FIELD-CONFIRMED 2026-08-03: historical war dates verified in live hangars] War-date tables regenerated from FA's OWN CANONICAL availability dates - the
+      ACWIKI 'Fighter Ace Planes Inventory' (the list the official Campaign Rules use; local
+      copy under Program Files ACWIKI), found while confirming v395f5 in the field. Both
+      PLANE_SERVICE_YEAR and PLANE_SERVICE_MONTH now carry FA's published (year, month) for
+      ALL 121 planes - no researched estimates, no # ?? rows. Notable corrections vs the old
+      tables: Ju-88 Feb 1941 (was 1939), He-111 Oct 1941 (was 1939), IL-2 Dec 1942 (FA models
+      the m3), Yak-3 Oct 1943 (was Jul 1944), DB-7B Mar 1943 (was Oct 1941), Mitchell II Feb
+      1942 (was 1943), Mosquito B IV Dec 1941 (was May 1942), Spit-Vb LF Feb 1941 (before the
+      F!), Hurr-IID + Typhoon Sep 1941, Kittyhawk Oct 1941, F4U-4 Nov 1944, SBD-2 Dec 1940,
+      C-47A Dec 1941, Pe-8 Jun 1940, Li-2 Dec 1941, L2D2 Feb 1941, Ki-61 Jan 1944, DH.100 Jun
+      1948, Tu-4 Aug 1946, Tunnan Jan 1954, HA-200 Dec 1965.
+      NO REGRESSION at the current test date: 21.12.1945 counts stay US 22 / GB 26 / SU 19 /
+      GE 23 / JP 19 (identical to the v395f5 field confirmation). Spot simulations: 21.05.1940
+      fighters-only -> GB {Hurr-Ia, Spit-Ia}, SU {I-16}, GE {both Emils}; BoB 15.09.1940 GB
+      {Hurr-Ia, Spit-Ia, Martlet I}; Pearl Harbor 08.12.1941 US {F4F-3, P-39D, P-40C, P-40E-1,
+      SBD-2, C-47A}; Barbarossa 22.06.1941 GE {Emils, Bf-110C-4, Ju-88, Do-217E-2, Ju-52}.
+      FALSIFY: (1) 21.12.45 counts unchanged from v395f5's confirmed 22/26/19/23/19; (2) at
+      08.12.1941 the US P-40E-1 appears (Dec 1941) while F4F-4 does not (Jun 1942); (3) at
+      22.06.1941 GE has the Ju-88 (Feb 1941) but not the He-111 (Oct 1941).
+      REVERT: restore the previous two tables (v394f5/v395f5 backup) - data only, no code.
+
+v395f5: [CRITICAL/DATA] PLANE_ROSTER bomber/transport tail was PHASE-SHIFTED by one - the last
+      standing plane-identity defect, root-caused from the field report 'GB shows Pe-8 and Li-2,
+      missing the Dakota and the SBD-2(Dauntless)'.
+      EVIDENCE CHAIN: (1) live capture 09:23:05 (run_20260803_085904): GB's 0x3a upload = 27 ids
+      = exactly our camp-1 set, NO ids 66/85 on the wire -> served byte0 and echo are clean, so
+      the wrong NAMES had to be the client rendering our GB slots as different models. (2) The
+      client's id->name map was derived independently: its 121-line 'Preload' list (messages10)
+      is the PLN_INFO LOAD ORDER, and the 119-id full native catalog upload (run_20260726, True
+      era) lists ids in that same load order - zipping them gives the authoritative binding.
+      (3) The client omits exactly two ids from catalog uploads (107, 118). The 2026-06-30
+      rebuild assumed these were L2D2 + Me-163B; anchors (F4F-3=0, F4U-4C=101 from a live spawn,
+      Me-163B=118 from the field-proven staff gate) + the field symptom prove they are
+      Me-163B=118 and DAUNTLESS=107. Every mapping after the Dauntless's load position was
+      therefore off by one: 34 slots renamed (the 60-89 block, 105/106/107/108, 115). The
+      corrected alignment PREDICTS the report exactly: client 87=Pe-8 (we had Mosquito_B_IX,
+      GB bit), client 84=Li-2 (we had Dakota, GB bit), real Dakota=83, and the FAA Dauntless
+      (107) is the catalog-omitted plane -> it can never appear in any hangar (kept on GB
+      harmlessly). L2D2 is really id 86 (JPN side), Ju-52 is 85, C-47A is 82, J9Y is 108.
+      FIX: PLANE_ROSTER rewritten from the verified map (set of 121 names unchanged, order
+      corrected). Every plane table is keyed BY NAME, so teams, war-date years+months,
+      fighter/bomber classification (41/80 counts unchanged) and scoring values auto-heal for
+      all 34 slots. This also silently CORRECTS prior misattribution in kill class columns,
+      plane values and war-date gating for tail planes.
+      FALSIFY (no filters or 1945/12): (1) GB shows all its bombers incl. Dakota, NO Pe-8/Li-2;
+      (2) SU shows Pe-8+Li-2+IL-10+Tu-4; (3) GE shows Ju-52 + He-111 + both Ju-87s; (4) JPN
+      shows L2D2 + Ki-67 + J9Y + G5N1; (5) war-date spot check: at 1941 GB has no Lancaster
+      (1942/3) but has DB-7B from Oct 1941.
+      REVERT: restore the previous PLANE_ROSTER block (git/backup copy) - one list.
+
+v394f5: [FEATURE] MONTH-GRANULAR war-date filter (field request after v393f5 confirmed working).
+      New sparse PLANE_SERVICE_MONTH table (by name, like the year table); a plane is available
+      when (service_year, service_month) <= (war_year, war_month). The web editor already
+      stored war_month/war_day per arena - the game server simply starts honouring the month
+      (war_day stays ignored: the tables are month-granular at best). NO-REGRESSION BY
+      CONSTRUCTION: a plane UNLISTED in the month table defaults to month 1 (January of its
+      service year = old behaviour exactly), and an arena with NO stored month reads as month
+      12 (whole-year = old behaviour exactly). Months are squadron-service/first-combat,
+      rounded early; the least-certain rows are marked # ?? for review, and deleting a row
+      reverts that plane to whole-year.
+      Sample hangars (fighters-only on): 21.05.1940 -> GB Hurr-Ia+Spit-Ia, GE the three 1939/40
+      birds, SU I-16, USA/JPN empty (F4F-3 is Dec-1940, A6M2 Jul-1940 - historically right;
+      empty sides at early dates are inherent to the setting). 21.05.1941 -> USA 3 (P-40E-1
+      arrives in August), GB 5, SU 3, GE 3, JPN 1. NOTE these counts land on the v392/v393
+      collision sizes (1, 3, 4 planes) constantly - the length-rule escape was a hard
+      prerequisite for month granularity.
+      Verified offline: month table has no orphan names and no out-of-range values; replayed
+      21.05.1940 / 21.05.1941 / 21.05.1942 / 01.09.1938; asserted the two no-regression
+      defaults. FALSIFY: (1) 21.05.1940 GB shows exactly Hurr-Ia + Spit-Ia ('re-encoded 2');
+      (2) 21.05.1941 USA shows F4F-3 + P-39D + P-40C (P-40E-1 hidden until 01.08.1941);
+      (3) an arena with war year only (no month set) behaves exactly as before.
+      REVERT: delete the (svc, month) tuple compare back to `svc > year` (one line) - or empty
+      the PLANE_SERVICE_MONTH dict, which is behaviourally identical.
+
+v393f5: [CRITICAL/PROTOCOL] Complete the v392f5 LENGTH-RULE fix: the catalog escape must cover
+      the WHOLE tb dispatch chain, not just 0x12. Field report (war date 21.05.1940 + fighters-
+      only): GB hangar showed ONLY the Hurricane Mk.1 of its 3 eligible fighters; at 1941 GB
+      recovered but USA showed NOTHING of its 4. Both are the same collision at other type
+      values - NO client-side date logic involved (the missing Spitfire was arithmetic, not
+      history):
+        * GB@1940: 3 fighters -> catalog size 4 -> T=0x42 -> the tb==0x42 block's default is a
+          VERBATIM echo of the flat 1-byte upload; the client's msg-58 decoder reads
+          (Size-1)/3 = 1 record = the FIRST uploaded id = Hurr-Ia. One plane shown.
+        * USA@1941: 4 fighters -> size 5 -> T=0x52 -> the tb==0x52 block's else is 'accepted
+          (not echoed)' - a SWALLOW. Zero records, empty hangar. (The session log will show
+          'type=0x52 sub=0x3a ... accepted (not echoed)'.)
+        * GB@1941: 6 fighters -> size 7 -> T=0x72 -> no block -> correct re-encode ('more
+          aircraft are listed').
+      FULL COLLISION SURFACE (plane count n -> size n+1 -> T): n%16==0 -> 0x12 (fixed v392f5),
+      n%16==1 -> 0x22 (verbatim: 1 plane owned, 0 shown), n%16==3 -> 0x42 (verbatim: first id
+      only), n%16==4 -> 0x52 (swallow: none shown). 0x62/0x82/0x92 are sub-gated (0xe4/0xc8/
+      0xdc) and immune; 0x01/0x00 can't match (catalog T low nibble is always 2).
+      FIX: the v392f5 _catalog_3a escape now gates all four vulnerable blocks (0x12, 0x22,
+      0x42, 0x52); an escaped catalog falls through to the single 0x3a re-encode handler, same
+      as every non-colliding size always did. The re-encode replies via build_ingame_pkt (fresh
+      type from RESPONSE size), so the 'never echo type=0x52' rule is not violated. Simulated
+      the full matrix n=0..32: every colliding count now re-encodes correctly; pilot create/
+      delete/rename (0xe2/0xe3/0xe7) and DisplayPilots/SetArena/gamedef/213 (0xe0/0xd7/0xd4/
+      0xd5) still enter their blocks untouched.
+      FALSIFY: (1) GB at 21.05.1940 shows Hurr-Ia + Spit-Ia + Martlet_I (3) and logs
+      're-encoded 3'; (2) USA at 1941 shows F4F-3 + P-39D + P-40C + P-40E-1 (4), 're-encoded
+      4'; (3) pilot create/delete/rename still work; (4) Display Pilots popup and arena list
+      still work; (5) no 0x52 echo retry loops.
+      REVERT: drop the three 'and not _catalog_3a' clauses (v392f5's 0x12 clause can stay).
+
+v392f5: [CRITICAL/PROTOCOL] Empty GB hangar under the v391f5 fighters-only filter - a LENGTH-RULE
+      collision, not a filter bug. Diagnosed from run_20260803_000702 + messages10: every side's
+      0x3a catalog upload got its 'POST-AUTH re-encoded N (3-byte recs)' echo EXCEPT GB's, whose
+      two attempts (00:10:02, 00:11:13) produced no echo and no CAREER push at all.
+      ROOT CAUSE: the client's appspace type byte ENCODES THE PAYLOAD SIZE - T = ((size & 0xF)
+      << 4) | 2, bc = size >> 4 (verified across all five captured sides: GB 17B->0x12,
+      US 15B->0xf2, SU 13B->0xd2, GE 16B->0x02, JP 14B->0xe2). The handle_post_auth appspace
+      dispatch keyed on `tb == 0x12` as if 0x12 were a fixed type marker, but any upload whose
+      payload is exactly 16k+1 bytes arrives with T=0x12. A catalog of EXACTLY 16 plane ids
+      (1 sub + 16 ids = 17 bytes) is precisely that shape - and fighters-only cut GB to exactly
+      its 16 fighters. The block has no 0x3a case, so its catch-all return swallowed the
+      request; the 3-byte re-echo (which IS the hangar pool since v384f5) never fired; and the
+      client's retry re-sends the identical 17-byte payload, so the hangar stayed empty
+      permanently. Pre-filter GB uploaded 28 planes (29B -> T=0xd2), which is why this never
+      showed before; ANY side reaching a multiple of 16 planes (war-date, fighters-only, roster
+      edits) would reproduce it. Likely the same class as the v337/v339 'lobby-phase blind
+      spot' around msg 58.
+      FIX: one guard - the appspace block's entry condition now excludes the catalog shape:
+      `if tb == 0x12 and not _catalog_3a`, where _catalog_3a = direct sub==0x3a OR the prefixed
+      form (sub==0x00 with pl[8]==0x3a; inside the block sub==0x00 was only ever consulted for
+      pl[8]==0xd2/0x43, so the prefixed catalog was equally catch-all-swallowed - rescuing it
+      changes nothing else). Excluded packets fall through to the existing 0x3a re-encode
+      handler unchanged. Simulated against all five captured packets: GB now parses (size=17,
+      16 ids) and echoes; US/SU/GE/JP dispatch identically to before; genuine appspace 0x12
+      requests (0xe1 pilot list, 0xd2 arena list, 0x43 polls) still enter the block.
+      FALSIFY: (1) GB hangar populates in the fighters-only arena and the T=0x12 request logs
+      're-encoded 16'; (2) other sides unchanged; (3) arena list + pilot list + 0x43 polls
+      still work (the block's real traffic); (4) no new 'unknown message' floods.
+      REVERT: restore `if tb == 0x12:` (delete the _catalog_3a line and the `and not` clause).
+
+v391f5: [FEATURE] Per-arena FIGHTERS-ONLY hangar filter (web arena editor checkbox, opt-in).
+      Completes the second half of the per-era + fighters-only request (the era half shipped as
+      the v383f5 war-date filter). Hides every bomber / attacker / transport in an opted-in
+      arena so it plays pure fighter-vs-fighter; fighter-bombers on fighter airframes (Bf-109
+      /B variants, Typhoon, Hurr-IID...) stay, per the BOMBER_PLANE_IDS classification the
+      v242 scoring work already established (41 slots hidden, 80 kept).
+      WHY SERVER-SIDE: definitive Ghidra pass (2026-08-02, FA.exe) proved no native per-era or
+      per-class hangar restriction exists. Hangar gate FUN_006de570 admits a plane EITHER via
+      free-selection ((MyRights & DAT_00bf53ec) != 0 && !(PLN_DEF+0xb & 1)) OR via the byte-0
+      camp mask (FUN_00438330); PLN_DEF+0xb is a static .pli byte and the gamedef Year/Month
+      fields (0x4d8/0x4d9) are parsed but read by NOTHING in the hangar path. Byte-0 is the
+      only server lever, and MyRights is only sent non-zero to moderators, so the free-
+      selection bypass is inert for players (a moderator may still see the full hangar in a
+      filtered arena - existing staff behaviour, not a leak).
+      MECHANISM: identical to (and independent from) the war-date filter. New function
+      _apply_fighters_only_filter chained after _apply_war_date_filter at both decision
+      points (plane_camp_for_room -> GAME_DEF byte0 write; _session_slot_camp -> 0x3a catalog
+      echo), remapping BOMBER_PLANE_IDS slots to camp 7 -> apply_plane_teams writes byte0 0x80
+      (hidden from every standard side, NEVER 0x00, so the GameDef.cpp:1902 CTD class is
+      structurally impossible). The two filters are order-independent (both only remap TO 7).
+      Opt-in via settings_json fighters_only=1; web_server.py gained the checkbox (GET render
+      + POST persist, mirroring war_enabled). DB read fails OPEN (all planes shown).
+      Verified offline: no-op without opt-in, no input mutation, Me-163B stays NU, Typhoon/
+      Bf-109E-4/B/P-51D stay on their sides, B-17G/IL-2/C-47A remap to 7; compile OK both files.
+      FALSIFY (one throwaway arena first): (1) ticked arena's hangar shows no bombers/attackers/
+      transports on ANY side; (2) untouched arenas unchanged; (3) no 1902 CTD; (4) side-switch
+      does not hang the HQ menu; (5) combines with war date (tick both on a 1941 arena).
+      REVERT: FIGHTERS_ONLY_ENABLED = False (single flag, war-date filter unaffected).
 
 v390f5: [INTERNET/CRITICAL] Fix the '100%% loading -> blank splash -> closes' hang for clients on
       a high-latency (internet) link. This is the real KILO/bigalon bug - NOT load, NOT the buffer.
