@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v407f5'
+VERSION = 'v408f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -408,12 +408,14 @@ def init_db():
     if 'admin_rights' not in pcols:
         conn.execute("ALTER TABLE pilots ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 0")
         log('DB', 'pilots: added `admin_rights` column (default 0) [moderator MyRights]')
-    # v406f5/v407f5: per-arena-mode scoreboards (the web ladder's FFA / TC / Events boards).
-    # Each mode gets a COMPLETE stat set of its own - score, kills, deaths - fed in parallel
-    # by db_apply_score_delta(mode=) / db_credit_kill(mode=); the career columns - and RANK,
-    # computed from score+bomber_score - remain the single source of truth the client renders.
-    # Existing pilots start every board at 0.
+    # v406f5/v407f5/v408f5: per-arena-mode scoreboards (the web ladder's FFA / TC / Events
+    # tabs). Each mode gets a COMPLETE stat set of its own, with the SAME fighter/bomber score
+    # split as the career (score_<mode> = fighter-flown points, bscore_<mode> = bomber-flown
+    # points), plus its own kills/deaths - fed in parallel by db_apply_score_delta(mode=) /
+    # db_credit_kill(mode=). The career columns - and RANK, computed from score+bomber_score -
+    # remain the single source of truth the client renders. Existing pilots start at 0.
     for _c in ('score_ffa', 'score_tc', 'score_events',
+               'bscore_ffa', 'bscore_tc', 'bscore_events',
                'kills_ffa', 'kills_tc', 'kills_events',
                'deaths_ffa', 'deaths_tc', 'deaths_events'):
         if _c not in pcols:
@@ -7618,9 +7620,10 @@ def db_apply_score_delta(name, delta, bomber=False, mode=None):
     WHAT YOU WERE FLYING when you earned the points, not on what you shot down. So `bomber` selects
     the column (`bomber_score` vs `score`). RANK is computed from the COMBINED total, since it is a
     single ladder.
-    v406f5: `mode` ('ffa'|'tc'|'events') additionally mirrors the same delta into that arena
-    mode's own tally column (score_ffa/score_tc/score_events, clamped at 0 like the career
-    columns) - the web ladder's per-mode boards. Career columns and RANK are unaffected by it.
+    v406f5/v408f5: `mode` ('ffa'|'tc'|'events') additionally mirrors the same delta into that
+    arena mode's own tally - split fighter/bomber EXACTLY like the career (`bomber` picks
+    bscore_<mode> vs score_<mode>), clamped at 0 like the career columns. These feed the web
+    ladder's per-mode boards; career columns and RANK are unaffected by them.
     Returns (new_total, new_rank, old_rank) so the caller can log a promotion/demotion.
     """
     if not name:
@@ -7646,12 +7649,16 @@ def db_apply_score_delta(name, delta, bomber=False, mode=None):
     else:
         conn.execute("UPDATE pilots SET score=?, rank=? WHERE pilot_name=?",
                      (f_score, new_rank, name))
-    # v406f5: PER-MODE TALLY (web ladder FFA/TC/Events boards) - same delta, the mode's own
-    # column, same never-negative clamp. Missing column (un-migrated DB) -> silently skipped.
+    # v406f5/v408f5: PER-MODE TALLY (web ladder FFA/TC/Events boards) - same delta, the mode's
+    # own column with the career's fighter/bomber split (`bomber` -> bscore_<mode>), same
+    # never-negative clamp. Missing column (un-migrated DB) -> silently skipped.
     _mcol = {'ffa': 'score_ffa', 'tc': 'score_tc', 'events': 'score_events'}.get(mode)
-    if _mcol and _mcol in have:
-        conn.execute(f"UPDATE pilots SET {_mcol} = MAX(0, COALESCE({_mcol},0) + ?) "
-                     f"WHERE pilot_name=?", (int(delta), name))
+    if _mcol:
+        if bomber:
+            _mcol = 'b' + _mcol                      # bscore_ffa / bscore_tc / bscore_events
+        if _mcol in have:
+            conn.execute(f"UPDATE pilots SET {_mcol} = MAX(0, COALESCE({_mcol},0) + ?) "
+                         f"WHERE pilot_name=?", (int(delta), name))
     conn.commit(); conn.close()
     return (new_total, new_rank, old_rank)
 

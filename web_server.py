@@ -3,6 +3,13 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-08-03: v408f5 - ladder restructured: FFA | TC | Events are the MAIN tabs.
+#   Fighter and Bomber scores are no longer their own tabs - they are COLUMNS inside every
+#   board, exactly like the career split (score_<mode> = fighter-flown, new bscore_<mode> =
+#   bomber-flown, fed by db_apply_score_delta(mode=, bomber=)). Four tabs now: Career (the
+#   client-rendered career: Fighter/Bomber/Total + career kills/deaths) and FFA / TC /
+#   Events, each a full 9-column scoreboard (#, Pilot, Rank, Fighter Score, Bomber Score,
+#   Total, Kills, Deaths, K/D) sorted by that board's Total; every column header sorts.
 # 2026-08-03: v407f5 - every ladder board is a COMPLETE scoreboard.
 #   The FFA/TC/Events tabs showed career kills/deaths on every board; now each mode board
 #   reads its OWN kills_<mode>/deaths_<mode> columns (fed by db_credit_kill(mode=)) and
@@ -405,7 +412,7 @@ LADDER_TABS_ASSETS = """
                 </style>
                 <script>
                 function lshow(tid){
-                  var ids=['ltotal','lfighter','lbomber','lffa','ltc','levents'];
+                  var ids=['lcareer','lffa','ltc','levents'];
                   for(var i=0;i<ids.length;i++){
                     var p=document.getElementById('pan-'+ids[i]);
                     if(p) p.style.display=(ids[i]===tid)?'block':'none';
@@ -787,7 +794,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 return ("COALESCE(" + col + ",0)") if col in pcols else "0"
             stats = conn.execute("SELECT pilot_name, account_name, COALESCE(score,0), "
                                  + _gc('bomber_score') + ", " + _gc('score_ffa') + ", "
-                                 + _gc('score_tc') + ", " + _gc('score_events') + ", "
+                                 + _gc('bscore_ffa') + ", " + _gc('score_tc') + ", "
+                                 + _gc('bscore_tc') + ", " + _gc('score_events') + ", "
+                                 + _gc('bscore_events') + ", "
                                  + _gc('kills_ffa') + ", " + _gc('deaths_ffa') + ", "
                                  + _gc('kills_tc') + ", " + _gc('deaths_tc') + ", "
                                  + _gc('kills_events') + ", " + _gc('deaths_events') + ", "
@@ -798,34 +807,32 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             def _kd(k, d):
                 return round(k / d, 2) if d > 0 else float(k)
             pilots = []
-            for (p_name, a_name, f_score, b_score, s_ffa, s_tc, s_ev,
+            for (p_name, a_name, f_score, b_score, f_ffa, b_ffa, f_tc, b_tc, f_ev, b_ev,
                  k_ffa, d_ffa, k_tc, d_tc, k_ev, d_ev, k, d) in stats:
                 total = (f_score or 0) + (b_score or 0)
                 # Rank is ALWAYS the combined-ladder rank - it IS the pilot's rank (the server
                 # computes it from fighter+bomber, db_apply_score_delta), same on every tab.
                 rname = _rank_name_for_score(_ref, total) if _ref else ''
                 pilots.append({'name': p_name, 'acct': a_name, 'rank': rname,
-                               'f': f_score, 'b': b_score, 'total': total,
-                               'k': k, 'd': d, 'kd': _kd(k, d),
-                               'ffa': s_ffa, 'k_ffa': k_ffa, 'd_ffa': d_ffa,
-                               'kd_ffa': _kd(k_ffa, d_ffa),
-                               'tc': s_tc, 'k_tc': k_tc, 'd_tc': d_tc,
-                               'kd_tc': _kd(k_tc, d_tc),
-                               'ev': s_ev, 'k_ev': k_ev, 'd_ev': d_ev,
-                               'kd_ev': _kd(k_ev, d_ev)})
+                               'career_f': f_score, 'career_b': b_score, 'career_t': total,
+                               'career_k': k, 'career_d': d, 'career_kd': _kd(k, d),
+                               'ffa_f': f_ffa, 'ffa_b': b_ffa, 'ffa_t': f_ffa + b_ffa,
+                               'ffa_k': k_ffa, 'ffa_d': d_ffa, 'ffa_kd': _kd(k_ffa, d_ffa),
+                               'tc_f': f_tc, 'tc_b': b_tc, 'tc_t': f_tc + b_tc,
+                               'tc_k': k_tc, 'tc_d': d_tc, 'tc_kd': _kd(k_tc, d_tc),
+                               'ev_f': f_ev, 'ev_b': b_ev, 'ev_t': f_ev + b_ev,
+                               'ev_k': k_ev, 'ev_d': d_ev, 'ev_kd': _kd(k_ev, d_ev)})
 
-            # v407f5: each board is a COMPLETE scoreboard - its own score, kills, deaths, K/D.
-            # The three career boards share the career kill/death columns (the DB has no
-            # per-airframe kill split); the three mode boards use their own counters.
+            # v408f5: FFA / TC / Events are the MAIN boards (plus Career - the totals the game
+            # client itself renders). Fighter and Bomber scores are COLUMNS inside every board,
+            # exactly mirroring the career split; each board sorts by its own Total then K/D,
+            # and every column header re-sorts. Each mode's kills/deaths/K/D are its own.
             ladder_boards = []
-            for tid, label, skey, kkey, dkey, kdkey in (
-                    ('ltotal',   'Total Score',   'total', 'k',     'd',     'kd'),
-                    ('lfighter', 'Fighter Score', 'f',     'k',     'd',     'kd'),
-                    ('lbomber',  'Bomber Score',  'b',     'k',     'd',     'kd'),
-                    ('lffa',     'FFA Score',     'ffa',   'k_ffa', 'd_ffa', 'kd_ffa'),
-                    ('ltc',      'TC Score',      'tc',    'k_tc',  'd_tc',  'kd_tc'),
-                    ('levents',  'Events Score',  'ev',    'k_ev',  'd_ev',  'kd_ev')):
-                rows = sorted(pilots, key=lambda x: (x[skey], x[kdkey]), reverse=True)
+            for tid, prefix in (('lcareer', 'career'), ('lffa', 'ffa'),
+                                ('ltc', 'tc'), ('levents', 'ev')):
+                fk, bk, tk = prefix + '_f', prefix + '_b', prefix + '_t'
+                kk, dk, kdk = prefix + '_k', prefix + '_d', prefix + '_kd'
+                rows = sorted(pilots, key=lambda x: (x[tk], x[kdk]), reverse=True)
                 body = ""
                 for pos, p in enumerate(rows, 1):
                     row_style = ("background-color: #e8f4f8; font-weight: bold;"
@@ -833,22 +840,24 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     body += ("<tr style='" + row_style + "'><td>" + str(pos) + "</td>"
                              "<td><strong>" + hesc(str(p['name'])) + "</strong></td>"
                              "<td>" + hesc(str(p['rank'])) + "</td>"
-                             "<td>" + str(p[skey]) + "</td>"
-                             "<td>" + str(p[kkey]) + "</td><td>" + str(p[dkey]) + "</td>"
-                             "<td>" + str(p[kdkey]) + "</td></tr>")
+                             "<td>" + str(p[fk]) + "</td><td>" + str(p[bk]) + "</td>"
+                             "<td><strong>" + str(p[tk]) + "</strong></td>"
+                             "<td>" + str(p[kk]) + "</td><td>" + str(p[dk]) + "</td>"
+                             "<td>" + str(p[kdk]) + "</td></tr>")
                 ths = ""
-                for i, h in enumerate(('#', 'Pilot Name', 'Rank', label, 'Kills', 'Deaths',
+                for i, h in enumerate(('#', 'Pilot Name', 'Rank', 'Fighter Score',
+                                       'Bomber Score', 'Total', 'Kills', 'Deaths',
                                        'K/D Ratio')):
                     ths += ('<th onclick="sortLadder(' + "'" + tid + "'," + str(i) + ')">'
                             + h + ' &#x21D5;</th>')
-                ladder_boards.append((tid, label, ths, body))
+                ladder_boards.append((tid, prefix, ths, body))
 
             tabs_html = ""
             panels_html = ""
-            for i, (tid, label, ths, body) in enumerate(ladder_boards):
+            for i, (tid, prefix, ths, body) in enumerate(ladder_boards):
                 on = ' lon' if i == 0 else ''
-                tab_lbl = {'ltotal': 'Combined', 'lfighter': 'Fighter', 'lbomber': 'Bomber',
-                           'lffa': 'FFA', 'ltc': 'TC', 'levents': 'Events'}.get(tid, label)
+                tab_lbl = {'lcareer': 'Career', 'lffa': 'FFA', 'ltc': 'TC',
+                           'levents': 'Events'}.get(tid, prefix)
                 tabs_html += ('<button type="button" class="ltab' + on + '" id="btn-' + tid + '" '
                               'onclick="lshow(' + "'" + tid + "'" + ')">' + tab_lbl + '</button>')
                 panels_html += ('<div class="lpanel" id="pan-' + tid + '" style="display:'
@@ -862,11 +871,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <h1>Top Aces Ladder</h1>
                 <div class="card" style="padding: 0;">
                     <div class="lbar">{tabs_html}</div>
-                    <p style="color:#888; font-size:0.85em; margin:8px 15px 0;">Fighter and Bomber
-                    points depend on what you were <em>flying</em> when you earned them. The FFA, TC
-                    and Events boards are complete scoreboards of their own: score, kills, deaths and
-                    K/D there count only what happened in arenas of that type. Rank comes from the
-                    combined Fighter+Bomber total on every board.</p>
+                    <p style="color:#888; font-size:0.85em; margin:8px 15px 0;">Every board splits
+                    its score into Fighter and Bomber - which one your points feed depends on what
+                    you were <em>flying</em> when you earned them. The FFA, TC and Events boards
+                    count only what happened in arenas of that type; Career is the record the game
+                    itself renders. Rank comes from the combined career total everywhere.</p>
                     <div style="padding: 15px;">
                         <input type="text" id="searchInput" placeholder="Search by pilot name..." style="width: 100%; padding: 10px; margin: 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;">
                     </div>

@@ -27,6 +27,33 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v408f5: [SCORING/WEB] LADDER RESTRUCTURED - FFA | TC | EVENTS ARE THE MAIN TABS, WITH THE
+      FIGHTER/BOMBER SPLIT INSIDE EVERY BOARD. User direction: fighter/bomber should not be
+      tabs of their own; the arena modes are the boards, and each carries the same
+      fighter/bomber score split the game itself keeps.
+      (1) Three more pilots columns - bscore_ffa/tc/events (bomber-flown points per mode).
+      score_<mode> is REDEFINED as the mode's FIGHTER-flown points - safe because none of the
+      v406/v407 columns has ever existed in a live DB (no restart since v400f5), so there is
+      no data to migrate, only meaning to fix before first boot.
+      (2) db_apply_score_delta: the per-mode tally now honours `bomber` exactly like the
+      career does - bomber -> 'b' + score_<mode>. One rule, both ladders.
+      (3) /ladder: FOUR tabs - Career | FFA | TC | Events. Career is the record the client
+      itself renders (career fighter/bomber/total + career kills/deaths); each mode tab is a
+      full 9-column scoreboard: #, Pilot, Rank, Fighter Score, Bomber Score, Total (bold),
+      Kills, Deaths, K/D - all per-mode, sorted by that board's Total then its K/D, every
+      header re-sortable. Old localStorage tab ids simply no-select -> Career default.
+      Unit-verified: sqlite full-cycle with the real db_apply_score_delta - a fighter+bomber
+      FFA session, a TC bomber kill and an Events fighter loss land as career (0f-after-clamp,
+      1100b), FFA (500f, 700b), TC (0f, 400b), Events (0/0 - the loss clamped at 0), proving
+      every column clamps independently and career/boards agree; the 4x9 page builder executed
+      with two synthetic pilots shows independent per-board ordering (TC leader differs) and
+      exactly 18 cells per 2-row board. (Two ASSERTION bugs during testing - a mispredicted
+      clamp and a substring-count overlap - were in the TESTS, verified against the DB rows;
+      the code was right both times.)
+      FALSIFY: a pilot who flies a bomber in TC and a fighter in FFA shows points in exactly
+      bscore_tc and score_ffa; the TC tab's Fighter Score column stays 0 for them; the Career
+      tab equals the in-game HQ screen.
+
 v407f5: [SCORING/WEB] EVERY BOARD IS A COMPLETE SCOREBOARD. Reported: the v406f5 FFA/TC/
       Events tabs still showed the CAREER kills/deaths on every board - only score was
       per-mode, so K/D and the kill columns were identical across arena types. Now each mode
