@@ -27,6 +27,185 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v407f5: [SCORING/WEB] EVERY BOARD IS A COMPLETE SCOREBOARD. Reported: the v406f5 FFA/TC/
+      Events tabs still showed the CAREER kills/deaths on every board - only score was
+      per-mode, so K/D and the kill columns were identical across arena types. Now each mode
+      carries its full stat set:
+      (1) Six more pilots columns - kills_ffa/tc/events + deaths_ffa/tc/events (same startup
+      migration loop, default 0).
+      (2) db_credit_kill(mode=): the killer's kills_<mode> and the victim's deaths_<mode>
+      increment alongside the career counters; both score_on_death call sites (credited kill
+      AND the no-shooter/AA death) pass mode, so a flak death in a TC arena lands in deaths_tc
+      exactly like a player kill would. Career kills/deaths/streak/planes-lost semantics are
+      byte-identical to before - the per-mode counters are strictly additive columns in the
+      same UPDATE.
+      (3) /ladder: the FFA/TC/Events boards now render their OWN kills, deaths and a K/D
+      computed from them; the three career boards (Combined/Fighter/Bomber) keep the career
+      kill/death columns - the DB has no per-airframe kill split and inventing one would lie.
+      Each mode board also sorts by (mode score, mode K/D), so tie-breaks are per-mode too.
+      Unit-verified FULL-CYCLE on a real sqlite DB with the actual db_credit_kill +
+      db_apply_score_delta: Hunter 2xFFA + 1xTC kills -> career kills 3 with boards 2/1/0 and
+      scores 1000/500; Prey's four deaths (3 shot down + 1 AA in Events) -> career 4 with
+      boards 2/1/1 and planes_lost_ai fed; per-mode scores clamp at 0 independently; the
+      career columns are untouched by any board write.
+      FALSIFY: two pilots duel in a Dogfighting arena then move to a Territorial Combat arena
+      - after one kill in each, the FFA tab shows 1/0 and the TC tab shows 1/0 independently
+      while Combined shows 2 kills; an AA death in an Events arena bumps the Events tab's
+      Deaths column only.
+
+v406f5: [SCORING/WEB] PER-MODE SCOREBOARDS - FFA | TC | EVENTS LADDER TABS. The v405f5 tabs
+      covered the two career columns; the user wants boards for the NEW scoring system's arena
+      types too. That needs per-mode TALLIES, not just display - and it surfaced a design gap:
+      'Events' lost its identity inside scoring_mode_for_room (v402f5 resolved it to a value
+      column immediately), so nothing downstream could ever know a death happened in an Events
+      arena. Changes:
+      (1) 'events' is now a FIRST-CLASS scoring mode: scoring_mode_for_room returns
+      'ffa'|'tc'|'events'|None (category 'event*' -> 'events'; the web override accepts
+      'events' too - new 'Force Events board' option in the arena editor dropdown). WHICH
+      value column an Events arena prices planes with moved into plane_value: mode 'events'
+      -> the EVENTS_VALUE_TABLE column (still the one-word flip, verified both ways).
+      (2) pilots gains score_ffa / score_tc / score_events INTEGER DEFAULT 0 (startup
+      migration, same pattern as the msg-25 columns; existing pilots start every board at 0).
+      (3) db_apply_score_delta(mode=): the same delta is MIRRORED into the mode's tally
+      column with the same never-negative clamp; career score/bomber_score and RANK are
+      untouched by it - they remain the single ladder the client renders. All three
+      score_on_death call sites (killer credit + both victim-loss branches) pass mode.
+      (4) /ladder: six boards - Combined | Fighter | Bomber | FFA | TC | Events - same
+      search/sort/persistence chrome, columns guarded for a pre-migration DB.
+      Unit-verified END-TO-END incl. a REAL sqlite DB: category 'Events' and forced-'events'
+      both resolve; events pricing follows EVENTS_VALUE_TABLE ('ffa'->111/'tc'->999 fixture);
+      a scripted session (2 FFA kills, a TC loss, a bomber Events kill, a mode-less delta)
+      leaves career=(650 fighter, 700 bomber) with boards (ffa 1000, tc clamped to 0,
+      events 700) and the mode-less delta touching no board; 6-board orderings independent.
+      FALSIFY: boot log prints the three pilots-column migrations once; a kill in a
+      'Dogfighting' arena raises the pilot's FFA board only (career unchanged in the other
+      boards); an 'Events'-category death logs the EVENTS_VALUE_TABLE plane cost and feeds
+      score_events; the ladder's TC tab re-orders independently of Fighter/Bomber.
+
+v405f5: [WEB] LADDER TABS - COMBINED | FIGHTER SCORE | BOMBER SCORE. The ladder only read the
+      `score` column (Fighter Score, msg-25 f9) while FA keeps TWO boards: `bomber_score`
+      (f10) is fed by what the pilot was FLYING when the points were earned (v242 rule), so a
+      bomber pilot's career was invisible on the web. Now three tabs, each a fully sorted
+      board: Combined (fighter+bomber - the total RANK is computed from, per
+      db_apply_score_delta, so it is the canonical board and the default tab), Fighter, and
+      Bomber. The Rank column shows the same combined-ladder rank on every tab - it IS the
+      pilot's rank; a per-column rank would be an invention. One search box filters all three
+      boards at once; the chosen tab persists across visits (localStorage); the column sorter
+      is generalized to sortLadder(tableId, col). bomber_score is column-guarded so an
+      un-migrated DB renders zeros instead of erroring. Bonus fix: pilot names in ladder rows
+      are now HTML-escaped - they never were, and v317 explicitly allows names containing
+      < > & " ' (any printable ASCII), so a hostile pilot name could inject markup into the
+      public ladder page. Tab chrome lives in LADDER_TABS_ASSETS, a plain string, for the
+      same f-string brace-escaping reason as ADMIN_TABS_ASSETS.
+      Unit-verified end-to-end with three synthetic pilots: per-board ordering differs
+      correctly (bomber-heavy pilot tops Bomber and Combined but bottoms Fighter), rank is
+      the combined-ladder rank everywhere, a '<'-bearing name renders escaped, and exactly
+      one panel is visible in the emitted HTML.
+      FALSIFY: /ladder shows three tabs; a pilot with fighter=200/bomber=4000 leads the
+      Bomber board, trails the Fighter board, and holds the rank of their 4200 total on both;
+      searching filters whichever tab is open; the tab choice survives a page reload.
+
+v404f5: [WEB/SCORING] SCORING TABLES ON THE WEB + PER-ARENA SCORING CONTROL. Two user asks:
+      the web server displays both value tables, and scoring/ranks are controllable per arena
+      type. (1) /scoring - a Scoring Reference page linked from the dashboard nav and the
+      ladder: the 13-rank ladder with score bands and loss percentages, the full per-plane
+      FFA/TC value table (filterable, fighter/bomber classed, unlisted planes flagged), the
+      14 AI-object values and the flat event bonuses. The data is NOT copied into the web
+      module: server.py injects web_scoring_reference() as a CALLABLE (new scoring_ref_fn
+      kwarg on start_web_server), so the page always renders the constants actually in force
+      and can never drift from the code - values shown are the EFFECTIVE ones (blank-TC
+      planes show their FFA fallback). (2) Arena settings editor: new 'Scoring mode' dropdown
+      -> settings_json 'scoring_mode': Default (the category decides; the effective result is
+      shown inline in the option label), Force FFA, Force TC, or Force NO global scoring.
+      scoring_mode_for_room() checks the override FIRST, so it wins over the category; ''/
+      absent falls through to the v402f5 category rule, and 'Default' stores no key. This
+      gives every arena - including a Custom one - an explicit scoring switch without touching
+      its category/list grouping. (3) /ladder gained a military-rank column (rank name
+      computed from score against the injected ladder); the position column is now '#'.
+      The pilot editor already edits rank (0-12) and every score column (v240) - with the
+      v401f5 13-rank ladder those indices now map to the full Cadet..FM range.
+      Unit-verified: override precedence (override beats category, 'none' forces off, junk
+      falls through, custom-can-be-forced-on), web_scoring_reference structure (13 ranks,
+      FM open-ended, 5%..100% modifiers, 14 AI objects, chute penalty negative), and the
+      /scoring + dropdown + POST blocks compiled AND executed against the real payload.
+      FALSIFY: /scoring renders all four tables and the plane filter works; saving 'Force TC'
+      on a Dogfighting arena makes the next death there log the TC plane cost; saving
+      'Default' back removes the key (no scoring_mode in the arena-edited log line); the
+      ladder shows 'Field Marshal' for a 20M-score pilot.
+
+v403f5: [SCORING/DATA] AI-OBJECT DUAL VALUES + TRIGGER-SCENE CORRECTION. Completes the
+      Plane_scoring.xlsx port. (1) AI_OBJECT_VALUES: the sheet's full 'AI Objects' table, both
+      columns (FFA, TC) - extends the tanks-only TANK_VALUES_2004 (whose numbers are exactly
+      this table's TC column) with the ships (cargo 1500, cruiser 2000, battleship 5000,
+      carrier 4000), paratrooper (the one big FFA/TC split: 250/50), locomotive 40 and rail
+      car 10. Cross-checked 14/14 against the sheet parse. Nothing consumes it yet - same
+      recorded-for-wiring status as GROUND_TARGET_VALUES - but ai_object_value(name, mode)
+      plugs straight into the v402f5 arena mode when ground/AI scoring lands (returns 0 for an
+      unknown name: an unpriced object scores nothing rather than something invented).
+      (2) TRIGGER_SCENE_BONUS_2004 1000 -> 500: the newsletter's list said 1000, the sheet's
+      Sheet2 event table says 500 - the sheet wins (same source family as the plane values
+      that authenticated against TANK_VALUES_2004). One-line revert. (3) The paratrooper
+      constant DESTROY_AI_PARATROOPER_BONUS=50 documented as the TC column.
+      With v401-v403 the full recovered-sheet port is in: 2004 rank ladder (v401), FFA/TC
+      plane values + arena scoring mode (v402), AI objects + event-bonus correction (v403).
+      Weapons_Tables.xlsx (gun AP/HE damage, overheat, bomb/rocket/torpedo damage+radius) is
+      deliberately NOT ported yet - its consumer is PvE damage/auto-destroy calibration, a
+      separate subsystem, queued as its own version.
+      FALSIFY: pure data + dead-until-wired helper; the live-behaviour surface is only the
+      scene-trigger bonus, which should log +500 (not +1000) on the next triggered scene.
+
+v402f5: [SCORING/DATA] AUTHORITATIVE PER-PLANE VALUES + ARENA SCORING MODE. The real per-plane
+      value table surfaced (Plane_scoring.xlsx) - the exact table v374f5's PLANE_VALUE_2004
+      comment asked for ('if the real scoring.htm table ever surfaces, replace this dict
+      wholesale'). Authenticated: the sheet's AI-objects TC column matches TANK_VALUES_2004
+      verbatim (Tiger/KV-1 500, T-34/Panther 400, Cromwell/Sherman 250, Type97 100). It prices
+      every plane TWICE - an FFA value and a TC value (e.g. Tempest 1000/1800, B-17G 10/1500,
+      F4U-4C 650/2000: bombers nearly free to lose in FFA, expensive in TC) - so the derived
+      1000..2000 interpolation band is retired. 120/121 roster planes covered (Me-163B is
+      staff-only, absent -> sheet-scale class default 600/200). Transcription was PROGRAMMATIC
+      (openpyxl -> dict literals, zero hand-typed numbers); display-name -> PLANE_ROSTER key
+      map validated 120/120 against the roster vocabulary, zero unmapped. Four blank TC cells
+      (Martlet I, Tomahawk IIB, Hurricane IID, Kittyhawk IA) fall back to the plane's FFA value.
+      ARENA SCORING MODE (policy set with the user 2026-08-03): the arena's web-editable list
+      CATEGORY (rooms.category, the name1 section header) now decides scoring -
+      'Dogfighting' -> FFA column, 'Territorial Combat' -> TC column, 'Events' -> scores with
+      EVENTS_VALUE_TABLE (currently 'ffa', one-word flip), anything else incl. the default
+      'Custom Arenas' -> DOES NOT TOUCH GLOBAL SCORING AT ALL: score_on_death exits before any
+      career-DB write (no score/kills/deaths/aces/rank restates), consuming the victim's
+      PENDING_KILL latch so it cannot leak into a later death in a scoring arena.
+      PLUMBING: scoring_mode_for_room(room_id) resolves once at the top of score_on_death
+      (substring, case-insensitive, DB-miss -> non-scoring, mirrors _exit_is_crash_for_room's
+      fail-safe direction); plane_value(plane_id, mode=None) passes the column through; the
+      killer's flat Destroy Plane Bonus is unchanged (2004 model - the column only prices the
+      VICTIM's loss). Gates: PLANE_VALUES_AUTHORITATIVE=False -> derived values everywhere;
+      CUSTOM_ARENAS_SCORE=True -> every arena scores again (TC column). Unit-verified: value
+      lookups for Tempest/Hurr-IID/B-17G/F4U-4C in both columns, blank-TC fallback, defaults,
+      and category resolution for 8 category spellings incl. both revert flags.
+      FALSIFY: a death in a 'Dogfighting'-category arena logs the FFA plane cost and a
+      'Territorial Combat' death logs the TC cost for the same plane (B-17G: 10 vs 1500 base,
+      x rank modifier); a death in a 'Custom Arenas' arena logs 'NON-SCORING' and changes NO
+      career column; boot line prints '120 FFA / 116 TC authoritative plane values'.
+
+v401f5: [SCORING/DATA] THE 2004 RANK LADDER. Source: Ranks.xlsx (recovered official 2004-era
+      rank/score bands - the same source family as the v374f5 newsletter economy; its Sheet2
+      loss-modifier percentages match RANK_LOSS_MODIFIER_2004 verbatim, which authenticates the
+      ladder). Replaces the 2001 9-rank thresholds (v249) with the 13-rank 2004 bands:
+      Cadet 0-999 | Sgt 1k-2,999 | 2nd Lt 3k-5,999 | 1st Lt 6k-49,999 | Capt 50k-99,999 |
+      Maj 100k-249,999 | Lt Col 250k-999,999 | Col 1M | B.Gen 2M | M.Gen 4M | L.Gen 8M |
+      Gen 12M | FM 20M+. WHY IT MATTERS BEYOND COSMETICS: (1) 13 ranks is exactly the client's
+      own hard clamp (FUN_00428770 caps rank at 0xc) - every index the client can render is now
+      reachable; (2) RANK_LOSS_MODIFIER_2004[9..12] (M.Gen 80% .. FM 100%) was DEAD CODE under
+      the 9-rank ladder (no score could hold rank > 8) - the 2004 loss scaling is now complete;
+      (3) the 2004 bands fit the 2004 plane values (10..4000 per plane) - with the old 30k-top
+      ladder a few good sessions hit Brigadier General, which is why ranks inflated in live play.
+      Gated: RANK_LADDER_2004 (False = exact v249 2001 ladder, one flag, full revert). All
+      consumers are length-driven (rank_for_score iterates, RANK_VALUE/logs use len()), so no
+      other code changes. rank_for_score math verified against every band edge incl. 3,583 pts
+      -> 2nd Lieutenant (the v249 calibration case) and 20M+ -> Field Marshal.
+      FALSIFY: boot log prints 'Cadet..Field Marshal' with the 13 thresholds; a pilot seeded to
+      49,999 renders 1st Lieutenant via msg-88 and 50,000 renders Captain; setting
+      RANK_LADDER_2004=False reproduces the old boot line byte-for-byte.
+
 v400f5: [SCORING/BUGFIX] The arena 'EXIT = CRASH' rule. FA arenas govern whether leaving
       the plane WHILE AIRBORNE costs you: rule OFF -> an UNDAMAGED in-flight exit is a clean
       bug-out (no death, no plane lost); rule ON -> you must land (undamaged) to exit for

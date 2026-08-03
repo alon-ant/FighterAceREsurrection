@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v400f5'
+VERSION = 'v407f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -408,6 +408,17 @@ def init_db():
     if 'admin_rights' not in pcols:
         conn.execute("ALTER TABLE pilots ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 0")
         log('DB', 'pilots: added `admin_rights` column (default 0) [moderator MyRights]')
+    # v406f5/v407f5: per-arena-mode scoreboards (the web ladder's FFA / TC / Events boards).
+    # Each mode gets a COMPLETE stat set of its own - score, kills, deaths - fed in parallel
+    # by db_apply_score_delta(mode=) / db_credit_kill(mode=); the career columns - and RANK,
+    # computed from score+bomber_score - remain the single source of truth the client renders.
+    # Existing pilots start every board at 0.
+    for _c in ('score_ffa', 'score_tc', 'score_events',
+               'kills_ffa', 'kills_tc', 'kills_events',
+               'deaths_ffa', 'deaths_tc', 'deaths_events'):
+        if _c not in pcols:
+            conn.execute(f"ALTER TABLE pilots ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
+            log('DB', f'pilots: added `{_c}` column (default 0) [per-mode ladder board]')
     conn.commit(); conn.close()
 
 def db_upsert_account(acct, pid, f45, ab):
@@ -872,7 +883,8 @@ def db_next_slot(acct):
     row = conn.execute("SELECT MAX(slot_index) FROM pilots WHERE account_name=?", (acct,)).fetchone()
     conn.close(); return (row[0] or 0) + 1
 
-def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, lost_to_ai=False):
+def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, lost_to_ai=False,
+                   mode=None):
     """Accumulate a combat result into persistent pilot stats (global scoring).
 
     v240: also maintains the columns the HQ Scores screen renders, so they stay consistent with
@@ -886,10 +898,14 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
     v243: `lost_to_ai` sends the loss to planes_lost_ai (msg-25 f13, "Planes Lost to AI") instead of
     planes_lost (f4), which is where an AA/flak kill belongs. The HQ screen shows f4 + f13, so the
     total is right either way - but the breakdown is what the game actually tracks.
+    v407f5: `mode` ('ffa'|'tc'|'events') also increments that arena mode's OWN kill/death
+    counters (kills_<mode> / deaths_<mode>) so each web ladder board is a complete scoreboard;
+    career kills/deaths/streak/planes-lost are maintained exactly as before.
     Columns are added conditionally so an un-migrated DB still works.
     """
     conn = sqlite3.connect(DB_PATH)
     have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
+    _msuf = mode if mode in ('ffa', 'tc', 'events') else None
     if killer_name:
         sets, args = ['kills=kills+1', 'score=score+?'], [points]
         _kcol = 'kills_bombers' if victim_is_bomber else 'kills_fighters'
@@ -897,6 +913,8 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
             sets.append(f'{_kcol}={_kcol}+1')
         if 'kills_in_a_row' in have:
             sets.append('kills_in_a_row=kills_in_a_row+1')
+        if _msuf and f'kills_{_msuf}' in have:
+            sets.append(f'kills_{_msuf}=kills_{_msuf}+1')      # v407f5 per-mode board
         args.append(killer_name)
         conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", args)
     if victim_name:
@@ -906,6 +924,8 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
             sets.append(f'{_lcol}={_lcol}+1')
         if 'kills_in_a_row' in have:
             sets.append('kills_in_a_row=0')          # dying breaks the streak
+        if _msuf and f'deaths_{_msuf}' in have:
+            sets.append(f'deaths_{_msuf}=deaths_{_msuf}+1')    # v407f5 per-mode board
         conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
     conn.commit(); conn.close()
 
@@ -7120,11 +7140,29 @@ LIVE_ACE_TRACKING   = True   # v222: SERVER-AUTHORITATIVE ace status. FA's rule 
 #        6       7      Lieutenant Colonel  14000 - 21999
 #        7       8      Colonel             22000 - 29999
 #        8       9      Brigadier General   30000 - 46000
-RANK_THRESHOLDS = [0, 1000, 2000, 4000, 6000, 10000, 14000, 22000, 30000]
-RANK_NAMES = [   # cosmetic only (logs / web admin) - the CLIENT prints its own localized name
+# v401f5: THE 2004 RANK LADDER (Ranks.xlsx - the official 2004-era rank/score bands). 13 ranks,
+# Cadet..Field Marshal - exactly the client's own 0..12 clamp (FUN_00428770), so every index the
+# client can render is now reachable. This also un-deadens RANK_LOSS_MODIFIER_2004[9..12]
+# (M.Gen..FM): under the 9-rank 2001 ladder no score could ever hold a rank above Brigadier
+# General, so the top of the 2004 loss-modifier table was unreachable code. Bands (verbatim from
+# the sheet): Cadet 0-999 | Sgt 1000-2999 | 2nd Lt 3000-5999 | 1st Lt 6000-49999 |
+# Capt 50000-99999 | Maj 100000-249999 | Lt Col 250000-999999 | Col 1M-1.999M | B.Gen 2M-3.999M |
+# M.Gen 4M-7.999M | L.Gen 8M-11.999M | Gen 12M-19.999M | FM 20M+.
+RANK_LADDER_2004 = True   # False -> the exact 2001 9-rank ladder below (v249 behaviour)
+RANK_THRESHOLDS_2001 = [0, 1000, 2000, 4000, 6000, 10000, 14000, 22000, 30000]
+RANK_NAMES_2001 = [
     'Cadet', 'Sergeant', 'Second Lieutenant', 'First Lieutenant', 'Captain',
     'Major', 'Lieutenant Colonel', 'Colonel', 'Brigadier General',
 ]
+RANK_THRESHOLDS_2004 = [0, 1000, 3000, 6000, 50000, 100000, 250000,
+                        1000000, 2000000, 4000000, 8000000, 12000000, 20000000]
+RANK_NAMES_2004 = [   # cosmetic only (logs / web admin) - the CLIENT prints its own localized name
+    'Cadet', 'Sergeant', 'Second Lieutenant', 'First Lieutenant', 'Captain',
+    'Major', 'Lieutenant Colonel', 'Colonel', 'Brigadier General',
+    'Major General', 'Lieutenant General', 'General', 'Field Marshal',
+]
+RANK_THRESHOLDS = RANK_THRESHOLDS_2004 if RANK_LADDER_2004 else RANK_THRESHOLDS_2001
+RANK_NAMES      = RANK_NAMES_2004      if RANK_LADDER_2004 else RANK_NAMES_2001
 RANK_VALUE = lambda idx: max(1, min(len(RANK_THRESHOLDS), int(idx) + 1))   # the page's 1-based value
 
 # AIR-TO-AIR KILL = value of the plane you shot down  +  a RANK BONUS:
@@ -7189,8 +7227,14 @@ PILOT_LOSS_PENALTY_2004      = 500    # penalty to the pilot for losing their pl
 DESTROY_PLANE_BONUS_2004     = 500    # killer's flat reward for destroying an enemy aircraft
 DAMAGE_PLANE_BONUS_2004      = 250    # for a damaging hit that doesn't kill (needs damage attribution)
 DESTROY_HUMAN_PARACHUTE_PEN  = 500    # PENALTY for shooting a human in his parachute
-DESTROY_AI_PARATROOPER_BONUS = 50     # bonus for downing an AI paratrooper
-TRIGGER_SCENE_BONUS_2004     = 1000   # bonus for triggering a capturable scene
+DESTROY_AI_PARATROOPER_BONUS = 50     # bonus for downing an AI paratrooper. v403f5: this is the
+                                      #   sheet's TC column; FFA prices a chute at 250 - use
+                                      #   ai_object_value('Paratrooper', mode) when AI scoring
+                                      #   wires in.
+TRIGGER_SCENE_BONUS_2004     = 500    # v403f5: sheet value (Plane_scoring.xlsx Sheet2 event
+                                      #   table). The 2004 newsletter's list said 1000; the sheet
+                                      #   says 500 - the sheet wins (same source family as the
+                                      #   authoritative plane values). One-line revert: 1000.
 CAPTURE_SCENE_BONUS_2004     = 2000   # bonus for capturing a scene
 
 # TABLE 1B - JULY 2004 plane values. The four marked (*) are the EXACT values the newsletter lists
@@ -7237,6 +7281,147 @@ def plane_value_2004(plane_id):
     if v is not None:
         return v
     return 900 if is_bomber_plane(plane_id) else 1500
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v402f5: AUTHORITATIVE PER-PLANE VALUES (Plane_scoring.xlsx) + ARENA SCORING MODE
+# ══════════════════════════════════════════════════════════════════════════════
+# THE REAL TABLE SURFACED. PLANE_VALUE_2004 above is a derived interpolation and says of itself
+# 'if the real scoring.htm table ever surfaces, replace this dict wholesale'. Plane_scoring.xlsx
+# IS that table - authenticated by its AI-objects TC column matching TANK_VALUES_2004 verbatim
+# (Tiger/KV-1 500, T-34/Panther 400, Cromwell/Sherman 250, Type97 100) - and it carries TWO
+# values per plane: an FFA value and a TC value. 120 of the 121 roster planes are listed
+# (Me-163B is staff-only and absent -> class-default fallback). Values transcribed
+# programmatically from the sheet, zero hand-typed numbers.
+#
+# ARENA SCORING MODE (policy set 2026-08-03):
+#   'Dogfighting'        category -> FFA column
+#   'Territorial Combat' category -> TC column
+#   'Events'             category -> scores too, column = EVENTS_VALUE_TABLE
+#   anything else (incl. default 'Custom Arenas') -> DOES NOT TOUCH GLOBAL SCORING:
+#     score_on_death exits before ANY career-DB write (no score/kills/deaths/aces/rank).
+# The mode comes from rooms.category (the web-editable arena-list section header / name1 that
+# the client groups rows under), matched by substring, case-insensitive.
+PLANE_VALUES_AUTHORITATIVE = True    # False -> v374f5 derived values everywhere (full revert)
+CUSTOM_ARENAS_SCORE        = False   # True -> pre-v402 behaviour: every arena scores (TC column)
+EVENTS_VALUE_TABLE         = 'ffa'   # which column an 'Events' arena uses: 'ffa' or 'tc'
+AUTH_DEFAULT_FIGHTER_VALUE = 600     # sheet-scale fallbacks for an unlisted plane (Me-163B);
+AUTH_DEFAULT_BOMBER_VALUE  = 200     #   the derived-band 1500/900 would be off-scale here
+
+# Sheet order preserved (US/GB/SU/GE/JP, fighters then bombers). The two Kittyhawk roster keys:
+# the sheet's GB 'Kittyhawk IA' -> 'Kittyhawk-Ia' (TC cell blank) and SU 'P-40E-1A Kittyhawk' ->
+# 'Kittyhawk' (400/400); if the key assignment is ever proven swapped it is value-identical
+# anyway (the blank TC falls back to FFA 400).
+PLANE_VALUE_FFA = {
+    'F4F-3': 300, 'Hurr-Ia': 200, 'P-39D': 400, 'Spit-Ia': 200, 'P-40C': 200, 'Martlet_I': 300,
+    'P-40E-1': 400, 'Spit-Vb_LF': 600, 'F4F-4': 300, 'Tomahawk': 200, 'F4U-1a': 600,
+    'Hurr-IIC': 600, 'P-38G': 600, 'Spit-Vb_F': 500, 'F6F-3': 600, 'Hurr-IID': 370, 'P-47D': 800,
+    'Typhoon': 700, 'F4U-1c': 700, 'Kittyhawk-Ia': 400, 'P-51D': 800, 'Spit-IXc': 800,
+    'P-38L': 800, 'Seafire': 400, 'F4U-4': 900, 'Spit-IXe': 700, 'F4U-4C': 650, 'Spit-XIV': 900,
+    'FH-1_Phantom': 2000, 'Tempest': 1000, 'F-86E': 4000, 'Meteor_F1': 2000, 'DH.100': 3000,
+    'Ouragan': 2500, 'Tunnan': 4000, 'SBD-2': 200, 'Dauntless': 200, 'C-47A': 10,
+    'Mosquito_B_IV': 10, 'B-25D': 450, 'Lancaster': 10, 'TBF-1c': 200, 'Mitchell_II': 450,
+    'A-20Gu': 400, 'Dakota_Mk.II': 10, 'B-17G': 10, 'Avenger_II': 200, 'B-25J': 400, 'DB-7B': 400,
+    'B-29': 2000, 'Mosquito_FB_VI': 400, 'Mosquito_"Tse-Tse"': 200, 'Mosquito_B_IX': 10,
+    'Mitchell_III': 10, 'I-16': 200, 'Bf-109E-1/B': 50, 'MiG-3': 300, 'Bf-109E-4/B': 300,
+    'LaGG-3': 200, 'Bf-110C-4': 400, 'Hurr-IIb': 500, 'Bf-109F-4/B': 500, 'Kittyhawk': 400,
+    'FW-190A-4/U3': 600, 'Yak-1b': 200, 'Bf-110G-2': 600, 'La-5FN': 600, 'Bf-109G-6/R2': 700,
+    'P-39Q': 600, 'FW-190A-8/R6': 700, 'Yak-3': 600, 'FW-190F-8': 420, 'Yak-9U': 700,
+    'Bf-109G-6/R6': 600, 'La-7': 700, 'FW-190A-8/R3': 700, 'Yak-9UT': 550, 'FW-190A-8/R2': 700,
+    'MiG-9': 3000, 'Me-262A-1': 2500, 'MiG-15bis': 4000, 'FW-190D-9': 800, 'Bf-109K-4': 900,
+    'Ta-152H-1': 900, 'Pulqui': 1500, 'HA-200': 1500, 'Pe-8': 10, 'Ju-52/3m': 10, 'Pe-2': 10,
+    'Ju-88': 10, 'Li-2': 10, 'Do-217E-2': 10, 'IL-2': 300, 'Ju-87D-3': 10, 'A-20Gs': 400,
+    'He-111': 10, 'Tu-2': 400, 'Do-217J-1': 600, 'IL-10': 400, 'Ju-87G-2': 100, 'Tu-4': 2000,
+    'A6M2': 300, 'Ki-43-IIa': 100, 'Ki-44-IIc': 700, 'Ki-44-IIc37': 600, 'A6M5a': 300,
+    'Ki-61': 500, 'J2M3': 600, 'N1K2-J': 800, 'Ki-84-1a': 800, 'Ki-84-1c': 800, 'Ki-100': 700,
+    'A6M7': 400, 'J9Y': 2000, 'D3A': 10, 'B5N2': 10, 'L2D2': 10, 'G5N1': 450, 'G4M2': 10,
+    'Ki-67': 10,
+}
+# Blank TC cells (Martlet_I, Tomahawk, Hurr-IID, Kittyhawk-Ia - early GB machines never priced
+# into TC) are OMITTED here and fall back to the plane's FFA value at lookup time.
+PLANE_VALUE_TC = {
+    'F4F-3': 200, 'Hurr-Ia': 100, 'P-39D': 400, 'Spit-Ia': 100, 'P-40C': 200, 'P-40E-1': 400,
+    'Spit-Vb_LF': 800, 'F4F-4': 200, 'F4U-1a': 800, 'Hurr-IIC': 800, 'P-38G': 600,
+    'Spit-Vb_F': 400, 'F6F-3': 400, 'P-47D': 1200, 'Typhoon': 1000, 'F4U-1c': 1000, 'P-51D': 1200,
+    'Spit-IXc': 1200, 'P-38L': 1400, 'Seafire': 600, 'F4U-4': 1400, 'Spit-IXe': 1000,
+    'F4U-4C': 2000, 'Spit-XIV': 1400, 'FH-1_Phantom': 2000, 'Tempest': 1800, 'F-86E': 4000,
+    'Meteor_F1': 2000, 'DH.100': 3000, 'Ouragan': 2500, 'Tunnan': 4000, 'SBD-2': 50,
+    'Dauntless': 50, 'C-47A': 100, 'Mosquito_B_IV': 300, 'B-25D': 700, 'Lancaster': 1100,
+    'TBF-1c': 300, 'Mitchell_II': 700, 'A-20Gu': 1100, 'Dakota_Mk.II': 100, 'B-17G': 1500,
+    'Avenger_II': 300, 'B-25J': 1100, 'DB-7B': 1100, 'B-29': 2000, 'Mosquito_FB_VI': 900,
+    'Mosquito_"Tse-Tse"': 700, 'Mosquito_B_IX': 500, 'Mitchell_III': 1100, 'I-16': 200,
+    'Bf-109E-1/B': 100, 'MiG-3': 200, 'Bf-109E-4/B': 400, 'LaGG-3': 200, 'Bf-110C-4': 200,
+    'Hurr-IIb': 400, 'Bf-109F-4/B': 600, 'Kittyhawk': 400, 'FW-190A-4/U3': 800, 'Yak-1b': 200,
+    'Bf-110G-2': 600, 'La-5FN': 800, 'Bf-109G-6/R2': 1000, 'P-39Q': 600, 'FW-190A-8/R6': 1400,
+    'Yak-3': 800, 'FW-190F-8': 600, 'Yak-9U': 1000, 'Bf-109G-6/R6': 800, 'La-7': 1400,
+    'FW-190A-8/R3': 1800, 'Yak-9UT': 1400, 'FW-190A-8/R2': 1800, 'MiG-9': 3000, 'Me-262A-1': 2500,
+    'MiG-15bis': 4000, 'FW-190D-9': 1600, 'Bf-109K-4': 1600, 'Ta-152H-1': 1600, 'Pulqui': 1500,
+    'HA-200': 1500, 'Pe-8': 1300, 'Ju-52/3m': 100, 'Pe-2': 300, 'Ju-88': 300, 'Li-2': 100,
+    'Do-217E-2': 900, 'IL-2': 500, 'Ju-87D-3': 50, 'A-20Gs': 1100, 'He-111': 300, 'Tu-2': 900,
+    'Do-217J-1': 700, 'IL-10': 700, 'Ju-87G-2': 100, 'Tu-4': 2000, 'A6M2': 200, 'Ki-43-IIa': 100,
+    'Ki-44-IIc': 1200, 'Ki-44-IIc37': 1000, 'A6M5a': 200, 'Ki-61': 400, 'J2M3': 600,
+    'N1K2-J': 1200, 'Ki-84-1a': 1400, 'Ki-84-1c': 1800, 'Ki-100': 800, 'A6M7': 800, 'J9Y': 2000,
+    'D3A': 25, 'B5N2': 100, 'L2D2': 100, 'G5N1': 1100, 'G4M2': 300, 'Ki-67': 300,
+}
+
+def plane_value_auth(plane_id, column):
+    """v402f5: the authoritative sheet value of a plane in the given column ('ffa'|'tc').
+    Fallbacks, in order: the OTHER column (covers the sheet's four blank TC cells), then the
+    sheet-scale class default (an unlisted plane, i.e. the staff-only Me-163B)."""
+    try:
+        name = PLANE_ROSTER[int(plane_id)]
+    except (TypeError, ValueError, IndexError):
+        name = None
+    if name is not None:
+        primary = PLANE_VALUE_TC if column == 'tc' else PLANE_VALUE_FFA
+        other   = PLANE_VALUE_FFA if column == 'tc' else PLANE_VALUE_TC
+        v = primary.get(name)
+        if v is None:
+            v = other.get(name)
+        if v is not None:
+            return v
+    return (AUTH_DEFAULT_BOMBER_VALUE if is_bomber_plane(plane_id)
+            else AUTH_DEFAULT_FIGHTER_VALUE)
+
+def _room_category(room_id):
+    """The arena's web-editable list category (rooms.category / the name1 section header the
+    client groups rows under); '' on any miss so a DB hiccup resolves to NON-SCORING, never to
+    a spurious career write."""
+    if room_id is None:
+        return ''
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT category FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        return (row[0] or '') if row else ''
+    except Exception:
+        return ''
+
+def scoring_mode_for_room(room_id):
+    """v402f5/v406f5: which scoring mode this arena uses: 'ffa' | 'tc' | 'events' | None.
+    None = the arena does not touch global scoring at all (Custom / unrecognized category).
+    v406f5: 'events' is a FIRST-CLASS mode (it has its own ladder tally); which VALUE column
+    an Events arena prices planes with is resolved inside plane_value via EVENTS_VALUE_TABLE.
+    Substring match, case-insensitive - 'Dogfighting', 'Dogfighting Arenas',
+    'Territorial Combat Arenas' all resolve.
+    v404f5: a per-arena settings_json 'scoring_mode' override from the web editor is checked
+    FIRST and wins over the category: 'ffa'/'tc'/'events' force that mode, 'none' forces no
+    global scoring; ''/absent falls through to the category rule."""
+    try:
+        _ov = str((db_get_room_settings(room_id) or {}).get('scoring_mode', '') or '').lower()
+    except Exception:
+        _ov = ''
+    if _ov == 'none':
+        return None
+    if _ov in ('ffa', 'tc', 'events'):
+        return _ov
+    cat = _room_category(room_id).lower()
+    if 'dogfight' in cat:
+        return 'ffa'
+    if 'territorial' in cat:
+        return 'tc'
+    if 'event' in cat:
+        return 'events'
+    return 'tc' if CUSTOM_ARENAS_SCORE else None
 
 PILOT_DEATH_PENALTY = 100    # "Pilot death: Lose 100 points"
 
@@ -7302,6 +7487,73 @@ TANK_VALUES_2004 = {
     'GB_Cromwell': 250, 'US_Sherman': 250, 'JP_Type_97': 100,
 }
 
+# v403f5: THE FULL AI-OBJECT VALUE TABLE, BOTH COLUMNS (Plane_scoring.xlsx 'AI Objects').
+# Supersedes the tanks-only TANK_VALUES_2004 above - whose numbers are exactly this table's TC
+# column (the authentication anchor for the whole sheet) - and extends it with the ships,
+# paratrooper, locomotive and rail car the newsletter never reproduced. Nothing consumes it yet
+# (same recorded-for-wiring status as GROUND_TARGET_VALUES); when ground/AI scoring lands it
+# plugs straight into the v402f5 arena mode via ai_object_value(name, mode).
+AI_OBJECT_VALUES = {
+    #                     FFA    TC
+    'US_Sherman':       ( 150,  250),
+    'GB_Cromwell':      ( 150,  250),
+    'SU_T-34':          ( 200,  400),
+    'SU_KV-1':          ( 250,  500),
+    'GE_Panther':       ( 200,  400),
+    'GE_Tiger':         ( 250,  500),
+    'JP_Type_97':       ( 100,  100),
+    'Cargo_ship':       (1500, 1500),
+    'Cruiser':          (2000, 2000),
+    'Battleship':       (5000, 5000),
+    'Carrier':          (4000, 4000),
+    'Paratrooper':      ( 250,   50),   # FFA 250 / TC 50 - the one big FFA/TC split down here
+    'Locomotive':       (  40,   40),
+    'Rail_car':         (  10,   10),
+}
+
+def ai_object_value(name, mode='tc'):
+    """v403f5: sheet value of an AI/ground object in the given column ('ffa'|'tc'); 0 for an
+    unknown name so an unpriced object scores nothing rather than something invented."""
+    v = AI_OBJECT_VALUES.get(name)
+    if v is None:
+        return 0
+    return v[0] if mode == 'ffa' else v[1]
+
+def web_scoring_reference():
+    """v404f5: everything the web /scoring reference page renders, in one dict. A CALLABLE
+    handed to the web server (not a copy of the data) so the page always reflects the
+    constants actually in force - values, ladder, flags - and can never drift from the code.
+    Values go through plane_value_auth so the page shows EFFECTIVE numbers (blank-TC planes
+    show their FFA fallback; the unlisted Me-163B shows its class default, flagged)."""
+    planes = []
+    for pid, pname in enumerate(PLANE_ROSTER):
+        planes.append({'id': pid, 'name': pname, 'bomber': bool(is_bomber_plane(pid)),
+                       'ffa': plane_value_auth(pid, 'ffa'), 'tc': plane_value_auth(pid, 'tc'),
+                       'listed': pname in PLANE_VALUE_FFA})
+    ranks = []
+    for i, rname in enumerate(RANK_NAMES):
+        hi = RANK_THRESHOLDS[i + 1] - 1 if i + 1 < len(RANK_THRESHOLDS) else None
+        _m = RANK_LOSS_MODIFIER_2004[min(i, len(RANK_LOSS_MODIFIER_2004) - 1)]
+        ranks.append({'idx': i, 'name': rname, 'lo': RANK_THRESHOLDS[i], 'hi': hi,
+                      'loss_pct': int(round(_m * 100))})
+    return {
+        'planes': planes,
+        'ranks': ranks,
+        'ai': {k: {'ffa': v[0], 'tc': v[1]} for k, v in AI_OBJECT_VALUES.items()},
+        'events': {
+            'Pilot Loss Penalty (pilot died)': PILOT_LOSS_PENALTY_2004,
+            'Destroy Plane Bonus (a kill)': DESTROY_PLANE_BONUS_2004,
+            'Damage Plane Bonus': DAMAGE_PLANE_BONUS_2004,
+            'Kill Player In Parachute (PENALTY)': -DESTROY_HUMAN_PARACHUTE_PEN,
+            'Destroy AI Paratrooper': DESTROY_AI_PARATROOPER_BONUS,
+            'Trigger Scene Bonus': TRIGGER_SCENE_BONUS_2004,
+            'Capture Scene Bonus': CAPTURE_SCENE_BONUS_2004,
+        },
+        'modes': {'events_table': EVENTS_VALUE_TABLE,
+                  'custom_scores': bool(CUSTOM_ARENAS_SCORE),
+                  'authoritative': bool(PLANE_VALUES_AUTHORITATIVE)},
+    }
+
 # ASSISTS (not yet implemented - see the changelog): "the kill is awarded to the attacker who did the
 # MOST damage. If the other attacker did 20% OR MORE damage as well, he will be awarded an Assist."
 # That is the real rule the user described, and it needs per-attacker damage accumulation from msg 28.
@@ -7310,11 +7562,18 @@ ASSIST_DAMAGE_FRACTION = 0.20
 DEATH_SCORE_PENALTY = 50     # DEPRECATED by v249 - superseded by PILOT_DEATH_PENALTY + plane cost.
                              # Left defined so any stale reference still resolves.
 
-def plane_value(plane_id):
+def plane_value(plane_id, mode=None):
     """v249: the official point value of an aircraft (Table 1). This is what its owner LOSES for
     losing it (and, in the pre-2004 model only, what a killer gained for shooting it down).
-    v374f5: under TC_ECONOMY_2004 this returns the JULY 2004 value (1000..2000 fighter band)."""
+    v374f5: under TC_ECONOMY_2004 this returns the JULY 2004 value (1000..2000 fighter band).
+    v402f5: with a resolved arena mode ('ffa'|'tc'|'events') and PLANE_VALUES_AUTHORITATIVE,
+    returns the authoritative sheet value; v406f5: 'events' prices with the EVENTS_VALUE_TABLE
+    column (the mode itself stays 'events' for the per-mode ladder tally)."""
     if TC_ECONOMY_2004:
+        if PLANE_VALUES_AUTHORITATIVE and mode in ('ffa', 'tc', 'events'):
+            _col = mode if mode in ('ffa', 'tc') else (
+                EVENTS_VALUE_TABLE if EVENTS_VALUE_TABLE in ('ffa', 'tc') else 'ffa')
+            return plane_value_auth(plane_id, _col)
         return plane_value_2004(plane_id)
     try:
         name = PLANE_ROSTER[int(plane_id)]
@@ -7352,13 +7611,16 @@ def rank_for_score(score):
             break
     return min(max(rank, 0), 12)
 
-def db_apply_score_delta(name, delta, bomber=False):
+def db_apply_score_delta(name, delta, bomber=False, mode=None):
     """v223/v242: add `delta` points to a pilot's career score, recompute their RANK, persist both.
 
     v242: FA keeps TWO scores - Fighter Score and Bomber Score - and which one you feed depends on
     WHAT YOU WERE FLYING when you earned the points, not on what you shot down. So `bomber` selects
     the column (`bomber_score` vs `score`). RANK is computed from the COMBINED total, since it is a
     single ladder.
+    v406f5: `mode` ('ffa'|'tc'|'events') additionally mirrors the same delta into that arena
+    mode's own tally column (score_ffa/score_tc/score_events, clamped at 0 like the career
+    columns) - the web ladder's per-mode boards. Career columns and RANK are unaffected by it.
     Returns (new_total, new_rank, old_rank) so the caller can log a promotion/demotion.
     """
     if not name:
@@ -7384,6 +7646,12 @@ def db_apply_score_delta(name, delta, bomber=False):
     else:
         conn.execute("UPDATE pilots SET score=?, rank=? WHERE pilot_name=?",
                      (f_score, new_rank, name))
+    # v406f5: PER-MODE TALLY (web ladder FFA/TC/Events boards) - same delta, the mode's own
+    # column, same never-negative clamp. Missing column (un-migrated DB) -> silently skipped.
+    _mcol = {'ffa': 'score_ffa', 'tc': 'score_tc', 'events': 'score_events'}.get(mode)
+    if _mcol and _mcol in have:
+        conn.execute(f"UPDATE pilots SET {_mcol} = MAX(0, COALESCE({_mcol},0) + ?) "
+                     f"WHERE pilot_name=?", (int(delta), name))
     conn.commit(); conn.close()
     return (new_total, new_rank, old_rank)
 
@@ -7418,6 +7686,18 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     ace; DYING WIPES YOUR ACES. The DB `aces` column is the single source of truth, a per-session
     `kills_since_death` streak drives the awards, and every change is re-stated via msg 88.
     """
+    # v402f5: ARENA SCORING MODE. Custom/unrecognized-category arenas do NOT touch global
+    # scoring - no score deltas, no kill/death counters, no ace changes, no rank restates.
+    # The victim's PENDING_KILL latch is consumed anyway so it cannot leak into a later death.
+    _smode = scoring_mode_for_room(getattr(victim, 'current_room', None))
+    if _smode is None:
+        _vo_ns = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+        if _vo_ns is not None:
+            PENDING_KILL.pop(_vo_ns, None)
+        log('SCORE', f'{victim.current_pilot or "?"} died in a NON-SCORING arena '
+                     f'(category {_room_category(getattr(victim, "current_room", None))!r}) '
+                     f'-> no career changes')
+        return None, False
     scored = len(death_payload) >= 14        # long form = shot down by someone
     killer = None
     # v249: capture the victim's object and whether they BAILED **before** the attribution step pops
@@ -7496,9 +7776,9 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
         killer.k_kills = getattr(killer, 'k_kills', 0) + 1
         killer.k_score = getattr(killer, 'k_score', 0) + KILL_SCORE_POINTS
         db_credit_kill(killer.current_pilot, victim.current_pilot, 0,
-                       victim_is_bomber=_victim_bomber)          # counters only
+                       victim_is_bomber=_victim_bomber, mode=_smode)   # counters only (+mode board)
     else:
-        db_credit_kill(None, victim.current_pilot, 0, lost_to_ai=_lost_to_ai)
+        db_credit_kill(None, victim.current_pilot, 0, lost_to_ai=_lost_to_ai, mode=_smode)
         log('DEATH', f'{victim.current_pilot} lost a plane to '
                      f'{"AA/AI ground fire" if _lost_to_ai else "no creditable shooter"} '
                      f'(exit=0x{_exitb:02x}, MEC&0xf={_mec}) -> '
@@ -7521,7 +7801,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
             _pts, _base, _bonus = kill_score(getattr(victim, 'plane_type', None),
                                              int(_vs.get('rank', 0)), int(_ks.get('rank', 0)))
         killer.k_score = getattr(killer, 'k_score', 0) + _pts
-        _sc, _rk, _old = db_apply_score_delta(killer.current_pilot, _pts, bomber=_killer_bomber)
+        _sc, _rk, _old = db_apply_score_delta(killer.current_pilot, _pts, bomber=_killer_bomber,
+                                              mode=_smode)   # v406f5: feed the mode's board too
         _pn = (PLANE_ROSTER[killer.plane_type]
                if isinstance(getattr(killer, 'plane_type', None), int)
                and 0 <= killer.plane_type < len(PLANE_ROSTER) else '?')
@@ -7547,7 +7828,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     # costs the plane only - the pilot walked away (over friendly ground at least; the page counts a
     # bail over ENEMY territory as a death, but we cannot yet tell friendly ground from enemy).
     if victim.current_pilot:
-        _base_cost = plane_value(getattr(victim, 'plane_type', None))
+        _base_cost = plane_value(getattr(victim, 'plane_type', None), _smode)   # v402f5 arena mode
         if TC_ECONOMY_2004:
             # v374f5: 2004 model. The plane's BASE value is scaled by the victim's RANK modifier
             # (Cdt pays 5%, Gen pays 100%), and the pilot pays a further flat PILOT_LOSS_PENALTY if
@@ -7557,14 +7838,16 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
             _plane_cost = int(round(_base_cost * _rmod))
             _pilot_pen = 0 if _bailed else PILOT_LOSS_PENALTY_2004
             _loss = _plane_cost + _pilot_pen
-            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
+            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss,
+                                                  bomber=_victim_bomber, mode=_smode)
             log('SCORE', f'{victim.current_pilot} -{_loss} = {_plane_cost} '
                          f'(plane {_base_cost} x {int(_rmod*100)}% rank)'
                          f'{"" if _bailed else f" + {_pilot_pen} (pilot loss)"}'
                          f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
         else:
             _loss = _base_cost + (0 if _bailed else PILOT_DEATH_PENALTY)
-            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss, bomber=_victim_bomber)
+            _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss,
+                                                  bomber=_victim_bomber, mode=_smode)
             log('SCORE', f'{victim.current_pilot} -{_loss} = {_base_cost} (plane)'
                          f'{"" if _bailed else f" + {PILOT_DEATH_PENALTY} (pilot death)"}'
                          f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
@@ -12562,7 +12845,8 @@ _unpriced = [n for n in PLANE_ROSTER if n not in PLANE_VALUE_NAMES]
 if _unpriced:
     log('PLANES', f'[warn] no point value for {len(_unpriced)} plane(s), falling back to the '
                   f'class default: {sorted(_unpriced)}')
-log('PLANES', f'scoring: {len(PLANE_VALUE_NAMES)} plane values loaded; ranks '
+log('PLANES', f'scoring: {len(PLANE_VALUE_FFA)} FFA / {len(PLANE_VALUE_TC)} TC authoritative '
+              f'plane values (Plane_scoring.xlsx), {len(PLANE_VALUE_NAMES)} legacy-2001; ranks '
               f'{RANK_NAMES[0]}..{RANK_NAMES[-1]} at {RANK_THRESHOLDS}')
 if _unmatched:
     log('PLANES', f'[warn] BOMBER_PLANE_NAMES not found in PLANE_ROSTER (typo?): {sorted(_unmatched)}')
@@ -12597,6 +12881,7 @@ threading.Thread(
     args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read,
           ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR,
           extract_date_from_gamedef),
+    kwargs={'scoring_ref_fn': web_scoring_reference},   # v404f5: /scoring page + ladder ranks
     daemon=True
 ).start()
 

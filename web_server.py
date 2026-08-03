@@ -3,6 +3,40 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-08-03: v407f5 - every ladder board is a COMPLETE scoreboard.
+#   The FFA/TC/Events tabs showed career kills/deaths on every board; now each mode board
+#   reads its OWN kills_<mode>/deaths_<mode> columns (fed by db_credit_kill(mode=)) and
+#   computes its own K/D, so a pilot's FFA record is fully independent of their TC record.
+#   The three career boards (Combined/Fighter/Bomber) share the career kill/death columns -
+#   the DB has no per-airframe kill split, and inventing one would lie.
+# 2026-08-03: v406f5 - per-mode ladder boards: FFA | TC | Events tabs.
+#   The ladder gains three more tabs reading the new pilots.score_ffa/score_tc/score_events
+#   tally columns the game server now feeds per arena mode (db_apply_score_delta(mode=)).
+#   'Events' became a first-class scoring mode server-side, so the arena editor's Scoring
+#   dropdown gains 'Force Events board' and the POST accepts it. Columns are guarded, so a
+#   pre-migration DB renders zeros. Rank stays the combined-career rank on every board.
+# 2026-08-03: v405f5 - ladder tabs: Combined | Fighter Score | Bomber Score.
+#   The ladder only read the `score` column (Fighter Score, msg-25 f9) while FA keeps TWO
+#   boards - `bomber_score` (f10) fed by what you were FLYING when you earned the points
+#   (v242). Now three tabs, each its own sorted table: Combined (fighter+bomber - the total
+#   that RANK is computed from, so it is the canonical board), Fighter, Bomber. Rank column
+#   shows the same combined-ladder rank on every tab (it IS the pilot's rank; a per-column
+#   'rank' would be an invention). One search box filters all three; chosen tab persists
+#   (localStorage); sortTable generalized to sortLadder(tableId, col). Pilot names are now
+#   HTML-escaped in ladder rows (they weren't - v317 allows @/#/! names, so they must be).
+#   Tab chrome lives in LADDER_TABS_ASSETS, a PLAIN string for the same brace-escaping
+#   reason as ADMIN_TABS_ASSETS.
+# 2026-08-03: v404f5 - scoring reference page + per-arena scoring control + ladder ranks.
+#   * /scoring - renders the game server's live scoring tables (injected via scoring_ref_fn so
+#     the page can never drift from the code): the 13-rank 2004 ladder with score bands and
+#     loss percentages, the authoritative per-plane FFA/TC values (filterable), the AI-object
+#     values, and the flat event bonuses. Linked from the dashboard nav and the ladder.
+#   * Arena settings editor gained a Scoring dropdown (settings_json 'scoring_mode'):
+#     Default (decided by the Title/category - the effective result is shown inline), or force
+#     FFA values / TC values / no global scoring for this one arena. The game server reads the
+#     override FIRST, so it wins over the category. Default stores no key.
+#   * /ladder shows each pilot's military rank (computed from score against the injected
+#     ladder) in its own sortable column; the position column is now '#'.
 # 2026-07-24: v322 - the health watchdog is now SILENT while healthy.
 #   The web server has been stable, so the observability scaffolding from the 07-23 work is
 #   just noise. Removed: the startup ping line, the per-check DEBUG heartbeat, the INFO pulse
@@ -123,6 +157,7 @@ SRV = {
     'exec_console': None,
     'log_dir': None,
     'date_read': None,
+    'scoring_ref': None,
     'log': print
 }
 
@@ -357,6 +392,80 @@ function faLoadLogs(){
 </script>
 """
 
+# v405f5: ladder tab chrome + behaviour. PLAIN string (not an f-string) - the ladder page body
+# is an f-string and CSS/JS braces inside one need doubling; keeping this separate means the
+# braces pass through untouched (same reasoning as ADMIN_TABS_ASSETS above).
+LADDER_TABS_ASSETS = """
+                <style>
+                  .lbar { display:flex; gap:6px; padding:15px 15px 0; }
+                  .ltab { width:auto; margin:0; padding:8px 18px; font-size:0.95em; border-radius:14px;
+                          background:#f1f3f5; color:#495057; border:1px solid #dee2e6; }
+                  .ltab:hover { background:#e6e9ec; }
+                  .ltab.lon { background:#0d6efd; color:#fff; border-color:#0d6efd; }
+                </style>
+                <script>
+                function lshow(tid){
+                  var ids=['ltotal','lfighter','lbomber','lffa','ltc','levents'];
+                  for(var i=0;i<ids.length;i++){
+                    var p=document.getElementById('pan-'+ids[i]);
+                    if(p) p.style.display=(ids[i]===tid)?'block':'none';
+                    var b=document.getElementById('btn-'+ids[i]);
+                    if(b) b.classList.toggle('lon', ids[i]===tid);
+                  }
+                  try{localStorage.setItem('fa_ladder_tab',tid);}catch(e){}
+                  var s=document.getElementById('searchInput');
+                  if(s) lfilter(s.value);
+                }
+                function lfilter(q){
+                  q=(q||'').toLowerCase();
+                  var rows=document.querySelectorAll('.lpanel tbody tr');
+                  for(var i=0;i<rows.length;i++){
+                    var name=rows[i].cells[1].textContent.toLowerCase();
+                    rows[i].style.display=(!q||name.indexOf(q)>=0)?'':'none';
+                  }
+                }
+                document.getElementById('searchInput').addEventListener('keyup',function(){lfilter(this.value);});
+                function sortLadder(tid,n){
+                  var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
+                  table = document.getElementById(tid);
+                  if(!table) return;
+                  switching = true;
+                  dir = "asc";
+                  while (switching) {
+                    switching = false;
+                    rows = table.rows;
+                    for (i = 1; i < (rows.length - 1); i++) {
+                      shouldSwitch = false;
+                      x = rows[i].getElementsByTagName("TD")[n];
+                      y = rows[i + 1].getElementsByTagName("TD")[n];
+                      var valX = isNaN(parseFloat(x.innerHTML)) ? x.innerHTML.toLowerCase() : parseFloat(x.innerHTML);
+                      var valY = isNaN(parseFloat(y.innerHTML)) ? y.innerHTML.toLowerCase() : parseFloat(y.innerHTML);
+                      if (dir == "asc") {
+                        if (valX > valY) { shouldSwitch = true; break; }
+                      } else if (dir == "desc") {
+                        if (valX < valY) { shouldSwitch = true; break; }
+                      }
+                    }
+                    if (shouldSwitch) {
+                      rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
+                      switching = true;
+                      switchcount++;
+                    } else {
+                      if (switchcount == 0 && dir == "asc") {
+                        dir = "desc";
+                        switching = true;
+                      }
+                    }
+                  }
+                }
+                (function(){
+                  var saved=null;
+                  try{saved=localStorage.getItem('fa_ladder_tab');}catch(e){}
+                  if(saved&&document.getElementById('pan-'+saved)) lshow(saved);
+                })();
+                </script>
+"""
+
 def hash_password(password: str) -> str:
     return hashlib.sha256(password.encode('utf-8')).hexdigest()
 
@@ -559,6 +668,29 @@ def _list_log_files():
     out.sort(key=lambda r: r['mtime'], reverse=True)
     return out
 
+def _scoring_ref():
+    """v404f5: the game server's live scoring tables (ranks/planes/AI/events), or None if the
+    server build predates the injection. A callable so the page always reflects the constants
+    actually in force, never a stale copy."""
+    fn = SRV.get('scoring_ref')
+    if not fn:
+        return None
+    try:
+        return fn() or None
+    except Exception:
+        return None
+
+def _rank_name_for_score(ref, score):
+    """Map a career score to its rank name using the injected ladder; '' if unavailable."""
+    try:
+        name = ''
+        for r in ref['ranks']:
+            if score >= r['lo']:
+                name = r['name']
+        return name
+    except Exception:
+        return ''
+
 class WebInterfaceHandler(BaseHTTPRequestHandler):
     def get_current_user(self):
         cookie_header = self.headers.get('Cookie')
@@ -624,6 +756,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <div class="nav">
                     Logged in as <strong>{user}</strong> | 
                     <a href="/ladder" style="color:#17a2b8;">Ladder Board</a> |
+                    <a href="/scoring" style="color:#fd7e14;">Scoring</a> |
                     <a href="/my_arenas" style="color:#6f42c1;">My Arenas</a> |
                     {admin_link} 
                     <a href="/logout" style="color:#dc3545;">Logout</a>
@@ -646,102 +779,100 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             
         elif self.path == '/ladder':
             conn = sqlite3.connect(SRV['db_path'])
-            # We still query account_name so we can highlight the active user, but we won't print it
-            stats = conn.execute("SELECT pilot_name, account_name, COALESCE(score,0), COALESCE(kills,0), COALESCE(deaths,0) FROM pilots").fetchall()
+            # v405f5: FA keeps TWO boards - Fighter Score and Bomber Score (which one your points
+            # feed depends on what you were FLYING, v242). Query both; guard the column for an
+            # un-migrated DB. account_name is still queried only to highlight the active user.
+            pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+            def _gc(col):
+                return ("COALESCE(" + col + ",0)") if col in pcols else "0"
+            stats = conn.execute("SELECT pilot_name, account_name, COALESCE(score,0), "
+                                 + _gc('bomber_score') + ", " + _gc('score_ffa') + ", "
+                                 + _gc('score_tc') + ", " + _gc('score_events') + ", "
+                                 + _gc('kills_ffa') + ", " + _gc('deaths_ffa') + ", "
+                                 + _gc('kills_tc') + ", " + _gc('deaths_tc') + ", "
+                                 + _gc('kills_events') + ", " + _gc('deaths_events') + ", "
+                                 "COALESCE(kills,0), COALESCE(deaths,0) FROM pilots").fetchall()
             conn.close()
-            
-            ladder_data = []
-            for p_name, a_name, score, k, d in stats:
-                kd = round(k / d, 2) if d > 0 else float(k)
-                ladder_data.append((p_name, a_name, score, k, d, kd))
-                
-            # Sort by score descending, then K/D descending
-            ladder_data.sort(key=lambda x: (x[2], x[5]), reverse=True)
-            
-            table_rows = ""
-            for rank, (p_name, a_name, score, k, d, kd) in enumerate(ladder_data, 1):
-                # Highlight if this pilot belongs to the currently logged in account
-                row_style = "background-color: #e8f4f8; font-weight: bold;" if a_name == user else ""
-                table_rows += f"""<tr style='{row_style}'>
-                    <td>{rank}</td>
-                    <td><strong>{p_name}</strong></td>
-                    <td>{score}</td>
-                    <td>{k}</td>
-                    <td>{d}</td>
-                    <td>{kd}</td>
-                </tr>"""
+
+            _ref = _scoring_ref()
+            def _kd(k, d):
+                return round(k / d, 2) if d > 0 else float(k)
+            pilots = []
+            for (p_name, a_name, f_score, b_score, s_ffa, s_tc, s_ev,
+                 k_ffa, d_ffa, k_tc, d_tc, k_ev, d_ev, k, d) in stats:
+                total = (f_score or 0) + (b_score or 0)
+                # Rank is ALWAYS the combined-ladder rank - it IS the pilot's rank (the server
+                # computes it from fighter+bomber, db_apply_score_delta), same on every tab.
+                rname = _rank_name_for_score(_ref, total) if _ref else ''
+                pilots.append({'name': p_name, 'acct': a_name, 'rank': rname,
+                               'f': f_score, 'b': b_score, 'total': total,
+                               'k': k, 'd': d, 'kd': _kd(k, d),
+                               'ffa': s_ffa, 'k_ffa': k_ffa, 'd_ffa': d_ffa,
+                               'kd_ffa': _kd(k_ffa, d_ffa),
+                               'tc': s_tc, 'k_tc': k_tc, 'd_tc': d_tc,
+                               'kd_tc': _kd(k_tc, d_tc),
+                               'ev': s_ev, 'k_ev': k_ev, 'd_ev': d_ev,
+                               'kd_ev': _kd(k_ev, d_ev)})
+
+            # v407f5: each board is a COMPLETE scoreboard - its own score, kills, deaths, K/D.
+            # The three career boards share the career kill/death columns (the DB has no
+            # per-airframe kill split); the three mode boards use their own counters.
+            ladder_boards = []
+            for tid, label, skey, kkey, dkey, kdkey in (
+                    ('ltotal',   'Total Score',   'total', 'k',     'd',     'kd'),
+                    ('lfighter', 'Fighter Score', 'f',     'k',     'd',     'kd'),
+                    ('lbomber',  'Bomber Score',  'b',     'k',     'd',     'kd'),
+                    ('lffa',     'FFA Score',     'ffa',   'k_ffa', 'd_ffa', 'kd_ffa'),
+                    ('ltc',      'TC Score',      'tc',    'k_tc',  'd_tc',  'kd_tc'),
+                    ('levents',  'Events Score',  'ev',    'k_ev',  'd_ev',  'kd_ev')):
+                rows = sorted(pilots, key=lambda x: (x[skey], x[kdkey]), reverse=True)
+                body = ""
+                for pos, p in enumerate(rows, 1):
+                    row_style = ("background-color: #e8f4f8; font-weight: bold;"
+                                 if p['acct'] == user else "")
+                    body += ("<tr style='" + row_style + "'><td>" + str(pos) + "</td>"
+                             "<td><strong>" + hesc(str(p['name'])) + "</strong></td>"
+                             "<td>" + hesc(str(p['rank'])) + "</td>"
+                             "<td>" + str(p[skey]) + "</td>"
+                             "<td>" + str(p[kkey]) + "</td><td>" + str(p[dkey]) + "</td>"
+                             "<td>" + str(p[kdkey]) + "</td></tr>")
+                ths = ""
+                for i, h in enumerate(('#', 'Pilot Name', 'Rank', label, 'Kills', 'Deaths',
+                                       'K/D Ratio')):
+                    ths += ('<th onclick="sortLadder(' + "'" + tid + "'," + str(i) + ')">'
+                            + h + ' &#x21D5;</th>')
+                ladder_boards.append((tid, label, ths, body))
+
+            tabs_html = ""
+            panels_html = ""
+            for i, (tid, label, ths, body) in enumerate(ladder_boards):
+                on = ' lon' if i == 0 else ''
+                tab_lbl = {'ltotal': 'Combined', 'lfighter': 'Fighter', 'lbomber': 'Bomber',
+                           'lffa': 'FFA', 'ltc': 'TC', 'levents': 'Events'}.get(tid, label)
+                tabs_html += ('<button type="button" class="ltab' + on + '" id="btn-' + tid + '" '
+                              'onclick="lshow(' + "'" + tid + "'" + ')">' + tab_lbl + '</button>')
+                panels_html += ('<div class="lpanel" id="pan-' + tid + '" style="display:'
+                                + ('block' if i == 0 else 'none') + ';">'
+                                + '<table id="' + tid + '"><thead><tr>' + ths + '</tr></thead>'
+                                + '<tbody>' + body + '</tbody></table></div>')
 
             content = f"""
-                <div class="nav"><a href="/">&larr; Back to Dashboard</a></div>
+                <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
+                    <a href="/scoring" style="color:#fd7e14;">Scoring Reference</a></div>
                 <h1>Top Aces Ladder</h1>
-                
                 <div class="card" style="padding: 0;">
+                    <div class="lbar">{tabs_html}</div>
+                    <p style="color:#888; font-size:0.85em; margin:8px 15px 0;">Fighter and Bomber
+                    points depend on what you were <em>flying</em> when you earned them. The FFA, TC
+                    and Events boards are complete scoreboards of their own: score, kills, deaths and
+                    K/D there count only what happened in arenas of that type. Rank comes from the
+                    combined Fighter+Bomber total on every board.</p>
                     <div style="padding: 15px;">
                         <input type="text" id="searchInput" placeholder="Search by pilot name..." style="width: 100%; padding: 10px; margin: 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px;">
                     </div>
-                    <table id="ladderTable">
-                        <thead>
-                            <tr>
-                                <th onclick="sortTable(0)">Rank &#x21D5;</th>
-                                <th onclick="sortTable(1)">Pilot Name &#x21D5;</th>
-                                <th onclick="sortTable(2)">Score &#x21D5;</th>
-                                <th onclick="sortTable(3)">Kills &#x21D5;</th>
-                                <th onclick="sortTable(4)">Deaths &#x21D5;</th>
-                                <th onclick="sortTable(5)">K/D Ratio &#x21D5;</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {table_rows}
-                        </tbody>
-                    </table>
+                    {panels_html}
                 </div>
-
-                <script>
-                    document.getElementById('searchInput').addEventListener('keyup', function() {{
-                        let filter = this.value.toLowerCase();
-                        let rows = document.querySelectorAll('#ladderTable tbody tr');
-                        rows.forEach(row => {{
-                            let name = row.cells[1].textContent.toLowerCase();
-                            row.style.display = name.includes(filter) ? '' : 'none';
-                        }});
-                    }});
-
-                    function sortTable(n) {{
-                        var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
-                        table = document.getElementById("ladderTable");
-                        switching = true;
-                        dir = "asc"; 
-                        while (switching) {{
-                            switching = false;
-                            rows = table.rows;
-                            for (i = 1; i < (rows.length - 1); i++) {{
-                                shouldSwitch = false;
-                                x = rows[i].getElementsByTagName("TD")[n];
-                                y = rows[i + 1].getElementsByTagName("TD")[n];
-                                
-                                let valX = isNaN(parseFloat(x.innerHTML)) ? x.innerHTML.toLowerCase() : parseFloat(x.innerHTML);
-                                let valY = isNaN(parseFloat(y.innerHTML)) ? y.innerHTML.toLowerCase() : parseFloat(y.innerHTML);
-
-                                if (dir == "asc") {{
-                                    if (valX > valY) {{ shouldSwitch = true; break; }}
-                                }} else if (dir == "desc") {{
-                                    if (valX < valY) {{ shouldSwitch = true; break; }}
-                                }}
-                            }}
-                            if (shouldSwitch) {{
-                                rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
-                                switching = true;
-                                switchcount ++; 
-                            }} else {{
-                                if (switchcount == 0 && dir == "asc") {{
-                                    dir = "desc";
-                                    switching = true;
-                                }}
-                            }}
-                        }}
-                    }}
-                </script>
-            """
+            """ + LADDER_TABS_ASSETS
             self.send_html(content)
 
         elif self.path == '/admin':
@@ -1220,6 +1351,31 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<input type="checkbox" name="s_exit_is_crash" value="1"'
                 + (' checked' if ec_on else '') + '> Exit while airborne counts as a crash'
                 + ec_edited + '</label>')
+            # SCORING (v404f5): per-arena override of the category-decided scoring mode.
+            # '' / absent = decided by the Title/category; 'ffa'/'tc' force that value column;
+            # 'none' turns global scoring off for this arena. The game server checks this key
+            # FIRST, so it wins over the category.
+            sm = str(overrides.get('scoring_mode', '') or '')
+            sm_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'scoring_mode' in overrides else ''
+            _cl = (str(category) or '').lower()
+            _ref_sc = _scoring_ref() or {}
+            _ev_col = str(_ref_sc.get('modes', {}).get('events_table', 'ffa')).upper()
+            if 'dogfight' in _cl:      eff = 'FFA values'
+            elif 'territorial' in _cl: eff = 'TC values'
+            elif 'event' in _cl:       eff = 'Events (' + _ev_col + ' values)'
+            else:                      eff = 'no global scoring'
+            def _sm_opt(v, label):
+                s = ' selected' if sm == v else ''
+                return '<option value="' + v + '"' + s + '>' + label + '</option>'
+            scoring_html = (
+                '<label style="display:block; margin:12px 0;">Scoring mode' + sm_edited + '<br>'
+                '<select name="s_scoring_mode" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + _sm_opt('',     'Default - by Title/category (currently: ' + eff + ')')
+                + _sm_opt('ffa',  'Force FFA values')
+                + _sm_opt('tc',   'Force TC values')
+                + _sm_opt('events', 'Force Events board')
+                + _sm_opt('none', 'Force NO global scoring')
+                + '</select></label>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -1250,6 +1406,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Exit = crash</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to make LEAVING THE PLANE WHILE AIRBORNE count as a crash (a death and a lost plane) &mdash; pilots must land, and be undamaged, to exit for free. Leave unticked (the default) and an undamaged in-flight exit is a clean bug-out that costs nothing. An exit while <em>damaged</em> is a death either way. Takes effect the next time the arena is entered.</p>
                     {exitcrash_html}
+                    <h3>Scoring</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Which value table this
+                    arena scores with. <em>Default</em> follows the Title/category (Dogfighting &rarr;
+                    FFA, Territorial Combat &rarr; TC, Events &rarr; the server's events column,
+                    anything else &rarr; no global scoring). Forcing a mode here overrides the
+                    category for this arena only. See the <a href="/scoring">Scoring Reference</a>
+                    for the tables. Takes effect on the next death in the arena.</p>
+                    {scoring_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -1296,6 +1460,103 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <p style="color:#666;">Arenas you created. Edit each one's settings, including enemy AA/Flak strength.</p>
                 {admin_extra}
                 {items}
+            """
+            self.send_html(content)
+
+        elif self.path == '/scoring':
+            # v404f5: the live scoring reference - rendered from the GAME SERVER's own constants
+            # (injected as a callable), so this page can never drift from the code in force.
+            ref = _scoring_ref()
+            if not ref:
+                self.send_html("<h2>Scoring reference unavailable</h2><p>The game server did not "
+                               "inject its scoring tables (older server build?).</p>"
+                               "<a href='/'>&larr; Back</a>")
+                return
+            ev_tbl = str(ref.get('modes', {}).get('events_table', 'ffa')).upper()
+            rank_rows = ""
+            for r in ref.get('ranks', []):
+                hi = ('{:,}'.format(r['hi']) if r.get('hi') is not None else '&infin;')
+                rank_rows += (f"<tr><td>{r['idx']}</td><td><strong>{hesc(str(r['name']))}</strong></td>"
+                              f"<td>{r['lo']:,} &ndash; {hi}</td><td>{r['loss_pct']}%</td></tr>")
+            plane_rows = ""
+            planes = sorted(ref.get('planes', []), key=lambda x: (x['bomber'], str(x['name']).lower()))
+            for p in planes:
+                cls = 'Bomber' if p['bomber'] else 'Fighter'
+                note = '' if p.get('listed', True) else ' <small style="color:#c60;">(class default)</small>'
+                plane_rows += (f"<tr><td><strong>{hesc(str(p['name']))}</strong>{note}</td><td>{cls}</td>"
+                               f"<td>{p['ffa']}</td><td>{p['tc']}</td></tr>")
+            ai_rows = ""
+            for nm, v in ref.get('ai', {}).items():
+                ai_rows += (f"<tr><td><strong>{hesc(str(nm).replace('_', ' '))}</strong></td>"
+                            f"<td>{v['ffa']}</td><td>{v['tc']}</td></tr>")
+            ev_rows = ''.join(f"<tr><td>{hesc(str(k))}</td><td>{v}</td></tr>"
+                              for k, v in ref.get('events', {}).items())
+            content = f"""
+                <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
+                    <a href="/ladder" style="color:#17a2b8;">Ladder Board</a></div>
+                <h1>Scoring Reference</h1>
+                <div class="card">
+                    <h2 style="margin-top:0;">How arenas score</h2>
+                    <p style="color:#555; font-size:0.95em; max-width:720px;">
+                    Every plane has TWO point values. Which one an arena uses is decided by the
+                    arena's list category (its Title / section header):
+                    <strong>Dogfighting</strong> arenas use the <strong>FFA value</strong>,
+                    <strong>Territorial Combat</strong> arenas use the <strong>TC value</strong>,
+                    and <strong>Events</strong> arenas score with the {ev_tbl} column.
+                    Arenas in any other category (including <em>Custom Arenas</em>) do
+                    <strong>not</strong> change global scores, kills, deaths, aces or ranks at all
+                    &mdash; unless the arena's editor forces a scoring mode.
+                    A kill always pays the killer the flat Destroy Plane Bonus; the plane's value is
+                    what its OWNER loses, scaled by the owner's rank percentage below.</p>
+                </div>
+                <div class="card" style="padding:0;">
+                    <div style="padding:15px 15px 0;"><h2 style="margin:0;">Ranks</h2>
+                    <p style="color:#666; font-size:0.9em;">Rank comes from career score. The
+                    percentage is how much of a loss's base cost a pilot of that rank actually
+                    pays (points GAINED are never reduced).</p></div>
+                    <table>
+                        <thead><tr><th>Idx</th><th>Rank</th><th>Score</th><th>% of losses paid</th></tr></thead>
+                        <tbody>{rank_rows}</tbody>
+                    </table>
+                </div>
+                <div class="card" style="padding:0;">
+                    <div style="padding:15px 15px 0;"><h2 style="margin:0;">Plane values</h2>
+                    <p style="color:#666; font-size:0.9em;">The value is what the plane's owner
+                    loses when it goes down (before the rank percentage). Blank-TC planes in the
+                    original table fall back to their FFA value.</p>
+                    <input type="text" id="planeSearch" placeholder="Search planes..."
+                           style="width:100%; padding:10px; margin:0 0 10px; box-sizing:border-box;
+                                  border:1px solid #ccc; border-radius:4px;"></div>
+                    <table id="planeTable">
+                        <thead><tr><th>Plane</th><th>Class</th><th>FFA value</th><th>TC value</th></tr></thead>
+                        <tbody>{plane_rows}</tbody>
+                    </table>
+                </div>
+                <div class="card" style="padding:0;">
+                    <div style="padding:15px 15px 0;"><h2 style="margin:0;">AI objects</h2></div>
+                    <table>
+                        <thead><tr><th>Object</th><th>FFA value</th><th>TC value</th></tr></thead>
+                        <tbody>{ai_rows}</tbody>
+                    </table>
+                </div>
+                <div class="card" style="padding:0;">
+                    <div style="padding:15px 15px 0;"><h2 style="margin:0;">Event bonuses / penalties</h2>
+                    <p style="color:#666; font-size:0.9em;">Flat amounts (positive and negative)
+                    applied on the event, before rank scaling where losses are concerned.</p></div>
+                    <table>
+                        <thead><tr><th>Event</th><th>Base points</th></tr></thead>
+                        <tbody>{ev_rows}</tbody>
+                    </table>
+                </div>
+                <script>
+                document.getElementById('planeSearch').addEventListener('keyup', function() {{
+                    let filter = this.value.toLowerCase();
+                    let rows = document.querySelectorAll('#planeTable tbody tr');
+                    rows.forEach(row => {{
+                        row.style.display = row.textContent.toLowerCase().includes(filter) ? '' : 'none';
+                    }});
+                }});
+                </script>
             """
             self.send_html(content)
 
@@ -1848,6 +2109,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             # EXIT = CRASH (v400f5): checkbox only posts when ticked; absence means off (the
             # default - an undamaged airborne exit is a clean bug-out, not a death).
             settings['exit_is_crash'] = 1 if qs.get('s_exit_is_crash', [''])[0].strip() else 0
+            # SCORING MODE (v404f5): only stored when forced; '' (Default) leaves no key so the
+            # category keeps deciding.
+            _sm = qs.get('s_scoring_mode', [''])[0].strip().lower()
+            if _sm in ('ffa', 'tc', 'none', 'events'):
+                settings['scoring_mode'] = _sm
             for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
                 _wv = qs.get('s_' + _wk, [''])[0].strip()
                 if _wv != '':
@@ -2054,7 +2320,7 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
-                     date_read_fn=None):
+                     date_read_fn=None, scoring_ref_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -2065,6 +2331,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['exec_console'] = exec_console_fn            # v317: queue_console_command(line, src)
     SRV['log_dir'] = log_dir                         # v321: for the admin Logs tab
     SRV['date_read'] = date_read_fn                  # v383: extract_date_from_gamedef(blob)->(d,m,y)
+    SRV['scoring_ref'] = scoring_ref_fn              # v404f5: web_scoring_reference() -> dict
 
     migrate_web_db()
     _start_httpd_thread()
