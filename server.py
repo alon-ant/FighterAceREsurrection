@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v410f5'
+VERSION = 'v413f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3167,7 +3167,7 @@ def perform_update(actor='console'):
         _update_lock.release()
 
 def console_handler():
-    log('CONSOLE', 'Ready. Commands: gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | update | loglevel | logmute | logtags | help')
+    log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | update | loglevel | logmute | logtags | help')
     threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
     while running:
         try:
@@ -3646,6 +3646,15 @@ def console_handler():
                     log('CONSOLE', f'rec dump: wrote {n} file(s)')
                 else:
                     log('CONSOLE', 'Usage: rec on | off | status | dump')
+            elif cmd in ('say', 'broadcast'):
+                # v413f5: announce to ALL players - every arena AND the lobby. In-game clients
+                # get the channel-4 announce (chat line + ~10s on-screen banner); lobby clients
+                # get the 0xcd 'Server' chat. See broadcast_everyone for the RE evidence.
+                if len(parts) < 2 or not parts[1].strip():
+                    log('CONSOLE', 'Usage: say <message>   (announce to ALL players - every arena + lobby; max 200 chars)')
+                else:
+                    _n = broadcast_everyone(parts[1].strip(), src=_src)
+                    log('CONSOLE', f'announced to {_n} player(s)')
             elif cmd == 'update':
                 # v329: git pull + restart. Also reachable from the web admin button, which
                 # simply queues this same command, so there is one code path.
@@ -3681,6 +3690,7 @@ def console_handler():
                 log('CONSOLE', f'muted tags: {_falog.list_muted() or "(none)"}')
             elif cmd == 'help':
                 log('CONSOLE', 'gen <name>  - generate ticket for new account')
+                log('CONSOLE', 'say <message> - announce to ALL players (every arena: chat + 10s banner; lobby: Server chat)')
                 log('CONSOLE', 'list        - show all accounts and their pilots')
                 log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
                 log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
@@ -8740,6 +8750,49 @@ def broadcast_system(message, exclude_sess=None):
         if sess is exclude_sess: continue
         _submit_send(send_rel, sess, bcast, '<- sys msg', to=3.0)
 
+# v413f5: server-wide ANNOUNCEMENT to every authenticated session, lobby and in-game alike,
+# using whichever chat form each client can actually RENDER in its current state:
+#   * IN-GAME (entered_game): msg-20 CHANNEL 4 - the client's own announce channel. RE of the
+#     display handler FUN_004f6030 (case channel==4): it upper-cases the text, prints the chat
+#     line, AND pushes the text as a ~10-second on-screen banner via FUN_0046a8a0 (Msn_Serv.cpp
+#     mission-service message, duration 10000ms). The line must carry a PlayerIndex the client
+#     can RESOLVE - the handler's first act is GetPlayer(PI), and an unknown PI logs
+#     'ChatMessage from unknown player' and DROPS the line entirely - so each recipient is
+#     stamped with its OWN index (self-resolution is what every reflected chat already relies
+#     on). The chat line therefore reads 'TheirName: TEXT'; cosmetic, since the banner shows
+#     the text alone and the upper-casing marks it as an announcement.
+#   * LOBBY: the 0xcd 'Server' named chat - the name travels inline in the packet, no PI
+#     needed; the same form every ban notice / refusal already uses.
+# LENGTH CAP: FUN_004f6030's channel-4 path strcpy's the text into a 512-byte stack buffer
+# with no bounds check, so the server refuses to send more than 200 chars - a full announce
+# fits, and nothing we emit can ever come near the client's buffer.
+ANNOUNCE_MAX_CHARS = 200
+
+def broadcast_everyone(text, src='console'):
+    """Announce `text` to ALL players everywhere. Returns the recipient count."""
+    text = str(text).strip()
+    if len(text) > ANNOUNCE_MAX_CHARS:
+        text = text[:ANNOUNCE_MAX_CHARS]
+    if not text:
+        return 0
+    n_game = n_lobby = 0
+    pkt_cd = build_chat_broadcast('Server', text)
+    for s2 in get_all_sessions():
+        try:
+            if getattr(s2, 'entered_game', False):
+                _pi = getattr(s2, 'player_index', 0) or 0
+                pkt20 = build_chat_display_20(4, text, player_index=_pi)
+                _submit_send(send_rel, s2, pkt20,
+                             f'<- server announce (in-game ch4 banner, PI={_pi})', to=3.0)
+                n_game += 1
+            else:
+                _submit_send(send_rel, s2, pkt_cd, '<- server announce (lobby 0xcd)', to=3.0)
+                n_lobby += 1
+        except Exception:
+            pass
+    log('ANNOUNCE', f'[{src}] {text!r} -> {n_game} in-game (ch4 banner) + {n_lobby} lobby (0xcd)')
+    return n_game + n_lobby
+
 def build_room_echo_pkt(db_id):
     """Build the type=0x92 sub=0xdc room creation echo for a room in the DB.
     Returns the packet bytes, or None if the room is missing/invalid."""
@@ -11245,7 +11298,34 @@ PREFIXED_NORMALISE_SUB = True
 # ONLY for subs with no pl[8] double-wrap fallback - for those, normalising sub to 0x00
 # achieves nothing because no handler ever matches on it, so the message is silently lost.
 # Empty this set to revert to pure v327 behaviour.
-PREFIXED_REFRAME_SUBS = {0x03, 0x45, 0x7d}
+# v411f5: 0x04 (out-4) joins. It nominally HAS a pl[8] fallback, but that fallback requires
+# pl[5]==0x12 - the 33-byte SPAWN shape - so the 15-byte PARACHUTE/BAIL form (type=0xf2; the
+# appspace type byte encodes the size) sails past it. server_3_.log 23:15:42: GCEXTREME's
+# second bail arrived prefixed [00060542|00f2000004|1900 8280 a201...], matched nothing, and
+# died at the cmd==0 dispatch gate: no parachuter, no ServerConfirm -> the client's chute kept
+# NumberVar=-1 and tore itself down as 'DelObject -1' on landing = the Main.cpp:2407 CTD
+# (messages09). The lost bail ALSO desyncs the global Number counter (the client allocated one
+# for the chute), which is the 'Confirm object N not found in list' dead-engine follow-on.
+# v412f5: 0x1c (damage 28) joins. Its pl[8] fallback (v333) sits INSIDE the cmd==0 dispatch,
+# so the cmd gate regressed v333: Gary's prefixed damage frames (server_3_.log 15:57:21.512
+# and 15:58:28.508, cmd=0x0542 PFX sub=0x1c) were captured and never relayed - the victim was
+# never told, no DAMAGED mark, no kill latch. Re-framing routes them to the sub==0x1c branch
+# as CLEAN direct bytes (prefix gone), which also retires the v356 in-relay strip's prefixed
+# case and the v352 'relayed with the prefix still attached' mis-walk suspect for this path.
+PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x45, 0x7d}
+
+# v411f5: a full re-frame makes the recovered frame BYTE-IDENTICAL to its direct (cmd==0)
+# form - but the entire in-game dispatch (the delete-notify death path, DAMAGE28/collision
+# relays, the out-4 spawn/bail handlers, the echo logic) sits inside `if cmd == 0:`. Leaving
+# cmd at its prefixed value meant every re-framed message was captured, logged... and then
+# refused by the very dispatcher it was recovered for. server_3_.log has three casualties in
+# one minute (23:15:14 collision 125 re-framed but never relayed, 23:15:42 bail lost -> CTD,
+# 23:15:49 delete-notify re-framed but no death/husk-removal - peers GC'd the ghost plane
+# themselves 20s later). Releasing cmd to 0 lets the recovered frame take the direct path.
+# It CANNOT re-enter the v364f5 counter-unwrap: a re-framed frame is self-consistent as a
+# direct frame, which the unwrap's `4 + (pl[1]>>4) != len(pl)` condition excludes for bc==0
+# frames, and bc>0 frames fail its pl[0]==0x00 test. Set False to restore capture-only.
+PREFIXED_REFRAME_RELEASES_CMD = True
 
 def handle_post_auth(s, cmd, pl):
     bc=pl[0] if pl else 0; tb=pl[1] if len(pl)>1 else 0
@@ -11284,14 +11364,21 @@ def handle_post_auth(s, cmd, pl):
             # Verified on all 32 captured prefixed payloads: after pl[4:] every one satisfies
             # len == 4 + bc*16 + (T>>4), and every resulting (T,len) shape is one the plain
             # handler has already processed (msg 69: 29/29, msg 125: 3/3).
-            _why = {0x03: 'delete-notify', 0x45: 'scene-supply 69',
+            _why = {0x03: 'delete-notify', 0x04: 'out-4 (spawn/bail)', 0x1c: 'damage 28',
+                    0x45: 'scene-supply 69',
                     0x7d: 'collision 125'}.get(_isub, f'sub 0x{_isub:02x}')
             _extra = (f' (was mis-read as ONumber '
                       f'0x{int.from_bytes(bytes(pl[5:7]),"little"):04x})') if _isub == 0x03 else ''
             log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED {_why} '
-                           f'[{hx(bytes(pl[:4]))}] -> re-framing from offset 4' + _extra)
+                           f'[{hx(bytes(pl[:4]))}] -> re-framing from offset 4'
+                           + (' + releasing cmd for direct dispatch'
+                              if PREFIXED_REFRAME_RELEASES_CMD else '') + _extra)
             pl = pl[4:]
             bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
+            if PREFIXED_REFRAME_RELEASES_CMD:
+                # v411f5: the frame is now byte-identical to a direct arrival - let it
+                # dispatch like one (the whole in-game handler block is gated on cmd == 0).
+                cmd = 0
         else:
             # *** v327: DO NOT DROP THESE. ***
             # The layout is now PROVEN on 100+ real samples from run_20260724_073916:
@@ -11523,7 +11610,18 @@ def handle_post_auth(s, cmd, pl):
         # take `and not _catalog_3a`; the escaped catalog falls through to the one true 0x3a
         # re-encode handler below, same as every non-colliding size always did.
         _catalog_3a = (sub == 0x3a) or (sub == 0x00 and len(pl) > 8 and pl[8] == 0x3a)
-        if tb == 0x12 and not _catalog_3a:
+        # v412f5: DAMAGE 28 ESCAPE - the same length-rule collision, next victim. A damage frame
+        # is 10+9*count bytes, so a 3-RECORD BURST is exactly 37B -> body 33B -> T=0x12, and it
+        # entered this spawn/lobby block instead of the damage handler further down: no relay, no
+        # DAMAGED mark, no kill latch. server_3_.log 15:55:04.374 / 15:57:21.004 / 15:58:29.033:
+        # Gary's three 37B bursts are the ONLY damage frames in the whole engagement without a
+        # 'hit -> relay' line - 19/28/46/55B all relayed fine (their T bytes don't collide; the
+        # 7/12/14-record sizes that map to tb 0x52/0x22/0x42 are safe because those blocks sit
+        # AFTER the damage handler - 0x12 is the only tb dispatched before it). The escape must
+        # NOT release the real tb=0x12 out-4 spawn (sub=0x04) or lobby traffic, so it keys on
+        # the damage sub in both wire forms, exactly like _catalog_3a above.
+        _dmg_1c = (sub == 0x1c) or (sub == 0x00 and len(pl) > 8 and pl[8] == 0x1c)
+        if tb == 0x12 and not _catalog_3a and not _dmg_1c:
             if sub == 0xe1:
                 pilots=db_get_pilots(s.account) if s.account else []
                 resp=build_e1_pilot_list(pilots)

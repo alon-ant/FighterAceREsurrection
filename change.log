@@ -27,6 +27,108 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v413f5: [CONSOLE/FEATURE] `say <message>` - SERVER-WIDE ANNOUNCEMENT to every player, all
+      arenas and the lobby at once (alias: `broadcast`; works from the terminal AND the web
+      admin Live Console, which queues onto the same command path). Each client gets the
+      chat form it can actually RENDER in its current state, both proven from the binary:
+      IN-GAME sessions get msg-20 CHANNEL 4 - RE of the display handler FUN_004f6030 shows
+      channel 4 is the client's built-in ANNOUNCE channel: it upper-cases the text, prints
+      the chat line, and pushes the text as a ~10-second on-screen banner via FUN_0046a8a0
+      (Msn_Serv.cpp mission-service message, duration 10000ms). The handler's first act is
+      GetPlayer(PlayerIndex) and an unknown PI DROPS the line ('ChatMessage from unknown
+      player'), so each recipient is stamped with its OWN index - self-resolution, the same
+      property every reflected chat already relies on. The chat line reads 'TheirName: TEXT'
+      (cosmetic; the banner shows the text alone). LOBBY sessions get the 0xcd 'Server'
+      named chat (name inline, no PI - the ban-notice form).
+      SAFETY: FUN_004f6030's channel-4 path strcpy's into a 512-byte stack buffer with no
+      bounds check, so ANNOUNCE_MAX_CHARS=200 caps every send far below the client's buffer.
+      Unit-verified with the real packet builders: in-game recipients get appspace msg-20
+      [0x14][ch=4][own PI u32][squad u32][text 00], lobby recipients get [0xcd]'Server'00
+      text00; a 500-char input truncates to 200 on every wire form; a blank sends nothing.
+      FALSIFY: type `say Server restarting in 5 minutes` in the web console -> ANNOUNCE log
+      line with the in-game/lobby split; every flying client shows the uppercased chat line
+      + a 10s on-screen banner; every lobby client shows 'Server: ...' in chat.
+
+v412f5: [NETCODE/BUGFIX] ONE-SIDED HIT REGISTRATION - damage-28 frames lost to two dispatch
+      collisions (ALL41_MAD vs Gary head-to-head, messages55 / server_3_.log 15:54-15:58,
+      room 53: MAD obj 0x0176, Gary 0x0170, Taurus@FA 0x0175). FIELD EVIDENCE: every relayed
+      damage frame in the engagement is Gary's 19/28/46/55B forms; his three 37-BYTE bursts
+      (15:55:04.374, 15:57:21.004, 15:58:29.033) are the ONLY sizes with no 'hit -> relay'
+      line, and his two PREFIXED frames (15:57:21.512, 15:58:28.508, cmd=0x0542 sub=0x1c)
+      died silently. The victims of those five frames were never told they were hit.
+      TWO BUGS, both dispatch-order: (A) THE LENGTH-RULE COLLISION AGAIN (v392/v393's
+      family): a damage frame is 10+9*count bytes, so a 3-record burst is exactly 37B ->
+      body 33B -> T=0x12 by the appspace length rule -> it entered the tb==0x12 spawn/lobby
+      block (which sits BEFORE the damage handler; the only tb block that does) and was
+      swallowed by its catch-all. 3-record bursts are the signature of sustained fire -
+      precisely the head-to-head scenario. (B) THE cmd GATE REGRESSED v333: the pl[8]==0x1c
+      prefixed-damage fallback lives INSIDE `if cmd == 0:`, so prefixed damage was captured
+      and never relayed - and the v352 'relayed with the prefix attached' mis-walk SUSPECT
+      could never even occur through this path anymore, it simply dropped.
+      FIX (two edits, same pattern as their parents): (1) `_dmg_1c` escape on the tb==0x12
+      block, exactly mirroring v393's `_catalog_3a` - keys on the damage sub in both wire
+      forms, so the real tb=0x12 out-4 spawn (sub=0x04), lobby traffic (0xe1/0xde/0xce...)
+      and the hangar catalog keep their block; (2) 0x1c joins PREFIXED_REFRAME_SUBS, riding
+      v411f5's cmd release: a prefixed damage frame re-frames to CLEAN direct bytes and
+      takes the mature sub==0x1c path (victim DAMAGED mark, kill latch, relay of a frame
+      whose header matches its length - retiring the v356 in-relay strip's prefixed case).
+      Verified by REPLAYING all five real lost frames + six controls through the extracted
+      reframe/escape/dispatch logic: 3x 37B bursts -> relay, 2x prefixed -> relay; 19/46B
+      direct unchanged, spawn out-4 / lobby 0xe1 / 17B hangar catalog / prefixed spawn all
+      keep their original dispatch.
+      NOT EXPLAINED BY THIS FIX, logged for next session: MAD's client sent ZERO out-28s all
+      session (his own hit detection found nothing - client-side aim/interp, not a server
+      relay loss; his collision detect at 15:58:37 proves proximity rendering worked), and
+      the 'ERROR: Unsupported message 8' clusters on MAD's client (15:55:26 x3, 15:55:54 x2,
+      15:57:38-40 x7, ~280ms apart = reliable-resend cadence, correlated with Taurus's
+      damage/death) - the server's sends are not logged at INFO, so if this recurs on v412
+      the next step is send-side instrumentation, not guessing.
+      FALSIFY: a sustained-fire dogfight logs 'hit -> relay' lines for 37B frames (grep
+      'relaying a 37B damage frame' / '(37B)'), and a shooter on a wrapped connection still
+      registers hits on the victim (REFRAME 'damage 28 ... releasing cmd' followed by
+      'hit -> relay' with the 4B-shorter clean length).
+
+v411f5: [NETCODE/BUGFIX] RE-FRAMED PREFIXED MESSAGES ACTUALLY DISPATCH - fixes the
+      parachute-landing CTD (DBD_GCEXTREME, messages09 / server_3_.log 23:15). ROOT CAUSE,
+      one flaw with two faces: the entire in-game dispatcher (delete-notify death path,
+      DAMAGE28/collision relays, out-4 spawn/bail handlers, echo logic) is gated on
+      `if cmd == 0:`, and the v246/v340 re-frame recovered a prefixed frame's bytes but LEFT
+      cmd AT ITS PREFIXED VALUE - so every re-framed message was captured, logged, and then
+      refused by the very dispatcher it was recovered for. Three casualties in one minute of
+      server_3_.log: 23:15:14 a re-framed collision 125 never relayed; 23:15:42 the BAIL
+      out-4 lost; 23:15:49 the re-framed bail delete-notify produced no death and no husk
+      removal (peers GC'd the ghost 0x01a2 themselves 20s later, the PEERDEL cluster).
+      The bail additionally slipped EVERY net: its 15-byte parachute form carries inner type
+      0xf2 (the appspace type byte encodes size), so the pl[8]==0x04 scan fallback - which
+      requires the 33-byte spawn shape pl[5]==0x12 - never matched, and sub 0x04 was not in
+      PREFIXED_REFRAME_SUBS. CONSEQUENCE CHAIN, fully evidenced: no parachuter object, no
+      ServerConfirm -> the client's chute kept NumberVar=-1 -> on canopy touchdown the
+      teardown ran 'DelObject -1, bsr=0' -> null lookup -> Access violation v.addr:0x10 at
+      Main.cpp:2407 (the exact messages09 crash signature). The lost bail also leaves the
+      server's object-Number counter one behind the client's (the chute consumed one
+      client-side), which is the documented 'Confirm object N not found in list' dead-engine
+      follow-on - so this wrap-state bail loss was lethal twice over.
+      FIX (two coordinated edits, one root cause): (1) PREFIXED_REFRAME_RELEASES_CMD - after
+      a full re-frame the frame is BYTE-IDENTICAL to a direct arrival, so cmd is released to
+      0 and the frame takes the direct dispatch path. Provably safe: it cannot re-enter the
+      v364f5 counter-unwrap (a re-framed frame is self-consistent as direct, which the
+      unwrap's first condition excludes for bc==0; bc>0 frames fail its pl[0]==0 test), and
+      byte-identical input + identical variables = the exact path the direct form has taken
+      all along. (2) 0x04 joins PREFIXED_REFRAME_SUBS, routing a prefixed bail to the mature
+      sub==0x04 parachute consumer (Number consumed, ident resynced, confirm + peer create +
+      descent delete - the path that served the FIRST bail of the night flawlessly) and a
+      prefixed 33B spawn to the direct tb==0x12 confirm instead of the scan shim.
+      Verified by REPLAYING the three real casualty payloads from server_3_.log through the
+      extracted reframe+gate+dispatch logic: wrapped bail -> parachute consumer, wrapped
+      delete -> death path, wrapped collision -> relay; direct forms and a prefixed
+      non-set sub (0x22) byte-for-byte unchanged; the counter-unwrap never re-fires.
+      Single-variable revert: PREFIXED_REFRAME_RELEASES_CMD=False + drop 0x04 from the set.
+      FALSIFY: bail out twice in one internet session (the wrap state follows the first
+      cycle) -> second bail logs '[PARA] BAILED OUT' + a REFRAME line ending 'releasing cmd
+      for direct dispatch', the client gets its '(p)' ServerConfirm, the chute lands with NO
+      crash, and the bail delete books the DEATH + husk removal on peers (no PEERDEL
+      GC-cluster for that object).
+
 v410f5: [WEB] PILOT EDITOR EDITS THE PER-MODE LADDER BOARDS. Follow-through on the v409f5
       finding that the manual pilot-editor test could not touch the boards: /admin/edit_pilot
       gains a 'Ladder Boards - FFA / TC / Events' fieldset exposing all twelve per-mode
