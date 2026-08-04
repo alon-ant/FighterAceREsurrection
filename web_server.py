@@ -3,6 +3,12 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-08-03: v410f5 - pilot editor edits the per-mode ladder boards.
+#   /admin/edit_pilot gains a 'Ladder Boards - FFA / TC / Events' fieldset with all twelve
+#   per-mode columns (fighter/bomber score + kills + deaths per board), for seeding or
+#   correcting boards manually - e.g. copying a career total into the board it was really
+#   earned on. Guarded like every other field: only rendered/saved when the column exists,
+#   so an un-migrated DB is unaffected. Rank still derives from career scores only.
 # 2026-08-03: v408f5 - ladder restructured: FFA | TC | Events are the MAIN tabs.
 #   Fighter and Bomber scores are no longer their own tabs - they are COLUMNS inside every
 #   board, exactly like the career split (score_<mode> = fighter-flown, new bscore_<mode> =
@@ -1167,6 +1173,20 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 ('ai_ships',         'AI Ships',               'f16 u16',   0,   65535),
                 ('ai_ground',        'AI Ground Units',        'f18 u16',   0,   65535),
                 ('ai_buildings',     'AI Buildings',           'f19 u16',   0,   65535),
+                # v410f5: per-mode ladder boards (web-only columns; the game client never sees
+                # them). Same bounds as their career counterparts.
+                ('score_ffa',        'FFA Fighter Score',      'FFA board', -2147483648, 2147483647),
+                ('bscore_ffa',       'FFA Bomber Score',       'FFA board', -2147483648, 2147483647),
+                ('kills_ffa',        'FFA Kills',              'FFA board', 0, 65535),
+                ('deaths_ffa',       'FFA Deaths',             'FFA board', 0, 65535),
+                ('score_tc',         'TC Fighter Score',       'TC board', -2147483648, 2147483647),
+                ('bscore_tc',        'TC Bomber Score',        'TC board', -2147483648, 2147483647),
+                ('kills_tc',         'TC Kills',               'TC board', 0, 65535),
+                ('deaths_tc',        'TC Deaths',              'TC board', 0, 65535),
+                ('score_events',     'Events Fighter Score',   'Events board', -2147483648, 2147483647),
+                ('bscore_events',    'Events Bomber Score',    'Events board', -2147483648, 2147483647),
+                ('kills_events',     'Events Kills',           'Events board', 0, 65535),
+                ('deaths_events',    'Events Deaths',          'Events board', 0, 65535),
             ]
             have = [f for f in STAT_FIELDS if f[0] in pcols]
             sel = ', '.join(f'COALESCE({c},0)' for c, _l, _s, _lo, _hi in have)
@@ -1228,6 +1248,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                         {_grp('AI Units Destroyed',
                               'Not yet tracked by the server - set them here to verify the client renders them.',
                               ('ai_fighters', 'ai_bombers', 'ai_tanks', 'ai_ships', 'ai_ground', 'ai_buildings'))}
+                        {_grp('Ladder Boards &mdash; FFA / TC / Events',
+                              'The web ladder&#39;s per-arena-type boards (the game client never sees '
+                              'these). They fill automatically from kills and deaths in arenas of that '
+                              'type; edit them here to seed or correct a board &mdash; e.g. copy a career '
+                              'total into the board it was really earned on. Rank always derives from '
+                              'the career scores above, never from these.',
+                              ('score_ffa', 'bscore_ffa', 'kills_ffa', 'deaths_ffa',
+                               'score_tc', 'bscore_tc', 'kills_tc', 'deaths_tc',
+                               'score_events', 'bscore_events', 'kills_events', 'deaths_events'))}
                         <div style="margin-top:15px;">
                             <button type="submit" class="btn-green" style="width:auto; padding:10px 20px;">Save Stats</button>
                             &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
@@ -1923,6 +1952,19 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 ('ai_tanks',       0, 65535),        # f17 u16
                 ('ai_ground',      0, 65535),        # f18 u16
                 ('ai_buildings',   0, 65535),        # f19 u16
+                # v410f5: per-mode ladder boards (web-only; same widths as career counterparts)
+                ('score_ffa',      -2147483648, 2147483647),
+                ('bscore_ffa',     -2147483648, 2147483647),
+                ('kills_ffa',      0, 65535),
+                ('deaths_ffa',     0, 65535),
+                ('score_tc',       -2147483648, 2147483647),
+                ('bscore_tc',      -2147483648, 2147483647),
+                ('kills_tc',       0, 65535),
+                ('deaths_tc',      0, 65535),
+                ('score_events',   -2147483648, 2147483647),
+                ('bscore_events',  -2147483648, 2147483647),
+                ('kills_events',   0, 65535),
+                ('deaths_events',  0, 65535),
             ]
             if pilot:
                 conn = sqlite3.connect(SRV['db_path'])

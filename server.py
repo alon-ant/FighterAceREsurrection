@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v408f5'
+VERSION = 'v410f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10307,11 +10307,23 @@ def _ingame_own_object_removed(s, tb, stored):
             # Rule OFF + undamaged + airborne = a clean voluntary exit, NOT a death. This is the
             # fix for "undamaged in-flight exit still counted as a death": _flying used to book
             # the death unconditionally.
+            # v409f5: THE WIRE TELLS A CRASH FROM AN EXIT AFTER ALL. v232's 'identical on the
+            # wire' finding (which v400f5 inherited) is FALSIFIED by run_20260803_224958: a
+            # ground impact reports exit MEC=1 (0x11, immediately followed by a StartPlace
+            # respawn request - one even RACED the delete), while a voluntary exit reports
+            # MEC=0xa (0xa0, followed by the HQ screen). v400f5's gate swallowed the MEC=1
+            # form too, so an undamaged fly-into-the-ground stopped registering as a death
+            # entirely. A moving MEC=1 removal is therefore a CRASH - a death REGARDLESS of
+            # the arena's exit-crash rule (that rule governs voluntary exits only). The
+            # land-and-swap case (also 0x11) stays out via the existing movement test: a
+            # parked plane reports movement 0.
             _exit_crash = _exit_is_crash_for_room(s.current_room)
-            _flying_kills = _flying and _exit_crash
+            _crashed = _flying and mec_nib == 1
+            _flying_kills = _flying and (_crashed or _exit_crash)
             if _damaged or _flying_kills or COUNT_EXIT_TO_HQ_AS_DEATH:
                 _why = ('DAMAGED' if _damaged else '') + ('+' if _damaged and _flying_kills else '') \
-                       + (f'IN FLIGHT (movement={_move}, exit=crash arena)' if _flying_kills else '')
+                       + ((f'CRASHED (movement={_move}, MEC=1 ground impact)' if _crashed else
+                           f'IN FLIGHT (movement={_move}, exit=crash arena)') if _flying_kills else '')
                 log('DEATH', f'{s.current_pilot} {_why} at removal (MEC&0xf={mec_nib}) '
                              f'-> counts as a death')
                 # v244: CAPTURE the killer here too. This branch used to DISCARD score_on_death's

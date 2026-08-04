@@ -27,6 +27,53 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v410f5: [WEB] PILOT EDITOR EDITS THE PER-MODE LADDER BOARDS. Follow-through on the v409f5
+      finding that the manual pilot-editor test could not touch the boards: /admin/edit_pilot
+      gains a 'Ladder Boards - FFA / TC / Events' fieldset exposing all twelve per-mode
+      columns (fighter score, bomber score, kills, deaths per board) with the same bounds as
+      their career counterparts, so an admin can seed a board (e.g. copy a career total into
+      the board it was really earned on) or correct one after the fact. The game client never
+      sees these columns; RANK still derives from the career scores only. Both the form and
+      the POST reuse the v240 guards - a field is rendered and saved ONLY when its column
+      exists in the DB and was actually posted - so an un-migrated DB shows a shorter form
+      and saves cleanly. server.py change: VERSION bump only.
+      Unit-verified END-TO-END on real sqlite DBs, running the exact GET (have-filter +
+      COALESCE select) and POST (_clamp + partial-update SQL) logic: on a migrated DB all 15
+      fields of the test subset render, board values round-trip (1234/4567/16/99), an
+      over-range kills value clamps to 65535 and junk input defaults to 0 without touching
+      neighbours; on an un-migrated DB the board fields are hidden and a POST carrying board
+      keys saves nothing.
+      FALSIFY: open AC2E_Bigalon in the editor after restart -> the new fieldset shows twelve
+      zeroed board fields; set FFA kills=16/deaths=99 and save -> the ladder's FFA tab shows
+      them immediately while Career is untouched; on a DB missing the columns the fieldset
+      simply doesn't render.
+
+v409f5: [SCORING/BUGFIX] CLEAN CRASHES REGISTER AS DEATHS AGAIN - the wire tells a crash from
+      an exit after all. Field report (run_20260803_224958 / messages23): an undamaged
+      fly-into-the-ground produced NO death at all, and every per-mode ladder board stayed
+      empty. ONE root cause: v400f5's exit-crash gate, inherited from v232's 'a crash and a
+      clean ground exit are identical on the wire' finding, swallowed EVERY undamaged airborne
+      removal when the arena rule is OFF - and since no death ever fired, score_on_death never
+      ran, so the v406-v408 mode boards had nothing to write (the manual pilot-editor test
+      only writes CAREER columns; the boards fill from live scoring only - working as
+      designed, starved by this bug).
+      THE v232 PREMISE IS FALSIFIED by tonight's log: a ground impact reports exit 0x11
+      (MEC=1, EEC=1) and is immediately followed by a StartPlace respawn request (one even
+      RACED the delete by 3ms), while a voluntary exit reports 0xa0 (MEC=0xa, EEC=0) and is
+      followed by the HQ screen - three of each in one session, perfectly separated. FIX: a
+      MOVING removal with MEC=1 is a CRASH and books the death REGARDLESS of the arena's
+      exit-crash rule (that rule now governs voluntary MEC=0xa exits only, exactly v400f5's
+      intent). The land-and-swap case (also 0x11, the reason for the old caution) stays clean
+      via the existing movement test - a parked plane reports movement 0.
+      Verified by REPLAYING all six exits from tonight's log through the new predicate:
+      3/3 crashes (movement 122k-347k, 0x11) -> deaths; 3/3 menu exits (0xa0, incl. the
+      parked one) -> clean; damaged-exit and exit-crash-arena behaviour byte-identical to
+      v400f5. The crash death flows through score_on_death -> career deaths/planes-lost AND
+      the arena mode's deaths_<mode>/loss, so the ladder boards start filling.
+      FALSIFY: fly into the ground undamaged in a Dogfighting arena -> DEATH 'CRASHED' log
+      line, career deaths +1, FFA board deaths +1 and the plane's FFA cost deducted; exit to
+      menu mid-flight -> still 'clean exit, NOT a death'; land, park, swap planes -> clean.
+
 v408f5: [SCORING/WEB] LADDER RESTRUCTURED - FFA | TC | EVENTS ARE THE MAIN TABS, WITH THE
       FIGHTER/BOMBER SPLIT INSIDE EVERY BOARD. User direction: fighter/bomber should not be
       tabs of their own; the arena modes are the boards, and each carries the same
