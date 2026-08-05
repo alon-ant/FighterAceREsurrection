@@ -209,6 +209,22 @@
 //     which also heals installs provisioned by the buggy v4.0.
 //     Falsify by: a v4.0-provisioned machine still showing the picker after
 //     the download with this build dropped into its launcher folder.
+// 2026-08-05: launcher v4.1 - L-FIX-7: ini client path overrides the server's.
+//     The launcher installs the game itself now, so GameDir/ClientExe from
+//     launcher.ini (written by the install step) is authoritative at launch;
+//     the account's X-Game-Client-Path from the website is demoted to a
+//     fallback used only when the ini path holds no existing client exe
+//     (legacy pilots with website-configured paths keep working). The stage
+//     log shows which source won ('L2: using ini/server client path').
+//     Falsify by: a self-installed pilot's launch running an exe outside
+//     their ini GameDir while that dir contains a valid client.
+//     v4.1b - L-FIX-7b: field bug - the TICKET download still targeted the
+//     server-path folder (a second consumer of X-Game-Client-Path missed in
+//     v4.1), so the launched client found no fresh ticket. The ticket
+//     destination now follows the same ini-first precedence, with a 'D0:'
+//     stage line recording which dir won.
+//     Falsify by: ticket.vr1's timestamp not updating in the ini GameDir on
+//     a self-installed machine at login.
 //     Falsify by: post-install, a file under the target still carrying the R
 //     attribute, GameDir absent from launcher.ini, or the game failing to
 //     launch from the saved path.
@@ -1282,17 +1298,25 @@ static bool ExtractPidFromName(const std::wstring& name, std::wstring& pid) {
 
 static bool LaunchGame(const std::wstring& pid, std::wstring& err,
                        const std::wstring& serverClientPath = L"") {
-    // Prefer the client path the WEBSITE has stored for this account (sent by the
-    // server in the X-Game-Client-Path header). Fall back to launcher.ini only if
-    // the server didn't provide one. This means the launcher respects whatever path
-    // the user set on the web page, instead of blindly using the ini.
+    // L-FIX-7: since the launcher now installs the game itself, the ini's
+    // GameDir/ClientExe (written by the install step) is authoritative - it
+    // OVERRIDES the account path stored on the website (X-Game-Client-Path),
+    // which may be stale or point at a machine-specific old install. The
+    // server header is only a fallback for legacy pilots whose ini has no
+    // valid local install.
     std::wstring client, workDir;
-    if (!serverClientPath.empty()) {
+    std::wstring iniClient = g_cfg.gameDir + L"\\" + g_cfg.clientExe;
+    if (FileExists(iniClient)) {
+        client = iniClient;
+        workDir = g_cfg.gameDir;
+        Stage(L"L2: using ini client path");
+    } else if (!serverClientPath.empty()) {
         client = serverClientPath;
         size_t slash = client.find_last_of(L"\\/");
         workDir = (slash == std::wstring::npos) ? g_cfg.gameDir : client.substr(0, slash);
+        Stage(L"L2: using server client path");
     } else {
-        client = g_cfg.gameDir + L"\\" + g_cfg.clientExe;
+        client = iniClient;   // will produce the clear 'not found' error below
         workDir = g_cfg.gameDir;
     }
     if (!FileExists(client)) { err = L"Game client not found:\n" + client; return false; }
@@ -1428,7 +1452,10 @@ static void DownloadTicketAndLaunch(const std::wstring& rawUrl) {
     }
 
     // Read the account's stored client path from the server (X-Game-Client-Path).
-    // This overrides launcher.ini so the launcher uses whatever path the website has.
+    // L-FIX-7b: the ticket must land next to the client we will LAUNCH, so the
+    // destination follows the SAME precedence as LaunchGame: a valid ini
+    // install (GameDir\ClientExe exists) wins; the server's path is only a
+    // fallback for legacy pilots without one.
     std::wstring serverClientPath, gameDir = g_cfg.gameDir;
     {
         wchar_t hv[1024] = L""; DWORD hl = sizeof(hv);
@@ -1443,7 +1470,13 @@ static void DownloadTicketAndLaunch(const std::wstring& rawUrl) {
                 serverClientPath.back() == L'"')
                 serverClientPath = serverClientPath.substr(1, serverClientPath.size() - 2);
             size_t slash = serverClientPath.find_last_of(L"\\/");
-            if (slash != std::wstring::npos) gameDir = serverClientPath.substr(0, slash);
+            if (slash != std::wstring::npos &&
+                !FileExists(g_cfg.gameDir + L"\\" + g_cfg.clientExe)) {
+                gameDir = serverClientPath.substr(0, slash);
+                Stage(L"D0: ticket dir from server path");
+            } else {
+                Stage(L"D0: ticket dir from ini");
+            }
         }
     }
     dest = gameDir + L"\\ticket.vr1";
