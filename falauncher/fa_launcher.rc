@@ -1,0 +1,6 @@
+#include <windows.h>
+// L-FIX-6: embedded distribution payload (extracted on first run)
+101 RCDATA "payload/aria2c.exe"
+102 RCDATA "payload/FA42DeluxeEdition_iso.torrent"
+103 RCDATA "payload/aria2-COPYING.txt"
+104 RCDATA "payload/launcher.ini"
