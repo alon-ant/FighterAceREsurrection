@@ -1,6 +1,33 @@
 #include <windows.h>
 // L-FIX-6: embedded distribution payload (extracted on first run)
-101 RCDATA "payload/aria2c.exe"
-102 RCDATA "payload/FA42DeluxeEdition_iso.torrent"
-103 RCDATA "payload/aria2-COPYING.txt"
 104 RCDATA "payload/launcher.ini"
+
+// L-FIX-8: identity metadata - unsigned binaries without VERSIONINFO and a
+// manifest score far worse with AV heuristics and SmartScreen.
+1 24 "fa_launcher.manifest"
+
+1 VERSIONINFO
+FILEVERSION     4,1,2,0
+PRODUCTVERSION  4,1,2,0
+FILEOS          0x40004L
+FILETYPE        0x1L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904b0"
+    BEGIN
+      VALUE "CompanyName",      "Fighter Ace Revival Project"
+      VALUE "FileDescription",  "Fighter Ace 4.2 Launcher and Installer"
+      VALUE "FileVersion",      "4.1.2.0"
+      VALUE "InternalName",     "fa_launcher"
+      VALUE "LegalCopyright",   "Fighter Ace community game-preservation project"
+      VALUE "OriginalFilename", "FighterAce42_Setup.exe"
+      VALUE "ProductName",      "Fighter Ace 4.2 Revival"
+      VALUE "ProductVersion",   "4.1.2.0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

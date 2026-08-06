@@ -225,6 +225,20 @@
 //     stage line recording which dir won.
 //     Falsify by: ticket.vr1's timestamp not updating in the ini GameDir on
 //     a self-installed machine at login.
+// 2026-08-05: launcher v4.2 - L-FIX-8b: AV false positives. The custom
+//     self-extractor (embedded aria2c PE + self-copy + relaunch) fed every
+//     dropper heuristic. The outer layer is now a standard NSIS installer
+//     (installer.nsi): welcome -> directory (default C:\Games\FA42, NSIS
+//     auto-appends FA42 on browse) -> extract to $INSTDIR\launcher ->
+//     WriteINIStr InstallTarget -> finish page runs the launcher /getgame.
+//     Reinstalls preserve an existing launcher.ini; an uninstaller and
+//     HKCU Add/Remove entry are written. The launcher itself drops the
+//     payload resources except the default ini (self-heal only), and its
+//     provisioning reduces to 'extract default ini if missing' - no picker,
+//     no self-copy, no relaunch. The L-FIX-6b2 launcher-parent rule remains
+//     the InstallTarget safety net.
+//     Falsify by: VirusTotal detections not dropping materially vs v4.1.2,
+//     or a reinstall wiping a pilot's launcher.ini.
 //     Falsify by: post-install, a file under the target still carrying the R
 //     attribute, GameDir absent from launcher.ini, or the game failing to
 //     launch from the saved path.
@@ -2024,101 +2038,16 @@ static bool ExtractRes(int id, const std::wstring& dest, bool overwrite) {
     return ok && wr == sz;
 }
 
-static void ExtractPayloadInto(const std::wstring& dir, bool overwriteTools) {
-    ExtractRes(IDR_ARIA2,   dir + L"\\aria2c.exe", overwriteTools);
-    ExtractRes(IDR_TORRENT, dir + L"\\FA42DeluxeEdition_iso.torrent", overwriteTools);
-    ExtractRes(IDR_LICENSE, dir + L"\\aria2-COPYING.txt", overwriteTools);
-    ExtractRes(IDR_INI,     dir + L"\\launcher.ini", false);   // NEVER clobber settings
-}
-
-// Returns true if this instance should exit (the installed copy was started).
-// L-FIX-6b: the bare distributed exe asks for the GAME folder FIRST, creates
-// it (with the L-FIX-5c subfolder rules), provisions <target>\launcher as the
-// launcher's home, records InstallTarget= in the generated ini so the install
-// step never asks again, and relaunches with /getgame so the download starts
-// straight away - one picker, zero redundant prompts.
-static bool ProvisionAndMaybeRelaunch(PWSTR cmdArgs) {
+// L-FIX-8b: provisioning is now the NSIS installer's job (known stub, far
+// lower AV false-positive rate). The launcher no longer embeds aria2c, never
+// copies itself and never relaunches - the dropper-shaped behaviors that fed
+// the heuristics are gone. Only the tiny default ini remains embedded, as a
+// self-heal for a deleted launcher.ini; aria2c/torrent are installed by
+// setup, and their absence just produces the existing clear error messages.
+static bool ProvisionAndMaybeRelaunch(PWSTR) {
     std::wstring dir = ExeDir();
-    if (FileExists(dir + L"\\launcher.ini")) {
-        ExtractPayloadInto(dir, false);   // in place; fill gaps only
-        return false;
-    }
-
-    std::wstring picked = PickFolder(
-        L"Welcome to Fighter Ace 4.2! Select where to install the game "
-        L"(e.g. C:\\Games). A game folder will be created there.");
-    if (picked.empty()) {
-        MessageBoxW(nullptr, L"Setup was cancelled - nothing was installed.",
-                    L"FA Secure Launcher", MB_OK | MB_ICONINFORMATION);
-        return true;
-    }
-    while (!picked.empty() && (picked.back() == L'\\' || picked.back() == L'/'))
-        picked.pop_back();
-    std::wstring target;
-    {
-        std::wstring name = picked;
-        size_t slash = name.find_last_of(L"\\/");
-        if (slash != std::wstring::npos) name = name.substr(slash + 1);
-        std::wstring lowName = name, lowSub = g_cfg.installSubdir;
-        std::transform(lowName.begin(), lowName.end(), lowName.begin(), ::towlower);
-        std::transform(lowSub.begin(),  lowSub.end(),  lowSub.begin(),  ::towlower);
-        if (lowName == lowSub || IsDirEmpty(picked)) target = picked;
-        else                                         target = picked + L"\\" + g_cfg.installSubdir;
-    }
-    if (!CreateDirectoryW(target.c_str(), nullptr) &&
-        GetLastError() != ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, (L"Could not create the game folder:\n" + target +
-                    L"\n\nPick a location you can write to.").c_str(),
-                    L"FA Secure Launcher", MB_OK | MB_ICONERROR);
-        return true;
-    }
-
-    std::wstring home = target + L"\\launcher";
-    CreateDirectoryW(home.c_str(), nullptr);
-    ExtractPayloadInto(home, true);       // fresh tools on every (re)install
-    // Record the chosen game folder for the install step (once - a preserved
-    // ini from a previous setup run already has it).
-    {
-        std::wstring iniPath = home + L"\\launcher.ini";
-        bool has = false;
-        {
-            std::ifstream f(iniPath.c_str(), std::ios::binary);
-            if (f) {
-                std::stringstream ss; ss << f.rdbuf();
-                // Match an actual key LINE - a doc comment mentioning the key
-                // must not defeat the append (that was the v4.0 bug).
-                has = ss.str().find("\nInstallTarget=") != std::string::npos;
-            }
-        }
-        if (!has) {
-            std::ofstream o(iniPath.c_str(), std::ios::binary | std::ios::app);
-            if (o) {
-                std::string add = "\r\n; Game folder chosen during setup:\r\nInstallTarget=" +
-                                  WideToUtf8(target) + "\r\n";
-                o.write(add.data(), (std::streamsize)add.size());
-            }
-        }
-    }
-
-    wchar_t self[MAX_PATH] = L"";
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
-    std::wstring exe = home + L"\\fa_launcher.exe";
-    if (!CopyFileW(self, exe.c_str(), FALSE)) {
-        if (!FileExists(exe)) { ExtractPayloadInto(dir, true); return false; }
-    }
-    std::wstring cmd = L"\"" + exe + L"\"";
-    if (cmdArgs && cmdArgs[0]) cmd += std::wstring(L" ") + cmdArgs;
-    if (cmd.find(L"/getgame") == std::wstring::npos)
-        cmd += L" /getgame";   // the pilot already committed - start the download
-    STARTUPINFOW si; ZeroMemory(&si, sizeof si); si.cb = sizeof si;
-    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof pi);
-    std::vector<wchar_t> b(cmd.begin(), cmd.end()); b.push_back(0);
-    if (CreateProcessW(exe.c_str(), b.data(), nullptr, nullptr, FALSE, 0,
-                       nullptr, home.c_str(), &si, &pi)) {
-        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-        return true;
-    }
-    ExtractPayloadInto(dir, true);        // last resort: run from here
+    if (!FileExists(dir + L"\\launcher.ini"))
+        ExtractRes(IDR_INI, dir + L"\\launcher.ini", false);
     return false;
 }
 
