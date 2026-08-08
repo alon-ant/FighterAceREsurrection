@@ -27,6 +27,94 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v417f5: [NETCODE/CRITICAL] RELIABLE-SEND TIMEOUT NO LONGER ABANDONS THE SEQ - the true root
+      cause of the '82 percent' hang (and, most likely, of the endemic one-way stall family).
+      GHIDRA VERDICT ON v416f5's OPEN QUESTION: with FA.exe loaded, functions were created at
+      0x4f4120 (msg-88 AceOrRankChangedCB) and its accessor 0x4f2560. The handler is a clean
+      bounded 512-slot scan (mgr NULL-guarded, index-guarded) that on unknown PI logs and
+      RETURNS - it cannot hang or crash a client in any state. The 82% screen is simply
+      WaitingForStartPlaceList (strings 0xa31a10 / native timeout 0xa29f10) waiting for a
+      grant that never arrived; the victims' silent final lines are unflushed log tail from
+      the kill, not a death inside the compound.
+      THE ACTUAL BUG: send_rel (v359f5) retransmits an un-ACKed reliable seq only until `to`
+      (3-5s), then rme(seq) and GIVES UP - but nrel() already advanced, so the next sends go
+      out as N+1, N+2, ... The client's reliable RX is strictly in-order (vcnc QRcv), so the
+      abandoned seq N leaves a PERMANENT hole: the client holds every later reliable message
+      while unreliable traffic keeps flowing. That is precisely the field picture - Warrior's
+      client logged unreliable ACE88s to its last line while the granted msg-23 and the
+      msg-96 answer (both sent instantly, per the run log) never surfaced; Snoman identical
+      within 0.4s; fresh sessions (fresh seq space) on retry worked at once. v359f5's own
+      comment documents the wedge mechanism; the `to` cap quietly reintroduced it through the
+      back door, and no INFO-level TX logging existed to see the abandonment happen (the gap
+      v412f5 flagged).
+      FIX: on window expiry send_rel no longer rme()s the seq. A per-send background keeper
+      (_rel_keeper, daemon thread) keeps the ACK event registered and re-sends the same pkt
+      at REL_KEEPER_INTERVAL_S=1.0 until the ACK lands (the late copy un-wedges the client's
+      QRcv, which drains its out-of-order queue - the v359f5 recovery, just never given up
+      on), the session closes, or REL_KEEPER_MAX_S=120 expires. Every takeover and resolution
+      logs at INFO under [RELKEEP], closing the send-side visibility gap in the same stroke.
+      Caller semantics unchanged: blocking window and return value as before. Cost: at most
+      1 pkt/s per held seq. KNOWN LIMIT (accepted): 512 further sends while a seq is held
+      re-keys its event and that keeper runs to the cap - a session that deep into a wedged
+      downlink is dead anyway.
+      RELATION TO v416f5: the ACE88 gate stands as useful traffic reduction (no scoreboard
+      pushes at clients mid-rebuild) but is no longer the load-bearing fix; the mechanism it
+      guessed at is disproven and its own FALSIFY note is superseded by this entry.
+      FALSIFY: grep [RELKEEP] - takeovers should appear occasionally and resolve 'ACKed after
+      Xs'; a client frozen >5s during HQ->fly (alt-tab through the load) still receives its
+      grant and spawns; the 82% both-at-once-fail/one-at-a-time-works pattern does not recur.
+      If RELKEEP lines show 'GAVE UP' on LIVE clients (still sending), the ACK rx path is the
+      next suspect (see the Moira SEQ9 bits8-16=2 anomaly). REVERT: restore the unconditional
+      rme(seq)+log tail in send_rel and delete _rel_keeper + the two consts; no wire change.
+
+v416f5: [NETCODE/BUGFIX] THE '82 PERCENT' LOAD HANG - ACE88 scoreboard pushes were sent to
+      every peer in the room with no regard for each RECIPIENT's state, landing on clients
+      mid-world-rebuild (between the msg-23 StartPlace grant and their spawn's ServerConfirm =
+      the 82% WaitingForStartPlaceList screen). build_ace_rank_88's own RE note has required
+      the opposite since v218: the recipient's GamerClientScore object 'must ALREADY exist ...
+      hence we send it AFTER the spawn is confirmed, not before' - honoured for the SUBJECT of
+      the 88, never for its recipients.
+      FIELD CASE (messages12 / run_20260804_190857.log 16:55, Warrior + Snoman report, room
+      53): Snoman (StartPlace 16:55:55.196) and Warrior (16:55:55.591) were both at 82% when
+      Moira's HQ-open 88 (PI=3, sent 16:55:54.776, msg-13-wrapped unreliable) reached them.
+      Warrior's client log: 'in 13'10 { in 88'7 / AceOrRankChangedCB. PlayerIndex=3 not found'
+      and then NOTHING - the compound never closed and no further RX was processed for 60s+
+      even though the granted msg-23 and the msg-96 answer were next in the stream and three
+      more 88s went out at 16:56:00. Both victims killed their clients and rejoined; their
+      one-at-a-time retries worked. CONTROLS: Moira's own 82% window (16:55:57.4-59.5)
+      happened to contain no 88 -> spawned fine; SpUn absorbed every 88 while idle at HQ ->
+      untouched; Warrior processed the identical unknown-PI 88 shape at the HQ screen 2.7s
+      before dying -> harmless. The STATE is the trigger, not the message content.
+      FIX: s.spawn_pending marks the grant->CONFIRM5 window (set in handle_fly_start_place
+      beside the obj_confirmed reset; cleared in _fire_server_confirm and in the msg-3 death
+      re-arm, since the death screen is a proven-safe state). send_ace_rank_88 skips
+      recipients inside the window and logs them as '[held for [...]: mid-world-rebuild]'.
+      Skipping is LOSSLESS: 88 is idempotent and every spawn-init re-states every player's 88
+      to the whole room post-CONFIRM5, so a held recipient receives the complete set the
+      moment its own spawn confirms.
+      UNCONFIRMED (Ghidra was not running this session): the exact client-side mechanism.
+      The documented RE of FUN_004f4120 calls the unknown-PI path a logged no-op, yet the
+      error line is the last thing both victims processed; whether the wedge is inside the
+      handler's 512-slot scan against a mid-rebuild score manager, the msg-13 walker, or a
+      lost-log coincidence masking a different death needs the decompiler. The gate stands on
+      the three-subject state correlation either way.
+      [RESOLVED by v417f5: the decompiler confirmed the handler is a harmless no-op and the
+      'lost-log coincidence' reading was the truth - the real fault is send_rel abandoning a
+      timed-out seq (permanent downlink wedge). This gate remains as traffic reduction only.]
+      SECONDARY OBSERVATIONS from the same window, logged not fixed: (1) Warrior's client
+      knew neither PI=1 nor PI=3 despite ~8s in the room and a roster push - his join logged
+      '(peers=2, assigned)' while ACE88 counted 3 peers, and his client shows only two msg-62s
+      (62'25, 62'16); if the roster 62 under-delivers, unknown-PI 88s are being provoked, gate
+      or no gate. (2) 'Wrong DeltaMinutes -2.500000' flood on the client at the HQ screen -
+      client/server clock delta worth a tsync look. (3) Moira 16:55:51.268 SEQ9 'NONZERO seq
+      fields ... bits8-16=2' - a reliable-framing shape worth keeping an eye on.
+      FALSIFY: with 3+ players cycling HQ->fly together, every 88 fired during someone's
+      grant->confirm window logs '[held for ...]' and NO client hangs at 82% (grep the client
+      logs for an 'AceOrRankChangedCB' error between its 'out 23' and 'in 23' - there should
+      be none); scoreboard aces/ranks still correct after everyone spawns. REVERT: delete the
+      _skipped/_targets filter pair in send_ace_rank_88 and the three spawn_pending
+      assignments; no wire format changed.
+
 v415f5: [SCORING/BUGFIX] KILL ATTRIBUTION SURVIVES THE KILLER'S RESPAWN - the EXACT and
       LATCH paths compared the named/latched hunter object only against each session's
       CURRENT my_obj_number, so whenever the killer respawned before the victim's plane came

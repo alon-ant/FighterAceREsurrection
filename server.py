@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v415f5'
+VERSION = 'v417f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5184,6 +5184,22 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
     _targets = [t for t in (get_sessions_in_room(s.current_room)
                             if getattr(s, 'current_room', None) is not None else [])
                 if t is not s]
+    # *** v416f5: NEVER PUSH 88 AT A CLIENT MID-WORLD-REBUILD (the '82 percent' hang). ***
+    # build_ace_rank_88's own RE note has said it from day one: the recipient's score object
+    # 'must ALREADY exist ... hence we send it AFTER the spawn is confirmed, not before' - but
+    # this sender only ever honoured that for the SUBJECT, never for each RECIPIENT. Field case
+    # run_20260804_190857.log 16:55:5x (messages12): Snoman + Warrior both sat at the 82%
+    # WaitingForStartPlaceList screen when Moira's HQ-open 88 (PI=3) landed on them; both
+    # clients logged 'AceOrRankChangedCB. PlayerIndex=3 not found' mid-msg-13 and went silent -
+    # no further RX processed for 60s+ despite the granted msg-23 sitting next in the stream -
+    # while Moira, whose 82% window happened to contain no 88, spawned fine 2s later, and SpUn,
+    # who got every 88 while safely idle at HQ, was untouched. The same unknown-PI 88 processed
+    # at the HQ screen 2.7s earlier was harmless: the STATE is the trigger, not the content.
+    # Skipping is LOSSLESS: 88 is idempotent and every spawn-init re-states EVERY player's 88
+    # to the whole room (post-CONFIRM5), so a recipient skipped while rebuilding receives the
+    # complete set the moment its own spawn confirms.
+    _skipped = [t.current_pilot for t in _targets if getattr(t, 'spawn_pending', False)]
+    _targets = [t for t in _targets if not getattr(t, 'spawn_pending', False)]
     _label = (f'<- AceOrRank 88 (PI={s.player_index} aces={aces} rank={rank})'
               f'{(" " + reason) if reason else ""}')
     for _t in _targets:
@@ -5193,7 +5209,9 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
             _submit_send(send_rel, _t, pkt, _label, to=3.0)
     log('ACE88', f'AceOrRank -> {pilot} PI={s.player_index} aces={aces} rank={rank} '
                  f'(from DB career) -> {len(_targets)} PEER(s) in room {s.current_room} '
-                 f'{[t.current_pilot for t in _targets]}; the owner '
+                 f'{[t.current_pilot for t in _targets]}'
+                 + (f' [held for {_skipped}: mid-world-rebuild]' if _skipped else '')
+                 + f'; the owner '
                  f'gets it via msg 25 so the in-flight announcement can fire {reason}')
 
 
@@ -5875,6 +5893,54 @@ def send_unrel(s, payload, label=''):
     return True
 
 REL_RETX_INTERVAL_S = 0.75   # v359f5: retransmit cadence inside the ACK wait window
+REL_KEEPER_INTERVAL_S = 1.0  # v417f5: background keeper cadence after the blocking window
+REL_KEEPER_MAX_S = 120.0     # v417f5: keeper hard cap - past this the client is gone anyway
+
+def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
+    """v417f5: keep an un-ACKed reliable seq ALIVE after send_rel's blocking window expires.
+
+    THE BUG THIS CURES (the '82 percent' class, messages12): the client's reliable RX is
+    strictly in-order (v359f5 - vcnc QRcv 'Now expecting packet N'). send_rel retransmitted
+    only until `to` (3-5s) and then ABANDONED the seq - but nrel() had already advanced, so
+    every later send went out as N+1, N+2, ... while the client's QRcv waited for N forever.
+    ONE send that outlived its window (client frozen in an HQ->fly world rebuild, terrain
+    load, alt-tab; or an ACK the rx path missed) PERMANENTLY wedged that downlink: unreliable
+    kept flowing (the ACE88s Warrior's client logged to its last line) while every reliable
+    message - the msg-23 StartPlace grant, the msg-96 answer - queued undeliverable.
+    run_20260804_190857.log 16:55: Snoman and Warrior both stuck at the 82% screen, grants
+    granted and sent but never seen, both killed their clients; their one-at-a-time retries
+    (fresh sessions = fresh seq space) worked. Ghidra confirms the receive side is blameless:
+    the msg-88 handler at 0x4f4120 is a bounded 512-scan no-op on unknown PI, and the 82%
+    state is just WaitingForStartPlaceList waiting for the grant that the wedge was holding.
+
+    So: a timeout no longer abandons the seq. The event stays registered, this keeper
+    re-sends at a gentle cadence until the ACK arrives (the late copy un-wedges the client's
+    QRcv, which drains its out-of-order queue - v359f5's own recovery, just never given up
+    on), the session closes, or the hard cap expires. Each keeper costs 1 pkt/s at most.
+    KNOWN LIMIT (harmless): if a session sends 512 more reliable messages while a keeper
+    holds seq N, nrel() reuses N and mke(N) re-keys the event - the keeper's own Event is
+    never set and it runs to the cap. 512 sends into a wedged downlink means the session is
+    dead regardless; the cap bounds the cost."""
+    t0 = time.time(); retx = blocking_retx; outcome = None
+    log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} not ACKed in the blocking window '
+                   f'({blocking_retx} retx) -> keeper holds it ({label})')
+    while True:
+        if getattr(s, 'closing', False):
+            outcome = 'session closed'; break
+        if e.wait(timeout=REL_KEEPER_INTERVAL_S):
+            outcome = f'ACKed after {time.time()-t0:.1f}s'; break
+        if time.time() - t0 > REL_KEEPER_MAX_S:
+            outcome = (f'GAVE UP after {REL_KEEPER_MAX_S:.0f}s - downlink for this session is '
+                       f'wedged, client almost certainly gone')
+            break
+        try:
+            sock.sendto(pkt, s.addr)
+            _perf['tx'] += 1; _perf['txb'] += len(pkt)
+        except OSError:
+            outcome = 'socket error'; break
+        retx += 1
+    s.rme(seq)
+    log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} {outcome} (total {retx} retx) {label}')
 
 def send_rel(s, payload, label='', to=5.0):
     # v359f5 [WIRE/CRITICAL]: RETRANSMISSION. The client's reliable RX is strictly
@@ -5908,11 +5974,18 @@ def send_rel(s, payload, label='', to=5.0):
         except OSError: break
         retx+=1
         log('TX/RELIABLE', f'seq={seq} RETX#{retx} type=0x{payload[1]:02x} {label}')
-    s.rme(seq)
-    log('TX/RELIABLE',f'seq={seq} {"ACKed OK" if ok else "TIMEOUT X"}' + (f' after {retx} retx' if retx else ''))
-    if not ok:
-        _rec(s, 'S->C', 'RELTX', f'seq={seq} TIMEOUT (no ACK in {to}s, {retx} retx) type=0x{payload[1]:02x} {label}')
-    return ok
+    if ok:
+        s.rme(seq)
+        log('TX/RELIABLE',f'seq={seq} ACKed OK' + (f' after {retx} retx' if retx else ''))
+        return True
+    # v417f5: the window expired WITHOUT an ACK. Do NOT rme+abandon - that is the permanent
+    # downlink wedge (see _rel_keeper). The event stays registered; the keeper re-sends until
+    # the ACK lands, the session closes, or REL_KEEPER_MAX_S expires.
+    log('TX/RELIABLE', f'seq={seq} window expired ({retx} retx) -> RELKEEP takes over {label}')
+    _rec(s, 'S->C', 'RELTX', f'seq={seq} window expired ({to}s, {retx} retx) -> RELKEEP '
+                             f'type=0x{payload[1]:02x} {label}')
+    threading.Thread(target=_rel_keeper, args=(s, seq, pkt, e, label, retx), daemon=True).start()
+    return False
 
 def send_reply(s, payload, label='', to=5.0):
     # Post-login server->client reply. When SEND_GAMEPLAY_UNRELIABLE, go UNRELIABLE (pt=0) so it
@@ -8604,6 +8677,11 @@ def handle_fly_start_place(s, af, mid, n, via=''):
     # caused by the reset instead of the 262s wrap. The NET-time counter must be strictly monotonic
     # for the life of the connection; see build_beacon/tsync for the real (non-resetting) fix.
     s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
+    # v416f5: mark the grant->ServerConfirm window. Between this grant and CONFIRM5 the client
+    # is REBUILDING ITS WORLD (terrain load + the 82% WaitingForStartPlaceList screen) and has
+    # not yet inserted its player, so scoreboard pushes about players it may not have built
+    # can land on a half-initialised client. See send_ace_rank_88 for the field case.
+    s.spawn_pending = True
     # v210 note: the v208/209 HQ-reentry SYNACK re-anchor was REMOVED - it chased the wrong cause.
     # The freeze was the STALE persisted GAME_DEF CreationTime (fixed at serve time now, see
     # build_lz_gamedef), not a missing base re-anchor. Re-sending a SYNACK mid-flight was an
@@ -10110,6 +10188,7 @@ def _fire_server_confirm(s, via='', ident=None):
         _isrc = 'counter fallback'   #       Counter kept only as fallback for a too-short out-4.
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
+    s.spawn_pending = False   # v416f5: world rebuilt + player inserted -> refreshes are safe again
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -10452,6 +10531,8 @@ def _ingame_own_object_removed(s, tb, stored):
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.
         s.obj_confirmed = False; s.flying = False
+        s.spawn_pending = False   # v416f5: death screen/HQ is a SAFE state for refreshes (proven
+                                  # 16:55:53.883) - only the grant->confirm rebuild is gated
     else:
         log('POST-AUTH', f'msg-3 delete-notify (tb=0x{tb:02x}) -> swallow, no echo (guarded)')
 
