@@ -239,6 +239,15 @@
 //     the InstallTarget safety net.
 //     Falsify by: VirusTotal detections not dropping materially vs v4.1.2,
 //     or a reinstall wiping a pilot's launcher.ini.
+// 2026-08-06: launcher v4.3 - L-FIX-8c: the launcher extracts NOTHING now.
+//     With the NSIS installer owning all extraction, the residual ini
+//     self-heal (last embedded resource + bootstrap function) is removed
+//     entirely: no RCDATA resources, no extraction code, no relaunch
+//     capability anywhere in the binary. A missing launcher.ini produces a
+//     clear 'run FighterAce42_Setup.exe' message. The launcher is purely:
+//     download -> install -> login.
+//     Falsify by: strings/resource dump of fa_launcher.exe showing any
+//     RCDATA payload, or any code path that writes an exe or relaunches.
 //     Falsify by: post-install, a file under the target still carrying the R
 //     attribute, GameDir absent from launcher.ini, or the game failing to
 //     launch from the saved path.
@@ -2005,52 +2014,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// ----------------------------------------------------------------------------
-//  L-FIX-6: single-file distribution. The payload (aria2c.exe, the torrent,
-//  aria2's license, a default launcher.ini) is embedded as RCDATA resources.
-//  Run from a folder WITHOUT launcher.ini (a pilot double-clicking the one
-//  downloaded exe in Downloads), the launcher installs itself to
-//  %LOCALAPPDATA%\FighterAce, extracts the payload, copies itself there and
-//  relaunches from that home (auto-upgrading an older home copy, but never
-//  overwriting the pilot's existing launcher.ini/settings). Run from a folder
-//  WITH launcher.ini (the installed home, or a dev/portable folder), it runs
-//  in place and only fills in missing payload files.
-// ----------------------------------------------------------------------------
-#define IDR_ARIA2   101
-#define IDR_TORRENT 102
-#define IDR_LICENSE 103
-#define IDR_INI     104
-
-static bool ExtractRes(int id, const std::wstring& dest, bool overwrite) {
-    if (!overwrite && FileExists(dest)) return true;
-    HRSRC hr = FindResourceW(nullptr, MAKEINTRESOURCEW(id), (LPCWSTR)RT_RCDATA);
-    if (!hr) return false;
-    HGLOBAL hg = LoadResource(nullptr, hr);
-    DWORD sz = SizeofResource(nullptr, hr);
-    void* p = hg ? LockResource(hg) : nullptr;
-    if (!p || !sz) return false;
-    HANDLE f = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                           FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    DWORD wr = 0;
-    BOOL ok = WriteFile(f, p, sz, &wr, nullptr);
-    CloseHandle(f);
-    return ok && wr == sz;
-}
-
-// L-FIX-8b: provisioning is now the NSIS installer's job (known stub, far
-// lower AV false-positive rate). The launcher no longer embeds aria2c, never
-// copies itself and never relaunches - the dropper-shaped behaviors that fed
-// the heuristics are gone. Only the tiny default ini remains embedded, as a
-// self-heal for a deleted launcher.ini; aria2c/torrent are installed by
-// setup, and their absence just produces the existing clear error messages.
-static bool ProvisionAndMaybeRelaunch(PWSTR) {
-    std::wstring dir = ExeDir();
-    if (!FileExists(dir + L"\\launcher.ini"))
-        ExtractRes(IDR_INI, dir + L"\\launcher.ini", false);
-    return false;
-}
-
 // L-FIX-5f: 'game present' means ANY known client binary exists in the dir
 // (4.20 classic ships FA.exe; the Deluxe ISO ships FA42R/D/B.EXE), plus
 // whatever custom ClientExe the ini names.
@@ -2085,18 +2048,14 @@ static LONG WINAPI StartupVEH(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_CONTINUE_SEARCH;   // let normal termination proceed after the box
 }
 
-int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR lpCmd, int nCmd) {
+int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
     HRESULT co = OleInitialize(nullptr);
     if (FAILED(co)) { ShowError(L"OLE initialisation failed."); return 1; }
 
-    // L-FIX-6: single-file distribution - self-install to %LOCALAPPDATA%\FighterAce
-    // and relaunch from there when run as the bare downloaded exe.
-    if (ProvisionAndMaybeRelaunch(lpCmd)) { OleUninitialize(); return 0; }
-
     std::wstring ini = ExeDir() + L"\\launcher.ini", err;
     if (!LoadConfig(ini, g_cfg, err)) {
-        ShowError(err + L"\n\nExpected an INI next to the launcher, e.g.:\n\n"
-                        L"[Launcher]\nLoginUrl=http://localhost/login\nGameDir=C:\\games\\FA");
+        ShowError(err + L"\n\nThe launcher must be installed by the Fighter Ace "
+                        L"setup.\nPlease run FighterAce42_Setup.exe to (re)install.");
         OleUninitialize(); return 1;
     }
     // NOTE: we deliberately do NOT hard-fail here if GameDir is missing. The real

@@ -1,6 +1,5 @@
 #include <windows.h>
 // L-FIX-6: embedded distribution payload (extracted on first run)
-104 RCDATA "payload/launcher.ini"
 
 // L-FIX-8: identity metadata - unsigned binaries without VERSIONINFO and a
 // manifest score far worse with AV heuristics and SmartScreen.
