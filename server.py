@@ -243,7 +243,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v413f5'
+VERSION = 'v415f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7731,6 +7731,17 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
                 log('KILL', f'attribution: EXACT - victim named hunter obj 0x{hunter_obj:04x} '
                             f'-> {p.current_pilot}')
                 break
+        if killer is None:
+            # v415f5: the killer may have RESPAWNED between the fatal hit and the victim's
+            # delete-notify, so their CURRENT Number no longer matches the named hunter. Resolve
+            # through the per-session retired-Number history (v326), exactly as the collision-125
+            # relay and the PEERDEL re-arm already do. 30 'no credit' failures in
+            # run_20260803_172220.log alone were this shape.
+            _hp, _hcur = _peer_owning_object(victim, hunter_obj)
+            if _hp is not None:
+                killer = _hp
+                log('KILL', f'attribution: EXACT - victim named hunter obj 0x{hunter_obj:04x} '
+                            f'-> {_hp.current_pilot} [resolved via retired-Number history]')
 
     # 2) v247: THE LATCH - the victim's own client already told us who hit it (msg 28), and we held
     # that against the OBJECT. This is the path that credits a BAILOUT, and it has NO clock: the
@@ -7749,8 +7760,21 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
                                 f'has now gone down -> {p.current_pilot}')
                     break
             if killer is None:
+                # v415f5: same respawn race as the EXACT path - the latched hunter object may be
+                # a RETIRED Number by the time this plane comes down (a bailed husk can outlive
+                # the killer's next respawn by minutes). History resolution keeps the latch's
+                # no-clock promise across the killer's respawns, bounded only by
+                # OBJ_HISTORY_GRACE_SEC once the Number has been retired.
+                _hp, _hcur = _peer_owning_object(victim, _hb)
+                if _hp is not None:
+                    killer = _hp
+                    log('KILL', f'attribution: LATCHED ({_pk["why"]}) - obj 0x{_hb:04x} hit '
+                                f'obj 0x{_vo:04x} {time.time() - _pk["at"]:.1f}s ago and the plane '
+                                f'has now gone down -> {_hp.current_pilot} '
+                                f'[resolved via retired-Number history]')
+            if killer is None:
                 log('KILL', f'attribution: latch for obj 0x{_vo:04x} named obj 0x{_hb:04x}, but no '
-                            f'session owns that object any more -> no credit')
+                            f'session owns that object any more (current or retired) -> no credit')
 
     # 3) FALLBACK: most-recent shooter inside the credit window. Weakest of the three - a guess, not
     #    a fact - so it only runs when the first two find nothing.
@@ -11451,7 +11475,20 @@ def handle_post_auth(s, cmd, pl):
     if cmd in COMPOUND_CMDS:
         handle_compound(s, cmd, pl); return
 
-    if (len(pl) > 8 and pl[8] == 0xcd) or sub == 0xcd:
+    # v414f5: the pl[8]==0xcd test MUST be gated on sub==0x00 (the same scan-wrap convention
+    # every other pl[8] handler below uses). Unguarded, it fires on ANY message whose byte at
+    # offset 8 happens to be 0xcd - and the long-form death delete-notify carries the HUNTER
+    # object u16 at pl[8:10], so every victim of a plane whose object-Number low byte is 0xcd
+    # had their death EATEN AS CHAT. Field case run_20260803_172220.log 15:21:59.330: Gary's
+    # death [00e2 0000 03 ca02 53 cd02 ...] (hunter = ALL41_MAD's 0x02cd) logged as
+    # "[CHAT] [Gary]: '\x01'" - no DEATH, no kill credit, no DELETE3 -> MAD's client GC'd the
+    # frozen ghost 27.8s later ("plane disappeared, no kill message"), the PEERDEL cleanup was
+    # swallowed as unowned, and MAD's own death 49s later found no owner for the latched 0x02ca
+    # -> "no creditable shooter" -> peers rendered it as a CRASH (messages64). One-in-256
+    # object Numbers made ALL their victims' deaths vanish, deterministically, for that plane's
+    # whole life. The guard is safe for chat: direct named chat is sub==0xcd (2nd disjunct),
+    # prefixed named chat reaches here with sub normalised to 0x00 by the v327 block above.
+    if (sub == 0x00 and len(pl) > 8 and pl[8] == 0xcd) or sub == 0xcd:
         _handle_chat_pl(s, pl); return
 
     # -- IN-ARENA CHAT (msg 20 / 0x14) ------------------------------------------

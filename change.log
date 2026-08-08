@@ -27,6 +27,52 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v415f5: [SCORING/BUGFIX] KILL ATTRIBUTION SURVIVES THE KILLER'S RESPAWN - the EXACT and
+      LATCH paths compared the named/latched hunter object only against each session's
+      CURRENT my_obj_number, so whenever the killer respawned before the victim's plane came
+      down (bailed husks, held kills, slow descents - the normal case, not the edge case) the
+      credit died with 'no session owns that object any more -> no credit', the victim was
+      scored as 'no creditable shooter' and PEERS RENDERED THE DEATH AS A CRASH. 30 hits in
+      run_20260803_172220.log alone; field case 15:22:48 (ALL41_MAD's death naming Gary's
+      retired 0x02ca -> Gary got no kill, everyone else saw MAD 'crash', messages64).
+      FIX: when the current-Number scan misses, resolve the hunter through the v326
+      per-session retired-Number history via _peer_owning_object(victim, hunter) - the exact
+      resolver the collision-125 relay and the PEERDEL re-arm already trust - and log
+      '[resolved via retired-Number history]'. The latch's no-clock promise now holds across
+      the killer's respawns, bounded only by OBJ_HISTORY_GRACE_SEC after the Number retires.
+      FALSIFY: shoot a plane down, respawn IMMEDIATELY, and let the victim's plane fall after
+      your new spawn: the log shows 'attribution: EXACT/LATCHED ... [resolved via
+      retired-Number history]' and the kill banner + score land on the shooter; grep for the
+      reworded 'no session owns that object any more (current or retired)' line - it should
+      now appear only for genuinely departed shooters. REVERT: delete the two history-fallback
+      blocks in the attribution step (marked v415f5); no state or wire format changed.
+
+v414f5: [NETCODE/BUGFIX] DEATHS EATEN AS CHAT - the named-chat (0xcd) dispatch tested
+      pl[8]==0xcd WITHOUT the sub==0x00 scan-wrap guard every other pl[8] handler uses, so
+      ANY message with 0xcd at offset 8 was consumed as chat. The long-form death
+      delete-notify carries the HUNTER object u16 at pl[8:10] - so every victim of a plane
+      whose object Number ends in 0xcd had their death eaten: no DEATH, no DELETE3 to peers,
+      no kill credit, object never retired. Field case run_20260803_172220.log 15:21:59.330
+      (messages64): Gary's death naming ALL41_MAD's 0x02cd logged as "[CHAT] [Gary]: '\x01'";
+      MAD's client GC'd the frozen ghost 27.8s later ('plane disappeared, no kill or leave
+      message'), the PEERDEL cleanup was swallowed as unowned, and MAD's own death 49s later
+      could not resolve the latched 0x02ca -> 'no creditable shooter' -> peers saw a CRASH.
+      Deterministic for the whole life of any 1-in-256 object Number; the collision-125
+      NumberTo low byte is exposed to the same sniff. NOTE: handle_compound's inner test
+      (inner[8]==0xcd, line ~9290) shares the flaw but has no field evidence yet - logged
+      here, deliberately untouched (one fix per version).
+      FIX: gate the pl[8] disjunct on sub==0x00, matching the house convention (chat 0x14,
+      team 0x44, leave 0x40, delete 0x03 all do this). Chat is unaffected in both wire
+      forms: direct named chat is sub==0xcd (second disjunct), prefixed named chat reaches
+      the check with sub normalised to 0x00 by the v327 block. REPLAY-VERIFIED on the real
+      captured bytes: Gary's eaten death now falls through to the death handler, MAD's
+      processed death is unchanged, direct + prefixed named chat still dispatch to chat, a
+      scan-wrapped delete stays out of chat (5/5).
+      FALSIFY: engineer a hunter object with low byte 0xcd (or just play until one occurs):
+      the victim's delete logs DEATH/KILL/DELETE3 with a '[CHAT]' line nowhere near it, and
+      lobby/in-game named chat still broadcasts. REVERT: drop the sub==0x00 guard from the
+      0xcd check (single line).
+
 v413f5: [CONSOLE/FEATURE] `say <message>` - SERVER-WIDE ANNOUNCEMENT to every player, all
       arenas and the lobby at once (alias: `broadcast`; works from the terminal AND the web
       admin Live Console, which queues onto the same command path). Each client gets the
