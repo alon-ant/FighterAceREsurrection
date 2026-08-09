@@ -87,7 +87,10 @@
 #   Downloads STREAM in 64 KB chunks and emit exactly the Content-Length advertised, so the
 #   live server.log growing (or rotating) mid-read cannot desync the body from the header.
 #   The listing is filtered through _safe_log_path() too, so it can never show an entry that
-#   would then 404. flightrec/ is deliberately not traversed - one flat directory keeps the
+#   would then 404. flightrec/ is not traversed FROM HERE; since v418f5 it is served as its
+#   OWN flat root (second card on the Logs tab: _stall_dir/_safe_stall_path/_list_stall_files
+#   + /admin/stallfiles.json + src=stall on view/download) with the identical four checks, so
+#   the invariant is unchanged: every served root is one flat directory, keeping the
 #   traversal surface at exactly zero.
 # 2026-07-24: v318 - admin page split into tabs with per-panel filtering.
 #   The page had grown into three long stacked cards on one scroll. Now:
@@ -196,7 +199,10 @@ def _infer_level_from_line(line):
 LOG_CONSOLE_PAGE = """
                 <div class="nav"><a href="/admin">&larr; Back to Admin</a> |
                     <a href="/logout" style="color:#dc3545;">Logout</a></div>
-                <h1>Live Server Console</h1>
+                <h1 style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">Live Server Console
+                  <span id="pcount" style="font-size:0.55em; font-weight:normal; background:#1e1e1e; color:#7ec97e;
+                        border-radius:14px; padding:5px 14px; font-family:monospace;">players: &hellip;</span>
+                </h1>
                 <div class="card" style="padding:12px;">
                   <label>Min level:
                     <select id="lvl" onchange="reload()">
@@ -251,7 +257,14 @@ LOG_CONSOLE_PAGE = """
                 function reload(){
                   var lvl=document.getElementById('lvl').value;
                   fetch('/admin/logs.json?level='+lvl).then(function(r){return r.json();})
-                    .then(function(j){DATA=j.lines;render();}).catch(function(){});
+                    .then(function(j){DATA=j.lines;render();showCounts(j.players);}).catch(function(){});
+                }
+                function showCounts(p){
+                  var el=document.getElementById('pcount');
+                  if(!el) return;
+                  if(!p){ el.textContent='players: n/a'; el.style.color='#888'; return; }
+                  el.style.color = p.connected>0 ? '#7ec97e' : '#888';
+                  el.textContent = p.connected+' connected \u00b7 '+p.in_arena+' in arena \u00b7 '+p.flying+' flying';
                 }
                 var timer=null;
                 function toggle(){var on=document.getElementById('auto').checked;
@@ -361,21 +374,29 @@ document.addEventListener('DOMContentLoaded', function(){
   var f = document.querySelectorAll('.filterbar input');
   for (var i=0;i<f.length;i++){ faFilter(f[i]); }
   faLoadLogs();
+  faLoadStalls();
 });
 function faBytes(n){
   if(n < 1024) return n + ' B';
   if(n < 1048576) return (n/1024).toFixed(1) + ' KB';
   return (n/1048576).toFixed(1) + ' MB';
 }
-function faLoadLogs(){
-  var tb = document.getElementById('logsTable');
+function faFileList(url, src, tblId, dirId, sumId, fltId){
+  // v418f5: one loader for both file tabs (run logs + stall dumps). `src` is appended to the
+  // view/download links so the server resolves the name against the matching root.
+  var tb = document.getElementById(tblId);
   if(!tb) return;
   tb.innerHTML = '<tr><td>Loading&hellip;</td></tr>';
-  fetch('/admin/logfiles.json').then(function(r){return r.json();}).then(function(j){
-    var d = document.getElementById('logsDir');
-    if(d) d.textContent = j.dir || '(log directory not available)';
+  var extra = src ? '&src=' + src : '';
+  fetch(url).then(function(r){return r.json();}).then(function(j){
+    var d = document.getElementById(dirId);
+    if(d) d.textContent = j.dir || '(directory not available)';
     if(!j.files || !j.files.length){
-      tb.innerHTML = '<tr><td>No log files found.</td></tr>';
+      tb.innerHTML = '<tr><td>' + (src==='stall'
+        ? 'No stall dumps - STALL-WATCH has not fired this run.'
+        : 'No log files found.') + '</td></tr>';
+      var s0 = document.getElementById(sumId);
+      if(s0) s0.textContent = '0 files';
       return;
     }
     var total = 0, html = '';
@@ -388,19 +409,25 @@ function faLoadLogs(){
             + '<small style="color:#666;">' + faBytes(f.size) + ' &middot; ' + when + '</small></td>'
             + '<td style="text-align:right; white-space:nowrap;">'
             + '<a class="btn-green" style="display:inline-block;width:auto;padding:7px 13px;'
-            + 'margin:0 6px 0 0;text-decoration:none;" href="/admin/log_view?name=' + q + '">View tail</a>'
+            + 'margin:0 6px 0 0;text-decoration:none;" href="/admin/log_view?name=' + q + extra + '">View tail</a>'
             + '<a class="btn-yellow" style="display:inline-block;width:auto;padding:7px 13px;'
-            + 'margin:0;text-decoration:none;color:#333;" href="/admin/log_download?name=' + q + '">Download</a>'
+            + 'margin:0;text-decoration:none;color:#333;" href="/admin/log_download?name=' + q + extra + '">Download</a>'
             + '</td></tr>';
     }
     tb.innerHTML = html;
-    var s = document.getElementById('logsSummary');
+    var s = document.getElementById(sumId);
     if(s) s.textContent = j.files.length + ' files, ' + faBytes(total) + ' total';
-    var fb = document.getElementById('logsFilter');
+    var fb = document.getElementById(fltId);
     if(fb) faFilter(fb);
   }).catch(function(e){
-    tb.innerHTML = '<tr><td style="color:#c00;">Could not load the log list.</td></tr>';
+    tb.innerHTML = '<tr><td style="color:#c00;">Could not load the file list.</td></tr>';
   });
+}
+function faLoadLogs(){
+  faFileList('/admin/logfiles.json', '', 'logsTable', 'logsDir', 'logsSummary', 'logsFilter');
+}
+function faLoadStalls(){
+  faFileList('/admin/stallfiles.json', 'stall', 'stallsTable', 'stallsDir', 'stallsSummary', 'stallsFilter');
 }
 </script>
 """
@@ -653,6 +680,65 @@ def _safe_log_path(name):
     if not os.path.isfile(full):
         return None
     return full
+
+def _stall_dir():
+    # v418f5: logs/flightrec - the STALL-WATCH flight-recorder dumps. Kept as its own root
+    # (never reachable through _safe_log_path) so the v321 guarantee still holds exactly:
+    # each download root is one flat directory, bare filenames only, zero traversal surface.
+    d = _log_dir()
+    if not d:
+        return None
+    fr = os.path.join(d, 'flightrec')
+    return fr if os.path.isdir(fr) else None
+
+def _safe_stall_path(name):
+    """v418f5: _safe_log_path with the root swapped to logs/flightrec/. Same four
+    independent checks; dump names are pre-sanitized by the recorder to [A-Za-z0-9_.-]
+    (<pilot>_<ts>.log) so every legitimate dump passes and nothing else does."""
+    d = _stall_dir()
+    if not d or not name:
+        return None
+    if '\x00' in name or ':' in name:
+        return None
+    if os.path.basename(name) != name:
+        return None
+    if name in ('.', '..') or not LOG_NAME_OK.match(name):
+        return None
+    if not LOG_EXT_OK.search(name):
+        return None
+    full = os.path.realpath(os.path.join(d, name))
+    root = os.path.realpath(d)
+    try:
+        if os.path.commonpath([root, full]) != root:
+            return None
+    except ValueError:
+        return None
+    if not os.path.isfile(full):
+        return None
+    return full
+
+def _list_stall_files():
+    """v418f5: [{name,size,mtime}] for logs/flightrec/, newest first - filtered through
+    _safe_stall_path exactly as the run-log list is through _safe_log_path."""
+    d = _stall_dir()
+    if not d:
+        return []
+    out = []
+    try:
+        for nm in os.listdir(d):
+            p = _safe_stall_path(nm)
+            if not p:
+                continue
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append({'name': nm, 'size': st.st_size, 'mtime': st.st_mtime})
+    except OSError as e:
+        SRV['log']('WEB', f'stall listing failed: {e!r}')
+        return []
+    out.sort(key=lambda r: r['mtime'], reverse=True)
+    return out
 
 def _list_log_files():
     """[{name,size,mtime}] for every downloadable file in the logs dir, newest first.
@@ -1124,8 +1210,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             the VM. <em>View tail</em> shows the last 128&nbsp;KB in the browser;
                             <em>Download</em> fetches the whole file.<br>
                             <small style="color:#888;">Directory: <code id="logsDir">&hellip;</code>
-                            &middot; <span id="logsSummary"></span>
-                            &middot; the <code>flightrec/</code> sub-folder is not listed.</small>
+                            &middot; <span id="logsSummary"></span></small>
                         </p>
                         <div class="filterbar">
                             <input type="text" id="logsFilter" placeholder="Filter logs (try a date, e.g. 20260724)&hellip;"
@@ -1136,6 +1221,25 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                     onclick="faLoadLogs()">Refresh</button>
                         </div>
                         <table id="logsTable"></table>
+                    </div>
+                    <div class="card">
+                        <h2 style="margin-top:0;">Stall Dumps (flight recorder)</h2>
+                        <p style="color:#666; margin-top:0; font-size:0.9em;">
+                            Per-session packet rings flushed by STALL-WATCH when a reliable
+                            channel goes quiet - the first thing to pull when a player reports
+                            a freeze, a one-sided fight or an 82%-style hang.<br>
+                            <small style="color:#888;">Directory: <code id="stallsDir">&hellip;</code>
+                            &middot; <span id="stallsSummary"></span></small>
+                        </p>
+                        <div class="filterbar">
+                            <input type="text" id="stallsFilter" placeholder="Filter dumps (pilot or date, e.g. Gary or 20260804)&hellip;"
+                                   data-table="stallsTable" data-count="stallsCount"
+                                   oninput="faFilter(this)">
+                            <span class="filtercount" id="stallsCount"></span>
+                            <button style="width:auto; padding:8px 14px; margin:0;"
+                                    onclick="faLoadStalls()">Refresh</button>
+                        </div>
+                        <table id="stallsTable"></table>
                     </div>
                 </div>
             """
@@ -1687,7 +1791,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     lv = _infer_level_from_line(ln)
                     if order.get(lv, 20) >= want:
                         lines.append({'level': lv, 'line': ln})
-            body = json.dumps({'lines': lines}).encode('utf-8')
+            # v418f5: piggyback the live player counts on the poll the console already makes
+            # every 2s - no extra endpoint, no extra request, counter is as fresh as the log.
+            counts = None
+            pc = SRV.get('player_counts')
+            if pc:
+                try:
+                    counts = pc()
+                except Exception:
+                    counts = None
+            body = json.dumps({'lines': lines, 'players': counts}).encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
@@ -1706,14 +1819,29 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif self.path.startswith('/admin/stallfiles.json'):
+            # v418f5: listing for the Stall Dumps sub-tab (STALL-WATCH flight recorder).
+            if not is_user_admin(user):
+                self.send_error(403); return
+            files = _list_stall_files()
+            body = json.dumps({'dir': _stall_dir() or '', 'files': files}).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path.startswith('/admin/log_download'):
             if not is_user_admin(user):
                 self.send_error(403); return
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = q.get('name', [''])[0]
-            path = _safe_log_path(name)
+            # v418f5: src=stall selects the flightrec root. The parameter picks WHICH of the
+            # two pre-defined roots resolves the bare filename - it is never part of a path.
+            src_kind = q.get('src', [''])[0]
+            path = _safe_stall_path(name) if src_kind == 'stall' else _safe_log_path(name)
             if not path:
-                SRV['log']('WEB', f'log download REJECTED for {user!r}: name={name!r}')
+                SRV['log']('WEB', f'log download REJECTED for {user!r}: name={name!r} src={src_kind!r}')
                 self.send_error(404); return
             try:
                 size = os.path.getsize(path)
@@ -1754,9 +1882,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 kb = max(1, min(1024, int(q.get('kb', ['128'])[0])))
             except (ValueError, TypeError):
                 kb = 128
-            path = _safe_log_path(name)
+            src_kind = q.get('src', [''])[0]      # v418f5: same two-root selection as download
+            path = _safe_stall_path(name) if src_kind == 'stall' else _safe_log_path(name)
             if not path:
-                SRV['log']('WEB', f'log view REJECTED for {user!r}: name={name!r}')
+                SRV['log']('WEB', f'log view REJECTED for {user!r}: name={name!r} src={src_kind!r}')
                 self.send_error(404); return
             try:
                 size = os.path.getsize(path)
@@ -2371,7 +2500,7 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
-                     date_read_fn=None, scoring_ref_fn=None):
+                     date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -2383,6 +2512,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['log_dir'] = log_dir                         # v321: for the admin Logs tab
     SRV['date_read'] = date_read_fn                  # v383: extract_date_from_gamedef(blob)->(d,m,y)
     SRV['scoring_ref'] = scoring_ref_fn              # v404f5: web_scoring_reference() -> dict
+    SRV['player_counts'] = player_counts_fn          # v418f5: web_player_counts() -> dict
 
     migrate_web_db()
     _start_httpd_thread()

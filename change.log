@@ -27,6 +27,31 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v418f5: [WEB/ADMIN] TWO CONSOLE QUALITY-OF-LIFE FEATURES, no game-server wire impact.
+      1) LIVE PLAYER COUNTER on /admin/logs: the console header now shows
+      'N connected - M in arena - K flying', refreshed by the same 2s /admin/logs.json poll
+      the page already makes (the counts ride in the JSON as 'players', no new endpoint).
+      Server side: web_player_counts() in server.py - a callable injected like
+      web_scoring_reference, reading the session table under sl (connected = auth_done and
+      not closing; in_arena = entered_game; flying = s.flying, the PERF flag).
+      2) STALL DUMPS on the admin Logs tab: logs/flightrec/ (STALL-WATCH flight-recorder
+      dumps) is now browsable and downloadable from a second card. Served as its OWN flat
+      root - _stall_dir/_safe_stall_path/_list_stall_files mirror the v321 pair with the
+      root swapped, keeping all four independent path checks; /admin/stallfiles.json lists,
+      and log_view/log_download take src=stall to select the flightrec root (the parameter
+      chooses between two pre-defined roots, it is never part of a path). Dump filenames are
+      already sanitized to [A-Za-z0-9_.-] by the recorder, so the v321 name charset passes
+      every legitimate dump. Guard attack-tested: 9 traversal/ADS/NUL/extension strings
+      blocked, roots isolated, listings correct. The two file cards share one JS loader
+      (faFileList).
+      FALSIFY: counter tracks the PERF sessions/flying line through a join+fly+exit cycle
+      and shows 0-grey when the arena is empty; a fresh STALL-WATCH dump appears in the new
+      card within one Refresh and downloads byte-identical to the file on disk; run-log
+      names still refuse to resolve under src=stall and vice versa. REVERT: web_server.py -
+      drop the stall trio + stallfiles.json + the two src_kind lines + the second card +
+      faLoadStalls; server.py - drop web_player_counts and its kwargs line; both files'
+      remaining hunks are cosmetic (header markup, shared loader).
+
 v417f5: [NETCODE/CRITICAL] RELIABLE-SEND TIMEOUT NO LONGER ABANDONS THE SEQ - the true root
       cause of the '82 percent' hang (and, most likely, of the endemic one-way stall family).
       GHIDRA VERDICT ON v416f5's OPEN QUESTION: with FA.exe loaded, functions were created at
