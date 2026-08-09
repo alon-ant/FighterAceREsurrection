@@ -27,6 +27,75 @@ they explain why a specific line is the way it is and must stay with it.
     field-confirmed stable. ***
 ==============================================================================
 
+v421f5: [OPS] MANUAL `restart` COMMAND - restart the running build with no git pull, from
+      the server terminal OR the web console, without connecting to the VM.
+      GAME SERVER: the restart half of perform_update (v329) is factored into _schedule_restart
+      (honours UPDATE_RESTART_MODE: exit-and-let-supervisor / external command / none), so the
+      new perform_restart reuses the EXACT proven mechanism and there is still ONE restart
+      implementation. perform_restart takes the SAME _update_lock as perform_update, so a
+      restart and an update - or two restarts - can never race (the second is refused with a
+      log line). It announces to every player first (broadcast_everyone) and pauses 1.5s so the
+      message is delivered before the process exits. New console command `restart` (terminal +
+      web queue, same path as `update`); added to `help`.
+      WEB: a grey 'Restart (no update)' button beside 'Update & Restart' on the live console,
+      with a confirm dialog spelling out no-pull + players-disconnected; it queues cmd=restart
+      through the existing /admin/console_cmd (which already forwards arbitrary console
+      commands, so no endpoint change). Output streams under the RESTART tag.
+      TESTED (stubbed exit): schedules and calls os._exit(0); the lock releases between calls
+      so a second restart still works; a concurrent attempt while the lock is held is refused
+      with no exit; players are warned first.
+      SAFETY NOTE: like `update`, this relies on the supervisor's restart policy (systemd
+      Restart=always etc.) - with UPDATE_RESTART_MODE='none' it does nothing but say so.
+      FALSIFY: `restart` at the terminal (or the web button) drops the server and the
+      supervisor brings it back logging the v421f5 banner within a few seconds; players get the
+      'Server is restarting' notice; issuing `restart` during an `update` is refused. REVERT:
+      delete perform_restart + the `restart` command + the web button/handler; inline
+      _schedule_restart's body back into perform_update (or leave it - it's behaviour-neutral).
+
+v420f5: [WEB/ADMIN] STALL DUMPS PROMOTED TO THEIR OWN TOP-LEVEL TAB - v418f5 stacked the
+      flightrec card under the run-log card on the Logs panel, making the page long (per the
+      TODO). Now a fourth tabbar button (Stall Dumps) with its own panel (p-stalls); the card
+      markup, faFileList loader, endpoints and path guards are unchanged - only the tab bar
+      and the panel wrapper moved. The tab-memory (localStorage fa_admin_main) picks it up
+      with no changes since faShow/init are generic. Structure-verified: 4 tabs, 4 panels,
+      div open/close balanced in the admin region.
+      FALSIFY: the Stall Dumps tab lists and downloads dumps identically to before; the Logs
+      tab shows only run logs; switching away and reloading returns to the remembered tab.
+      REVERT: delete the fourth button and move the p-stalls card back inside p-logs.
+
+v419f5: [DIAGNOSTIC] STALL-WATCH REBUILT ON THE ONE CONDITION THAT CANNOT FALSE-FIRE - a
+      send that has OUTLIVED its blocking window (RELKEEP active, s._relkeep_held > 0).
+      THE FALSE-POSITIVE CLASS (Celt_20260809_025032 + run_20260808_204942): v323's pend>0
+      counted sends still INSIDE their normal 5s blocking window at the scan instant, so an
+      HQ-idle client - 622s with no reliable DATA to send, acks_in climbing the whole time
+      (channel healthy; _rel_rx_time stamps DATA only, never ACKs), nothing flowing but the
+      2.0s/36B 0x7d0 keepalive beacon - plus one transient in-window send produced a warn and
+      a junk flightrec dump. 2733 dumps accumulated since Jul 6, most of them this shape.
+      NEW TRIGGER: held>0 AND unreliable RX <3s AND not already warned. held>0 only happens
+      after `to` (3-5s) of retransmits with no ACK - the exact failure the watcher exists
+      for; a client with nothing to say can never trip it. rel_idle>=20 is DROPPED from the
+      trigger (an ACK-path stall can coexist with flowing reliable DATA and still deserves a
+      dump) and demoted to log-line context. Dead clients (no unreliable either) stay silent
+      - the idle reaper owns them.
+      TICK-VS-BEACON DISCRIMINATOR: s._tick_rx_time is stamped only when _rec_decode_telem
+      identifies a real 0x42 object-update (the 96B incrementing-tick telemetry), never for
+      the beacon. The warn and the dump header now carry the client state - 'IN-FLIGHT
+      (tick 0.3s ago)' vs 'ALIVE-NO-TICKS (menu/load screen, beacon only)' - so a dump says
+      at a glance whether the victim was flying (_Butterz_ 020823 shape) or stuck at a
+      screen (the 82%-class victim is exactly ALIVE-NO-TICKS).
+      RE-ARM: _rel_keeper maintains the held counter under s._lock (increment at takeover,
+      decrement before rme on every exit path); when the LAST held send resolves by ACK on a
+      session that had warned, _stall_warned/_rec_dumped re-arm and 'ACK flow RESTORED' logs
+      - covering the client that recovers its ACKs without ever sending reliable DATA (the
+      old re-arm only fired on DATA arrival).
+      REPLAYED against the field cases: Celt suppressed, _Butterz_ seq=334 fires IN-FLIGHT,
+      a synthetic 82%-victim fires ALIVE-NO-TICKS, a dead client stays silent.
+      FALSIFY: flightrec dump rate collapses (baseline ~58 fires/session -> only genuine
+      keeper-active stalls); every remaining warn coincides with a RELKEEP takeover on the
+      same session; an idle HQ camper never produces a dump; 'ACK flow RESTORED' pairs with
+      keeper 'ACKed after' lines. REVERT: restore the pend>0 trigger line + warn/dump texts,
+      delete _tick_rx_time/_relkeep_held and the keeper's counter/re-arm block.
+
 v418f5: [WEB/ADMIN] TWO CONSOLE QUALITY-OF-LIFE FEATURES, no game-server wire impact.
       1) LIVE PLAYER COUNTER on /admin/logs: the console header now shows
       'N connected - M in arena - K flying', refreshed by the same 2s /admin/logs.json poll

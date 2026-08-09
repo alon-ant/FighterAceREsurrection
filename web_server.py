@@ -232,11 +232,15 @@ LOG_CONSOLE_PAGE = """
                   <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
                     <button class="btn-yellow" style="width:auto; padding:9px 20px; margin:0;"
                             onclick="doUpdate();">&#8635; Update &amp; Restart</button>
+                    <button style="width:auto; padding:9px 20px; margin:0; background:#6c757d;"
+                            onclick="doRestart();">&#8635; Restart (no update)</button>
                     <small style="color:#666; flex:1; min-width:280px;">
-                      Runs <code>git pull --ff-only</code> in the server directory, then restarts.
-                      Progress appears in the stream above tagged <code>UPDATE</code>.
-                      <strong>The server goes down for a few seconds</strong> and players are
-                      disconnected, so do this between sessions.
+                      <strong>Update &amp; Restart</strong> runs <code>git pull --ff-only</code> then
+                      restarts (tagged <code>UPDATE</code>). <strong>Restart</strong> reboots the
+                      <em>current</em> build with no pull (tagged <code>RESTART</code>) - use it to
+                      clear state or recover a wedged server. Either way the server goes down for a
+                      few seconds and players are disconnected, so do it between sessions; Restart
+                      warns any players first.
                     </small>
                   </div>
                 </div>
@@ -300,6 +304,19 @@ LOG_CONSOLE_PAGE = """
                   fetch('/admin/console_cmd',{method:'POST',
                     headers:{'Content-Type':'application/x-www-form-urlencoded'},
                     body:'cmd=update'})
+                    .then(function(){setTimeout(reload,300);})
+                    .catch(function(){});
+                }
+                function doRestart(){
+                  if(!confirm('Restart the CURRENT server build now?\\n\\n'
+                    + '\\u2022 NO git pull - the running code is unchanged\\n'
+                    + '\\u2022 the server process restarts\\n'
+                    + '\\u2022 ALL CONNECTED PLAYERS ARE DISCONNECTED (they are warned first)\\n\\n'
+                    + 'Use this to clear state or recover a wedged server.')) return;
+                  document.getElementById('auto').checked = true; toggle();
+                  fetch('/admin/console_cmd',{method:'POST',
+                    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+                    body:'cmd=restart'})
                     .then(function(){setTimeout(reload,300);})
                     .catch(function(){});
                 }
@@ -1125,6 +1142,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             onclick="faShow('main','p-arenas')">Arenas</button>
                     <button data-btngroup="main" data-target="p-logs"
                             onclick="faShow('main','p-logs')">Logs</button>
+                    <button data-btngroup="main" data-target="p-stalls"
+                            onclick="faShow('main','p-stalls')">Stall Dumps</button>
                 </div>
 
                 <div class="panel on" data-group="main" data-panel="p-users">
@@ -1222,6 +1241,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                         </div>
                         <table id="logsTable"></table>
                     </div>
+                </div>
+
+                <div class="panel" data-group="main" data-panel="p-stalls">
                     <div class="card">
                         <h2 style="margin-top:0;">Stall Dumps (flight recorder)</h2>
                         <p style="color:#666; margin-top:0; font-size:0.9em;">

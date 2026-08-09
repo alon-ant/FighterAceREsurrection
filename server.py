@@ -7,6 +7,23 @@ Inline '# vNNN:' comments in the code body are kept where they are - they explai
 why a particular line exists and are load-bearing at the point of use.
 
 TODO list:
+  [x] (v419f5) STALL-WATCH FALSE-POSITIVE DISCRIMINATOR - confirmed from run_20260808_204942 +
+      flightrec (Celt_20260809_025032): an HQ-idle client trips the watcher because (a) its
+      2.0s keepalive beacon (36B, 0x7d0) satisfies unrel_idle<3s and (b) pending_tx>0 counts
+      sends still INSIDE their normal blocking window at the scan instant. Celt 'stalled'
+      622s while acks_in kept climbing - the channel was healthy, it just had no reliable
+      DATA to send (_rel_rx_time stamps DATA only, never ACKs - correct, but the watcher
+      must account for it). Real stalls (_Butterz_ 020823, SpUn 234219) show 96-byte
+      incrementing-tick telemetry in the unreliable tail. FIX: require recent TICK telem
+      (not just the beacon) for the 'unreliable active' arm, and/or count a send as pending
+      only once its blocking window has expired (i.e. it is in RELKEEP hands). Cuts the
+      flightrec noise (2733 dumps since Jul 6) so remaining dumps mean something.
+
+  [x] (v420f5) WEB: STALL DUMPS ON THEIR OWN TAB - v418f5 put the flightrec card UNDER the run-log
+      card on the existing Logs panel, which makes the page long. Next web update: promote it
+      to a fourth top-level tab (or a Logs sub-tab pair like User Management has), reusing
+      faFileList as-is; only the panel markup and the tab bar change.
+
   [ ] AUTH ACK TAKES A FIXED ~15.4s AND THE CLIENT GIVES UP AT ~14s - v351, intermittent
       "stuck at 82%" on join. Across 86 auths in server_8_.log virtually every one lands in a
       15.29-15.67s band; the outliers are WORSE (T+19.189, T+20.285), never better. That tight
@@ -243,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v417f5'
+VERSION = 'v421f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3133,36 +3150,68 @@ def perform_update(actor='console'):
         log('UPDATE', f'updated {before} -> {after}')
 
         # 4. Restart.
-        if UPDATE_RESTART_MODE == 'none':
-            log('UPDATE', 'UPDATE_RESTART_MODE=none - files updated, restart manually to apply')
-            return False
-        if UPDATE_RESTART_MODE == 'command':
-            if not UPDATE_RESTART_COMMAND:
-                log('UPDATE', 'ABORT: restart mode is "command" but UPDATE_RESTART_COMMAND is empty')
-                return False
-            log('UPDATE', f'running restart command: {UPDATE_RESTART_COMMAND}')
-            threading.Thread(
-                target=lambda: (time.sleep(UPDATE_RESTART_DELAY),
-                                _run_cmd(UPDATE_RESTART_COMMAND, 60.0)),
-                daemon=True).start()
-            return True
+        return _schedule_restart(tag='UPDATE', reason=f'updated {before} -> {after}')
+    finally:
+        _update_lock.release()
 
-        # default: exit and let the supervisor bring us back on the new code
-        log('UPDATE', f'restarting in {UPDATE_RESTART_DELAY:.0f}s by exiting '
-                      f'(code {UPDATE_EXIT_CODE}) - the supervisor must have a restart policy; '
-                      f'this page/console will go quiet for a few seconds')
-        def _bye():
-            time.sleep(UPDATE_RESTART_DELAY)
-            try:
-                # flush the log handlers before the hard exit - `logging` is not imported at
-                # module level here, so reach it through fa_logging which already owns it.
-                import logging as _lg
-                _lg.shutdown()
-            except Exception:
-                pass
-            os._exit(UPDATE_EXIT_CODE)      # _exit, not sys.exit: we are on a daemon thread
-        threading.Thread(target=_bye, daemon=True).start()
+def _schedule_restart(tag='RESTART', reason=''):
+    """v421f5: the restart half of perform_update, factored out so a bare `restart` command
+    can reuse the EXACT same, already-proven mechanism (exit-and-let-supervisor, or an
+    external restart command) without doing a git pull. Returns True if a restart was
+    scheduled. Honours UPDATE_RESTART_MODE just like an update-triggered restart, so however
+    the box is wired to bring the server back, a manual restart uses the same path."""
+    if UPDATE_RESTART_MODE == 'none':
+        log(tag, 'UPDATE_RESTART_MODE=none - restart is disabled in config; nothing done')
+        return False
+    if UPDATE_RESTART_MODE == 'command':
+        if not UPDATE_RESTART_COMMAND:
+            log(tag, 'ABORT: restart mode is "command" but UPDATE_RESTART_COMMAND is empty')
+            return False
+        log(tag, f'running restart command: {UPDATE_RESTART_COMMAND}'
+                 + (f' ({reason})' if reason else ''))
+        threading.Thread(
+            target=lambda: (time.sleep(UPDATE_RESTART_DELAY),
+                            _run_cmd(UPDATE_RESTART_COMMAND, 60.0)),
+            daemon=True).start()
         return True
+
+    # default: exit and let the supervisor bring us back
+    log(tag, f'restarting in {UPDATE_RESTART_DELAY:.0f}s by exiting (code {UPDATE_EXIT_CODE})'
+             + (f' - {reason}' if reason else '')
+             + ' - the supervisor must have a restart policy; this page/console will go '
+               'quiet for a few seconds, then the new process logs its VERSION banner')
+    def _bye():
+        time.sleep(UPDATE_RESTART_DELAY)
+        try:
+            # flush the log handlers before the hard exit - `logging` is not imported at
+            # module level here, so reach it through fa_logging which already owns it.
+            import logging as _lg
+            _lg.shutdown()
+        except Exception:
+            pass
+        os._exit(UPDATE_EXIT_CODE)      # _exit, not sys.exit: we are on a daemon thread
+    threading.Thread(target=_bye, daemon=True).start()
+    return True
+
+def perform_restart(actor='console'):
+    """v421f5: manual restart with NO git pull - reboot the current build in place. Guarded
+    by the same lock as perform_update so the two can never race (a restart mid-update, or
+    two restarts, are refused). Announces to any players first so a populated arena is not
+    dropped without warning."""
+    if not _update_lock.acquire(blocking=False):
+        log('RESTART', 'an update or restart is already running - ignoring this request')
+        return False
+    try:
+        log('RESTART', f'--- manual restart requested by {actor} (no git pull) ---')
+        try:
+            _n = broadcast_everyone('Server is restarting - you will be disconnected briefly. '
+                                    'Please rejoin in about 15 seconds.', src='restart')
+            if _n:
+                log('RESTART', f'notified {_n} player(s); brief pause so the message is delivered')
+                time.sleep(1.5)
+        except Exception as _e:
+            log('RESTART', f'player notify skipped ({_e!r})')
+        return _schedule_restart(tag='RESTART', reason='manual restart, build unchanged')
     finally:
         _update_lock.release()
 
@@ -3659,6 +3708,11 @@ def console_handler():
                 # v329: git pull + restart. Also reachable from the web admin button, which
                 # simply queues this same command, so there is one code path.
                 perform_update(actor=line if _src == 'terminal' else _src)
+            elif cmd == 'restart':
+                # v421f5: restart the CURRENT build with no git pull - e.g. to clear state or
+                # recover from a wedged condition without touching code. Same restart mechanism
+                # and same lock as `update`, so the two can't race.
+                perform_restart(actor=line if _src == 'terminal' else _src)
             elif cmd == 'loglevel':
                 a = parts[1].split() if len(parts) > 1 else []
                 if len(a) == 2 and a[0] == 'console':
@@ -3695,6 +3749,8 @@ def console_handler():
                 log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
                 log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
                 log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
+                log('CONSOLE', 'update      - git pull the server dir + restart (only if there are new commits)')
+                log('CONSOLE', 'restart     - restart the CURRENT build now (no git pull); warns players first')
             else: log('CONSOLE', f'Unknown command "{cmd}". Type "help".')
         except Exception:
             logx('CONSOLE', f'command failed: {line!r}')
@@ -5578,6 +5634,10 @@ class S:
         self._unrel_rx_time=0.0   # time of last unreliable in-game packet FROM this client
         self._rel_rx_last_cs=None # last reliable RX seq byte (data[3]); repeats => client retransmit
         self._rel_rx_count=0; self._rel_rx_dups=0; self._ack_in_count=0
+        self._tick_rx_time=0.0    # v419f5: last unreliable packet that was REAL tick telemetry
+                                  #   (0x42 object update), as opposed to the 2.0s keepalive
+                                  #   beacon - the discriminator between flying and parked
+        self._relkeep_held=0      # v419f5: sends currently held by _rel_keeper (window expired)
         self._stall_warned=False  # STALL-WATCH logs the transition once, not every tick
         # -- Flight recorder rings (dumped to logs/flightrec/ when STALL-WATCH fires) --
         self._rec_rel=deque(maxlen=FLIGHT_REC_RELMAX)    # reliable msgs both directions
@@ -5922,6 +5982,8 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
     never set and it runs to the cap. 512 sends into a wedged downlink means the session is
     dead regardless; the cap bounds the cost."""
     t0 = time.time(); retx = blocking_retx; outcome = None
+    with s._lock:
+        s._relkeep_held = getattr(s, '_relkeep_held', 0) + 1   # v419f5: STALL-WATCH trigger
     log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} not ACKed in the blocking window '
                    f'({blocking_retx} retx) -> keeper holds it ({label})')
     while True:
@@ -5939,8 +6001,19 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         except OSError:
             outcome = 'socket error'; break
         retx += 1
+    with s._lock:
+        s._relkeep_held = max(0, getattr(s, '_relkeep_held', 1) - 1)
+        _all_clear = (s._relkeep_held == 0)
     s.rme(seq)
     log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} {outcome} (total {retx} retx) {label}')
+    # v419f5: when the LAST held send resolves by ACK, the client's ACK flow is healthy again -
+    # re-arm STALL-WATCH (whose trigger is now held>0) so a LATER stall on this session warns
+    # and dumps afresh. A reliable-DATA arrival re-arms too (the RESUMED path); this covers the
+    # client that recovers its ACKs without having any reliable data to send.
+    if _all_clear and outcome and outcome.startswith('ACKed') and getattr(s, '_stall_warned', False):
+        s._stall_warned = False
+        s._rec_dumped = False
+        log('STALL-WATCH', f'{s.current_pilot}: ACK flow RESTORED (last kept send ACKed)')
 
 def send_rel(s, payload, label='', to=5.0):
     # v359f5 [WIRE/CRITICAL]: RETRANSMISSION. The client's reliable RX is strictly
@@ -7603,6 +7676,21 @@ def ai_object_value(name, mode='tc'):
     if v is None:
         return 0
     return v[0] if mode == 'ffa' else v[1]
+
+def web_player_counts():
+    """v418f5: live player counts for the web console header. A CALLABLE handed to the web
+    server so every /admin/logs.json poll reflects the session table at that instant.
+    connected = authenticated sessions not being torn down; in_arena = of those, inside a
+    game room (entered_game); flying = of those, spawn confirmed and airborne (s.flying,
+    set at ServerConfirm, cleared on death/exit - the same flag PERF counts)."""
+    try:
+        with sl:
+            ss = [s for s in sids.values() if s.auth_done and not s.closing]
+            return {'connected': len(ss),
+                    'in_arena': sum(1 for s in ss if getattr(s, 'entered_game', False)),
+                    'flying': sum(1 for s in ss if getattr(s, 'flying', False))}
+    except Exception:
+        return {'connected': 0, 'in_arena': 0, 'flying': 0}
 
 def web_scoring_reference():
     """v404f5: everything the web /scoring reference page renders, in one dict. A CALLABLE
@@ -12991,6 +13079,8 @@ def on_pkt(data, addr):
             # reveals whether the sim was degrading (tick stalling / Number changing) or the
             # client froze instantly from a clean stream.
             _td = _rec_decode_telem(data)
+            if _td:
+                s._tick_rx_time = s._unrel_rx_time   # v419f5: real 0x42 tick, not the beacon
             _rec(s, 'C->S', 'UNREL',
                  f'sz={sz} {_td} hdr={hx(data[:8])} pl={hx(data[8:32])}')
         if CAPTURE_UNREL and s.entered_game:
@@ -13055,17 +13145,39 @@ def _stall_watch():
             #     watcher exists for is "server sent reliable data, client never ACKed it",
             #     which necessarily leaves packets pending. With nothing pending there is no
             #     stall to report - the client just has nothing reliable to send.
-            with s._lock: pend=len(s._evts)
-            if rel_idle>=20.0 and unrel_idle<3.0 and pend>0 and not getattr(s,'_stall_warned',False):
+            # v419f5 FALSE-ALARM FIX #2 (the Celt class, run_20260808_204942 +
+            # flightrec Celt_20260809_025032). v323's pend>0 was still not it: pend counts
+            # sends INSIDE their normal 5s blocking window at the scan instant, so an
+            # HQ-idle client (622s with no reliable DATA to send, acks_in climbing the whole
+            # time, only the 2.0s/36B 0x7d0 keepalive beacon flowing) + one transient
+            # in-window send = warn + a junk flightrec dump. 2733 dumps since Jul 6, most of
+            # them this shape. The condition that cannot false-fire: a send has OUTLIVED its
+            # blocking window and is in _rel_keeper hands (held>0) - that only happens when
+            # the client has genuinely not ACKed for `to` (3-5s) despite retransmits, which
+            # is the exact failure this watcher exists for. rel_idle>=20 is dropped from the
+            # trigger (an ACK-path stall can coexist with flowing reliable DATA and still
+            # deserves a dump); it stays in the log line as context. The tick-vs-beacon
+            # discriminator (_tick_rx_time, stamped only on real 0x42 telemetry) is reported
+            # as client state so a dump says at a glance whether the victim was flying or
+            # parked at a menu/load screen - the 82%-class victim is exactly ALIVE-NO-TICKS.
+            with s._lock:
+                pend=len(s._evts); held=getattr(s,'_relkeep_held',0)
+            _tt=getattr(s,'_tick_rx_time',0.0)
+            tick_idle=(now-_tt) if _tt>0 else float('inf')
+            if held>0 and unrel_idle<3.0 and not getattr(s,'_stall_warned',False):
                 s._stall_warned=True
-                log('STALL-WATCH', f'[warn] {s.current_pilot}: reliable RX idle {rel_idle:.1f}s but '
-                                   f'unreliable active ({unrel_idle:.1f}s ago) - possible reliable '
-                                   f'stall | last_cs={getattr(s,"_rel_rx_last_cs",None)} '
+                _state=(f'IN-FLIGHT (tick {tick_idle:.1f}s ago)' if tick_idle<3.0
+                        else 'ALIVE-NO-TICKS (menu/load screen, beacon only)')
+                log('STALL-WATCH', f'[warn] {s.current_pilot}: client alive but NOT ACKing - '
+                                   f'{held} send(s) outlived the blocking window (RELKEEP active) | '
+                                   f'{_state} | rel DATA idle {rel_idle:.1f}s '
+                                   f'last_cs={getattr(s,"_rel_rx_last_cs",None)} '
                                    f'rel_rx={getattr(s,"_rel_rx_count",0)} dups={getattr(s,"_rel_rx_dups",0)} '
                                    f'pending_tx={pend} acks_in={getattr(s,"_ack_in_count",0)}')
                 if not getattr(s,'_rec_dumped',False):
                     s._rec_dumped=True
-                    _p=_rec_dump(s, f'reliable stall (idle {rel_idle:.1f}s, last_cs='
+                    _p=_rec_dump(s, f'reliable stall ({held} kept send(s), {_state}, '
+                                    f'rel DATA idle {rel_idle:.1f}s, last_cs='
                                     f'{getattr(s,"_rel_rx_last_cs",None)})')
                     if _p:
                         log('REC', f'flight recorder dumped -> {_p}')
@@ -13116,7 +13228,8 @@ threading.Thread(
     args=(DB_PATH, get_existing_ticket, generate_ticket, log, arena_settings_read,
           ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR,
           extract_date_from_gamedef),
-    kwargs={'scoring_ref_fn': web_scoring_reference},   # v404f5: /scoring page + ladder ranks
+    kwargs={'scoring_ref_fn': web_scoring_reference,    # v404f5: /scoring page + ladder ranks
+            'player_counts_fn': web_player_counts},     # v418f5: console player counter
     daemon=True
 ).start()
 
