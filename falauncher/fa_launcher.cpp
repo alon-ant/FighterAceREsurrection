@@ -248,6 +248,23 @@
 //     download -> install -> login.
 //     Falsify by: strings/resource dump of fa_launcher.exe showing any
 //     RCDATA payload, or any code path that writes an exe or relaunches.
+// 2026-08-08: launcher v4.4 - L-FIX-9: HTTP mirror fallback for the young
+//     swarm. If MirrorFallbackSecs (default 60) after the torrent starts
+//     there are ZERO bytes and ZERO seeders, the launcher fetches
+//     mirrors.txt from the project repo (MirrorListUrl, default
+//     raw.githubusercontent.com/alon-ant/FighterAceREsurrection/main/
+//     falauncher/mirrors.txt; one URL per line, #/; comments allowed),
+//     resolves each entry - Google Drive share links get the large-file
+//     confirm interstitial resolved to a direct drive.usercontent URL with
+//     the uuid token - and hands the URL to the RUNNING aria2 via addUri
+//     (forceRemove of the torrent gid first; the BT control file and the
+//     0-byte stub are deleted since HTTP cannot reuse them). A dead mirror
+//     (stopped status 'error') advances to the next entry; an exhausted
+//     list returns to the torrent permanently for the session. The progress
+//     page shows 'Source: mirror (<host>)' in mirror mode. Stage lines:
+//     M0 (list size), M1 (mirror chosen), M! (exhausted).
+//     Falsify by: a machine with no reachable seeds not switching to a
+//     mirror within ~70 s, or a first-mirror 404 not advancing to the next.
 //     Falsify by: post-install, a file under the target still carrying the R
 //     attribute, GameDir absent from launcher.ini, or the game failing to
 //     launch from the saved path.
@@ -314,6 +331,10 @@ struct Config {
     std::wstring playUploadLimit = L"512K";  // upload cap while playing ("0" = unlimited)
     int  rpcPort = 6811;            // aria2 JSON-RPC port on 127.0.0.1
     int  btPort  = 6888;            // L-FIX-4b: BT/DHT listen range base (btPort..btPort+9)
+    // L-FIX-9: HTTP mirror fallback when the swarm is empty.
+    std::wstring mirrorListUrl =
+        L"https://raw.githubusercontent.com/alon-ant/FighterAceREsurrection/main/falauncher/mirrors.txt";
+    int mirrorFallbackSecs = 60;    // stall window before switching to mirrors
     // L-FIX-5b: the folder inside the ISO whose CONTENTS are copied to the
     // user-selected target (no installer is run).
     std::wstring isoGameFolder = L"FIGHTER_ACE_4_2_DELUXE_EDITION";
@@ -406,6 +427,8 @@ static bool LoadConfig(const std::wstring& ini, Config& cfg, std::wstring& err) 
         else if (lk == L"playuploadlimit")  cfg.playUploadLimit = v;
         else if (lk == L"rpcport")      { try { cfg.rpcPort = std::stoi(v); } catch (...) {} }
         else if (lk == L"btport")       { try { cfg.btPort  = std::stoi(v); } catch (...) {} }
+        else if (lk == L"mirrorlisturl") cfg.mirrorListUrl = v;
+        else if (lk == L"mirrorfallbacksecs") { try { cfg.mirrorFallbackSecs = std::stoi(v); } catch (...) {} }
         else if (lk == L"isogamefolder") cfg.isoGameFolder = v;
         else if (lk == L"installsubdir") cfg.installSubdir = v;
         else if (lk == L"installtarget") cfg.installTarget = v;
@@ -566,6 +589,7 @@ static void CaptureLastUser() {
 //  L-FIX-4: game download + sharing (bundled aria2c.exe as the torrent engine)
 // ----------------------------------------------------------------------------
 static bool   g_downloadMode = false;  // the browser is showing the progress page
+static ULONGLONG g_dlStartTick = 0;    // L-FIX-9: when the visible download began
 static bool   g_startInstall = false;  // L-FIX-5: auto-trigger install after startup
 static HANDLE g_ariaProc = nullptr;    // aria2c process handle (nullptr = not running)
 #define DL_POLL_TIMER 1002
@@ -703,6 +727,7 @@ static bool StartAria2(bool quietSeed, std::wstring& err) {
     }
     CloseHandle(pi.hThread);
     g_ariaProc = pi.hProcess;
+    if (!quietSeed) g_dlStartTick = GetTickCount64();   // L-FIX-9 stall clock
     Stage(quietSeed ? L"T1: aria2 started (quiet seed)" : L"T1: aria2 started (download)");
     return true;
 }
@@ -1210,6 +1235,161 @@ static void StartInstall() {
     DoCopyInstall(target);
 }
 
+// ----------------------------------------------------------------------------
+//  L-FIX-9: HTTP mirror fallback. If, mirrorFallbackSecs after the torrent
+//  starts, we have zero bytes AND zero seeders, fetch mirrors.txt from the
+//  project repo, resolve each entry (Google Drive links need the large-file
+//  'confirm' interstitial resolved to a direct drive.usercontent URL) and
+//  feed it to the ALREADY-RUNNING aria2 via addUri - resume, multi-connection
+//  and the existing progress UI all keep working. Mirror errors advance down
+//  the list; an exhausted list falls back to the torrent again.
+// ----------------------------------------------------------------------------
+static int  g_mirrorIndex = -1;              // -1 = torrent mode
+static bool g_mirrorsExhausted = false;
+static std::vector<std::string> g_mirrors;   // parsed mirrors.txt (utf-8)
+static std::wstring g_mirrorHost;            // for the progress page
+
+// Small HTTPS/HTTP GET via WinINet (redirects followed). Body capped.
+static std::string WinInetGet(const std::wstring& url, DWORD maxBytes,
+                              std::wstring* contentType) {
+    std::string out;
+    if (contentType) contentType->clear();
+    HINTERNET hNet = InternetOpenW(L"FALauncher", INTERNET_OPEN_TYPE_PRECONFIG,
+                                   nullptr, nullptr, 0);
+    if (!hNet) return out;
+    DWORD to = 15000;
+    InternetSetOptionW(hNet, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof to);
+    InternetSetOptionW(hNet, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof to);
+    HINTERNET hUrl = InternetOpenUrlW(hNet, url.c_str(), nullptr, 0,
+                                      INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
+                                      INTERNET_FLAG_SECURE, 0);
+    if (hUrl) {
+        if (contentType) {
+            wchar_t ct[128] = L""; DWORD cl = sizeof ct;
+            if (HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_TYPE, ct, &cl, nullptr))
+                *contentType = ct;
+        }
+        char b[4096]; DWORD got = 0;
+        while (out.size() < maxBytes && InternetReadFile(hUrl, b, sizeof b, &got) && got > 0)
+            out.append(b, got);
+        InternetCloseHandle(hUrl);
+    }
+    InternetCloseHandle(hNet);
+    return out;
+}
+
+// Resolve a mirrors.txt entry to a URL aria2 can download directly.
+// Google Drive links get the large-file confirm interstitial resolved.
+static std::string ResolveMirror(const std::string& raw) {
+    if (raw.find("drive.google.com") == std::string::npos &&
+        raw.find("drive.usercontent.google.com") == std::string::npos)
+        return raw;
+    // extract the file id: /d/<ID>/ or id=<ID>
+    std::string id;
+    size_t p = raw.find("/d/");
+    if (p != std::string::npos) {
+        size_t s2 = p + 3, e = raw.find_first_of("/?&", s2);
+        id = raw.substr(s2, e == std::string::npos ? std::string::npos : e - s2);
+    } else if ((p = raw.find("id=")) != std::string::npos) {
+        size_t s2 = p + 3, e = raw.find_first_of("&", s2);
+        id = raw.substr(s2, e == std::string::npos ? std::string::npos : e - s2);
+    }
+    if (id.empty()) return raw;
+    std::string base = "https://drive.usercontent.google.com/download?id=" + id +
+                       "&export=download&confirm=t";
+    // Peek: large files answer with an HTML confirm page carrying a uuid field.
+    std::wstring ct;
+    std::string body = WinInetGet(Utf8ToWide(base), 131072, &ct);
+    if (ct.find(L"text/html") != std::wstring::npos) {
+        const std::string pat = "name=\"uuid\" value=\"";
+        size_t u = body.find(pat);
+        if (u != std::string::npos) {
+            u += pat.size();
+            size_t e = body.find('"', u);
+            if (e != std::string::npos)
+                return base + "&uuid=" + body.substr(u, e - u);
+        }
+    }
+    return base;   // small file / already direct
+}
+
+static std::string CurrentActiveGid() {
+    std::string rsp = RpcCall(RpcMethod("aria2.tellActive"));
+    return JStr(rsp, "gid");
+}
+
+// Move to the next mirror (or from torrent to the first one).
+static void SwitchToNextMirror(bool leavingTorrent) {
+    if (g_mirrorsExhausted) return;
+    if (g_mirrors.empty()) {
+        std::string txt = WinInetGet(g_cfg.mirrorListUrl, 65536, nullptr);
+        std::stringstream ls(txt); std::string line;
+        while (std::getline(ls, line)) {
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            size_t b = line.find_first_not_of(" \t");
+            if (b == std::string::npos) continue;
+            line = line.substr(b);
+            if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+            if (line.rfind("http", 0) == 0) g_mirrors.push_back(line);
+        }
+        Stage((L"M0: mirrors.txt entries=" + std::to_wstring(g_mirrors.size())).c_str());
+    }
+    ++g_mirrorIndex;
+    if (g_mirrorIndex >= (int)g_mirrors.size()) {
+        // Out of mirrors: go back to the pilot network and stop retrying mirrors.
+        g_mirrorsExhausted = true;
+        g_mirrorIndex = -1;
+        g_mirrorHost.clear();
+        Stage(L"M!: mirrors exhausted - back to torrent");
+        StopAria2(1500);
+        std::wstring aerr;
+        if (StartAria2(false, aerr)) g_dlStartTick = GetTickCount64();
+        return;
+    }
+
+    // Drop the current transfer. Leaving the torrent at 0 bytes: also remove
+    // its piece-based control file, which an HTTP download cannot reuse.
+    std::string gid = CurrentActiveGid();
+    if (!gid.empty())
+        RpcCall("{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.forceRemove\","
+                "\"params\":[\"token:" + WideToUtf8(g_rpcSecret) + "\",\"" + gid + "\"]}");
+    std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
+    DeleteFileW((iso + L".aria2").c_str());
+    if (leavingTorrent) DeleteFileW(iso.c_str());
+
+    std::string url = ResolveMirror(g_mirrors[g_mirrorIndex]);
+    // host for the UI
+    {
+        size_t hs = url.find("://");
+        std::string host = hs == std::string::npos ? url : url.substr(hs + 3);
+        size_t he = host.find_first_of("/:");
+        if (he != std::string::npos) host = host.substr(0, he);
+        g_mirrorHost = Utf8ToWide(host);
+    }
+    std::string body =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.addUri\",\"params\":[\"token:" +
+        WideToUtf8(g_rpcSecret) + "\",[\"" + url + "\"],{" +
+        "\"dir\":\"" + WideToUtf8(g_cfg.downloadDir) + "\"," +
+        "\"out\":\"" + WideToUtf8(g_cfg.isoName) + "\"," +
+        "\"continue\":\"true\",\"split\":\"8\",\"max-connection-per-server\":\"8\"," +
+        "\"max-tries\":\"3\"}]}";
+    // JSON: backslashes in dir must be escaped
+    // (WideToUtf8 of a Windows path contains single backslashes)
+    // - handled below by escaping before send.
+    auto esc = [](std::string in) {
+        std::string o; for (char c : in) { if (c == '\\') o += "\\\\"; else o += c; } return o; };
+    body =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.addUri\",\"params\":[\"token:" +
+        WideToUtf8(g_rpcSecret) + "\",[\"" + esc(url) + "\"],{" +
+        "\"dir\":\"" + esc(WideToUtf8(g_cfg.downloadDir)) + "\"," +
+        "\"out\":\"" + esc(WideToUtf8(g_cfg.isoName)) + "\"," +
+        "\"continue\":\"true\",\"split\":\"8\",\"max-connection-per-server\":\"8\"," +
+        "\"max-tries\":\"3\"}]}";
+    RpcCall(body);
+    g_dlStartTick = GetTickCount64();
+    Stage((L"M1: mirror #" + std::to_wstring(g_mirrorIndex) + L" " + g_mirrorHost).c_str());
+}
+
 // 2 s timer tick while in download mode: read status over RPC, repaint the
 // progress page. Repaints ONLY while the browser is still on about:blank, so
 // the user can click through to the login page and log in mid-download.
@@ -1246,6 +1426,9 @@ static void PollDownload() {
         if (st.find("\"complete\"") != std::string::npos) {
             status = "complete";
             done = total = strtoull(JStr(st, "totalLength").c_str(), nullptr, 10);
+        } else if (g_mirrorIndex >= 0 && st.find("\"error\"") != std::string::npos) {
+            // L-FIX-9: the current mirror died - move to the next one.
+            SwitchToNextMirror(false);
         }
     }
 
@@ -1258,6 +1441,14 @@ static void PollDownload() {
     if (finished && g_sawUnfinished && !g_autoInstall && g_instState == INST_NONE) {
         g_autoInstall = true;
         if (g_mainWnd) PostMessageW(g_mainWnd, WM_DO_INSTALL, 0, 0);
+    }
+    // L-FIX-9: empty-swarm fallback - N seconds with zero bytes AND zero
+    // seeders means nobody reachable is sharing right now; switch to mirrors.
+    if (!finished && up && g_mirrorIndex < 0 && !g_mirrorsExhausted && g_dlStartTick &&
+        GetTickCount64() - g_dlStartTick >=
+            (ULONGLONG)g_cfg.mirrorFallbackSecs * 1000ULL &&
+        done == 0 && seeders == 0) {
+        SwitchToNextMirror(true);
     }
     wchar_t pctb[16]; swprintf(pctb, 16, L"%.1f", pct);
 
@@ -1299,9 +1490,13 @@ static void PollDownload() {
                 break;
             }
         } else {
-            h += L"<p>Down: <b>" + FmtSpeed(dspd) + L"</b> &nbsp; Up: " + FmtSpeed(uspd) +
-                 L" &nbsp; Peers: " + std::to_wstring(conns) +
-                 L" (seeds: " + std::to_wstring(seeders) + L")</p>";
+            if (g_mirrorIndex >= 0)
+                h += L"<p>Source: <b>mirror</b> (" + g_mirrorHost + L") &nbsp; Down: <b>" +
+                     FmtSpeed(dspd) + L"</b></p>";
+            else
+                h += L"<p>Down: <b>" + FmtSpeed(dspd) + L"</b> &nbsp; Up: " + FmtSpeed(uspd) +
+                     L" &nbsp; Peers: " + std::to_wstring(conns) +
+                     L" (seeds: " + std::to_wstring(seeders) + L")</p>";
             h += L"<p>Uploaded so far: " + FmtGB(uploaded) + L"</p>";
         }
     }

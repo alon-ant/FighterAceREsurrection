@@ -1,1 +1,9 @@
-https://drive.google.com/file/d/1V93JcBbDHDrUSk_EfitC49hgurKxGG7R/view?usp=drive_link
+# Fighter Ace 4.2 - ISO mirror list (fetched by the launcher when the swarm is empty)
+# One URL per line. Lines starting with # or ; are ignored.
+# Google Drive share links are supported and resolved automatically, e.g.:
+# https://drive.google.com/file/d/FILE_ID_HERE/view?usp=sharing
+# Direct links to any web server also work:
+# http://fa-re-srv.ddns.net/FA42DeluxeEdition.iso
+
+http://fa-re-srv.ddns.net/FA42DeluxeEdition.iso
+https://drive.google.com/file/d/1V93JcBbDHDrUSk_EfitC49hgurKxGG7R/view?usp=sharing
