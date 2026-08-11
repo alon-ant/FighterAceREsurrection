@@ -6,6 +6,22 @@ bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
+*** BANKED BASELINE 2026-08-12: v428f5 is the current stable banking point.
+    THE REPAIR/RESUPPLY REFACTOR, field-confirmed end to end this date on LAN:
+    fail-closed ground-stop detection (v422f5 - single _pos_hist data path,
+    tick-advance discriminator; the mid-air-grant compound is dead), scene
+    damage display polarity (v423f5 - 0% on pristine, verified live), camp-
+    pool TC economy (v424f5), and the two-level supply policy on the msg-60
+    handler's OWN decompiled semantics (v425-v428f5): arcade = 0x07 total
+    restore silent; TC = rich 0x06 loadout-restore at flat pool cost / lean
+    incremental adds where debit == fill by construction, ordnance never
+    stripped, HQ fuel loadout respected everywhere. Live-tested: arcade full
+    cycle incl. bombs, TC bomber spawn-park (racks survive), rich rearm, fuel-
+    to-loadout. Flag truth table (5th and final revision) recorded at v427f5;
+    msg-73 decode groundwork in msg73_decode_notes.md. Rollback point: this
+    file at v428f5. NEXT PROJECT: production tick + supply links (four-
+    resource economy, aircraft units, complex topology). ***
+
 *** BANKED BASELINE 2026-08-03: v398f5 is the current stable banking point.
     Field-confirmed on this date: the COMPLETE plane-id map (v395+v397+v398 -
     all 121 slots anchored to the client's own Preload/upload data; both
@@ -25,6 +41,297 @@ they explain why a specific line is the way it is and must stay with it.
     which is deployed and compile-verified but still UNTESTED in live play (see
     its entry). Everything below it (through v371f5's 256-wedge cure) is
     field-confirmed stable. ***
+==============================================================================
+
+v428f5: [SUPPLY] TC RICH TIER = FLAGS 0x06 - fuel to the HQ LOADOUT, not to full. v427f5's
+      rich tier (0x04) added fuel INCREMENTALLY by 300 kg, which on fighter-sized internal
+      tanks (~300-600 kg) reads as 'filled it to full' and ignores the pilot's selection.
+      0x06 (bit1&bit2, bit0 clear) takes the handler's vfunc20(1) TOTAL-restore path: fuel
+      to the HQ loadout, full guns AND ordnance, silent, amounts unread - the same call
+      arcade's 0x07 makes, with one bonus: the bit0==0 path also sends the out-73
+      SendRepairInfo reply (0x07's bit0 shortcut skips it), so every TC rich grant now
+      produces a 39-byte client report for the msg-73 decode.
+      Rich tier requires the pool to cover BOTH flat costs (500 ammo + 300 fuel) and debits
+      exactly those; LEAN tier unchanged (incremental adds of what the pool holds + bit3
+      narration).
+      FALSIFY: TC rich - spawn with a partial fuel loadout, expend, land, park -> fuel
+      returns to the SELECTED loadout (not full), bombs and guns full, silent, pool -500
+      ammo -300 fuel, and the client's out 73'39 appears in the wire log after the grant.
+
+==============================================================================
+
+v427f5: [SUPPLY] TC GRANTS GO INCREMENTAL - debit == fill BY CONSTRUCTION - built on the
+      msg-60 handler DECOMPILE (FA.exe 0x005581c0, function defined by Alon and read this
+      session), which finally reconciles every probe and settles the semantics for good:
+        * EVERY grant repairs: the handler's first act in all paths is subobj(plane+0x1F4)
+          ->vfunc+0x20(full) - airframe restore. Repair was never bit0's.
+        * bit1&bit2 together -> vfunc20(1) = TOTAL restore (loadout fuel + guns + ordnance),
+          silent - what arcade's 0x07 executes, one call.
+        * NO fill bits -> INCREMENTAL adds: FUN_004ebf50(amount) fuel, FUN_004ecad0(amount2)
+          ammo - silent, no unload, no strip, amount 0 SAFE (shows 'no fuel/ammo
+          available'). The mode v285 believed 0x08 was. It is flags 0x00.
+        * bit3 -> two canned strings 0xe5/0xe6 ('insufficient aircraft units' / 'taking from
+          tank production') - DISPLAY ONLY. v347 was right, v426f5's relabel wrong: there is
+          NO client-side units stock. THE UNITS ECONOMY WAS ALWAYS SERVER-SIDE - the 2009
+          server did the accounting and used bit3 to narrate its shortages. Full control.
+        * bit0&!bit2's reload-to-budget is the ordnance STRIPPER - which is what 'denied the
+          bombs on spawn' was: our v426f5 TC 0x03 grant fired on the freshly spawned parked
+          bomber, unloaded every station and reloaded guns only. TC no longer sends bit0.
+
+      TC POLICY NOW (arcade 0x07 unchanged):
+        * RICH pool (ammo >= SUPPLY_TC_REARM_AMMO_KG=500): flags 0x04 - full guns AND
+          ordnance + incremental fuel add; flat 500 kg ammo cost debited, fuel debit = add.
+        * LEAN pool: flags 0x08 - incremental adds of exactly what the pool holds (capped at
+          300 fuel / 150 ammo per stop), pool debited exactly that, plus bit3's authentic
+          shortage narration for the ordnance not restored. Dry resource -> add 0, safe,
+          client's own 'no fuel/ammo available' shows. The v425f5 [DRY] no-grant branch and
+          its bookkeeping are gone.
+        * Free airframe repair rides along on any grant (client behaviour, unavoidable);
+          costing repairs in metal/aircraft-units is the next economy stage, now known to be
+          purely server-side arithmetic + bit3 narration.
+
+      FALSIFY: TC - spawn a bomber, park through the grace: bombs SURVIVE the grant. Rich
+      pool: full rearm incl. racks, pool drops by 500+fuel. Drain the pool below 500: LEAN
+      grants add small increments, 'insufficient aircraft units / taking from tank
+      production' appears, dry pool adds 0 with 'no fuel/ammo available' and the plane keeps
+      everything it has. Arcade regression: unchanged from v426f5.
+
+==============================================================================
+
+v426f5: [SUPPLY] ARCADE GRANT = FLAGS 0x07, from the second probe matrix - repair + loadout
+      fuel + FULL GUNS AND ORDNANCE in one silent packet (v425f5's 0x23 restored everything
+      except bombs: bit0's rearm budget is clamped at plane+0x500 = GUN capacity, so no
+      amount2 can reach the racks, and bit1 does not touch them either).
+
+      SECOND PROBE ROUND (bombs expended, parked) - the table that finally reconciles
+      v283's empirical matrix with v347's static read (v283 was right about 'incremental'):
+        0x02  fuel->HQ loadout, ammo INCREMENTAL +amount2, silent
+        0x04  FULL guns AND bombs/rockets, fuel INCREMENTAL +amount, no message
+        0x08  AIRCRAFT-UNITS ECONOMY, LIVE: 'insufficient aircraft units' - the client
+              gates ordnance restore on a local units stock we never feed. NOT display-only
+              (v347 label falsified). b1/b2 do NOT feed it (50/50 and 255/255 probed, no
+              change) - the stock's source is an open RE lead (msg-73 exchange / msg-40
+              panel data / another message).
+        0x40, 0x80  unmapped -> DEFAULT INCREMENTAL top-up by amounts, silent (this is the
+              behaviour v285 attributed to 0x08)
+        0x07  repair + loadout fuel + full guns AND BOMBS, NO messages (bit2's ordnance
+              pass survives bit0)  <- THE ARCADE GRANT
+        0x03  repair + loadout fuel + gun ammo only; client says 'no bombs or rockets
+              available'  <- kept as the TC grant
+
+      TC DELIBERATELY KEEPS 0x03: ordnance should cost AIRCRAFT UNITS - the client already
+      implements exactly that economy behind bit3, we just cannot feed the stock yet - and
+      its 'no bombs or rockets available' message tells the TC pilot the truth. Pragmatic
+      switch documented in code: SUPPLY_TC_FLAGS = 0x07 for free ordnance until the units
+      economy lands.
+
+      FALSIFY: arcade - expend bombs, take damage, land, park -> repaired, HQ fuel, full
+      guns AND racks, zero on-screen messages. TC - unchanged from v425f5 plus the client's
+      own no-ordnance message.
+
+      NEXT (the units thread): define the msg-60 handler as a function at FA.exe 0x005581c0
+      (Ghidra shows code but no function object - press F there), decompile the bit3 branch
+      to find WHERE the client reads the aircraft-units stock, then trace which message
+      writes it. That plus the msg-73 SendRepairInfo decode (out 73'39 after every grant)
+      turns on the fourth resource and real per-take debits.
+
+==============================================================================
+
+v425f5: [SUPPLY] THE TWO-LEVEL POLICY, BUILT ON A LIVE FLAG-PROBE MATRIX that corrected
+      v347's bit1 label and settled all three open reports from the v424f5 flight test
+      (loadout ignored, 'limited to X lb' not matching the fill, and the economy leak).
+
+      PROBED (console `resupply`, 2026-08-11) + decompiled (FUN_004ebf00/FUN_005299e0 fuel,
+      FUN_004ec5c0 Plnprod.cpp rearm):
+        * bit0 0x01 = repair + ABSOLUTE set: fuel := amount kg (clamped to tank capacity),
+          guns unloaded then reloaded up to amount2 kg (clamped to plane ammo capacity).
+          `resupply 0x01 0 0` = FULL DRAIN - a 0 amount under bit0 empties the plane. The
+          v42xf5 'offer 0 when dry' design was therefore a plane-drainer; NEVER send 0.
+        * bit1 0x02 = RESTORE-TO-LOADOUT: fuel to the pilot's HQ-selected loadout AND full
+          ammo, silently, amounts ignored. v347 labelled this 'fuel to max' from the static
+          read; the probe shows it restores the whole loadout (v283's matrix had seen the
+          ammo effect and was dismissed). Combined with bit0 (0x03), bit1's fuel outcome
+          WINS over bit0's amount (`resupply 0x03 50 1000` ends at loadout fuel, full ammo,
+          only the ammo 'limited to 2205lb' message shown).
+        * the 'supplied beyond the limits' report decoded: under 0x01 the DISPLAY prints the
+          offer, the FILL is min(offer, capacity), and the DEBIT was the nominal 300/150 kg
+          v285 leftover - three unrelated numbers. The fix is alignment, not clamping.
+
+      POLICY (mode = scoring_mode_for_room(), web override wins as elsewhere):
+        * ARCADE (ffa/events/none/custom): flags 0x23 (repair + loadout restore + ammo
+          message suppressed), amount=100 (drain guard; bit1 overrides), amount2=0xffff
+          (bomber ordnance fills too). Silent full service, no economy touched. Level 1.
+        * TC: flags 0x03 - repair + fuel to LOADOUT (bit1; the loadout report fixed) + ammo
+          absolute-set with amount2 = min(0xffff, camp pool), so the 'limited to X lb'
+          message and the actual fill AGREE with what the pool can back. Draw stays the
+          nominal debits for now. PEEK-FIRST: the pool is checked BEFORE drawing; if it
+          cannot cover the debits -> [DRY], NOTHING drawn, NO grant (0 drains, bit1 alone is
+          a free loadout), logged once per stop, and the stop stays open so a production
+          tick that refills the pool services the still-parked plane. (Draw-then-refund was
+          rejected: the takes clamp negative wants to 0, so a retrying dry stop would waste
+          the dregs and every tick's output.) Unmapped terrain in a TC room -> arcade-style
+          grant rather than a bricked field. Level 2.
+
+      KNOWN INTERIM WARTS (both close with the msg-73 SendRepairInfo decode, next up):
+        * TC fuel is loadout-filled whenever the pool covers the nominal debit - a nearly
+          dry pool still fills a bomber; the debit does not scale with the actual take.
+        * the ammo ABSOLUTE set can reduce a plane that lands holding MORE ammo than the
+          pool total.
+
+      FALSIFY: arcade room - park damaged with a partial loadout -> repaired, fuel at the
+      HQ selection, full ammo, NO on-screen supply messages. TC room - same, but the ammo
+      message appears and reads exactly min(0xffff, pool) kg in lb; drain the pool below
+      300 fuel / 150 ammo -> [DRY] in the server log, no grant, plane keeps its remaining
+      load (nothing drained); let one production tick land -> the parked plane is serviced.
+      REVERT: SUPPLY_ARCADE_FLAGS/SUPPLY_TC_FLAGS back to SUPPLY_GRANT_FLAGS=0x01 semantics.
+
+==============================================================================
+
+v424f5: [SUPPLY] TC GRANTS DRAW FROM THE PILOT'S CAMP PRODUCTION COMPLEX, airfields first,
+      instead of from one (mis-attributed) scene.
+
+      THE v422f5 LIVE TEST EXPOSED THE ATTRIBUTION AS STRUCTURALLY WRONG, not just stale:
+      a ground SPAWN on terrain 2 logged 'AF=2 ... Support Factory: field now ammo 0/0' -
+      fuel-only grants forever. But terrain 2's spawnable scenes are its AIRFIELDS (30-39
+      plus Front Airfields 40/43/46/49/52); scenes 0-9 are all Support Factories. Nobody
+      ground-spawns at a Support Factory, so the StartPlace AF ident CANNOT be a scene index
+      - it is presumably an ordinal into the terrain's start-place list, which we have no
+      table for (RE task, filed). Every per-scene debit made through it - spawn OR landing -
+      was against the wrong scene.
+
+      FIX: camp_supply_take() drains the camp's profiled scenes, AIRFIELD-TYPED SCENES FIRST,
+      production scenes after - which is the authentic mechanic in the client's own words:
+      'insufficient aircraft units at the airfield, taking from tank production to supply'.
+      Pilot's camp = s.nation; offers capped by the camp's remaining pool. On terrain 2 every
+      camp owns Villages / Tank Factories holding 45-55k ammo, so the 'ammo 0 at spawn'
+      symptom is gone by construction. Grant log carries [campN pool (M scenes)] + AFRAW=<id>
+      (kept for the eventual start-place mapping).
+      SUPPLY_CAMP_POOL=False reverts to the per-scene path, which also remains the automatic
+      fallback for terrains without a SCENE_CAMP_BY_TERRAIN table and for camp-less sessions.
+
+      NOTE ON SCOPE: scene DESTRUCTION effects are unchanged - v291's destroyed-scene store
+      loss and per-scene HP/efficiency still act on the individual scene, and the camp pool
+      simply sums over what survives, so flattening a camp's Villages still starves its ammo.
+
+      FALSIFY: parked pilot in the terrain-2 room gets fuel AND ammo; the [campN pool] log
+      line shows the pool draining by the nominal debits; destroying a camp's ammo scenes
+      drops that camp's offers while the other camps' pilots are unaffected.
+
+      STILL OPEN (the real fix, filed): extract the per-terrain START-PLACE table (client
+      terrain data or FA.exe StartPlaceList builder) so AF idents resolve to actual scenes;
+      then landing-field resolution from position; then 'Aircraft units' as a fourth tracked
+      resource (the wiki lists Aircraft units / Metal / Ammo / Fuel - repair should draw
+      units+metal, not be free).
+
+==============================================================================
+
+v423f5: [SCENE] MAP DAMAGE DISPLAY POLARITY - the msg-69 per-scene byte is the DAMAGE
+      percent, rendered by the client AS-IS. We were sending condition (100 = healthy), so
+      every intact scene displayed '100% damage'. v296's 'condition' label was inferred,
+      never checked against the binary - the same failure as v285's flag labels and v345's
+      MEC nibbles.
+
+      PROOF, both directions:
+        * BINARY: msg-69 handler = FUN_004f5130 (VNET dispatch table 0xc81ed8 slot 69; base
+          anchored by slot 88 -> 0xc82038 -> FUN_004f4120, the known msg-88 handler). It
+          asserts (Length-1) % sizeof(SCENE_TAG_MESSAGE::PACKED_INFO) == 0 and hands the
+          3-byte records to FUN_0048e9a0, which locates the scene node by id (node+0x4c) and
+          writes THE RAW BYTE to node+0x30 (+ stamps node+0x20 with the time). The
+          AIRFIELD_CONDITION_LIST_BOX detail line (FUN_006dcc60 @ 0x006dcd37) formats that
+          value straight into "%s %i%%" (label = string-table 0x61a, value = dlg+0x13c). No
+          inversion anywhere on the traced path.
+        * LIVE, twice: v295 sent the supply average (~100 on full fields) -> '100% damage'
+          everywhere; v296 sent condition=100 for pristine -> STILL '100% damage'
+          everywhere. Two different ~100 payloads, identical wrong display; 0 is pristine.
+
+      FIX: val = 100 - round(scene_efficiency*100), clamped 0..100. Nothing to 'reset'
+      server-side - SCENE_HP was never populated (no damage occurred); the 100% was pure
+      polarity. The unknown-scene filler record already sends 0, which is now correct by
+      construction. Log tag flips hpNN -> dmgNN.
+
+      FALSIFY: join the arena -> every scene reads 0% damage; `crumble` one scene -> its
+      percentage rises while the others stay 0. REVERT: restore val = efficiency*100.
+
+      BONUS RE (logged for later): the CargoRequest/delivery economy lives at FUN_00559250
+      (Msn_Prod.cpp) - inbound 0x6b cargo request, outbound 0x76 (delivery record) and 0x7c
+      (DELIV_BONUS_SCENE m/f/a + NotEnough + distance/time) - a decoded route into cargo
+      resupply missions when we want them.
+
+==============================================================================
+
+v422f5: [RESUPPLY] AUTO-RESUPPLY RE-ENABLED behind a rewritten, FAIL-CLOSED ground-stop
+      detector. It had been disabled on the live server because msg-60 grants kept firing at
+      AIRBORNE aircraft.
+
+      ROOT CAUSE (the compound v346 could not close): the gate stack judged freshness and
+      "new packet" from last_telem_time - which is stamped for EVERY telemetry packet the
+      session sends, ANY object - but took the position it judged from last_plane_telem,
+      which updates ONLY when the packet's ONumber == my_obj_number. A bail (the parachuter
+      transmits under its own number), a respawn's ONumber change, or the plane's own stream
+      pausing while anything else keeps flowing => "fresh new packets" over a frozen cached
+      position = reads as parked. Gate 4b then failed OPEN: plane_movement() returns 0 on NO
+      EVIDENCE (correct for the crash classifier) and _pos_hist is cleared on every spawn, so
+      the one predicate meant to catch the airborne case answered "parked" in precisely the
+      divergence scenarios. Only the 10s spawn grace stood in the way.
+
+      FIX - ground_stop_eligible(), ONE data path, no-evidence = NOT eligible:
+        * judged solely from _pos_hist (samples appended only for ONumber==my_obj_number,
+          each with its own arrival time; v422f5 adds the sender's conductor tick per sample
+          - tuples grew to (t, pos, tick); plane_movement indexes [0]/[1], unaffected)
+        * newest sample must be fresh BY ITS OWN TIMESTAMP (never the any-object clock)
+        * plane_movement() over the retained window EXACTLY 0 (v346 calibration: parked=0
+          sample after sample, airborne ~250k) - tested FIRST so a moving plane answers
+          'movement=N', which is the ONLY answer that re-arms the one-shot (staleness or
+          thin evidence must not, or a lossy link re-grants a plane that never moved =
+          the v276 168-grants failure resurrected via packet loss)
+        * >= AUTO_RESUPPLY_MIN_SAMPLES newest samples IDENTICAL in position, spanning
+          >= AUTO_RESUPPLY_SETTLE seconds
+        * the conductor tick must ADVANCE across the static run - a frozen conductor
+          re-sending one stale state is indistinguishable from a parked plane by position
+          alone; a genuinely parked client keeps ticking (type-7 flows when parked, v273).
+          Closes v346's endemic tick-freeze false-static for good.
+
+      ALSO CHANGED:
+        * at_airfield NO LONGER GATES eligibility - it is ATTRIBUTION only (which field's
+          stock a TC grant debits). A pilot whose StartPlace framing we fail to parse (the
+          framing set has grown since v275: v340 re-frame, v364f5 universal unwrap)
+          previously skipped at the poll's FIRST gate and could never resupply; now they get
+          a blind [NO-AF] grant that debits nothing. This was also a latent None-crash:
+          supply_take -> supply_state -> int(None) raised, and the poll's single try aborted
+          the whole per-session scan for that tick.
+        * the '0x53 engine-ON clears at_airfield' branch is GONE - v347 proved 0x53 is not
+          engine state (...5300 precedes SPAWN, ...5301 precedes EXIT), so it fired at
+          climb-OUT and never during a sortie. at_airfield := last spawn field, cleared on
+          despawn (sub 0x03) only; _auto_resupply_check is slimmed to that maintenance and
+          now runs regardless of AUTO_RESUPPLY.
+        * one-shot re-arms on OBSERVED MOVEMENT or on parking at a DIFFERENT position
+          (_grant_pos), instead of on any single changed poll sample.
+        * per-SESSION try in the poll: one bad session no longer aborts the scan for the
+          rest of that tick.
+        * dead state removed: engine_on, parked_since, stationary_since, has_flown,
+          last_pos, pos_static_since, pos_static_samples, last_pos_telem_t.
+        * stale '(incremental)' tag dropped from the grant log line (flags are 0x01
+          absolute-set since v347).
+
+      KNOWN LIMIT (unchanged since v347, now the top of the resupply queue): at_airfield is
+      the field you SPAWNED at. Land elsewhere and the wrong stock is debited (TC only).
+      Position-based field resolution needs scene WORLD COORDINATES, which no extracted
+      table carries - the 48-byte DATA00 scene record is name+h+cls+flag+link, fully
+      consumed - so the placements must come from the per-map data or the FA.exe scene
+      loader (Ghidra session). That is the v423f5+ track.
+
+      FALSIFY: (a) a ground-start pilot parks -> grant within ~SETTLE+poll, log line
+      'ground-stop at AF=..'; (b) a session containing a bail or respawn NEVER produces a
+      grant while the plane is airborne; (c) a pilot who takes off and lands again IS
+      granted (the old first-gate skip is gone); (d) a parked pilot on a lossy link gets
+      exactly ONE grant per stop. REVERT: AUTO_RESUPPLY=False is the live kill-switch; full
+      revert = restore this entry's diff.
+
+      NEXT (v423f5+): explicit Arcade/TC policy split keyed on scoring_mode_for_room();
+      position-based field attribution; decode the msg-73/0x49 SendRepairInfo REPLY (39B,
+      FUN_004c8690) - if it carries the amounts actually drawn, debit real figures and
+      delete the nominal SUPPLY_DEBIT_* constants.
+
 ==============================================================================
 
 v421f5: [OPS] MANUAL `restart` COMMAND - restart the running build with no git pull, from

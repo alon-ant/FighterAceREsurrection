@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v421f5'
+VERSION = 'v428f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5593,18 +5593,15 @@ class S:
         self.obj_confirmed=False  # ServerConfirm sent for the current spawn? (reset per StartPlace)
         self.my_obj_number=None   # server-assigned object Number for this player's plane
         self.flying=False         # set once ServerConfirm sent (sim loop should start)
-        # -- v267 auto-resupply state (P2a) --
-        self.at_airfield=None     # AF ident the player is parked at (from StartPlace 0x17), else None
-        self.engine_on=None       # last engine state (type=0x22 sub=0x53: 1=on, 0=off), None=unknown
-        self.parked_since=None    # v268: time.time() when the settle timer started, else None
-        self.stationary_since=None # v272: time.time() the plane's ground speed hit 0, else None
-        self.last_pos=None        # v274: last quantised position seen by the resupply poll
-        self.pos_static_since=None # v274: time.time() the position last changed (static clock)
-        self.pos_static_samples=0 # v277: consecutive FRESH telemetry packets with the same position
-        self.last_pos_telem_t=0.0 # v277: last_telem_time already consumed by the resupply poll
+        # -- v267/v422f5 auto-resupply state --
+        self.at_airfield=None     # AF ident of the LAST SPAWN field (StartPlace 0x17/0x18).
+                                  # v422f5: ATTRIBUTION ONLY - which field's stock a TC grant
+                                  # debits. No longer gates eligibility (that decision is
+                                  # ground_stop_eligible(), judged from _pos_hist alone).
         self.resupplied_this_stop=False # v278: one-shot guard - fire once per stationary episode
+        self._grant_pos=None      # v422f5: quantised pos of the last auto-grant; the one-shot
+                                  # re-arms on observed movement OR on parking elsewhere
         self.spawn_time=0.0       # v279: time.time() of the last ServerConfirm (spawn grace window)
-        self.has_flown=False      # v269: engine has run since spawn -> a later shutdown = real landing
         self.last_resupply_at=0.0 # time.time() of the last auto-resupply grant (debounce)
         self.last_telem_tick=None # this player's most recent conductor tick (telemetry[5:7]);
         self.last_telem_time=0.0  # used to re-stamp packets we RELAY *to* this player so the
@@ -8448,7 +8445,12 @@ def relay_telemetry(src, data):
                 _p = struct.unpack_from('<HHH', pl, 9)
                 _now = time.time()
                 _hist = src.__dict__.setdefault('_pos_hist', [])
-                _hist.append((_now, _p))
+                # v422f5: carry the sender's conductor tick with each sample. The ground-stop
+                # judgement needs "tick advancing while the position holds still" to tell a
+                # genuinely parked plane from a frozen conductor re-sending one stale state
+                # (v346's endemic false-static). plane_movement() indexes [0]=t/[1]=pos and is
+                # unaffected by the extra element.
+                _hist.append((_now, _p, src.last_telem_tick))
                 _cut = _now - CRASH_MOVEMENT_WINDOW_S
                 while _hist and _hist[0][0] < _cut:
                     _hist.pop(0)
@@ -10286,12 +10288,11 @@ def _fire_server_confirm(s, via='', ident=None):
     _hist.append((number, time.time()))
     if len(_hist) > 16:
         del _hist[:-16]
-    # v276: a spawn/respawn (HQ entry OR base change) starts the plane fresh at a base. Reset the
-    # auto-resupply position tracking so the new spawn starts a CLEAN static settle - the old
-    # object's transit/wind-down position deltas must not leak into the new base's stationary check.
-    s.last_pos = None; s.pos_static_since = None
-    s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
+    # v276/v422f5: a spawn/respawn (HQ entry OR base change) starts the plane fresh at a base.
+    # Re-arm the auto-resupply one-shot; the position evidence itself (_pos_hist) is dropped a few
+    # lines below (v243), which is what gives the new life a clean static settle.
     s.resupplied_this_stop = False
+    s._grant_pos = None
     # v349: DESPAWN THE ABANDONED BAIL-OUT PLANE BEFORE THE NEW ONE REACHES PEERS.
     # Bailing leaves the empty plane flying on purpose (the held kill is credited when it comes
     # down). But if the pilot re-spawns first, peers end up with TWO live objects on the SAME
@@ -10691,20 +10692,29 @@ SUPPLY_MSG_INSTRUMENT = True   # v264: log ALL reliable-channel messages while a
                               #   Set False once the supply/repair messages are identified.
 SUPPLY_WATCH_SUBS = None       # None = log everything (in-arena); or a set to filter
 
-# v267 P2a: auto-resupply. When the player parks at an airfield and shuts the engine off, the server
-# sends the proven msg-60 supply grant (full repair + rearm). BLIND for all arenas for now - the TC
-# per-airfield supply gate is P2b.
-AUTO_RESUPPLY = False
+# v267 P2a: auto-resupply. When the player parks at an airfield, the server sends the proven msg-60
+# supply grant (repair + rearm/refuel).
+# v422f5: RE-ENABLED. It had been disabled on the live server because grants kept firing at AIRBORNE
+# aircraft. Root cause (full write-up: change.log v422f5): the old gate stack judged freshness and
+# "new packet" from last_telem_time - stamped for EVERY telemetry packet this session sends, ANY
+# object - but took the position it judged from last_plane_telem, which updates ONLY when the
+# packet's ONumber == my_obj_number. Bail (parachuter transmits under its own number), a respawn's
+# ONumber change, or the plane's own stream pausing while anything else keeps flowing => "fresh new
+# packets" over a frozen cached position = reads as parked. And plane_movement() returned 0 on NO
+# EVIDENCE (right for the crash classifier, fatal here), so the v346 airborne gate failed open in
+# exactly the divergence scenarios. The decision is rewritten FAIL-CLOSED in ground_stop_eligible():
+# ONE data path (_pos_hist - onum-matched samples with their own timestamps + conductor tick), and
+# no evidence => NOT eligible.
+AUTO_RESUPPLY = True
 AUTO_RESUPPLY_DEBOUNCE = 5.0   # seconds; fire at most once per this window per player
-AUTO_RESUPPLY_SETTLE = 2.0     # seconds stationary (ground speed 0) before the resupply fires
-AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval for the stationary check
-# v277 SAFETY (remote-server fix): the poll must never mistake a STALE position view for a stationary
-# plane. Over a high-latency/lossy link the telemetry stops arriving while the plane is still flying,
-# so re-reading the same cached packet looked 'static' and fired a mid-flight rearm (which rebuilds
-# the plane object and FROZE the client). So: only judge stationarity from FRESH, NEWLY-ARRIVED
-# telemetry, and require several consecutive new packets that all report the same position.
-AUTO_RESUPPLY_FRESH = 1.5      # telemetry older than this => we cannot judge; reset + skip
-AUTO_RESUPPLY_MIN_SAMPLES = 3  # consecutive NEW telemetry packets with identical position required
+AUTO_RESUPPLY_SETTLE = 2.0     # min seconds of identical-position samples before a grant. NOTE the
+                               #   movement==0 test additionally spans the full retained _pos_hist
+                               #   window (CRASH_MOVEMENT_WINDOW_S=3.0), so in practice a plane is
+                               #   granted once its whole recent history is still
+AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval
+AUTO_RESUPPLY_FRESH = 1.5      # newest PLANE sample older than this (its OWN timestamp, never the
+                               #   any-object last_telem_time) => cannot judge => NOT eligible
+AUTO_RESUPPLY_MIN_SAMPLES = 3  # min onum-matched samples in the identical-position run
 # v279: after a spawn/respawn the CLIENT is still building the plane object. A msg-60 that lands in
 # that window corrupts it: run 05.50.26 shows 'Create NetPlane ... ONumber=258' followed 4ms later by
 # our 'Repair PlnID:5 ... Load:0' and then an 8.5-MINUTE flood of
@@ -10978,6 +10988,55 @@ def supply_take(room_id, terrain, scene_id, ammo_kg, fuel_kg, allow_default=True
             out.append(got)
     return tuple(out)
 
+# v424f5: TC grants draw from the pilot's CAMP PRODUCTION COMPLEX, not from one scene.
+# WHY: the StartPlace AF ident is NOT a scene index. Field evidence (v422f5 live test, terrain 2):
+# a ground SPAWN resolved to scene 2 = 'Support Factory' (ammo cap 0) and the pilot was granted
+# fuel-only. But on terrain 2 the scenes a pilot can actually spawn at are the airfields (30-39
+# plus the Front Airfields 40/43/46/49/52) - nobody ground-spawns at a Support Factory, so AF=2
+# cannot be scene 2. The ident is presumably an ordinal into the terrain's START-PLACE list;
+# translating it needs a start-place table we have not extracted (RE task). Rather than debit a
+# mis-attributed scene, draw from the whole camp complex - which is also the AUTHENTIC mechanic:
+# the client's own shortage text is 'insufficient aircraft units at the airfield, taking from
+# tank production to supply', i.e. cross-scene draw inside the camp. Airfield-typed scenes drain
+# FIRST, production scenes after, matching that wording. Per-scene draw remains the fallback for
+# terrains with no camp table (SCENE_CAMP_BY_TERRAIN), and the raw AF ident stays in the grant
+# log as AFRAW for the eventual start-place mapping work.
+SUPPLY_CAMP_POOL = True
+
+def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg):
+    """v424f5: draw up to ammo_kg / fuel_kg from every profiled scene the camp owns, airfield-
+    typed scenes first. Returns (ammo_got, fuel_got, stored_after, n_scenes) where stored_after
+    sums the camp's remaining {'ammo','fuel'} - or None when the terrain has no camp table or
+    the camp owns nothing profiled (the caller falls back to the per-scene path)."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    if not table:
+        return None
+    own = [sidx for sidx, c in table.items() if c == camp]
+    if not own:
+        return None
+    def _is_af(sidx):
+        t = scene_type_for(terrain, sidx) or ''
+        return 'airfield' in t.lower()
+    own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, sidx))
+    need = {'ammo': ammo_kg, 'fuel': fuel_kg}
+    got = {'ammo': 0, 'fuel': 0}
+    after = {'ammo': 0, 'fuel': 0}
+    n = 0
+    for sidx in own:
+        st, p = supply_state(room_id, terrain, sidx)
+        if st is None:
+            continue
+        n += 1
+        with _SUPPLY_LOCK:
+            for res in ('ammo', 'fuel'):
+                take = max(0, min(st[res], need[res] - got[res]))
+                st[res] -= take
+                got[res] += take
+                after[res] += st[res]
+    if n == 0:
+        return None
+    return got['ammo'], got['fuel'], after, n
+
 def _supply_tick_loop():
     """One production STEP per SUPPLY_TICK: every seeded scene adds its producers' per-minute rate,
     capped at its storage volume (the wiki's 'if there is no available storage space the resources
@@ -11236,13 +11295,25 @@ def _handle_scene_supply_query_69(s, pl):
             if cap > 0:
                 pcts.append(max(0, min(100, int(round(st[r] * 100.0 / cap)))))
         supply_pct = int(round(sum(pcts) / len(pcts))) if pcts else 0
-        # v296: the byte is the scene's CONDITION, not its supply. Proven live - v295 put the
-        # supply average here and the client rendered it as '100% damage' on every scene. Health
-        # comes from SCENE_HP, which only populates while AUTO_SCENE_DESTROY is on; undamaged
-        # scenes correctly report 100.
-        val = int(round(scene_efficiency(s.current_room, sidx) * 100))
+        # v423f5: the byte is the scene's DAMAGE percent, rendered by the client AS-IS. v296's
+        # 'condition' label was wrong the same way v285's flag labels were - never checked against
+        # the binary. Proof, both directions:
+        #   * BINARY: msg-69 handler = FUN_004f5130 (dispatch table 0xc81ed8 slot 69, base anchored
+        #     by slot 88 -> 0xc82038 -> FUN_004f4120). It asserts (Length-1)%3==0
+        #     ('SCENE_TAG_MESSAGE::PACKED_INFO') and hands the records to FUN_0048e9a0, which finds
+        #     the scene node by id (+0x4c) and writes THE RAW BYTE to node+0x30. The
+        #     AIRFIELD_CONDITION_LIST_BOX detail line (FUN_006dcc60, 0x006dcd37) formats that value
+        #     straight into "%s %i%%" (string 0x61a label + dlg+0x13c). No inversion anywhere on
+        #     the path.
+        #   * LIVE, twice: v295 sent the supply average (~100 on full fields) -> '100% damage' on
+        #     every scene. v296 sent condition=100 for pristine -> STILL '100% damage' on every
+        #     scene. Two different ~100 values, same wrong display; 0 must therefore be pristine.
+        # So: damage% = 100 - efficiency%. Undamaged scenes report 0. The unknown-scene record
+        # below already sends 0 = undamaged, which is now correct by construction.
+        val = 100 - int(round(scene_efficiency(s.current_room, sidx) * 100))
+        val = max(0, min(100, val))
         out += struct.pack('<HB', sidx & 0xFFFF, val & 0xFF)
-        parts.append(f'{sidx}:hp{val}(sup{supply_pct})')
+        parts.append(f'{sidx}:dmg{val}(sup{supply_pct})')
     pkt = build_ingame_pkt(bytes(out))
     threading.Thread(target=lambda: send_rel(s, pkt, f'<- SCENE_SUPPLY 69 x{len(idxs)}', to=3.0),
                      daemon=True).start()
@@ -11274,40 +11345,22 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                       f'len={len(body)} flying={getattr(s,"flying",False)} pl={hx(body)}')
 
 def _auto_resupply_check(s, sub, pl):
-    """v272: gate the auto-resupply on ACTUAL GROUND SPEED = 0, not proxy events. v271 used
-    StartPlace/engine/heartbeat signals, which (a) missed a plane that never moved from spawn (no
-    new signal) and (b) fired on touchdown while still rolling. v272 uses plane_movement(s) (the
-    quantised-position delta already tracked for crash detection): a stationary plane reports
-    EXACTLY 0. This fn just maintains at_airfield + a 'moving' observation; the actual fire decision
-    is made by a background poll (_resupply_poll) that checks movement==0 for AUTO_RESUPPLY_SETTLE
-    seconds. Cancelled implicitly by movement (position changes) or takeoff/despawn."""
-    if not AUTO_RESUPPLY:
-        return
+    """v422f5: SLIMMED to at_airfield ATTRIBUTION maintenance only - the eligibility decision
+    moved wholesale into ground_stop_eligible() (single fail-closed judgement; change.log v422f5).
+      * StartPlace 0x17/0x18 (direct or type-scan wrap) records the SPAWN field;
+      * despawn/exit (sub 0x03) clears it;
+      * the v272-era '0x53 engine-ON clears at_airfield' branch is GONE: v347 proved 0x53 is NOT
+        engine state (...5300 always precedes a SPAWN, ...5301 always precedes an EXIT), so that
+        clear fired at climb-OUT and at_airfield was never cleared during a sortie anywhere.
+    Runs regardless of AUTO_RESUPPLY - attribution is also useful to console/TC tooling.
+    KNOWN LIMIT (unchanged since v347, now the top of the resupply queue): this is the field you
+    last SPAWNED at. Land at another field and its stock is not the one debited. Position-based
+    field resolution is the fix (v423f5 track - blocked on scene world coordinates, which no
+    extracted table carries; the 48-byte DATA00 scene record is name+h+cls+flag+link, fully
+    consumed)."""
     if not getattr(s, 'entered_game', False):
         return
     body = bytes(pl)
-    # takeoff / despawn clears the parked-airfield association
-    if sub == 0x53 and len(body) >= 6 and (body[5] & 1) == 1:   # engine ON
-        s.at_airfield = None
-        return
-    # v339: REVERTED v338's engine-OFF re-park. It conflated "engine off" with "landed at a
-    # field", which is wrong in both directions:
-    #   * AIR START, no takeoff -> there is no launch field, so _last_af is None and the restore
-    #     did nothing; resupply still never fired for those pilots.
-    #   * ENGINE CUT IN THE AIR (glide, stall, battle damage) -> it re-parked the plane at a
-    #     field it may be nowhere near, potentially setting at_airfield while airborne. Firing a
-    #     msg-60 rearm mid-flight is exactly what v277 exists to prevent (it rebuilds the plane
-    #     object and FREEZES the client). The settle/freshness guards make that unlikely, not
-    #     impossible, and "engine off and looks static" is a far weaker guarantee than "parked
-    #     at a field".
-    # THE ROOT BUG IS STILL OPEN: at_airfield is only ever SET from StartPlace (spawn) and
-    # CLEARED on engine-on (takeoff), with nothing to restore it after a landing - so
-    # _resupply_poll_loop's first gate rejects any plane that took off and came back, which is
-    # why run_20260725_203749 contains ZERO resupply activity of any kind.
-    # THE CORRECT FIX is to resolve the field FROM POSITION on engine-off: fa_scenes.json already
-    # carries 722 scenes over 14 terrains, so a nearest-field + altitude check would handle the
-    # air-start case AND correctly resolve to nothing for a mid-air engine cut. Do that rather
-    # than reaching for _last_af again.
     if sub == 0x03:                                             # despawn / exit-to-HQ
         s.at_airfield = None
         return
@@ -11320,168 +11373,252 @@ def _auto_resupply_check(s, sub, pl):
     elif sub == 0x00 and len(body) >= 12 and body[8] in (0x17, 0x18):
         _new_af = body[9]
     if _new_af is not None:
-        # v276: a base change (tab) re-fires StartPlace + a fresh ServerConfirm, i.e. it's a respawn
-        # at the new base. Treat it like an HQ entry: reset the position/static tracking so the new
-        # base starts a CLEAN settle (the transit drift from the old base won't leak in / block it).
+        # v276: a base change (tab) re-fires StartPlace + a fresh ServerConfirm, i.e. it's a
+        # respawn at the new base -> re-arm the one-shot for the new stop. (The position evidence
+        # itself is cleared at ServerConfirm, where _pos_hist is dropped.)
         if _new_af != getattr(s, 'at_airfield', None):
-            s.last_pos = None
-            s.pos_static_since = None
-            s.pos_static_samples = 0
-            s.last_pos_telem_t = 0.0
             s.resupplied_this_stop = False
+            s._grant_pos = None
         s.at_airfield = _new_af
-        s._last_af = _new_af      # v339: retained but NOT read - v338's engine-OFF re-park that
-                                  # consumed it was reverted. Kept only because the eventual
+        s._last_af = _new_af      # v339: retained but NOT read. Kept only because the eventual
                                   # position-based field resolution may want a last-known field
                                   # as a tie-breaker. Nothing depends on it today.
 
+def ground_stop_eligible(s, now):
+    """v422f5: THE single ground-stop judgement, FAIL-CLOSED. Replaces the v277 gate stack.
+
+    WHY THE REWRITE (this is the mid-air-rearm root cause; change.log v422f5 has the full
+    write-up): the old gates judged freshness / "new packet" from last_telem_time, which is
+    stamped for EVERY telemetry packet this session sends, ANY object - but the position they
+    judged came from last_plane_telem, which updates ONLY when the packet's ONumber matches
+    my_obj_number. When the two diverge (parachuter telemetry after a bail, an ONumber change
+    around a respawn, the plane's own stream pausing while anything else keeps flowing) the
+    poll saw "fresh new packets" over a frozen cached position and read an airborne plane as
+    parked. The v346 movement gate then failed open: plane_movement() returns 0 on NO EVIDENCE
+    (correct for the crash classifier, fatal here) and _pos_hist is cleared on every spawn.
+
+    This judgement reads ONLY _pos_hist - samples appended exclusively for telemetry whose
+    ONumber == my_obj_number, each carrying its own arrival time and the sender's conductor
+    tick - and requires ALL of:
+      * EVIDENCE - >= AUTO_RESUPPLY_MIN_SAMPLES samples exist. No evidence => NOT eligible.
+      * FRESH    - newest sample within AUTO_RESUPPLY_FRESH of now, by its OWN timestamp
+                   (never the any-object last_telem_time).
+      * PARKED   - plane_movement() over the whole retained window is EXACTLY 0. v346
+                   calibration: parked = 0 sample after sample, airborne ~250k; a taxiing
+                   plane counts as moving and simply settles again. Tested BEFORE the static
+                   run so a moving plane answers 'movement=N' - the poll re-arms the one-shot
+                   on exactly that answer.
+      * STATIC   - the newest samples all report the IDENTICAL quantised position and the run
+                   spans >= AUTO_RESUPPLY_SETTLE seconds (floors the evidence when the
+                   retained window is short, e.g. right after the post-spawn history drop).
+      * LIVE CONDUCTOR - the tick ADVANCED across the static run. A frozen conductor
+                   re-sending one stale state is indistinguishable from a parked plane by
+                   position alone; a genuinely parked client keeps ticking (the type-7 stream
+                   flows when parked, v273). Closes v346's endemic tick-freeze false-static.
+    Returns (eligible, why, pos): pos is the parked position when eligible, else None."""
+    hist = getattr(s, '_pos_hist', None)
+    if not hist or len(hist) < AUTO_RESUPPLY_MIN_SAMPLES:
+        return False, 'no-evidence', None
+    newest = hist[-1]
+    t_new, p_new = newest[0], newest[1]
+    if (now - t_new) > AUTO_RESUPPLY_FRESH:
+        return False, 'stale', None
+    try:
+        _pm = plane_movement(s)
+    except Exception:
+        return False, 'movement-error', None
+    if _pm != 0:
+        return False, f'movement={_pm}', None
+    run_start_t = t_new
+    run_n = 0
+    ticks = set()
+    for ent in reversed(hist):
+        if ent[1] != p_new:
+            break
+        run_start_t = ent[0]
+        run_n += 1
+        if len(ent) >= 3 and ent[2] is not None:
+            ticks.add(ent[2])
+    if run_n < AUTO_RESUPPLY_MIN_SAMPLES:
+        return False, f'run={run_n}', None
+    if (t_new - run_start_t) < AUTO_RESUPPLY_SETTLE:
+        return False, f'span={t_new - run_start_t:.1f}s', None
+    if len(ticks) < 2:
+        return False, 'conductor-frozen', None
+    return True, 'parked', p_new
+
+# v427f5: msg-60 SEMANTICS FROM THE HANDLER ITSELF (FA.exe 0x005581c0, defined + decompiled
+# 2026-08-12; reconciles every probe from both matrices; supersedes ALL prior tables):
+#   * EVERY grant repairs: the handler's first act in every path is subobj(plane+0x1F4)
+#     ->vfunc+0x20(full) - airframe restore. Repair was never bit0's.
+#   * bit1&bit2 TOGETHER (any bit0) -> vfunc20(1): TOTAL restore - fuel to HQ loadout, full
+#     guns AND ordnance, silent. This is what 0x07 executes. THE ARCADE GRANT.
+#   * fuel:  bit1 -> absolute to HQ loadout (+0x4e8). bit0&!bit1 -> absolute to amount kg
+#     ('Fuel limited to' msg unless bit4; damage-mask warning 0xa0). NEITHER -> INCREMENTAL
+#     add of amount kg (FUN_004ebf50), silent; amount==0 -> msg 0xa3 'no fuel available'.
+#   * ammo:  bit2 -> full guns+ordnance (FUN_004eba80 + FUN_004ec5c0(+0x500)). bit0&!bit2 ->
+#     UNLOAD-ALL then reload to amount2 budget = the ordnance STRIPPER ('Ammunition limited
+#     to' unless bit5; rack-mask msg 0xa2 'no bombs or rockets available'). NEITHER ->
+#     INCREMENTAL add of amount2 kg (FUN_004ecad0), silent; amount2==0 -> msg 0xa4.
+#   * bit3 -> appends canned strings 0xe5+0xe6 ('insufficient aircraft units' / 'taking from
+#     tank production...') - DISPLAY ONLY. v347 was right; the v426f5 relabel was wrong. The
+#     units economy was always SERVER-side: the 2009 server did the accounting and used bit3
+#     to narrate shortages. bits 6/7 unused -> plain incremental (probed 0x40/0x80).
+#   * every non-shortcut path replies out-73 SendRepairInfo (FUN_004c8690) - decode pending.
+SUPPLY_ARCADE_FLAGS = 0x07     # vfunc20(1): repair + loadout fuel + full guns + ordnance, silent
+SUPPLY_ARCADE_AMT   = 100      # unread by the vfunc20(1) shortcut; nonzero sentinel
+SUPPLY_ARCADE_AMT2  = 100      # unread by the vfunc20(1) shortcut; nonzero sentinel
+# TC (v427f5): INCREMENTAL grants - debit == fill BY CONSTRUCTION, no strip, no drain, bombs
+# preserved. Repair is free on any grant (client behaviour); costing repairs is the units/metal
+# work. Two tiers, decided by the camp pool BEFORE drawing:
+#   RICH (pool covers the rearm cost): flags 0x06 - bit1&bit2 -> vfunc20(1) TOTAL restore:
+#        fuel to the HQ LOADOUT (not full tank - v427f5's incremental +300kg read as 'filled
+#        it' on fighter-sized tanks), full guns AND ordnance, silent. Flat costs debited:
+#        SUPPLY_TC_REARM_AMMO_KG ammo + SUPPLY_TC_FUEL_ADD_KG fuel. BONUS: the bit0==0 path
+#        also sends the out-73 SendRepairInfo reply (0x07's shortcut skips it), so every rich
+#        grant feeds the msg-73 decode.
+#   LEAN: flags 0x00 - incremental adds of exactly what the pool can give (capped by the
+#        per-stop constants); a resource at 0 shows the client's own 'no fuel/ammo available'.
+#        With no ordnance restored, append bit3 (flags 0x08) so the pilot gets the authentic
+#        'insufficient aircraft units / taking from tank production' narration.
+SUPPLY_TC_REARM_AMMO_KG = 500  # flat ammo-pool cost of a full rearm incl. ordnance (RICH tier)
+SUPPLY_TC_FUEL_ADD_KG   = 300  # incremental fuel added (and debited) per grant
+SUPPLY_TC_AMMO_ADD_KG   = 150  # incremental gun ammo added (and debited) per LEAN grant
+
+def _grant_auto_resupply(s, pos):
+    """v425f5: THE EXPLICIT TWO-LEVEL SUPPLY POLICY (the refactor's level 1 / level 2).
+    Mode = scoring_mode_for_room(): 'tc' -> economy; anything else -> arcade. Flag semantics
+    per the v425f5 probe table above. Camp-pool rationale: v424f5 block above camp_supply_take.
+    at_airfield is attribution/diagnostic only (AFRAW in the log)."""
+    _af = getattr(s, 'at_airfield', None)
+    _mode = None
+    try:
+        _mode = scoring_mode_for_room(s.current_room)
+    except Exception:
+        pass
+    if _mode != 'tc':
+        # ---- ARCADE: silent full service, no economy ----
+        send_supply_grant_60(
+            s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
+            reason=f'(auto-resupply ARCADE: {s.current_pilot} parked)')
+        log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> ARCADE grant '
+                        f'(repair + loadout restore, mode={_mode}, AFRAW={_af})')
+        return
+    # ---- TC: camp-pool economy (v427f5: INCREMENTAL grants - debit == fill by construction,
+    # nothing is unloaded, ordnance is preserved; the ordnance STRIPPER (bit0's reload-to-
+    # budget pass) is gone from TC - it was denuding freshly spawned bombers of their racks) ----
+    if getattr(s, 'nation', None) is None:
+        log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC but no camp (nation '
+                        f'unset) - no grant')
+        return
+    _trn = _probe_terrain_for_room(s.current_room)
+    _have_pool = bool(SCENE_CAMP_BY_TERRAIN.get(_trn))
+    if _have_pool:
+        _stored, _pcap = camp_economy_totals(s.current_room, _trn, s.nation)
+        if not any(_pcap.values()):
+            _have_pool = False           # camp owns nothing profiled -> per-scene fallback
+    if not _have_pool:
+        _pk = supply_state(s.current_room, _trn, _af, True)[0] if _af is not None else None
+        if _pk is None:
+            # TC room on a terrain with no supply data at all: serve arcade-style rather
+            # than deny - an unmapped map should not brick resupply.
+            send_supply_grant_60(
+                s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT,
+                amount2=SUPPLY_ARCADE_AMT2,
+                reason=f'(auto-resupply TC-unmapped: {s.current_pilot} parked)')
+            log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC room but terrain '
+                            f'{_trn} has no supply data - arcade-style grant (AFRAW={_af})')
+            return
+        _stored = {'ammo': _pk['ammo'], 'fuel': _pk['fuel']}
+        _src = f'scene AFRAW={_af}'
+    else:
+        _src = f'camp{s.nation} pool'
+    # TIER from the peek: a RICH pool buys the full rearm (guns + ordnance, flat cost); a LEAN
+    # pool gives incremental adds of exactly what it holds. Peek->draw races with another pilot
+    # can only shave the draw short, and a shaved rich draw demotes to lean below. A dry pool
+    # sends adds of 0, which in INCREMENTAL mode is safe (no drain) and surfaces the client's
+    # own 'no fuel available' / 'no ammunition available' messages - so the old [DRY] no-grant
+    # branch is gone (free airframe repair rides along on any grant; costing repairs in metal/
+    # units is the next economy stage).
+    _rich = (_stored['ammo'] >= SUPPLY_TC_REARM_AMMO_KG
+             and _stored['fuel'] >= SUPPLY_TC_FUEL_ADD_KG)
+    _fuel_add = SUPPLY_TC_FUEL_ADD_KG if _rich else min(SUPPLY_TC_FUEL_ADD_KG, _stored['fuel'])
+    _ammo_add = SUPPLY_TC_REARM_AMMO_KG if _rich else min(SUPPLY_TC_AMMO_ADD_KG, _stored['ammo'])
+    if _have_pool:
+        _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
+                                                      _ammo_add, _fuel_add)
+        _rem_a, _rem_f = _after['ammo'], _after['fuel']
+        _src = f'camp{s.nation} pool ({_n} scenes)'
+    else:
+        _got_a, _got_f = supply_take(s.current_room, _trn, _af, _ammo_add, _fuel_add)
+        _pk2 = supply_state(s.current_room, _trn, _af, True)[0]
+        _rem_a, _rem_f = _pk2['ammo'], _pk2['fuel']
+    if _rich and _got_a >= SUPPLY_TC_REARM_AMMO_KG:
+        # RICH: 0x06 = vfunc20(1) total restore - fuel to HQ LOADOUT, full guns AND ordnance,
+        # silent (amounts unread); flat ammo+fuel service cost debited. Sends the out-73 reply.
+        _flags, amt, amt2 = 0x06, 100, 100
+        _tier = f'RICH loadout-restore (flat cost ammo {_got_a}kg fuel {_got_f}kg)'
+    else:
+        # LEAN: pure incremental adds + bit3's authentic narration ('insufficient aircraft
+        # units' / 'taking from tank production') for the ordnance that is NOT restored.
+        _flags, amt, amt2 = 0x08, _got_f, _got_a
+        _tier = 'LEAN incremental'
+    send_supply_grant_60(
+        s, flags=_flags, amount=amt, amount2=amt2,
+        reason=f'(auto-resupply TC {_tier}: {s.current_pilot} parked, {_src})')
+    log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC {_tier} [{_src}: '
+                    f'+fuel {_got_f}kg +ammo {_got_a}kg | pool now ammo {_rem_a} '
+                    f'fuel {_rem_f} kg | flags=0x{_flags:02x} AFRAW={_af}]')
+
 def _resupply_poll_loop():
-    """v277: background poll gating resupply on the plane's position being STATIC - but ONLY when
-    that judgement is backed by FRESH, NEWLY-ARRIVED telemetry.
-
-    v274-v276 compared the cached last_plane_telem on every poll tick. On localhost that was fine
-    (telemetry arrives ~every 0.5s), but on a REMOTE server the stream stalls while the plane is
-    still flying - the poll then re-read the same cached packet, saw an unchanged position, and
-    concluded 'stationary'. That fired a mid-flight msg-60 rearm, which rebuilds the plane object
-    and FROZE the client. Staleness must never look like stillness.
-
-    v277 therefore requires all of:
-      * telemetry FRESH  - last_telem_time within AUTO_RESUPPLY_FRESH, else reset the clock and skip
-      * a NEW packet     - last_telem_time must advance before a sample counts (no double-counting
-                           one cached packet across poll ticks)
-      * repeated agreement - AUTO_RESUPPLY_MIN_SAMPLES consecutive new packets with the SAME position
-      * settled          - position unchanged for AUTO_RESUPPLY_SETTLE seconds
-    Any position change, telemetry gap, takeoff, or respawn resets the clock. BLIND (TC gate = P2b)."""
+    """v422f5: background poll driving the auto-resupply. The ground-stop decision itself lives
+    in ground_stop_eligible() (fail-closed, ONE data path); this loop walks the sessions,
+    enforces spawn grace / one-shot / debounce, and sends the grant.
+    at_airfield NO LONGER GATES eligibility - it is attribution only. A pilot who took off and
+    landed again, or whose StartPlace framing we failed to parse, is no longer skipped at the
+    first gate (the v339 'ZERO resupply activity' failure mode).
+    Per-SESSION try: one bad session must not abort the scan for everyone else this tick."""
     while True:
         try:
             time.sleep(AUTO_RESUPPLY_POLL)
-            if not AUTO_RESUPPLY:
-                continue
-            now = time.time()
-            for s in list(get_all_sessions()):
-                if not getattr(s, 'entered_game', False):
+        except Exception:
+            pass
+        if not AUTO_RESUPPLY:
+            continue
+        now = time.time()
+        for s in list(get_all_sessions()):
+            try:
+                if not getattr(s, 'entered_game', False) or not getattr(s, 'flying', False):
                     continue
-                if getattr(s, 'at_airfield', None) is None or s.current_room is None:
-                    s.last_pos = None; s.pos_static_since = None
-                    s.pos_static_samples = 0; s.last_pos_telem_t = 0.0
-                    s.resupplied_this_stop = False
+                if s.current_room is None or getattr(s, 'my_obj_number', None) is None:
                     continue
-                tel_t = getattr(s, 'last_telem_time', 0.0)
-                # (0) SPAWN GRACE: a freshly spawned plane is still being constructed client-side.
-                #     Repairing it mid-build leaves it permanently desynced (IPC net error flood).
+                # SPAWN GRACE: a freshly spawned plane is still being constructed client-side.
+                # Repairing it mid-build leaves it permanently desynced (v279 IPC-net flood).
                 _spawn_t = getattr(s, 'spawn_time', 0.0)
                 if _spawn_t > 0 and (now - _spawn_t) < AUTO_RESUPPLY_SPAWN_GRACE:
-                    s.last_pos = None; s.pos_static_since = None
-                    s.pos_static_samples = 0
                     continue
-                # (1) FRESHNESS: a stale view means the plane may be moving and we simply can't see
-                #     it (remote-link stall). Never accumulate stillness from it.
-                if tel_t <= 0 or (now - tel_t) > AUTO_RESUPPLY_FRESH:
-                    s.last_pos = None; s.pos_static_since = None
-                    s.pos_static_samples = 0
+                ok, why, pos = ground_stop_eligible(s, now)
+                if not ok:
+                    # OBSERVED MOVEMENT re-arms the one-shot: the plane must come to rest again
+                    # before the next grant. Only movement re-arms - staleness or thin evidence
+                    # must NOT, or a lossy link would re-grant a plane that never moved (the
+                    # v276 '168 grants in one session' failure, resurrected via packet loss).
+                    if why.startswith('movement=') and getattr(s, 'resupplied_this_stop', False):
+                        s.resupplied_this_stop = False
+                        s._grant_pos = None
                     continue
-                # (2) NEW PACKET: only evaluate once per actually-received telemetry packet.
-                if tel_t <= getattr(s, 'last_pos_telem_t', 0.0):
-                    continue
-                s.last_pos_telem_t = tel_t
-                tel = getattr(s, 'last_plane_telem', None)
-                pos = None
-                if tel and len(tel) >= 15:
-                    try:
-                        pos = struct.unpack_from('<HHH', tel, 9)
-                    except struct.error:
-                        pos = None
-                if pos is None:
-                    continue
-                prev = getattr(s, 'last_pos', None)
-                if prev is None or pos != prev:
-                    # moving (or first fresh sample) -> restart the stationary clock and re-arm the
-                    # one-shot: the plane must come to rest again before it can resupply once more.
-                    s.last_pos = pos
-                    s.pos_static_since = now
-                    s.pos_static_samples = 1
-                    s.resupplied_this_stop = False
-                    continue
-                # (3) same position on a NEW packet -> a genuine stationary observation
-                s.pos_static_samples = getattr(s, 'pos_static_samples', 0) + 1
-                if s.pos_static_samples < AUTO_RESUPPLY_MIN_SAMPLES:
-                    continue
-                # (4) settled long enough?
-                static_for = now - getattr(s, 'pos_static_since', now)
-                if static_for < AUTO_RESUPPLY_SETTLE:
-                    continue
-                # (4b) v346: IS THE PLANE ACTUALLY ON THE GROUND?
-                # Gates (1)-(4) only prove the position REPEATED - which is also exactly what a
-                # FROZEN CONDUCTOR TICK produces, and tick freezes are endemic (6 of 12 pilots in
-                # run_20260726_022244_1_). So a stalled telemetry stream reads as "parked".
-                # at_airfield does not save us: it is set at spawn and cleared ONLY on the
-                # engine-ON transition, which NEVER HAPPENS in an air-start arena because the
-                # pilot spawns with the engine already running. Confirmed on the wire - the only
-                # 0x53 messages before those grants carry ...5300 (engine OFF); the ...5301 for
-                # _AvA_Insane arrives at 02:31:22, five minutes AFTER his three grants. So
-                # at_airfield stays set for the entire sortie in every air-start room.
-                # RESULT BEFORE THIS GATE: 7 auto msg-60 grants to AIRBORNE aircraft, every one
-                # at AF=0, altitudes 2112-3084, positions scattered across the whole map. A msg-60
-                # rearm in flight is precisely what v277 exists to prevent - it rebuilds the plane
-                # object and can FREEZE the client.
-                # Reuse the predicate the DEATH classifier already depends on rather than invent a
-                # threshold. Calibrated against real logs: movement=0 for the legitimate ground
-                # resupply in run_20260726_122104 (parked, engine off, two correct grants) versus
-                # 242665-301359 for the airborne removals. Do NOT swap this for a position-delta
-                # test: that ground session TAXIED 2560 units between its two valid grants, so a
-                # "moved from spawn" rule would break the working case.
-                try:
-                    _pm = plane_movement(s)
-                except Exception:
-                    _pm = 0
-                if _pm >= CRASH_MOVEMENT_MIN:
-                    if not getattr(s, '_resup_air_logged', False):
-                        s._resup_air_logged = True
-                        log('RESUPPLY', f'{s.current_pilot} reads static at AF={s.at_airfield} but '
-                                        f'plane_movement={_pm} >= {CRASH_MOVEMENT_MIN} -> AIRBORNE, '
-                                        f'no auto-grant (logged once per session)')
-                    continue
-                # (5) ONE-SHOT: v276 re-fired every DEBOUNCE seconds for as long as the plane sat
-                #     parked (168 grants in one remote session). Fire once per stop; the plane must
-                #     move and settle again (or respawn) before another grant.
                 if getattr(s, 'resupplied_this_stop', False):
+                    if pos == getattr(s, '_grant_pos', None):
+                        continue                       # same stop, already granted
+                    s.resupplied_this_stop = False     # parked at a NEW spot -> a new stop
+                if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
                     continue
                 s.resupplied_this_stop = True
+                s._grant_pos = pos
                 s.last_resupply_at = now
-                # (6) P2b SUPPLY GATE. SUPPLY_GRANT_FLAGS=0x08 is an INCREMENTAL top-up: the client
-                #     takes only what the aircraft is actually short of, clamps at its capacity, and
-                #     runs its own base accounting (falling back to unit/tank production and telling
-                #     the player when the field cannot cover it). We therefore OFFER a ceiling and
-                #     charge a nominal amount, rather than force-setting a fixed load every time.
-                _flags = SUPPLY_GRANT_FLAGS
-                amt  = SUPPLY_FULL_FUEL_KG
-                amt2 = SUPPLY_FULL_AMMO_KG
-                _sup = ''
-                if SUPPLY_MODEL:
-                    _trn = _probe_terrain_for_room(s.current_room)
-                    _fr = supply_take(s.current_room, _trn, s.at_airfield,
-                                      SUPPLY_DEBIT_AMMO_KG, SUPPLY_DEBIT_FUEL_KG)
-                    if _fr is not None:
-                        _ammo_kg, _fuel_kg = _fr
-                        _st, _p = supply_state(s.current_room, _trn, s.at_airfield, True)
-                        # offer is capped by what the field can still back: a field with nothing
-                        # left offers 0 and the client surfaces the shortage on its own.
-                        amt  = min(0xffff, SUPPLY_FULL_FUEL_KG if _fuel_kg > 0 else 0, _st['fuel'] + _fuel_kg)
-                        amt2 = min(0xffff, SUPPLY_FULL_AMMO_KG if _ammo_kg > 0 else 0, _st['ammo'] + _ammo_kg)
-                        _ty = scene_type_for(_trn, s.at_airfield) or f'{SUPPLY_DEFAULT_TYPE}?'
-                        _sup = (f" [supply {_ty}: field now ammo {_st['ammo']}/{_p['caps']['ammo']} "
-                                f"fuel {_st['fuel']}/{_p['caps']['fuel']} kg"
-                                f" | drew fuel {_fuel_kg}kg ammo {_ammo_kg}kg"
-                                f" | offering fuel {amt}kg ammo {amt2}kg"
-                                f" (flags=0x{_flags:02x} incremental)]")
-                send_supply_grant_60(
-                    s, flags=_flags, amount=amt, amount2=amt2,
-                    reason=f'(auto-resupply: {s.current_pilot} stationary at AF={s.at_airfield})')
-                log('RESUPPLY', f'{s.current_pilot} position static {static_for:.1f}s '
-                                f'({s.pos_static_samples} fresh samples) at AF={s.at_airfield} '
-                                f'(pos={pos}) -> auto msg-60 grant{_sup}')
-        except Exception:
-            logx('RESUPPLY', 'poll loop error')
+                _grant_auto_resupply(s, pos)
+            except Exception:
+                logx('RESUPPLY', f'poll error for {getattr(s, "current_pilot", "?")}')
 
 # v327: see the block in handle_post_auth. Set False to restore the old
 # drop-everything-that-isn't-a-delete behaviour.

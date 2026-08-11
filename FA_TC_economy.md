@@ -228,7 +228,18 @@ struct RESOURCE_STORAGE_DEF {   // 8 bytes
     u32 MaxStorageValue;        // +0x04
 };
 ```
-`RESOURCE_PRODUCER_DEF` (16 B) and `UNIT_PRODUCER_DEF` (24 B) field order is **not yet
+`RESOURCE_PRODUCER_DEF` (16 B) - PARTIALLY PINNED (2026-08-12, ctor chain FUN_00567f10 ->
+FUN_00566e30, Production.hpp:0xee):
+```c
+struct RESOURCE_PRODUCER_DEF {
+    u32 ResourceType;   // +0x00 (same convention as RESOURCE_STORAGE_DEF)
+    u32 Rate;           // +0x04 - confirmed: ctor computes (def+4)*ProductionPercent/100
+    u32 unk8, unkC;     // +0x08/+0x0c TBD (step vtable at PTR_FUN_00a36c58 will pin them)
+};
+```
+Producer objects are constructed WITH A COORDINATE PAIR (obj[4]/obj[5] = x,y from the caller)
+- producers are positioned entities; relevant to the Link-radius complex topology.
+`UNIT_PRODUCER_DEF` (24 B) field order is **not yet
 pinned** — that is what `extract_production.py` is for.
 
 The init also confirms the aggregate array geometry: the clear loop steps `iVar7 += 0x20`
