@@ -1,10 +1,266 @@
 Fighter Ace LAN Server - CHANGE LOG
 ==============================================================================
-Split out of server.py's docstring on 2026-07-25, current build v328.
+Split out of server.py's docstring on 2026-07-25, current build v429f5.
 Newest first. server.py keeps only the banner, the TODO list and the
 bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
+
+v433f5 [KILL/SCORE] REPAIR CLEARS THE DAMAGE LATCH - fixes "land, repair, exit -> lose a
+      plane and a life; last shooter gets a phantom kill + cyan banner".
+      FIELD BUG (Taurus, messages57_1_.log, FFA Two Islands, 2026-08-13):
+        18:46:38  HitFrom(518) hits Taurus mid-sortie          -> took_damage=True, PENDING_KILL set
+        18:47:05  ServerConfirm obj 521 (Taurus, Yak-3)
+        ...dogfights, more HitFrom...
+        18:55:37  "You are accepted to this airfield" (serviced)
+        18:56:18  HitFrom(524) + ExitEvent(521) IsDelete=1 MEC=21 ScoreEvent=3  -> booked a DEATH,
+                  attacker 524 (Camp=4, enemy) credited the kill with the cyan PLAYER_KILLED banner.
+      ROOT CAUSE: took_damage (set on every msg-28, ~L12660) and PENDING_KILL (the no-clock kill
+      latch, ~L12666) were cleared ONLY on a fresh spawn (spawn path L10422/L10430). REPAIR never
+      cleared them, so damage taken earlier in a life stayed latched through a full field repair;
+      the exit classifier's `_damaged` branch (~L10604) then counted the normal exit as a damaged
+      death and score_on_death handed the last shooter the kill. The exit-tail was synthesised
+      (short form) so v372f5's ANNOUNCE_SYNTH_KILL printed the cyan banner too - the "other player
+      got the kill with a cyan message" symptom.
+      FIX: send_supply_grant_60() now clears took_damage + pops PENDING_KILL for the serviced
+      plane, and drops _pos_hist (a repaired plane is parked/fresh, so the movement crash-test
+      must not read the pre-repair flight). A msg-60 grant is the server's own statement that the
+      plane is airworthy again, which is exactly when the latch should retire. This is the single
+      choke point for every auto-resupply repair (arcade 0x07 and TC tiers all route through it).
+      A plane hit AGAIN after repair re-latches via the normal msg-28 path, so a genuine post-
+      repair kill still counts. Guarded by REPAIR_CLEARS_DAMAGE_LATCH (True); False = old behaviour.
+      FALSIFY: take damage, land, get the auto-repair grant (RESUPPLY log line), then exit to HQ:
+        server logs 'obj 0xNNNN REPAIRED -> damage latch + PENDING_KILL cleared', DEATH log says
+        'exited UNDAMAGED ... clean exit, NOT a death', no score change, no cyan banner on the
+        shooter. Regression check: get hit, repair, then get SHOT DOWN again -> still a death,
+        killer still credited (the re-latch from the new msg-28 works).
+      OPEN/RELATED (not changed here, watch for it): if a pilot lands and exits in a mode/arena
+      where the auto-repair grant does NOT fire (no msg-60 sent), took_damage is still live and the
+      same phantom-death occurs. If that shows up, mirror this clear on the airfield-accept (msg-23
+      "accepted to this airfield") path as well. Current fix covers every case where a repair grant
+      is actually issued, which is the reported scenario.
+
+==============================================================================
+
+v432f5 [PLAN] PANEL ROOT-CAUSE via OFFLINE/ONLINE memdump diff (Alon's hypothesis).
+      KEY NEW FACT (Alon): in OFFLINE TRAINING mode the client shows the full TC production/supply
+      panel exactly like 2009 online. So the client's DISPLAY code works; something in our ONLINE
+      arena STATE fails to arm it. Alon also notes the game still shows as PRIVATE - likely the
+      GAME_DEF/host state that gates whether the client requests+renders TC data (this fits the
+      earlier finding: our client never sends `out 71`/`out 59`, i.e. its production system is
+      dormant).
+      THIS IS TESTABLE BY DIFF, NO GUESSING: dump the same memory offline (works) vs online
+      (blank) and compare the arena-state fields. Added to fa_memdump.py:
+        * --gamedef : captures the era-gate/host fields the client checks -
+            [0xc6e8b4] live GAME_DEF struct (+0x8 CreatTimeSec, +0x135c Active, +0x1360/64 era),
+            [0xc6e8a4] host_flag (==0 => not host => INFO path), [0xc6e8b0] host_flag2,
+            [0xc845c8] 8x0x9c camp records (+0x34 valid) - and a 0x1400-byte GAME_DEF window.
+        * --gddiff OFFLINE.json ONLINE.json : reports which flags differ + the exact differing
+          GAME_DEF bytes. Tested on synthetic dumps: correctly isolates host_flag/Active/byte.
+      RUN SEQUENCE (Alon, needs Administrator for ReadProcessMemory):
+        1. Start FA OFFLINE (training/sample TC arena), load it, open the map panel to confirm it
+           shows data, then:  python fa_memdump.py --gamedef --out gd_offline.json
+        2. Join our ONLINE server on the same terrain, open the (blank) panel, then:
+           python fa_memdump.py --gamedef --out gd_online.json
+        3. python fa_memdump.py --gddiff gd_offline.json gd_online.json
+      The differing field(s) are the arena-state bits our GAME_DEF gets wrong. Likely candidates
+      from prior RE: the PRE-PLANE-BLOCK region checkboxes (same area as the scoring-enabled and
+      exit-crash flags already in the TODO), and/or a 'private/host' bit. Once identified: set that
+      byte correctly in build_gamedef / the 212 path (or, if it is a pure host-side flag the wire
+      cannot reach, document that TC panels require a host-mode arena). Then the memdump of the
+      scene node (obj+0x40..+0xa0) pins the 71 array->column map as the FINAL step.
+
+v432f5: *** BANKED BASELINE 2026-08-12 (evening) *** - production units layer + supply links live;
+      panel content-decode is the one open thread, cleanly characterised for pickup.
+      [UPDATE post-bank] v432f5b tested the last wire-level 2009-mimic (periodic per-minute msg-40,
+      SEND_PRODUCTION_40=True) - fired correctly at the 2009 cadence (run_20260812_174430: PROD40
+      x5 camps at 17:45:31 and 17:46:31, exactly 60s) but the panel STAYED BLANK, so it was
+      REVERTED (pure added traffic). This CLOSES the wire-level investigation: message sizes,
+      sequence, the periodic-40 stream, and the one-shot-42 precondition now ALL match the 2009
+      working session, and the client ingests everything (in 40'38 / in 71'90 in messages45.log).
+      The ONLY remaining variable is the PACKED_INFO byte CONTENT - which value lands in which of
+      the nine A..I arrays. A blank panel gives no content feedback, so this is NOT solvable by
+      more live wire tweaks; it needs the memdump (below). Stop guessing the wire.
+      This bank rolls up v429f5-v431f5c. What is DONE + FIELD-CONFIRMED on the deployed build:
+        * v429f5 UNITS LAYER: Metal -> aircraft/tank/ship units (wiki step 3-5); msg-40 carries
+          real counts; metal conservation exact. Live (run_20260812_103722: u=4/4/4 ..).
+        * v430f5 SUPPLY LINKS: complex membership learned live from the client's msg-69 query
+          (no coords needed); complex_totals aggregates linked scenes. TICK HEARTBEAT (SUPPLYTICK).
+        * v431f5 FLOOD FIX: msg-69 is a ~30x/sec POLL, not an open-event; panel push DEBOUNCED
+          (3s per session per scene-set), arena-wide msg-42 dropped from the hover path, SUPPLY69
+          log rate-limited. Field-confirmed: flood gone, damage% stable (run_20260812_171314).
+        * v431f5b one-shot msg-42 per session (PANELTX sent=True) - precondition sent cleanly.
+      PANEL STATUS - blocker ISOLATED, not solved (deliberately parked):
+        From the CLIENT's own logs (C:\games\FA\DebugLogs\messagesNN.log): our msg-40 (in 40'38)
+        and msg-71 (in 71'90/'173/'256) ARRIVE and are INGESTED by the 2026 client, identical
+        envelope to the 2009 working server (messages04.log). Transport, sequence, and the
+        one-shot-42 precondition are all RULED OUT. The probe-71 write even flips the scene
+        damage display unknown->0% (it stamps the node), proving our 71 reaches + updates the
+        scene node. Yet the production COLUMNS stay blank => the ONE remaining variable is the
+        msg-71 array->column MAPPING (scene_prodinfo_arrays, a documented best-guess) and/or the
+        msg-40 field map. Live probing cannot surface it (blank panel gives no feedback).
+      PICKUP (one clean step, no trial-and-error): send one known msg-71, then fa_memdump the
+        scene node fields obj+0x40..+0xa0 (A->+0x40 B->+0x4c C->+0x58 D->+0x64 E->+0x70 F->+0x7c
+        G->+0x88 H->+0x94 I->+0xa0 per the v298 decode) and read which array landed where vs what
+        the panel shows for that scene -> pin the map -> rewrite scene_prodinfo_arrays -> panel
+        fills. Gates all default-safe: PANEL_PROBE=False, PANEL_OPEN_SEQUENCE=True,
+        PANEL_SEND_SNAPSHOT=True, SEND_PRODUCTION_40=False.
+      TUNABLE (unchanged, calibrate vs a live TC panel): UNIT_METAL_COST=2000, UNIT_CAP_PER_CAMP=99,
+        UNITS_PER_TICK_MAX=4.
+
+v431f5: [TC] FIX v430f5 PANEL FLOOD - msg-69 is a POLL, not an open-event; debounce the push.
+      v430f5 field test (run_20260812_170450.log) exposed the flaw: the client sends the msg-69
+      SCENE_SUPPLY query ~25-30x PER SECOND the whole time the panel is open (always the same
+      scene-set, e.g. 5/30/55). v430f5 fired a full 42->40->71 sequence on EVERY poll ->
+        * FLOOD: ~900 SUPPLY69/PANELSEQ lines in a few seconds; wire saturated.
+        * PANEL FLICKER: the client alternated 'unknown damage' <-> '0%' because the arena-wide
+          msg-42 SCENE SNAPSHOT was being re-ingested 30x/sec, so the panel was perpetually
+          mid-rebuild and never settled to show data.
+      ROOT CAUSE: treated a continuous poll as a one-shot event, and put an ARENA-WIDE message
+      (42) on the per-scene hover path. Both wrong.
+      FIX:
+        * _maybe_push_panel(): DEBOUNCE. Push 40+71 to the querying session at most once per
+          PANEL_DEBOUNCE (3s) per (session, scene-set); a genuine change of hovered scene re-
+          pushes immediately, holding still does not. Unit-tested: 30 polls/s -> 1 push; scene
+          change -> re-push; per-session isolated.
+        * DROPPED msg-42 from the hover path entirely - it is arena-wide and belongs to
+          join/ownership-change, not a scene hover. Panel push is now 40 (complex) + 71 (scene)
+          only.
+        * SUPPLY69 log line rate-limited to once / 5s per (session, scene-set) (SUPPLY69_LOG_GAP)
+          so the run log stays readable; the 3-byte 69 REPLY is still sent on every poll (the
+          client needs it).
+      Gates: PANEL_OPEN_SEQUENCE (False = reply-only, pre-v430), PANEL_DEBOUNCE=3.0,
+      SUPPLY69_LOG_GAP=5.0.
+      STILL UNKNOWN (the original question): whether 40+71 actually FILL the panel. v430f5's
+      flood prevented a clean read - the panel never settled long enough to tell. v431f5 makes
+      the push stable and rare; if the panel is STILL blank with a clean single push, then the
+      msg-71 array->column mapping is the culprit (still an unproven 'best guess') and the next
+      step is the wire capture, not more blind pushing. If it now shows data, we're done.
+      FALSIFY: open panel on a TC map -> log shows ONE 'PANELSEQ .. 40 xN -> 71 xM' per few
+         seconds (not a flood), damage% is STABLE (no unknown<->0% flicker), and the Production
+         Complex + Single Scene sections either populate (win) or stay blank (-> probe next).
+      FIELD RESULT (run_20260812_171314.log): flood GONE, damage% STABLE, clean single pushes
+         ('40 x1 -> 71 x3'). BUT panel still shows NO supply data. So the flood was masking the
+         real blocker, now cleanly isolated: the client accepts 40+71 and renders nothing.
+         RULED OUT this pass: msg-73 (0x49) is NOT the panel request - it's SendRepairInfo
+         (msg73_decode_notes.md), a plane fuel/ammo report after a msg-60 grant; the 0x49 in the
+         log is just the auto-resupply report, unrelated to the panel.
+         CONCLUSION: the msg-71 array->column mapping (scene_prodinfo_arrays, still a documented
+         'best guess') is the prime suspect. Added PANEL_PROBE + `panelprobe` console toggle:
+         flips the panel push to send PRODINFO_PROBE marker families (A=0xA1BE.. .. I=0x99BE..)
+         so we can READ which array feeds which on-screen column. Works now because the push is
+         clean (v430's probe 'never reached the client' - likely the same flood this fix removes).
+         NEXT RUN: console `panelprobe on`, open the panel in-game, note which column shows which
+         marker family, report back -> pin the real mapping -> panel fills. `panelprobe off`
+         restores real values.
+
+v431f5c: [TC] PANEL DIAGNOSIS from CLIENT-SIDE logs - transport/sequence/precondition RULED OUT;
+      isolated to msg-40/71 FIELD MAPPING. Read the client's own message traces
+      (C:\games\FA\DebugLogs\messagesNN.log - the FA client's in/out message log):
+        * 2009 WORKING reference (messages04.log, a live TC server): when the panel is open the
+          client loops `out 69'3 / out 71'9` (it REQUESTS msg-71) and gets `in 69'4 / in 71'90`.
+          Arena cfg carried UseSceneUnitProducers=yes, SupplyResourceRadius=10000m.
+        * OUR client TODAY (messages45.log, 2026-08-12 14:23, same GCP session as the blank
+          panel): the client receives `in 40'38` AND `in 71'90 / '173 / '256` - i.e. OUR
+          unsolicited 40 and 71 ARRIVE and are INGESTED, exact 7+N*83 sizes, identical envelope
+          to the 2009 working case. The client accepts unsolicited 71 (no `out 71` required).
+      => The v298 worry ('client never sends the request, panel needs the request') is WRONG:
+         our 40+71 reach and are parsed by the client. Transport OK, sequence OK, the one-shot-42
+         precondition (v431f5b) sent fine (PANELTX sent=True) - none of those is the blocker.
+         Same-SIZE messages that filled the panel in 2009 do NOT render for us => the difference
+         is PAYLOAD CONTENT: the msg-71 array->column map (scene_prodinfo_arrays, documented
+         'best guess') and/or the msg-40 field map are landing values in fields the panel doesn't
+         read. The client log shows sizes only, not payload, so a byte-diff needs the probe.
+      DECISIVE NEXT STEP (now known to reach the client - the `in 71` lines prove it):
+         `panelprobe on`, open panel, read which on-screen column shows which marker FAMILY
+         (A=0xA1BE.. .. I=0x99BE..). If NOTHING shows even with probe markers, msg-40 is the
+         gate (panel may need a valid 40 to unlock the section) - test by watching whether the
+         Complex header fields move. This is a content-mapping fix, not transport - the hard part
+         (does it reach/parse) is now proven yes.
+
+
+v430f5: [TC] SUPPLY LINKS (live-learned) + TICK HEARTBEAT + PANEL-OPEN SEQUENCE (blank-panel attempt).
+      Three things, following the 2026-07-19 Production Complex screenshot as ground truth
+      ('Link range: 21'; complex Metal 39,690 = 6 x single-scene 6,615; Single Scene Stored
+      3,308 / Cap 6,615 = 50%).
+      1) SUPPLY LINKS, learned LIVE from the client (no coordinates needed). Scene positions are
+         not in any data we have (data00_scenes.json has a per-scene link RADIUS of 10000 but no
+         x/y). We don't need them: the msg-69 panel query LISTS every scene the client considers
+         linked into that complex. _handle_scene_supply_query_69 now records that id-set via
+         record_link_group() (union-find fuse on overlap); complex_totals() aggregates stored +
+         capacity over the linked scenes and units over their camps. linked_scenes_for() returns
+         a scene's complex, falling back to itself until a group is observed. Unit-tested: groups
+         fuse across anchors, totals sum correctly (matches the screenshot's 6x aggregate).
+      2) TICK HEARTBEAT. The production tick ran silently (only PROD40, which is gated off for
+         ambient) so 'no production ticks' in the log was a VISIBILITY gap, not a dead loop.
+         Added a SUPPLYTICK line each step: '#N rooms=.. scenes=.. units[rID:a/t/s ..]'. Gated by
+         SUPPLY_TICK_LOG; counter _SUPPLY_TICK_N.
+      3) PANEL-OPEN SEQUENCE - the working hypothesis for the LONG-STANDING panel-blank blocker
+         (documented open since ~v300: client accepts 42/40/71 but renders nothing when they
+         arrive standalone). The msg-69 query IS the panel-open event, so on it we now push, to
+         the querying session only, spaced by PANEL_SEQ_GAP: 42 SCENE SNAPSHOT (bind ownership)
+         -> 40 PRODUCTION COMPLEX per camp in the queried complex (bind aggregate) -> 71 per-
+         scene INFO for the queried scenes (bind detail). Best-effort in a daemon thread so it
+         can never break the 69 reply the client is waiting on. Gates: PANEL_OPEN_SEQUENCE (set
+         False to revert to reply-only), PANEL_SEQ_GAP=0.15. Builders validated to correct sizes
+         against the screenshot's values (42=8B, 40=38B, 71=7+N*83).
+      HONEST STATUS: (1) and (2) are done + tested. (3) is an ATTEMPT at a blocker that predates
+         all this work - if the panel is still blank after it, the next lever is a wire capture
+         of our 42/40/71 vs the client's post-query expectation (the PANELSEQ + PROD71 log lines
+         are there to diagnose), NOT more guessing at the msg-71 array->column mapping (still a
+         'best guess'; the last probe never reached the client). msg-71 arrays remain unproven.
+      FALSIFY (3): open the Production Complex panel in-game on a TC map -> log shows PANELSEQ
+         '42 -> 40 xN -> 71 xM'; if the panel now shows Complex + Single Scene data, the ordering
+         was the missing precondition. If still blank, capture the wire and compare.
+
+v429f5: [PRODUCTION] THE UNITS LAYER - Metal -> aircraft/tank/ship units (wiki step 3-5).
+      FIELD-CONFIRMED 2026-08-12 (run_20260812_103722.log): `production` console command on
+      room 49 -> 'economy seeded (60 scenes)', msg 40 x5 camps to the in-game session, each
+      carrying u=4/4/4 with real stored/capacity totals. Live on the deployed build.
+      TWO BLOCKERS FOUND+FIXED when the first live test showed nothing:
+        (1) broadcast_production_40 was hard-gated by SEND_PRODUCTION_40=False, so the console
+            command (and any diagnostic) returned 0 instantly. Added force=True param; the
+            console path forces past the ambient-broadcast gate, per-tick caller stays gated.
+        (2) the economy was SPAWN-GATED: _SUPPLY only populated when a pilot parked at a field,
+            so a fresh arena had an empty tick loop and nothing to broadcast. Added
+            seed_room_economy() (idempotent - supply_state seeds on first touch, returns
+            existing after) called by BOTH the tick loop (every active in-game room, before
+            iterating) and the console command (seed + one on-demand units build so the panel
+            shows live counts immediately, not 0/0/0 until the next 60s tick).
+      Context first: the q6 client-data hunt for per-scene production numbers concluded this
+      session (q6_reader_status.md, exhaustive) - the economy is NOT in the client. The VFS6B
+      reader was fully cracked (180k names, all members, calibrate() retired) but the .prs/.prp/
+      .pup tables do not exist in any volume; production was always server-side. So v429f5 is
+      built on the MEMDUMP/RE model (FA_TC_economy.md), NOT on any extracted client file.
+      WHAT CHANGED: the minute tick (_supply_tick_loop) ran only wiki stages 1-2 (resources
+      produced + stored), which is why build_production_40 had always sent units=(0,0,0). Now
+      after resources are stored, each camp runs stages 3-5: convert stored METAL into built-
+      not-deployed UNITS (PMT_UNIT_PRODUCER consumes Metal, confirmed in FA.exe). Because the
+      per-scene UNIT_PRODUCER_DEF (.pup, 24B, layout never pinned) is unavailable, the layer is
+      a CAMP-LEVEL METAL-DERIVED AGGREGATE - faithful to the mechanic, honest about the one
+      unknown (the conversion ratio is a TUNABLE ASSUMPTION, not an extracted constant).
+        * Unit TYPE per camp derived from REAL scene type names we already have: Tank/Metal
+          Factory -> tank, any Airfield -> aircraft, Port -> ship (a camp may build several).
+        * Per tick per type: convert up to UNITS_PER_TICK_MAX units' worth of the camp's stored
+          metal (UNIT_METAL_COST each) into units, capped at UNIT_CAP_PER_CAMP. Metal spent is
+          DEBITED from the camp's scenes (producers first) so the metal economy stays conserved;
+          any partial-unit remainder is refunded cap-respecting. Unit-tested: metal in ==
+          units*cost out exactly (98000 -> 49 units, 0 leaked), caps honoured, kinds correct.
+        * msg-40 PRODUCTION COMPLEX now carries the real (aircraft,tank,ship) counts instead of
+          (0,0,0); PROD40 log line shows u=a/t/s. SEND_PRODUCTION_40 gating unchanged (still off
+          for ambient broadcast; the `production` console command exercises it on demand).
+      Knobs (all TUNABLE, centralised by _SUPPLY_UNITS): UNIT_METAL_COST=2000,
+      UNIT_CAP_PER_CAMP=99, UNITS_PER_TICK_MAX=4. Calibrate against a live TC arena's Production
+      Complex panel (the authoritative source now).
+      FALSIFY: on a TC map, `production` console command after a few minute-ticks -> each camp
+      that owns a factory/airfield/port shows nonzero units matching its metal spend, camp metal
+      totals drop by exactly units_built*2000, units never exceed 99, and a camp with no live
+      metal producer stops building once drained.
+      NOT YET (deferred, non-blocking): stage 6 (deploying a unit draws fuel+ammo) is still the
+      per-spawn msg-60 grant, not tied to the unit pool; supply-radius LINK pooling across
+      connected scenes (topology) remains the next production sub-project.
+
+==============================================================================
 
 *** BANKED BASELINE 2026-08-12: v428f5 is the current stable banking point.
     THE REPAIR/RESUPPLY REFACTOR, field-confirmed end to end this date on LAN:

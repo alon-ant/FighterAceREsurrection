@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v428f5'
+VERSION = 'v433f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3513,14 +3513,49 @@ def console_handler():
                 for _rid in _rooms:
                     broadcast_production_info_71(_rid, scene_ids=_ids, probe=_probe,
                                                  reason='(console prodinfo)')
+            elif cmd == 'panelprobe':
+                # panelprobe [on|off]  - toggle msg-71 PROBE markers in the panel push. With it ON,
+                # opening the Production Complex panel in-game shows the PRODINFO_PROBE marker
+                # families (A=0xA1BE.., B=0xB2BE.., C=0xC3.., ..) in place of real values, so we
+                # can read which of the nine arrays feeds which on-screen column - the decisive
+                # step for the panel-blank blocker (the array->column map is still a guess).
+                global PANEL_PROBE
+                _pp = parts[1].lower() if len(parts) > 1 else ''
+                if _pp in ('on', '1', 'true'):
+                    PANEL_PROBE = True
+                elif _pp in ('off', '0', 'false'):
+                    PANEL_PROBE = False
+                else:
+                    PANEL_PROBE = not PANEL_PROBE
+                # clear the debounce so the next panel poll pushes fresh immediately
+                with _PANEL_LAST_LOCK:
+                    _PANEL_LAST.clear()
+                log('CONSOLE', f'panelprobe = {PANEL_PROBE}. Markers: A=0xA1BE.. B=0xB2BE.. '
+                               f'C=0xC3/C4/C5 D=0xD4BE.. E=0xE5/E6/E7 F=0xF6BE.. G=0x67BE.. '
+                               f'H=0x8B/8C/8D I=0x99BE.. -> open the panel and read which column '
+                               f'shows which family.')
             elif cmd == 'production':
                 # production  - push msg 40 PRODUCTION COMPLEX for every camp, on demand.
+                # v429f5: seed each active room's full economy first (so a fresh arena shows a
+                # populated panel without waiting for a spawn), then force-send past the ambient
+                # SEND_PRODUCTION_40 gate.
                 _rooms = {x.current_room for x in get_all_sessions()
                           if getattr(x, 'entered_game', False) and x.current_room is not None}
                 if not _rooms:
                     log('CONSOLE', 'production: no in-game players to send to')
                 for _rid in _rooms:
-                    broadcast_production_40(_rid, reason='(console production)')
+                    _n = seed_room_economy(_rid)
+                    # v429f5: also run one units build on demand so the panel shows a live unit
+                    # count immediately rather than 0/0/0 until the next 60s tick.
+                    _t = _probe_terrain_for_room(_rid)
+                    for _c in sorted(set(SCENE_CAMP_BY_TERRAIN.get(_t, {}).values())):
+                        if _c <= 7:
+                            try:
+                                _camp_build_units(_rid, _t, _c)
+                            except Exception:
+                                logx('UNITS', f'console build failed room {_rid} camp {_c}')
+                    log('CONSOLE', f'production: room {_rid} economy seeded ({_n} scenes)')
+                    broadcast_production_40(_rid, reason='(console production)', force=True)
             elif cmd == 'snapshot':
                 # snapshot  - send msg 42 SCENE SNAPSHOT to every in-game room. This is what the
                 # client needs before it can show any economy/ownership at all; without it the
@@ -7143,6 +7178,14 @@ KILL_CREDIT_WINDOW  = 30.0   # s: LAST-RESORT fallback only - credit the most-re
 #   consumed: when the delete-notify for that object number arrives
 #   dropped : when the object number is reused by a new spawn (numbers are recycled)
 PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
+REPAIR_CLEARS_DAMAGE_LATCH = True  # v433f5 [KILL/SCORE]: a msg-60 repair grant clears took_damage
+                             #   + PENDING_KILL for the serviced plane, so a plane that is hit,
+                             #   lands, repairs, then EXITS normally is not booked as a damaged
+                             #   death (and the last shooter is not handed a phantom kill+banner).
+                             #   Field bug: Taurus, messages57, FFA Two Islands. A plane hit AGAIN
+                             #   after repair re-latches via the normal msg-28 path, so a real
+                             #   post-repair kill still counts. False = pre-v433f5 (latch survives
+                             #   repair).
 
 # -- v227: which own-plane removals actually count as a DEATH -------------------
 # The trailing byte of the msg-3 delete-notify ([.. 0x03][ONumber u16 LE][EXIT byte]) is NOT a
@@ -9905,6 +9948,32 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
         return 0
     pkt = build_supply_grant_60(flags, amount, amount2, b1, b2)
     _desc = f'flags=0x{flags:02x} amt={amount} amt2={amount2} b1={b1} b2={b2}'
+    # v433f5 [KILL/SCORE]: a REPAIR clears the damage latch. Field bug (Taurus,
+    # messages57, FFA Two Islands): the plane took msg-28 hits mid-sortie, landed,
+    # was serviced at the field, then EXITED normally - and the exit classifier
+    # (~L10604, the `_damaged` branch) booked it as a DAMAGED DEATH, costing a plane
+    # + a life and handing the last shooter a kill + cyan PLAYER_KILLED banner.
+    # Root cause: took_damage (set on every msg-28, ~L12660) and PENDING_KILL (the
+    # kill latch, ~L12666) were cleared ONLY on a fresh spawn (L10422/L10430), never
+    # on repair - so the previous engagement's damage stayed latched straight through
+    # a full field repair and into the exit. A msg-60 grant IS the server asserting
+    # this plane is airworthy again, so it is exactly where the latch should retire:
+    # the damage it recorded has been undone. A plane hit AGAIN after this point
+    # re-latches through the normal msg-28 path, so a genuine post-repair kill still
+    # counts. Single-flag revert: REPAIR_CLEARS_DAMAGE_LATCH.
+    if REPAIR_CLEARS_DAMAGE_LATCH:
+        _ro = getattr(sess, 'my_obj_number', None)
+        _was = bool(getattr(sess, 'took_damage', False))
+        sess.took_damage = False
+        # a serviced plane is parked/fresh; drop the pre-repair flight history so the
+        # movement-based crash test can't read this life's earlier flying as a crash.
+        sess.__dict__.pop('_pos_hist', None)
+        if _ro is not None and PENDING_KILL.pop(_ro, None) is not None:
+            log('KILL', f'{getattr(sess, "current_pilot", "?")} obj 0x{_ro:04x} REPAIRED '
+                        f'-> damage latch + PENDING_KILL cleared (was_damaged={_was})')
+        elif _was:
+            log('KILL', f'{getattr(sess, "current_pilot", "?")} REPAIRED -> took_damage '
+                        f'cleared (no pending kill latch)')
     threading.Thread(
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
@@ -10851,6 +10920,8 @@ SUPPLY_TYPE_KEYWORDS = (
 SUPPLY_DAMAGE_SCALES_RATE = True   # destroyed/damaged scenes produce proportionally less
 SUPPLY_MIN_EFFICIENCY     = 0.0    # a fully flattened scene produces nothing
 SUPPLY_REPAIR_HP_PER_TICK = 250    # HP healed per production step (BuildingsRepairRate analogue)
+SUPPLY_TICK_LOG   = True            # v430f5: emit a SUPPLYTICK heartbeat line each production step
+_SUPPLY_TICK_N    = 0               # v430f5: monotonic production-step counter (for the heartbeat)
 SUPPLY_JSON       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_scenes.json')
 
 _SCENES = {'terrains': {}, 'profiles': {}}
@@ -10864,6 +10935,48 @@ except Exception as _e:
 
 _SUPPLY = {}                              # (room_id, scene_id) -> {'ammo':n,'fuel':n,'metal':n}
 _SUPPLY_LOCK = threading.Lock()
+
+# v429f5: THE UNITS LAYER. The wiki's production step is six stages; the tick so far only ran
+# stages 1-2 (resources produced, resources stored), which is why build_production_40 has always
+# sent units=(0,0,0). Stages 3-5 are "Metal -> units": a UNIT_PRODUCER (PMT_UNIT_PRODUCER,
+# confirmed in FA.exe to CONSUME Metal) turns stored metal into built-but-not-deployed
+# aircraft/tank/ship UNITS. We cannot run this per-scene with authentic numbers: the per-scene
+# UNIT_PRODUCER_DEF lives in the .pup files, whose 24-byte layout was never pinned and which the
+# client we mapped does not ship in any readable form (see q6_reader_status.md session 3 -
+# exhaustive: the economy was always server-side). So we model the layer as a CAMP-LEVEL
+# METAL-DERIVED AGGREGATE, which is faithful to the mechanic (metal in -> units out) and honest
+# about the one unknown: the conversion ratio is a TUNABLE ASSUMPTION, not an extracted constant.
+#   * Which unit type a camp builds is derived from real scene TYPE names we already have:
+#     a camp that owns a Tank Factory builds TANK units; a camp that owns an Airfield builds
+#     AIRCRAFT units; Ports build SHIP units. A camp can build more than one.
+#   * Each tick, per unit type the camp can build, it converts up to UNITS_PER_TICK_MAX units'
+#     worth of the camp's stored metal (UNIT_METAL_COST each) into units, capped at
+#     UNIT_CAP_PER_CAMP. Metal actually spent is DEBITED from the camp's scenes, so the metal
+#     economy stays conserved rather than double-counted.
+# All three knobs are marked TUNABLE and centralised here for later calibration against a live
+# TC arena's Production Complex panel (the authoritative source now).
+_SUPPLY_UNITS = {}                       # (room_id, camp) -> {'aircraft':n,'tank':n,'ship':n}
+_SUPPLY_UNITS_LOCK = threading.Lock()
+UNITS_MODEL        = True                # master switch for the v429f5 units layer
+UNIT_METAL_COST    = 2000                # TUNABLE: stored metal consumed to build one unit
+UNIT_CAP_PER_CAMP  = 99                  # TUNABLE: max built-not-deployed units of a type per camp
+UNITS_PER_TICK_MAX = 4                   # TUNABLE: units of a type a camp can build in one step
+
+# v430f5: SUPPLY-LINK TOPOLOGY, learned LIVE from the client. The scene positions needed to
+# compute link ranges geometrically are not in any data we have (data00_scenes.json carries a
+# per-scene link RADIUS of 10000 but no coordinates). We don't need them: when a player opens the
+# Production Complex panel at a scene, the client itself sends a msg-69 SCENE_SUPPLY query listing
+# EVERY scene it considers linked into that complex (this is what fills the panel's 'Link range'
+# and the aggregated Produce-Units/Resource totals). So _handle_scene_supply_query_69 records the
+# queried id-set as the authoritative link group. Two indexes:
+#   _SCENE_LINKS[(room,scene)] = frozenset(all scenes queried alongside it)  - per-anchor group
+#   _LINK_GROUPS[room] = list of frozensets  - deduped complex memberships seen so far
+# The complex aggregate for a scene is the union-find closure of every group it has appeared in,
+# so opening the panel at any member yields the same complex totals. Groups accrete over a
+# session; a scene with no observed query yet falls back to its own camp (camp_economy_totals).
+_SCENE_LINKS = {}                        # (room_id, scene_id) -> frozenset(scene_id, ...)
+_LINK_GROUPS = {}                        # room_id -> list[frozenset]
+_SCENE_LINKS_LOCK = threading.Lock()
 
 def scene_type_for(terrain, scene_id):
     """Scene TYPE string ('Front Line Airfield', 'FAB', ...) for a terrain+scene id, else None."""
@@ -11037,15 +11150,218 @@ def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg):
         return None
     return got['ammo'], got['fuel'], after, n
 
+
+# v429f5: which unit types a camp can build, from the real scene TYPE names it owns.
+# Tank Factory / Metal Factory -> tank units; Airfield (any) -> aircraft units; Port -> ship.
+def _camp_unit_types(terrain, camp):
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    if not table:
+        return set()
+    kinds = set()
+    for sidx, c in table.items():
+        if c != camp:
+            continue
+        t = (scene_type_for(terrain, sidx) or '').lower()
+        if 'airfield' in t:
+            kinds.add('aircraft')
+        if 'tank factory' in t or 'metal factory' in t:
+            kinds.add('tank')
+        if 'port' in t:
+            kinds.add('ship')
+    return kinds
+
+
+def _camp_metal_debit(room_id, terrain, camp, want_metal):
+    """v429f5: spend up to want_metal from the camp's scenes (producers first, so storage-only
+    airfields keep their reserve for spawns). Returns metal actually spent. Mirrors
+    camp_supply_take's ownership walk but for the metal resource only."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    if not table or want_metal <= 0:
+        return 0
+    own = [sidx for sidx, c in table.items() if c == camp]
+    if not own:
+        return 0
+    # producers (nonzero metal rate) drained first; pure-storage scenes last
+    def _metal_rate(sidx):
+        p = scene_profile(terrain, sidx)
+        return p['rates'].get('metal', 0) if p else 0
+    own.sort(key=lambda sidx: (0 if _metal_rate(sidx) > 0 else 1, sidx))
+    spent = 0
+    for sidx in own:
+        if spent >= want_metal:
+            break
+        st, p = supply_state(room_id, terrain, sidx)
+        if st is None:
+            continue
+        with _SUPPLY_LOCK:
+            take = max(0, min(st['metal'], want_metal - spent))
+            st['metal'] -= take
+            spent += take
+    return spent
+
+
+def camp_units_state(room_id, camp):
+    """Current built-not-deployed unit counts for a camp, {'aircraft','tank','ship'}."""
+    key = (room_id, int(camp))
+    with _SUPPLY_UNITS_LOCK:
+        u = _SUPPLY_UNITS.get(key)
+        if u is None:
+            u = {'aircraft': 0, 'tank': 0, 'ship': 0}
+            _SUPPLY_UNITS[key] = u
+        return dict(u)
+
+
+def record_link_group(room_id, scene_ids):
+    """v430f5: record a client-observed link group (the scene id-set from one msg-69 panel query).
+    Merges into the room's group list by union: any existing group sharing a scene with the new
+    set is fused with it, so repeated queries from different anchors converge on the true complex.
+    Updates the per-scene _SCENE_LINKS index to the merged group."""
+    ids = frozenset(int(x) for x in scene_ids if x is not None)
+    if len(ids) < 1:
+        return
+    with _SCENE_LINKS_LOCK:
+        groups = _LINK_GROUPS.setdefault(room_id, [])
+        merged = set(ids)
+        keep = []
+        for g in groups:
+            if g & merged:
+                merged |= g          # fuse overlapping groups (union-find by intersection)
+            else:
+                keep.append(g)
+        fused = frozenset(merged)
+        keep.append(fused)
+        _LINK_GROUPS[room_id] = keep
+        for sid in fused:
+            _SCENE_LINKS[(room_id, sid)] = fused
+
+
+def linked_scenes_for(room_id, scene_id):
+    """The complex membership (frozenset of scene ids) a scene belongs to, from observed msg-69
+    queries. Returns just {scene_id} if the client has not queried a group containing it yet."""
+    with _SCENE_LINKS_LOCK:
+        g = _SCENE_LINKS.get((room_id, int(scene_id)))
+    return g if g else frozenset({int(scene_id)})
+
+
+def complex_totals(room_id, scene_id):
+    """v430f5: Production Complex aggregate for the complex a scene belongs to - summed stored +
+    capacity resources over every LINKED scene, plus summed built units over the camps those
+    linked scenes belong to (deduped by camp). Falls back to the scene's own camp when no link
+    group has been observed. Returns (stored, capacity, units) dicts."""
+    trn = _probe_terrain_for_room(room_id)
+    members = linked_scenes_for(room_id, scene_id)
+    stored = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    capacity = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    seen_camps = set()
+    for sid in members:
+        st, p = supply_state(room_id, trn, sid)
+        if st and p:
+            for r in ('metal', 'fuel', 'ammo'):
+                stored[r] += int(st.get(r, 0))
+                capacity[r] += int(p['caps'].get(r, 0))
+        c = scene_camp(trn, sid)
+        if c is not None and c != SCENE_CAMP_NEUTRAL:
+            seen_camps.add(c)
+    units = {'aircraft': 0, 'tank': 0, 'ship': 0}
+    for c in seen_camps:
+        u = camp_units_state(room_id, c)
+        for k in units:
+            units[k] += u[k]
+    return stored, capacity, units
+
+
+def _camp_build_units(room_id, terrain, camp):
+    """v429f5 stages 3-5: convert the camp's stored METAL into UNITS for each type it can build.
+    Runs once per production step per camp. Metal is debited from the camp's scenes so the
+    resource economy stays conserved. Returns the units dict after building, or None if the camp
+    builds nothing (no unit-capable scenes)."""
+    if not UNITS_MODEL:
+        return None
+    kinds = _camp_unit_types(terrain, camp)
+    if not kinds:
+        return None
+    key = (room_id, int(camp))
+    with _SUPPLY_UNITS_LOCK:
+        u = _SUPPLY_UNITS.setdefault(key, {'aircraft': 0, 'tank': 0, 'ship': 0})
+    for kind in kinds:
+        with _SUPPLY_UNITS_LOCK:
+            room_for_units = UNIT_CAP_PER_CAMP - u[kind]
+        if room_for_units <= 0:
+            continue
+        buildable = min(UNITS_PER_TICK_MAX, room_for_units)
+        # spend metal for as many whole units as the camp can afford, up to buildable
+        spent = _camp_metal_debit(room_id, terrain, camp, buildable * UNIT_METAL_COST)
+        made = spent // UNIT_METAL_COST if UNIT_METAL_COST else 0
+        if made <= 0:
+            continue
+        # refund the remainder metal that didn't complete a whole unit (spent - made*cost)
+        refund = spent - made * UNIT_METAL_COST
+        if refund > 0:
+            _camp_refund_metal(room_id, terrain, camp, refund)
+        with _SUPPLY_UNITS_LOCK:
+            u[kind] = min(UNIT_CAP_PER_CAMP, u[kind] + made)
+    return camp_units_state(room_id, camp)
+
+
+def _camp_refund_metal(room_id, terrain, camp, metal):
+    """Return leftover metal (from a partial-unit debit) to the camp's storage, cap-respecting.
+    Fills producer scenes first (they were drained first), never exceeding each scene's cap."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    if not table or metal <= 0:
+        return
+    own = [sidx for sidx, c in table.items() if c == camp]
+    for sidx in own:
+        if metal <= 0:
+            break
+        st, p = supply_state(room_id, terrain, sidx)
+        if st is None or not p:
+            continue
+        with _SUPPLY_LOCK:
+            room_left = max(0, p['caps'].get('metal', 0) - st['metal'])
+            add = min(room_left, metal)
+            st['metal'] += add
+            metal -= add
+
+def _active_ingame_rooms():
+    """Room ids with at least one in-game session (mirrors the console-command idiom)."""
+    return {x.current_room for x in get_all_sessions()
+            if getattr(x, 'entered_game', False) and x.current_room is not None}
+
+
+def seed_room_economy(room_id):
+    """v429f5: ensure every profiled scene a room's terrain owns is seeded in _SUPPLY, so the
+    production tick and the msg-40 panel have a full economy from the moment the room is active
+    - not only the handful of scenes a pilot has happened to park at. Idempotent: supply_state
+    seeds a scene on first touch and returns the existing state after, so calling this every tick
+    is cheap and never re-seeds. Returns the number of scenes seeded (existing or new)."""
+    trn = _probe_terrain_for_room(room_id)
+    camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+    if not camps:
+        return 0
+    n = 0
+    for sidx in camps:
+        st, p = supply_state(room_id, trn, sidx)
+        if st is not None:
+            n += 1
+    return n
+
+
 def _supply_tick_loop():
     """One production STEP per SUPPLY_TICK: every seeded scene adds its producers' per-minute rate,
     capped at its storage volume (the wiki's 'if there is no available storage space the resources
-    simply vanish')."""
+    simply vanish').
+    v429f5: before iterating, seed every active in-game room's full terrain economy, so a TC arena
+    produces from the moment it has a player rather than only after someone parks at a field."""
     while True:
         try:
             time.sleep(SUPPLY_TICK)
             if not SUPPLY_MODEL:
                 continue
+            for _rid in _active_ingame_rooms():
+                try:
+                    seed_room_economy(_rid)
+                except Exception:
+                    logx('SUPPLY', f'seed failed room {_rid}')
             with _SUPPLY_LOCK:
                 items = list(_SUPPLY.items())
             for (rid, sid), st in items:
@@ -11066,6 +11382,20 @@ def _supply_tick_loop():
                     if hp is not None and hp < SCENE_DEFAULT_HP:
                         SCENE_HP[skey] = min(SCENE_DEFAULT_HP,
                                              hp + SUPPLY_REPAIR_HP_PER_TICK)
+            # v429f5 stages 3-5: after resources are produced+stored this step, each camp converts
+            # stored metal into aircraft/tank/ship UNITS. Done per-room-per-camp (not per-scene)
+            # so it runs exactly once even though _SUPPLY is keyed by scene.
+            if UNITS_MODEL:
+                for _rid in {k[0] for (k, _v) in items}:
+                    _trn = _probe_terrain_for_room(_rid)
+                    _camps = SCENE_CAMP_BY_TERRAIN.get(_trn, {})
+                    for _camp in sorted(set(_camps.values())):
+                        if _camp > 7:
+                            continue
+                        try:
+                            _camp_build_units(_rid, _trn, _camp)
+                        except Exception:
+                            logx('UNITS', f'build failed room {_rid} camp {_camp}')
             # v297: push the new per-camp totals after every step. The 2009 log carries msg 40 at
             # exactly this cadence (184 of them across the session, one per camp per minute), which
             # is what keeps the Production Complex panel live rather than frozen at join values.
@@ -11077,12 +11407,54 @@ def _supply_tick_loop():
                     broadcast_production_40(_rid, reason='(production step)')
                 except Exception:
                     logx('PROD40', 'broadcast failed')
+            # v430f5: heartbeat so the tick is VISIBLE in the log even with ambient msg-40 off.
+            # One concise line per step: tick number, rooms, scenes stepped, and per-room unit
+            # totals. Gated by SUPPLY_TICK_LOG so it can be silenced if it ever gets noisy.
+            global _SUPPLY_TICK_N
+            _SUPPLY_TICK_N += 1
+            if SUPPLY_TICK_LOG and items:
+                _rooms = sorted({k[0] for (k, _v) in items})
+                _usum = []
+                for _rid in _rooms:
+                    _trn = _probe_terrain_for_room(_rid)
+                    _ta = _tt = _ts = 0
+                    for _c in sorted(set(SCENE_CAMP_BY_TERRAIN.get(_trn, {}).values())):
+                        if _c > 7:
+                            continue
+                        _u = camp_units_state(_rid, _c)
+                        _ta += _u['aircraft']; _tt += _u['tank']; _ts += _u['ship']
+                    _usum.append(f'r{_rid}:a{_ta}/t{_tt}/s{_ts}')
+                log('SUPPLYTICK', f'#{_SUPPLY_TICK_N} rooms={len(_rooms)} scenes={len(items)} '
+                                  f'units[{" ".join(_usum)}]')
         except Exception:
             logx('SUPPLY', 'tick loop error')
 
 
 PRODINFO_MAX_SCENES = 8       # scenes per msg 71 push; 2009 never sent more than 7 at once
 SUPPLY_QUERY_REPLY = True     # answer msg 69 scene-supply queries (v294)
+# v431f5: the msg-69 query is a continuous POLL (~30x/sec while the panel is open), not a one-
+# shot open event. So we DEBOUNCE: push the panel data (40+71, never the arena-wide 42) at most
+# once per PANEL_DEBOUNCE seconds per session, re-pushing immediately if the hovered scene-set
+# changes. v430f5's per-poll 42->40->71 sequence flooded the wire and made the panel flicker.
+# Set PANEL_OPEN_SEQUENCE=False to revert to reply-only (the pre-v430 behaviour).
+PANEL_OPEN_SEQUENCE = True
+PANEL_DEBOUNCE      = 3.0     # seconds; min gap between panel-data pushes for the same scene-set
+PANEL_SEND_SNAPSHOT = True    # v431f5b: send msg-42 ONCE per session before the first panel push,
+                              # to establish scene ownership/type (the client only shows a
+                              # production panel for scenes it knows are complexes). Not per-poll.
+PANEL_SEQ_GAP       = 0.15    # spacing between the one-shot 42 and the 40/71 that follow it
+PANEL_PROBE         = False   # v431f5: when True, the panel push sends msg-71 PROBE markers
+                              # (PRODINFO_PROBE) instead of real data. NOTE (v431f5c field test):
+                              # with probe ON the scene DAMAGE flickered unknown->0% - the msg-71
+                              # write stamps the scene node (obj+0x20 time / +0x28), which flips
+                              # the damage display from 'unknown' to its value. That CONFIRMS our
+                              # 71 reaches + updates the node, but the probe did not surface a
+                              # readable column mapping. Left OFF by default; the panel-content
+                              # decode needs a memory dump of the scene node (fa_memdump) after a
+                              # known 71, not more live probing. Toggle via `panelprobe`.
+SUPPLY69_LOG_GAP    = 5.0     # v431f5: min seconds between SUPPLY69 log lines per (session,scenes)
+_SUPPLY69_LOG_LAST  = {}
+_SUPPLY69_LOG_LOCK  = threading.Lock()
 MSG_SCENE_SUPPLY_69 = 0x45
 
 MSG_SCENE_PRODUCTION_71 = 0x47
@@ -11180,6 +11552,13 @@ MSG_PRODUCTION_40 = 0x28
 # v300: OFF for the stable build. msg 40 is correctly framed and the client accepts it at exactly
 # 38 bytes without complaint, but nothing appears on screen, so broadcasting one per camp every
 # production step is pure traffic. The `production` console command still sends on demand.
+# v432f5b TESTED + REVERTED: turned this ON to mimic the 2009 per-minute `in 40'38` cadence
+# (confirmed firing at exactly 60s in run_20260812_174430: PROD40 x5 camps at 17:45:31, 17:46:31).
+# Panel STILL blank. So the periodic-40 stream is NOT the missing piece - this closes the last
+# wire-level difference vs the 2009 working session. Reverted to False (it was pure added traffic).
+# CONCLUSION: every wire-level variable (sizes, sequence, periodic-40, 42 precondition) now matches
+# 2009 and the client ingests it all (in 40'38 / in 71'90 in messages45.log) - the ONLY remaining
+# variable is PACKED_INFO byte CONTENT (the array->column map). Resolve via memdump, not the wire.
 SEND_PRODUCTION_40 = False
 
 def build_production_40(camp, units, stored, capacity):
@@ -11225,9 +11604,11 @@ def camp_economy_totals(room_id, terrain, camp):
     return stored, capacity
 
 
-def broadcast_production_40(room_id, reason=''):
-    """Send one msg 40 per active camp to everyone in-game in a room."""
-    if not SEND_PRODUCTION_40:
+def broadcast_production_40(room_id, reason='', force=False):
+    """Send one msg 40 per active camp to everyone in-game in a room.
+    `force=True` bypasses SEND_PRODUCTION_40 (the ambient-broadcast gate) so an explicit
+    operator command / diagnostic always fires; the per-tick caller leaves it False."""
+    if not SEND_PRODUCTION_40 and not force:
         return 0
     trn = _probe_terrain_for_room(room_id)
     camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
@@ -11245,13 +11626,17 @@ def broadcast_production_40(room_id, reason=''):
         stored, capacity = camp_economy_totals(room_id, trn, camp)
         if not any(capacity.values()):
             continue
+        # v429f5: real built-not-deployed units for this camp, in msg-40 order (aircraft,tank,ship)
+        _u = camp_units_state(room_id, camp)
+        _units = (_u['aircraft'], _u['tank'], _u['ship'])
         pkt = build_production_40(
-            camp, (0, 0, 0),
+            camp, _units,
             (stored['metal'], stored['fuel'], stored['ammo']),
             (capacity['metal'], capacity['fuel'], capacity['ammo']))
         for s in sess:
             _submit_send(send_rel, s, pkt, f'<- PRODUCTION 40 camp={camp}', to=3.0)
-        sent.append(f'c{camp}:{stored["metal"]}/{stored["fuel"]}/{stored["ammo"]}')
+        sent.append(f'c{camp}:{stored["metal"]}/{stored["fuel"]}/{stored["ammo"]}'
+                    f' u={_units[0]}/{_units[1]}/{_units[2]}')
     log('PROD40', f'room {room_id}: msg 40 x{len(sent)} camp(s) -> {len(sess)} session(s) '
                   f'{reason} [{" ".join(sent)}]')
     return len(sent)
@@ -11278,6 +11663,10 @@ def _handle_scene_supply_query_69(s, pl):
     idxs = [struct.unpack_from('<H', body, p)[0] for p in range(i + 1, len(body) - 1, 2)]
     if not idxs:
         return False
+    # v430f5: the client's query IS the link topology - it lists every scene it considers part of
+    # this scene's Production Complex. Record it so complex_totals() can aggregate the right group.
+    if len(idxs) > 1:
+        record_link_group(s.current_room, idxs)
     trn = _probe_terrain_for_room(s.current_room)
     out = bytearray([MSG_SCENE_SUPPLY_69])
     parts = []
@@ -11317,8 +11706,106 @@ def _handle_scene_supply_query_69(s, pl):
     pkt = build_ingame_pkt(bytes(out))
     threading.Thread(target=lambda: send_rel(s, pkt, f'<- SCENE_SUPPLY 69 x{len(idxs)}', to=3.0),
                      daemon=True).start()
-    log('SUPPLY69', f'{s.current_pilot} asked {len(idxs)} scene(s) -> ' + ' '.join(parts))
+    # v431f5: the client polls this ~30x/sec while the panel is open. Logging every poll floods the
+    # run log (v430f5's run had ~900 SUPPLY69/PANELSEQ lines in seconds). Rate-limit the log line
+    # to once per SUPPLY69_LOG_GAP per (session, scene-set); the REPLY above is always sent.
+    _now = time.monotonic()
+    _lk = (id(s), tuple(idxs))
+    with _SUPPLY69_LOG_LOCK:
+        _last = _SUPPLY69_LOG_LAST.get(_lk, 0.0)
+        _emit = (_now - _last) >= SUPPLY69_LOG_GAP
+        if _emit:
+            _SUPPLY69_LOG_LAST[_lk] = _now
+    if _emit:
+        log('SUPPLY69', f'{s.current_pilot} asked {len(idxs)} scene(s) -> ' + ' '.join(parts))
+    # v431f5: the msg-69 query is a CONTINUOUS POLL (the client re-sends it ~30x/sec the whole
+    # time the panel is open / a scene is hovered), NOT a one-shot open event. v430f5 fired a full
+    # 42->40->71 sequence on EVERY poll, which (a) flooded the log and wire and (b) made the panel
+    # flicker between 'unknown' and 0% because the arena-wide msg-42 snapshot was being re-ingested
+    # 30x/sec mid-rebuild. Fix: push the panel data (40 + 71 only - NOT the arena-wide 42) AT MOST
+    # ONCE per debounce window per session, keyed on the queried scene-set so a genuine change of
+    # hovered scene re-pushes but holding still does not.
+    if PANEL_OPEN_SEQUENCE:
+        _maybe_push_panel(s, tuple(idxs))
     return True
+
+
+_PANEL_LAST = {}                 # session id -> (scene_set, last_push_monotonic)
+_PANEL_LAST_LOCK = threading.Lock()
+
+def _maybe_push_panel(s, scene_key):
+    """v431f5: debounced panel-data push. Sends 40 (complex) + 71 (per-scene) to this session only
+    when either the queried scene-set changed or PANEL_DEBOUNCE seconds have passed since the last
+    push for the same set. Never sends the arena-wide 42 here (that belongs to join/ownership
+    changes, not a hover-poll). Cheap, non-flooding, and idempotent under the client's poll rate."""
+    now = time.monotonic()
+    sid = id(s)
+    with _PANEL_LAST_LOCK:
+        prev = _PANEL_LAST.get(sid)
+        if prev is not None:
+            prev_key, prev_t = prev
+            if prev_key == scene_key and (now - prev_t) < PANEL_DEBOUNCE:
+                return                      # same scenes, within debounce -> suppress
+        _PANEL_LAST[sid] = (scene_key, now)
+    threading.Thread(target=_panel_push, args=(s, list(scene_key)), daemon=True).start()
+
+
+def _panel_push(s, scene_ids):
+    """Send 40 (per camp in the queried complex) then 71 (per queried scene) to one session.
+    v431f5b: send the arena-wide msg-42 SCENE SNAPSHOT ONCE per session first (not per poll),
+    because the client only shows a production panel for scenes whose ownership/type it knows,
+    and it learns that from msg-42 - which we currently never send at join. The 30x/sec 42 in
+    v430 was the flood; ONE 42 per session is the precondition. Best-effort; never breaks 69."""
+    try:
+        rid = s.current_room
+        trn = _probe_terrain_for_room(rid)
+        # v431f5b: one-shot scene snapshot per session, establishing which scenes are owned/typed
+        # production complexes. Gated by a per-session flag so it never floods.
+        _snap_sent = False
+        if PANEL_SEND_SNAPSHOT and not getattr(s, '_panel_snap_sent', False):
+            entries = scene_snapshot_entries(trn)
+            if entries:
+                ok42 = send_rel(s, build_scene_snapshot_42(entries),
+                                f'<- [panel] SCENE_SNAPSHOT 42 x{len(entries)} (once/session)', to=3.0)
+                s._panel_snap_sent = True
+                _snap_sent = True
+                log('PANELTX', f'{s.current_pilot}: msg-42 snapshot x{len(entries)} '
+                               f'sent={ok42} (once/session precondition)')
+                time.sleep(PANEL_SEQ_GAP)
+        complex_camps = sorted({scene_camp(trn, sid) for sid in scene_ids
+                                if scene_camp(trn, sid) not in (None, SCENE_CAMP_NEUTRAL)})
+        n40 = 0
+        for camp in complex_camps:
+            if camp > 7:
+                continue
+            stored, capacity = camp_economy_totals(rid, trn, camp)
+            if not any(capacity.values()):
+                continue
+            u = camp_units_state(rid, camp)
+            ok40 = send_rel(s, build_production_40(camp, (u['aircraft'], u['tank'], u['ship']),
+                                            (stored['metal'], stored['fuel'], stored['ammo']),
+                                            (capacity['metal'], capacity['fuel'], capacity['ammo'])),
+                     f'<- [panel] PRODUCTION 40 camp={camp}', to=3.0)
+            n40 += 1
+        sids = scene_ids[:PRODINFO_MAX_SCENES]
+        recs = [build_packed_info_71(sid, scene_prodinfo_arrays(rid, trn, sid, probe=PANEL_PROBE))
+                for sid in sids]
+        ok71 = None
+        if recs:
+            ok71 = send_rel(s, build_production_info_71(recs),
+                     f'<- [panel] PRODUCTION_INFO 71 x{len(recs)}'
+                     + (' PROBE' if PANEL_PROBE else ''), to=3.0)
+        # v431f5b: surface the panel TX at INFO so the run log directly shows whether 42/40/71
+        # actually hit the wire (send_rel's own TX/RELIABLE lines are DEBUG-level and don't
+        # appear in run_*.log). This is the clean read for the one-shot-42 test.
+        log('PANELTX', f'{s.current_pilot}: 40 x{n40} 71 x{len(recs)} 71sent={ok71} '
+                       f'snap_this_push={_snap_sent}'
+                       + (' PROBE' if PANEL_PROBE else ''))
+        log('PANELSEQ', f'{s.current_pilot}: 40 x{n40} -> 71 x{len(recs)}'
+                        + (' PROBE' if PANEL_PROBE else '')
+                        + f' (debounced push for {len(scene_ids)} scene(s))')
+    except Exception:
+        logx('PANELSEQ', 'panel push failed')
 
 
 def _supply_msg_instrument(s, sub, cmd, pl):
