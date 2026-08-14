@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v433f5'
+VERSION = 'v435f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11832,19 +11832,24 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                       f'len={len(body)} flying={getattr(s,"flying",False)} pl={hx(body)}')
 
 def _auto_resupply_check(s, sub, pl):
-    """v422f5: SLIMMED to at_airfield ATTRIBUTION maintenance only - the eligibility decision
-    moved wholesale into ground_stop_eligible() (single fail-closed judgement; change.log v422f5).
-      * StartPlace 0x17/0x18 (direct or type-scan wrap) records the SPAWN field;
-      * despawn/exit (sub 0x03) clears it;
-      * the v272-era '0x53 engine-ON clears at_airfield' branch is GONE: v347 proved 0x53 is NOT
-        engine state (...5300 always precedes a SPAWN, ...5301 always precedes an EXIT), so that
-        clear fired at climb-OUT and at_airfield was never cleared during a sortie anywhere.
-    Runs regardless of AUTO_RESUPPLY - attribution is also useful to console/TC tooling.
-    KNOWN LIMIT (unchanged since v347, now the top of the resupply queue): this is the field you
-    last SPAWNED at. Land at another field and its stock is not the one debited. Position-based
-    field resolution is the fix (v423f5 track - blocked on scene world coordinates, which no
-    extracted table carries; the 48-byte DATA00 scene record is name+h+cls+flag+link, fully
-    consumed)."""
+    """v435f5: RE-SCOPED and RENAMED-IN-SPIRIT to FIELD ATTRIBUTION. Despite the historic name,
+    this no longer decides anything about resupply - the grant TRIGGER is now msg-119
+    (_handle_repair_request_119, client-driven) with the ground-stop poll as fallback. What this
+    still does, and why it must stay:
+      (1) at_airfield ATTRIBUTION - records the pilot's last SPAWN field (StartPlace 0x17/0x18),
+          cleared on despawn (0x03). _grant_auto_resupply READS at_airfield to choose which
+          field's stock the TC economy debits and to log AFRAW. Remove this and every TC grant
+          loses its field -> all debits fall through to the unmapped-terrain fallback. The msg-119
+          path depends on it transitively.
+      (2) ONE-SHOT RE-ARM on a base change - tabbing to a DIFFERENT airfield clears
+          resupplied_this_stop/_grant_pos so the new field can be serviced (else the one-shot
+          would treat B as the already-serviced A).
+    The v272-era eligibility logic and the '0x53 engine clears at_airfield' branch are long gone
+    (see v347/v422f5). Runs regardless of AUTO_RESUPPLY - attribution is also useful to console/
+    TC tooling.
+    KNOWN LIMIT (unchanged): this is the field you last SPAWNED at. Land at another field and its
+    stock is not the one debited - position-based field resolution is the eventual fix (blocked on
+    scene world coordinates; q6_reader work)."""
     if not getattr(s, 'entered_game', False):
         return
     body = bytes(pl)
@@ -12057,6 +12062,76 @@ def _grant_auto_resupply(s, pos):
                     f'+fuel {_got_f}kg +ammo {_got_a}kg | pool now ammo {_rem_a} '
                     f'fuel {_rem_f} kg | flags=0x{_flags:02x} AFRAW={_af}]')
 
+MSG_REPAIR_REQUEST_119 = 0x77   # v435f5: the client's REPAIR/RESUPPLY REQUEST (msg 119).
+                               #   Wire form (sub already unwrapped by v327/v364f5):
+                               #     direct  len 9:  00 52 00 00 77 [ctr] 00 [fl] 00
+                               #     prefixed len 13: [ctr u16][0542] + the same 9 bytes
+                               #   byte5 = a per-pilot request counter (a nonce); byte7 = 00
+                               #   normally, 04 on the client's own unanswered-retry. Neither
+                               #   carries state we need - it is simply 'service me now'. Decoded
+                               #   from run_20260813_203929 SUPPLY-CAP (type=0x52 sub=0x77): every
+                               #   0x77 that preceded a grant had flying=True; the four unanswered
+                               #   were Taurus's first-landing failures (flying=False, byte7=04
+                               #   retries) - the v434f5 bug from the other side. The client ALWAYS
+                               #   asks when it wants repair; the server just never listened.
+
+def _handle_repair_request_119(s, pl):
+    """v435f5 [RESUPPLY]: grant on the client's EXPLICIT request (msg 119) instead of inferring
+    'parked' from telemetry. The client only sends 0x77 when it is at a field and wants service
+    (it renders 'accepted to airfield' locally first), so it is the AUTHORITY on serviceability -
+    this makes the request path primary and retires the fragile ground-stop-inference class of
+    bugs (v277/v346/v422f5/v434f5). We keep only a light AIRBORNE guard as defence-in-depth:
+    refuse if the plane is positively moving (plane_movement != 0), so a malformed/hostile request
+    cannot trigger a mid-air rearm (which rebuilds the plane object and freezes the client - the
+    hazard v277 chased). The ground-stop background poll stays as a FALLBACK for any client that
+    does not ask; one-shot + debounce are shared with it so the two paths cannot double-grant."""
+    if not AUTO_RESUPPLY:
+        return
+    if not getattr(s, 'entered_game', False) or not getattr(s, 'obj_confirmed', False):
+        return
+    if s.current_room is None or getattr(s, 'my_obj_number', None) is None:
+        return
+    now = time.time()
+    # SPAWN GRACE: a just-spawned plane is still being built client-side; repairing mid-build
+    # desyncs it (v279). The client should not ask this early, but guard anyway.
+    _spawn_t = getattr(s, 'spawn_time', 0.0)
+    if _spawn_t > 0 and (now - _spawn_t) < AUTO_RESUPPLY_SPAWN_GRACE:
+        log('RESUPPLY', f'{s.current_pilot} msg-119 request within spawn grace '
+                        f'({now - _spawn_t:.1f}s) - deferred')
+        return
+    # AIRBORNE GUARD: never rearm a moving plane. plane_movement()==0 for a genuinely parked
+    # plane (v346 calibration), ~250k airborne. NO-EVIDENCE also returns 0, but here that means
+    # 'no telemetry divergence' and the client has asserted it is at a field, so 0 -> grant.
+    # Only a positively-moving plane is refused.
+    try:
+        _mv = plane_movement(s)
+    except Exception:
+        _mv = 0
+    if _mv >= CRASH_MOVEMENT_MIN:
+        log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - plane moving '
+                        f'(movement={_mv} >= {CRASH_MOVEMENT_MIN}, airborne/taxiing)')
+        return
+    # DEBOUNCE + ONE-SHOT (shared with the poll): one grant per stop. The client re-sends 0x77
+    # every ~20-60s while parked; without this each retry would re-grant.
+    if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
+        return
+    _pos = None
+    try:
+        _hist = getattr(s, '_pos_hist', None)
+        if _hist:
+            _pos = _hist[-1][1]
+    except Exception:
+        _pos = None
+    if getattr(s, 'resupplied_this_stop', False) and _pos is not None \
+            and _pos == getattr(s, '_grant_pos', None):
+        return                                   # same stop, already serviced
+    s.resupplied_this_stop = True
+    s._grant_pos = _pos
+    s.last_resupply_at = now
+    log('RESUPPLY', f'{s.current_pilot} msg-119 repair REQUEST -> granting '
+                    f'(movement={_mv}, pos={_pos})')
+    _grant_auto_resupply(s, _pos)
+
 def _resupply_poll_loop():
     """v422f5: background poll driving the auto-resupply. The ground-stop decision itself lives
     in ground_stop_eligible() (fail-closed, ONE data path); this loop walks the sessions,
@@ -12075,7 +12150,21 @@ def _resupply_poll_loop():
         now = time.time()
         for s in list(get_all_sessions()):
             try:
-                if not getattr(s, 'entered_game', False) or not getattr(s, 'flying', False):
+                # v434f5 [RESUPPLY]: gate on obj_confirmed, NOT flying. flying is set True only at
+                # a ServerConfirm-with-takeoff (L10350) and cleared to False on every StartPlace/
+                # tab and on death (L8813/L10692). A plane that Ctrl+Tabs to an airfield - or spawns
+                # at one - and PARKS THERE without first taking off therefore has flying=False, so
+                # the old `not flying -> continue` gate skipped the exact planes this poll exists to
+                # service. FIELD BUG (Taurus, run_20260813_203929, FFA): 21:03:38 StartPlace tab to
+                # AF4 (flying=False), sat damaged 2 min, NO grant, killed at 21:05:40; every later
+                # life that took off first (flying=True) was serviced normally. The client's own
+                # repair-poll heartbeat (type=0x52 sub=0x77 / the out-119 the client logs) fires in
+                # BOTH states - it was only the server's flying gate that differed. obj_confirmed is
+                # the correct guard: the plane exists and is spawn-confirmed; ground_stop_eligible()
+                # still requires fresh onum-matched telemetry + advancing tick, and the spawn-grace
+                # below still covers the mid-build window, so a parked-but-confirmed plane is
+                # exactly what should be eligible. Revert: restore the `or not ...flying` disjunct.
+                if not getattr(s, 'entered_game', False) or not getattr(s, 'obj_confirmed', False):
                     continue
                 if s.current_room is None or getattr(s, 'my_obj_number', None) is None:
                     continue
@@ -12263,6 +12352,10 @@ def handle_post_auth(s, cmd, pl):
     if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
         # v294: the scene supply query the client fires on every map open / scene select.
         _handle_scene_supply_query_69(s, stored)
+    if sub == MSG_REPAIR_REQUEST_119 and getattr(s, 'entered_game', False):
+        # v435f5: the client's explicit REPAIR REQUEST (msg 119). Primary supply trigger -
+        # grant on request rather than inferring 'parked' from telemetry (see the handler).
+        _handle_repair_request_119(s, stored)
     _auto_resupply_check(s, sub, stored)         # v267: auto msg-60 resupply on park+engine-off
 
     if cmd in COMPOUND_CMDS:

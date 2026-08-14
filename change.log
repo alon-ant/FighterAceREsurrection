@@ -6,6 +6,104 @@ bc/appspace LENGTH RULE notes; the per-version history lives here.
 Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
+==============================================================================
+NEXT-SESSION PROMPT (paste this to start the new thread):
+------------------------------------------------------------------------------
+  "Continue the Fighter Ace TC production-panel investigation. Read change.log
+   entries 'PLAN-UPDATE 3', 'PLAN-UPDATE 2', and the v432f5 bank first. Summary:
+   the map-screen Production Complex panel is blank on our online server but works
+   in offline training on the SAME terrain. Via read-only memdump (gd_offline2.json
+   vs gd_online3.json, both on disk in C:\games\FA Server\) I proved the msg-40
+   camp table, the scene array at 0xc87270, and the host/era flags are all IDENTICAL
+   between working(offline) and blank(online). The ONLY confirmed difference is five
+   bytes in the live GAME_DEF struct at [0xc6e8b4] (same terrain):
+       +0x94: 50 vs 1000   +0xa8: 3 vs 2   +0xb4: 1 vs 64
+       +0xbc: 128 vs 256   +0xec: 0 vs 1
+   TASK: using the ghidra MCP on FA.exe (base 0x400000, no ASLR), xref DAT_00c6e8b4
+   and find what code READS +0x94/+0xa8/+0xb4/+0xbc/+0xec, and whether the map-panel
+   render path or the 'client emits out-71 request' path branches on any of them.
+   Identify the fields (likely among UseSceneUnitProducers / SupplyResourceRadius=
+   10000 / ResourceProducerLinkRadius=0 / PlaneProducerLinkRadius=250 from the 2009
+   arena cfg in C:\games\FA\messages04.log). Then decide: can we set the gating
+   field in our served GAME_DEF (build path around apply_tc_settings / _gamedef_tc_
+   offsets in server.py), or is it a client-INI-only field the wire can't reach
+   (like UseSceneUnitProducers per the earlier +0x474/+0x47c finding)? Do NOT infer
+   struct offsets from decompiles without confirming the object identity - several
+   such inferences were WRONG last session (scene +0x4c, the +0x40..+0xa0 'prod'
+   offsets). RE the read side, confirm, THEN change one value and re-dump.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace - read-only mount), ghidra
+   MCP, fa_memdump.py --gamedef (needs Admin). Server is server.py ~13950 lines,
+   build v433f5 banked."
+------------------------------------------------------------------------------
+
+v435f5 [RESUPPLY] MSG-119 REPAIR REQUEST IS NOW THE PRIMARY SUPPLY TRIGGER - the client asks,
+      the server grants, instead of the server inferring 'parked' from telemetry.
+      DECODE (run_20260813_203929 SUPPLY-CAP, type=0x52 sub=0x77): msg 119 = 0x77, the client's
+      repair/resupply request. Wire form (sub already unwrapped by v327/v364f5):
+        direct   len 9:  00 52 00 00 77 [ctr] 00 [fl] 00
+        prefixed len 13: [ctr u16][0542] + the same 9 bytes
+      byte5 = per-pilot request counter (a nonce); byte7 = 00 normally, 04 on the client's own
+      unanswered-retry. No parameters we need - it means 'service me now'. Proof it is the
+      request: every 0x77 that preceded a grant had flying=True; the only unanswered ones were
+      Taurus's first-landing failures (flying=False, byte7=04 retries) - i.e. the client WAS
+      asking on that first landing and the server ignored it (no 119 handler existed, and the
+      v434f5 poll gate had skipped him).
+      WHY THIS IS THE RIGHT MODEL: the client renders 'accepted to airfield' locally and only
+      then sends 0x77, so it is the authority on whether it is serviceable. Granting on request
+      retires the entire ground-stop-INFERENCE class of bugs that produced v277 (stale-view mid-
+      air rearm), v346 (tick-freeze false-static), v422f5 (bail/respawn airborne grants), and
+      v434f5 (flying-gate first-landing miss) - all of them were the server trying to guess a
+      fact the client already knew.
+      HANDLER (_handle_repair_request_119): grants via the existing _grant_auto_resupply (arcade
+      0x07 / TC tiers unchanged), guarded by entered_game + obj_confirmed + spawn-grace + a light
+      AIRBORNE guard (refuse only if plane_movement != 0, so a malformed/hostile request cannot
+      trigger a mid-air rearm) + the shared one-shot/debounce so it cannot double-grant with the
+      poll. plane_movement==0 (parked OR no-evidence) with the client asserting a field = grant.
+      The v422f5 ground-stop background poll is RETAINED as a fallback for any client that does
+      not ask; shared resupplied_this_stop/_grant_pos/last_resupply_at keep the two paths from
+      double-granting.
+      FALSIFY: land (or Ctrl+Tab to a field) and stop -> the client's out-119 draws an immediate
+      grant; server logs 'msg-119 repair REQUEST -> granting'. First landing after launch now
+      works with no tab. Airborne/taxiing 0x77 (if any) logs 'REFUSED - plane moving'. Retry
+      spam while parked is absorbed by debounce (one grant per stop). REVERT: remove the
+      _handle_repair_request_119 dispatch line; the poll alone resumes (v434f5 behaviour).
+
+==============================================================================
+
+v434f5 [RESUPPLY] GROUND-STOP POLL GATED ON obj_confirmed, NOT flying - fixes "repair does
+      not work on the first landing; had to Ctrl+Tab to get repaired".
+      DIAGNOSED FROM THE SERVER LOG (run_20260813_203929.log, account Sinistarr / pilot
+      Taurus@HQ, FFA):
+        21:02:26  Taurus obj 0x0104 DAMAGED by 0x0105
+        21:03:38  FLY23 StartPlace tab to AF4 -> GRANT N=0; from here flying=False (parked,
+                  never took off from this field), client sends its repair-poll heartbeat
+                  type=0x52 sub=0x77 with flying=False
+        21:03:38-21:05:40  parked & damaged ~2 min, ZERO RESUPPLY grants
+        21:05:40  HD75@FA destroyed Taurus (killed while parked) - lost plane + life
+        21:12:44  next life: took off first (flying=True), landed, sat -> RESUPPLY fired
+                  normally, and did so on every subsequent life (all flying=True).
+      ROOT CAUSE: _resupply_poll_loop skipped any session with flying=False
+      (`not getattr(s,'flying',False) -> continue`). flying is True ONLY after a
+      ServerConfirm-with-takeoff (L10350) and is cleared on every StartPlace/tab and on death
+      (L8813/L10692). So a plane that Ctrl+Tabs to a field - or spawns at one - and PARKS
+      without first taking off has flying=False and was excluded from the very poll meant to
+      service grounded planes. The client's repair-poll heartbeat (type=0x52 sub=0x77, the
+      out-119 in the client log) fires in BOTH states; only the server's flying gate differed,
+      which is why a Ctrl+Tab that ended in a normal takeoff+land 'fixed' it.
+      FIX: gate the poll on obj_confirmed instead of flying. A spawn-confirmed plane is
+      serviceable whether or not it ever took off; ground_stop_eligible() still requires fresh
+      onum-matched telemetry with an advancing conductor tick, and the spawn-grace window still
+      guards the mid-build case, so nothing airborne/half-built slips through. entered_game +
+      obj_confirmed + my_obj_number remain required.
+      FALSIFY: spawn OR Ctrl+Tab onto an airfield, take damage, land WITHOUT a prior takeoff,
+      sit with brakes on -> RESUPPLY grant within ~SETTLE+poll, no tab needed. Regression:
+      normal takeoff->land->park still grants exactly once per stop; airborne planes still
+      never grant (movement!=0). REVERT: restore the `or not getattr(s,'flying',False)` disjunct.
+      NOTE: pairs with v433f5 (repair clears the damage latch) - together, land-repair-exit is
+      now clean whether the pilot took off first or tabbed straight to a field.
+
+==============================================================================
+
 v433f5 [KILL/SCORE] REPAIR CLEARS THE DAMAGE LATCH - fixes "land, repair, exit -> lose a
       plane and a life; last shooter gets a phantom kill + cyan banner".
       FIELD BUG (Taurus, messages57_1_.log, FFA Two Islands, 2026-08-13):
@@ -43,32 +141,124 @@ v433f5 [KILL/SCORE] REPAIR CLEARS THE DAMAGE LATCH - fixes "land, repair, exit -
 ==============================================================================
 
 v432f5 [PLAN] PANEL ROOT-CAUSE via OFFLINE/ONLINE memdump diff (Alon's hypothesis).
-      KEY NEW FACT (Alon): in OFFLINE TRAINING mode the client shows the full TC production/supply
-      panel exactly like 2009 online. So the client's DISPLAY code works; something in our ONLINE
-      arena STATE fails to arm it. Alon also notes the game still shows as PRIVATE - likely the
-      GAME_DEF/host state that gates whether the client requests+renders TC data (this fits the
-      earlier finding: our client never sends `out 71`/`out 59`, i.e. its production system is
-      dormant).
-      THIS IS TESTABLE BY DIFF, NO GUESSING: dump the same memory offline (works) vs online
-      (blank) and compare the arena-state fields. Added to fa_memdump.py:
-        * --gamedef : captures the era-gate/host fields the client checks -
-            [0xc6e8b4] live GAME_DEF struct (+0x8 CreatTimeSec, +0x135c Active, +0x1360/64 era),
-            [0xc6e8a4] host_flag (==0 => not host => INFO path), [0xc6e8b0] host_flag2,
-            [0xc845c8] 8x0x9c camp records (+0x34 valid) - and a 0x1400-byte GAME_DEF window.
-        * --gddiff OFFLINE.json ONLINE.json : reports which flags differ + the exact differing
-          GAME_DEF bytes. Tested on synthetic dumps: correctly isolates host_flag/Active/byte.
-      RUN SEQUENCE (Alon, needs Administrator for ReadProcessMemory):
-        1. Start FA OFFLINE (training/sample TC arena), load it, open the map panel to confirm it
-           shows data, then:  python fa_memdump.py --gamedef --out gd_offline.json
-        2. Join our ONLINE server on the same terrain, open the (blank) panel, then:
-           python fa_memdump.py --gamedef --out gd_online.json
-        3. python fa_memdump.py --gddiff gd_offline.json gd_online.json
-      The differing field(s) are the arena-state bits our GAME_DEF gets wrong. Likely candidates
-      from prior RE: the PRE-PLANE-BLOCK region checkboxes (same area as the scoring-enabled and
-      exit-crash flags already in the TODO), and/or a 'private/host' bit. Once identified: set that
-      byte correctly in build_gamedef / the 212 path (or, if it is a pure host-side flag the wire
-      cannot reach, document that TC panels require a host-mode arena). Then the memdump of the
-      scene node (obj+0x40..+0xa0) pins the 71 array->column map as the FINAL step.
+      *** MEMDUMP DONE - MAJOR FINDINGS (gd_offline.json vs gd_online.json) ***
+      1) msg-40 IS CORRECT AND UNGATED. The consumer FUN_004f6ab0 (msg-40 handler) has NO
+         ownership/host/validity check - it writes camp byte [param+1] straight into the
+         CAMP_SCORE_PRODUCTION_DATA[8] table (stride 0x27 dwords @ 0xc845c8), sets valid=1, copies
+         units(3)+stored(3)+capacity(3). PROOF it works: online camp 1 record =
+         [4,4,4, 127000,253200,384500, 151000,253500] - our EXACT units (4/4/4) and resource
+         values. So msg-40 format, fields, and delivery are all correct; the client stores it.
+      2) THE DIFFERENCE IS COVERAGE, NOT REJECTION. Offline (working panel) has camps 0-4 ALL
+         populated (valid=1, real data) - the local sim fills every camp. Online (blank panel)
+         has ONLY camp 1 populated; camps 0,2,3,4 are empty (valid=0, all zeros). The panel needs
+         the full camp table; we're only landing ONE camp.
+      3) HOST/ERA state is NOT the gate: host_flag=0, host_flag2=0, Active_135c=0, era 46/1 are
+         IDENTICAL offline and online. Alon's 'private' observation is real but it is NOT these
+         bits - the GAME_DEF head matches. (The deeper GAME_DEF body diffs are confounded by the
+         two dumps being different arenas/sizes 984B vs 524B; not trusted as the gate.)
+      4) BONUS - real camp-record field layout confirmed: [u0,u1,u2 units][3 x resource A]
+         [3 x resource B]... matching build_production_40's units+stored+capacity order.
+      => NEW WORKING THEORY: the panel is blank because only 1 of N camps is populated client-side.
+         Either (a) our online session only actually transmitted camp 1 (the dump may have caught
+         it mid-cadence / the periodic broadcast was off in that run), or (b) the panel requires
+         EVERY camp's record present before it renders. Both are testable.
+      NEXT (decisive, cheap):
+         * Turn on the periodic msg-40 for ALL camps (SEND_PRODUCTION_40) OR run console
+           `production` (sends x5), THEN immediately --gamedef dump ONLINE again and confirm
+           camps 0-4 all show valid=1 with data. If the panel fills once all camps are present ->
+           SOLVED (we were under-sending). If camps populate but panel still blank -> the gate is
+           elsewhere (msg-71 scene records / a scene-count precondition), and we memdump the
+           scene node next.
+         * Compare against a SAME-ARENA offline/online pair to remove the terrain confound before
+           trusting any GAME_DEF body byte.
+
+v432f5 [PLAN-UPDATE 3] SCENE ARRAY IS IDENTICAL offline vs online -> not the gate either.
+      gd_online3.json vs gd_offline2.json: the scene array (0xc87270, cap/count=1565) has
+      BYTE-IDENTICAL node structure in both - same vtables (0x00a36e74), same -1.0f sentinels,
+      same stamp_24=33, same values (only per-process pointers differ). CAVEAT: my +0x40..+0xa0
+      'production' offsets read back as VTABLES / FLOATS / POINTERS, and sceneid_4c=0 for every
+      node - so THIS scene array (0xc87270) is a DIFFERENT class than msg-71's FUN_0048e910 target
+      (param_1); the +0x4c.. mapping does NOT apply here (the memdump header note warned of exactly
+      this). scene_nodes_with_production=64 was a FALSE positive (nonzero pointers/floats).
+      NET RESULT of the whole memdump investigation - by ELIMINATION, everything proven identical
+      between WORKING(offline) and BLANK(online):
+        * msg-40 / camp table  -> identical (both fill camps 0-4)
+        * scene array 0xc87270 -> identical
+        * host/era flags       -> identical
+      The ONLY confirmed difference is the GAME_DEF HEAD ([0xc6e8b4], same terrain):
+        +0x94: 50 vs 1000 | +0xa8: 3 vs 2 | +0xb4: 1 vs 64 | +0xbc: 128 vs 256 | +0xec: 0 vs 1
+      So the panel gate is almost certainly one of these five. They were deferred because the
+      wire parser FUN_0057bee0 writes by dword-index into a struct that is NOT the [0xc6e8b4]
+      object, so the byte offsets aren't yet named.
+      HONEST NOTE: several offset interpretations this session (scene +0x4c, prod arrays) proved
+      WRONG from over-reading decompiles. STOP inferring layout; instead RE the READ side:
+      find what code reads [0xc6e8b4]+0x94/+0xa8/+0xb4/+0xbc/+0xec, and whether the map-panel
+      render path (or the 'client requests out 71' path) branches on any of them. Only then change
+      a value. Candidate approach: xref DAT_00c6e8b4; for each reader, check if it gates production
+      UI / out-71 emission. The 2009 arena cfg (UseSceneUnitProducers=yes, SupplyResourceRadius=
+      10000, ResourceProducerLinkRadius=0, PlaneProducerLinkRadius=250) are the likely identities
+      of some of these five - e.g. +0xbc 128->256 and +0xb4 1->64 look like radius/count configs.
+      This is the FINAL lead; if a matching config byte can be set in our served GAME_DEF (or is a
+      client-INI-only field the wire can't reach, per the earlier UseSceneUnitProducers finding),
+      that determines whether the panel is fixable server-side at all.
+
+
+      (valid=1, our data), matching offline. PANEL STILL BLANK. So a full camp table is NECESSARY
+      but NOT SUFFICIENT - the camp-coverage theory is ELIMINATED. The gate is the SCENE side.
+      RE of the msg-71 consumer FUN_0048e910 (renamed target): it writes the 9 arrays into a SCENE
+      NODE at node+0x4c,+0x58,..,+0xa0, then stamps node+0x24=timeGetTime() and node+0x2c=0 and
+      calls FUN_0048c8b0 (notify). So msg-71 needs a scene NODE to land in. If the online client
+      has no scene objects (empty scene array at 0xc87270) or their +0x4c.. fields stay zero, the
+      Single Scene panel is empty -> the whole Production Complex panel stays hidden even with the
+      camp table full. This fits: mouse-over shows DAMAGE (a different, populated field) but never
+      production.
+      Extended --gamedef to also dump the SCENE ARRAY (base/cap/count at 0xc87270/74/0xc84ffc) and
+      sample the first 64 scene nodes' production fields (+0x40..+0xa0) + stamp. DECISIVE next dump:
+        join online TC map, open panel, `production`, then:
+          python fa_memdump.py --gamedef --out gd_online3.json
+        Read scene_array.count and scene_nodes_with_production:
+        - count>0 but scene_nodes_with_production==0 -> our msg-71 is NOT landing in the nodes
+          (scene-id match against node+0x4c is failing: our wire scene-index space != the client's
+          node id space). FIX: correct the scene ids we send in msg-71 to match node+0x4c. The
+          dump prints each node's sceneid_4c so we can map our ids to the client's directly.
+        - count==0 / array empty -> the client has no scene objects at all in our arena; the map
+          world was never built (a bigger arena-state gap than the panel). Different track.
+        - scene_nodes_with_production>0 but panel blank -> data lands and panel still won't draw:
+          then it is the +0x94/a8/b4/bc/ec GAME_DEF head bits after all; go identify the 0xc6e8b4
+          struct class and map them.
+      Compare the SAME fields in the OFFLINE dump (re-run --gamedef offline -> gd_offline2.json)
+      to see what a WORKING scene node's +0x4c..+0xa0 and sceneid_4c look like - that is the
+      ground-truth template for both the id mapping AND the 71 array->column order.
+
+
+      Re-diffed the deserialized GAME_DEF ([0xc6e8b4]) offline vs online, same terrain, ignoring
+      pointers. Real non-pointer differences in the head:
+        +0x04/+0x08 timestamps (expected per-launch, ignore)
+        +0x94: off=50   on=1000
+        +0xa8: off=3    on=2
+        +0xb4: off=1    on=64
+        +0xbc: off=128  on=256
+        +0xec: off=0    on=1
+      RE status: FUN_0057bee0 (the wire GAME_DEF parser, version byte 0x8a) writes fields as
+      param_1[dword-index], NOT at these byte offsets - so the deserialized STRUCT ([0xc6e8b4]) is
+      a DIFFERENT object/layout from the parser's param_1, and these +0x94 etc. offsets are not
+      yet mapped to named fields. Deferred: mapping them would need to identify the [0xc6e8b4]
+      struct's own class. NOT chased further this pass to avoid a guess-spiral.
+      THE CLEAR, ACTIONABLE SIGNAL remains the CAMP RECORDS (terrain-independent, directly gates
+      the panel): offline 5 camps populated, online 1. msg-40 consumer FUN_004f6ab0 is ungated and
+      our data lands perfectly (camp1 online = our exact 4/4/4 + resources). So the decisive test
+      needs NO more analysis:
+        DECISIVE TEST (Alon): join online TC map, run console `production` (sends all 5 camps),
+        confirm in-game whether the panel now fills; ALSO immediately
+          python fa_memdump.py --gamedef --out gd_online2.json
+        and check camps 0-4 all show valid=1 with data.
+        - Panel fills once all camps present -> SOLVED (we were under-sending; make all camps
+          broadcast, i.e. keep SEND_PRODUCTION_40 on / ensure periodic covers every camp).
+        - Camps all populate but panel STILL blank -> the gate is the msg-71 scene records or a
+          scene-count precondition; memdump the SCENE node next (obj+0x40..+0xa0) which also pins
+          the 71 array->column map. AND revisit the +0x94/+0xa8/+0xb4/+0xbc/+0xec head diffs by
+          first identifying the [0xc6e8b4] struct class.
+
 
 v432f5: *** BANKED BASELINE 2026-08-12 (evening) *** - production units layer + supply links live;
       panel content-decode is the one open thread, cleanly characterised for pickup.
