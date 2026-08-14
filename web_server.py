@@ -3,6 +3,13 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-08-15: v418f5 - admin promote/demote from the Users tab.
+#   Each account row gains a Promote (btn-green) / Demote (btn-yellow) toggle POSTing to
+#   /admin/set_admin (admin-only, same guard as every other handler). Two rows never show
+#   the toggle: your OWN account (an admin demoting themselves mid-session is a lock-out
+#   footgun) and the built-in 'admin' account (init_db re-asserts its is_admin=1 on every
+#   start, so a demote would silently revert - refusing is honest). Both are also enforced
+#   server-side in the handler, not just hidden in the HTML.
 # 2026-08-03: v410f5 - pilot editor edits the per-mode ladder boards.
 #   /admin/edit_pilot gains a 'Ladder Boards - FFA / TC / Events' fieldset with all twelve
 #   per-mode columns (fighter/bomber score + kills + deaths per board), for seeding or
@@ -1103,10 +1110,31 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             for u_name, is_adm in users:
                 role = "&#128081; Admin" if is_adm else "Player"
                 u_esc = hesc(str(u_name), quote=True)
+                # v418f5: promote/demote toggle. Hidden (and refused server-side) for the
+                # requesting admin's own row and for the pinned built-in 'admin' account.
+                if u_name == user or u_name == 'admin':
+                    admin_toggle = ''
+                elif is_adm:
+                    admin_toggle = f"""
+                        <form method="POST" action="/admin/set_admin" style="display:inline-block; margin-right:10px;"
+                              onsubmit="return confirm('Remove admin rights from this account?');">
+                            <input type="hidden" name="account_name" value="{u_esc}">
+                            <input type="hidden" name="make_admin" value="0">
+                            <button type="submit" class="btn-yellow" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Demote</button>
+                        </form>"""
+                else:
+                    admin_toggle = f"""
+                        <form method="POST" action="/admin/set_admin" style="display:inline-block; margin-right:10px;"
+                              onsubmit="return confirm('Grant this account FULL admin rights?\\n\\nThey will be able to edit pilots, arenas, accounts and promote/demote others.');">
+                            <input type="hidden" name="account_name" value="{u_esc}">
+                            <input type="hidden" name="make_admin" value="1">
+                            <button type="submit" class="btn-green" style="width:auto; padding:8px 12px; margin:0; display:inline-block;">Promote</button>
+                        </form>"""
                 user_html += f"""
                 <tr>
                     <td><strong>{u_esc}</strong> <br><small style="color:#666;">{role}</small></td>
                     <td style="text-align:right;">
+                        {admin_toggle}
                         <form method="POST" action="/admin/reset_password" style="display:inline-block; margin-right: 10px;">
                             <input type="hidden" name="account_name" value="{u_esc}">
                             <input type="password" name="new_password" placeholder="New Password" required style="width:130px; padding:8px; margin:0; display:inline-block;">
@@ -2043,6 +2071,29 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 conn.commit()
                 conn.close()
                 SRV['log']('WEB', f'Admin {user} reset password for: {target_user}')
+            self.send_response(302)
+            self.send_header('Location', '/admin')
+            self.end_headers()
+
+        elif self.path == '/admin/set_admin':
+            # v418f5: promote/demote an account. Any admin may flip any OTHER account's
+            # is_admin flag. Two refusals, enforced here (not merely hidden in the HTML):
+            #   * your own account - self-demotion mid-session is a lock-out footgun, and
+            #     self-"promotion" is a no-op (you got here, so you are already admin);
+            #   * the built-in 'admin' account - init_db pins is_admin=1 on every start,
+            #     so a demote would silently revert on restart. Refusing is honest.
+            if not is_user_admin(user): return self.send_error(403)
+            target_user = qs.get('account_name', [''])[0].strip()
+            make_admin = 1 if qs.get('make_admin', ['0'])[0].strip() == '1' else 0
+            if target_user and target_user != user and target_user != 'admin':
+                conn = sqlite3.connect(SRV['db_path'])
+                cur = conn.execute("UPDATE accounts SET is_admin=? WHERE account_name=?",
+                                   (make_admin, target_user))
+                conn.commit()
+                conn.close()
+                if cur.rowcount:
+                    verb = 'promoted' if make_admin else 'demoted'
+                    SRV['log']('WEB', f'Admin {user} {verb} account: {target_user} (is_admin={make_admin})')
             self.send_response(302)
             self.send_header('Location', '/admin')
             self.end_headers()
