@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v442f5'
+VERSION = 'v444f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12464,7 +12464,52 @@ SUPPLY_ARCADE_AMT2  = 100      # unread by the vfunc20(1) shortcut; nonzero sent
 #        'insufficient aircraft units / taking from tank production' narration.
 SUPPLY_TC_REARM_AMMO_KG = 500  # flat ammo-pool cost of a full rearm incl. ordnance (RICH tier)
 SUPPLY_TC_FUEL_ADD_KG   = 300  # incremental fuel added (and debited) per grant
-SUPPLY_TC_AMMO_ADD_KG   = 150  # incremental gun ammo added (and debited) per LEAN grant
+SUPPLY_TC_AMMO_ADD_KG   = 150  # v443f5: reference only - the LEAN cap is gone (per-resource
+                               # grants allocate whatever the pool can give, per the field spec:
+                               # 'if it cannot fully resupply, arm according to what CAN be
+                               # allocated at the time')
+# v444f5: spawn-time ammo ask = a per-class CEILING, not a cap. 2009 ground truth
+# (messages04, Korea TC, 14 spawns incl. B-17G): a supplied base answers a spawn with a FULL
+# arm and NO 'limited to' lines - the only narration ever shown is the bit3 unit-shortage
+# pair ('Insufficient aircraft units... taking from tank production'), and several grants
+# are completely silent. ACWIKI TC_PRODUCTION_AND_SUPPLY: 'in the event that a plane is
+# being created, but resources are not completely available, the plane is created but does
+# not have full fuel or ammo' + equip cost = 'the physical weight of the fuel and
+# ammunition/ordnance used'. So: caps exist ONLY when the pool comes up short; the ceiling
+# below is what a full load can weigh (debit approximates the ACWIKI physical-weight cost
+# at class granularity - a Lancaster's 14x910lb is ~5,800kg + gun ammo). Exact per-plane
+# weights (client Data files) or msg-73 SendRepairInfo reconciliation are the upgrade path.
+SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG = 500
+SUPPLY_TC_SPAWN_AMMO_BOMBER_KG  = 6500
+
+def _tc_pool_draw(s, ammo_ask, fuel_ask):
+    """v443f5: THE 'CHECK SUPPLY FIRST' PRIMITIVE shared by every TC grant path. Draws up to
+    (ammo_ask, fuel_ask) from the pilot's camp pool - the DRAW ITSELF is the supply check
+    (atomic per scene under _SUPPLY_LOCK), which closes the peek->take race the old tier
+    logic had: what the pool yields IS its status, and the grant is built from the yield.
+    Destroyed scenes contribute nothing by construction: supply_on_scene_destroyed zeroes a
+    dead scene's stores the moment it dies and scene_efficiency 0.0 stops its production -
+    so a killed fuel storage genuinely limits fuel and a killed ammo dump limits ammo, per
+    resource, with no extra bookkeeping here.
+    Returns (got_ammo, got_fuel, rem_ammo, rem_fuel, src_desc) or None when the terrain has
+    no usable supply mapping (caller serves arcade-style rather than deny)."""
+    _trn = _probe_terrain_for_room(s.current_room)
+    _af = getattr(s, 'at_airfield', None)
+    _have_pool = bool(SCENE_CAMP_BY_TERRAIN.get(_trn))
+    if _have_pool:
+        _stored, _pcap = camp_economy_totals(s.current_room, _trn, s.nation)
+        if not any(_pcap.values()):
+            _have_pool = False               # camp owns nothing profiled -> per-scene fallback
+    if _have_pool:
+        _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
+                                                      ammo_ask, fuel_ask)
+        return _got_a, _got_f, _after['ammo'], _after['fuel'], f'camp{s.nation} pool ({_n} scenes)'
+    if _af is None or supply_state(s.current_room, _trn, _af, True)[0] is None:
+        return None                          # unmapped terrain / no per-scene data either
+    _got_a, _got_f = supply_take(s.current_room, _trn, _af, ammo_ask, fuel_ask)
+    _pk2 = supply_state(s.current_room, _trn, _af, True)[0]
+    return _got_a, _got_f, _pk2['ammo'], _pk2['fuel'], f'scene AFRAW={_af}'
+
 
 def _grant_auto_resupply(s, pos):
     """v425f5: THE EXPLICIT TWO-LEVEL SUPPLY POLICY (the refactor's level 1 / level 2).
@@ -12485,65 +12530,47 @@ def _grant_auto_resupply(s, pos):
         log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> ARCADE grant '
                         f'(repair + loadout restore, mode={_mode}, AFRAW={_af})')
         return
-    # ---- TC: camp-pool economy (v427f5: INCREMENTAL grants - debit == fill by construction,
-    # nothing is unloaded, ordnance is preserved; the ordnance STRIPPER (bit0's reload-to-
-    # budget pass) is gone from TC - it was denuding freshly spawned bombers of their racks) ----
+    # ---- TC: camp-pool economy, PER-RESOURCE (v443f5). Draw first (_tc_pool_draw = the
+    # supply check), then compose the msg-60 from what each resource actually yielded:
+    #   fuel covered + ammo covered -> 0x06  vfunc20(1) TOTAL restore, silent (out-73 bonus)
+    #   fuel covered + ammo short   -> 0x0a  bit1 fuel->loadout + incremental ammo add + bit3
+    #   fuel short   + ammo covered -> 0x0c  bit2 full guns/ordnance + incremental fuel + bit3
+    #   both short                  -> 0x08  incremental adds of the yields + bit3 narration
+    # bit0 NEVER appears mid-life: its ammo path is unload-all-then-reload (the v427f5
+    # ordnance STRIPPER) which denudes a loaded plane - budget reloads are for spawns only.
+    # A dry pool sends adds of 0 (safe in incremental mode; the client narrates 'no fuel/
+    # ammunition available'), and a destroyed storage scene contributes nothing (v291 store
+    # loss + efficiency 0), so per-resource limits track the war state by construction. ----
     if getattr(s, 'nation', None) is None:
         log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC but no camp (nation '
                         f'unset) - no grant')
         return
-    _trn = _probe_terrain_for_room(s.current_room)
-    _have_pool = bool(SCENE_CAMP_BY_TERRAIN.get(_trn))
-    if _have_pool:
-        _stored, _pcap = camp_economy_totals(s.current_room, _trn, s.nation)
-        if not any(_pcap.values()):
-            _have_pool = False           # camp owns nothing profiled -> per-scene fallback
-    if not _have_pool:
-        _pk = supply_state(s.current_room, _trn, _af, True)[0] if _af is not None else None
-        if _pk is None:
-            # TC room on a terrain with no supply data at all: serve arcade-style rather
-            # than deny - an unmapped map should not brick resupply.
-            send_supply_grant_60(
-                s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT,
-                amount2=SUPPLY_ARCADE_AMT2,
-                reason=f'(auto-resupply TC-unmapped: {s.current_pilot} parked)')
-            log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC room but terrain '
-                            f'{_trn} has no supply data - arcade-style grant (AFRAW={_af})')
-            return
-        _stored = {'ammo': _pk['ammo'], 'fuel': _pk['fuel']}
-        _src = f'scene AFRAW={_af}'
-    else:
-        _src = f'camp{s.nation} pool'
-    # TIER from the peek: a RICH pool buys the full rearm (guns + ordnance, flat cost); a LEAN
-    # pool gives incremental adds of exactly what it holds. Peek->draw races with another pilot
-    # can only shave the draw short, and a shaved rich draw demotes to lean below. A dry pool
-    # sends adds of 0, which in INCREMENTAL mode is safe (no drain) and surfaces the client's
-    # own 'no fuel available' / 'no ammunition available' messages - so the old [DRY] no-grant
-    # branch is gone (free airframe repair rides along on any grant; costing repairs in metal/
-    # units is the next economy stage).
-    _rich = (_stored['ammo'] >= SUPPLY_TC_REARM_AMMO_KG
-             and _stored['fuel'] >= SUPPLY_TC_FUEL_ADD_KG)
-    _fuel_add = SUPPLY_TC_FUEL_ADD_KG if _rich else min(SUPPLY_TC_FUEL_ADD_KG, _stored['fuel'])
-    _ammo_add = SUPPLY_TC_REARM_AMMO_KG if _rich else min(SUPPLY_TC_AMMO_ADD_KG, _stored['ammo'])
-    if _have_pool:
-        _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
-                                                      _ammo_add, _fuel_add)
-        _rem_a, _rem_f = _after['ammo'], _after['fuel']
-        _src = f'camp{s.nation} pool ({_n} scenes)'
-    else:
-        _got_a, _got_f = supply_take(s.current_room, _trn, _af, _ammo_add, _fuel_add)
-        _pk2 = supply_state(s.current_room, _trn, _af, True)[0]
-        _rem_a, _rem_f = _pk2['ammo'], _pk2['fuel']
-    if _rich and _got_a >= SUPPLY_TC_REARM_AMMO_KG:
-        # RICH: 0x06 = vfunc20(1) total restore - fuel to HQ LOADOUT, full guns AND ordnance,
-        # silent (amounts unread); flat ammo+fuel service cost debited. Sends the out-73 reply.
+    _draw = _tc_pool_draw(s, SUPPLY_TC_REARM_AMMO_KG, SUPPLY_TC_FUEL_ADD_KG)
+    if _draw is None:
+        # TC room on a terrain with no supply data at all: serve arcade-style rather
+        # than deny - an unmapped map should not brick resupply.
+        send_supply_grant_60(
+            s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT,
+            amount2=SUPPLY_ARCADE_AMT2,
+            reason=f'(auto-resupply TC-unmapped: {s.current_pilot} parked)')
+        log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC room but terrain '
+                        f'has no supply data - arcade-style grant (AFRAW={_af})')
+        return
+    _got_a, _got_f, _rem_a, _rem_f, _src = _draw
+    _fuel_ok = _got_f >= SUPPLY_TC_FUEL_ADD_KG
+    _ammo_ok = _got_a >= SUPPLY_TC_REARM_AMMO_KG
+    if _fuel_ok and _ammo_ok:
         _flags, amt, amt2 = 0x06, 100, 100
-        _tier = f'RICH loadout-restore (flat cost ammo {_got_a}kg fuel {_got_f}kg)'
+        _tier = f'FULL loadout-restore (cost ammo {_got_a}kg fuel {_got_f}kg)'
+    elif _fuel_ok:
+        _flags, amt, amt2 = 0x0a, 0, _got_a
+        _tier = f'fuel FULL / ammo SHORT +{_got_a}kg'
+    elif _ammo_ok:
+        _flags, amt, amt2 = 0x0c, _got_f, 0
+        _tier = f'ammo FULL / fuel SHORT +{_got_f}kg'
     else:
-        # LEAN: pure incremental adds + bit3's authentic narration ('insufficient aircraft
-        # units' / 'taking from tank production') for the ordnance that is NOT restored.
         _flags, amt, amt2 = 0x08, _got_f, _got_a
-        _tier = 'LEAN incremental'
+        _tier = f'LEAN incremental (+fuel {_got_f}kg +ammo {_got_a}kg)'
     send_supply_grant_60(
         s, flags=_flags, amount=amt, amount2=amt2,
         reason=f'(auto-resupply TC {_tier}: {s.current_pilot} parked, {_src})')
@@ -12650,7 +12677,9 @@ def _handle_repair_request_119(s, pl):
 # spawned plane has no telemetry divergence -> movement 0 -> grant).
 MSG_ASK_RESOURCES_59     = 0x3b
 SPAWN59_REPLY            = True   # answer spawn-time msg 59 immediately; False -> poll only
-SPAWN59_FLAGS            = 0x03   # bit0|bit1: fuel->loadout silent, ammo->limited-to budget
+SPAWN59_FLAGS            = 0x03   # v443f5: reference only (superseded by the per-resource
+                                  # composition in _grant_spawn_supply: 0x03 when fuel is
+                                  # covered, 0x01 with 'Fuel limited to' when it is not)
 SPAWN59_NARRATE_SHORTAGE = True   # add bit3 ('insufficient aircraft units...') on a short draw
 SPAWN59_REPLY_DELAY      = 1.5    # v438f5: seconds to hold the grant after the request. The
                                   # v437f5 instant (~20ms) reply raced the client's own spawn
@@ -12663,9 +12692,29 @@ SPAWN59_REPLY_DELAY      = 1.5    # v438f5: seconds to hold the grant after the 
                                   # 1.5s clears the build window with margin. 0 = reply inline.
 
 def _grant_spawn_supply(s):
-    """The msg-60 reply to a spawn-time msg-59. Arcade rooms: silent full service. TC rooms:
-    flags 0x03 with amount2 = the ammo kg actually drawn from the camp pool (the client renders
-    'Ammunition limited to <amount2>' and loads exactly that budget)."""
+    """The msg-60 reply to a spawn-time msg-59. Arcade rooms: silent full service. TC rooms
+    (v444f5, per 2009 ground truth messages04 + ACWIKI): the pool draw is the supply check,
+    and the grant form follows what each resource yielded - CAPS EXIST ONLY ON SHORTAGE:
+      both covered    -> 0x07  bit0|bit1|bit2: fuel to loadout + EXPLICIT full guns AND
+                               ordnance (FUN_004eba80 + FUN_004ec5c0 full) - the full arm a
+                               supplied 2009 base gave, no 'limited to' lines. (NOT 0x06:
+                               the v436f5 field test proved vfunc20(1)'s restore leaves a
+                               fresh mission-mode plane's guns/ordnance EMPTY; bit2's
+                               explicit reload is the same machinery as the proven bit0
+                               budget path, with a full parameter.)
+      ammo short only -> 0x03  fuel to loadout; ammo budget-reload to the yield -
+                               'Ammunition limited to <amount2>'.
+      fuel short only -> 0x05  full guns/ordnance; fuel absolute to the yield -
+                               'Fuel limited to <amount>'.
+      both short      -> 0x01  both limited-to yields.
+      (+0x08 narration on any shortage - the 'Insufficient aircraft units' pair, the ONLY
+       narration messages04's 14 spawns ever show; 'limited to' appears ZERO times there.)
+    The ammo ask is a per-class CEILING (fighter 500 / bomber 6500kg - a Lancaster carries
+    14x910lb): a rich pool yields the ceiling -> full arm; a short pool's yield becomes the
+    authentic cap. Destroyed storage zeroes its side of the pool (v291 + efficiency 0), so a
+    killed fuel depot limits fuel and a killed ammo dump limits ammo, independently. Debit =
+    the yield (approximates ACWIKI's 'physical weight of the fuel and ammunition/ordnance
+    used' at class granularity; msg-73 reconciliation is the exactness upgrade)."""
     _mode = None
     try:
         _mode = scoring_mode_for_room(s.current_room)
@@ -12680,33 +12729,35 @@ def _grant_spawn_supply(s):
     if getattr(s, 'nation', None) is None:
         log('RESUPPLY', f'{s.current_pilot} spawn-59: TC but no camp (nation unset) - no grant')
         return
-    _trn = _probe_terrain_for_room(s.current_room)
-    _have_pool = bool(SCENE_CAMP_BY_TERRAIN.get(_trn))
-    if _have_pool:
-        _stored, _pcap = camp_economy_totals(s.current_room, _trn, s.nation)
-        if not any(_pcap.values()):
-            _have_pool = False
-    if not _have_pool:
+    _pt = getattr(s, 'plane_type', None)
+    _bomber = bool(is_bomber_plane(_pt))
+    _ask_a = SUPPLY_TC_SPAWN_AMMO_BOMBER_KG if _bomber else SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG
+    _draw = _tc_pool_draw(s, _ask_a, SUPPLY_TC_FUEL_ADD_KG)
+    if _draw is None:
         # unmapped terrain: serve arcade-style rather than deny (same rationale as the poll)
         send_supply_grant_60(
             s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
             reason=f'(spawn-59 TC-unmapped: {s.current_pilot})')
-        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> TC room, terrain {_trn} unmapped - '
+        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> TC room, terrain unmapped - '
                         f'arcade-style grant')
         return
-    _ask = SUPPLY_TC_REARM_AMMO_KG
-    _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
-                                                  _ask, SUPPLY_TC_FUEL_ADD_KG)
-    _flags = SPAWN59_FLAGS
-    if _got_a < _ask and SPAWN59_NARRATE_SHORTAGE:
+    _got_a, _got_f, _rem_a, _rem_f, _src = _draw
+    _fuel_ok = _got_f >= SUPPLY_TC_FUEL_ADD_KG
+    _ammo_ok = _got_a >= _ask_a
+    _flags = 0x01 | (0x02 if _fuel_ok else 0x00) | (0x04 if _ammo_ok else 0x00)
+    if not (_fuel_ok and _ammo_ok) and SPAWN59_NARRATE_SHORTAGE:
         _flags |= 0x08                     # authentic 'insufficient aircraft units' narration
     send_supply_grant_60(
-        s, flags=_flags, amount=0, amount2=max(0, int(_got_a)) & 0xffff,
-        reason=f'(spawn-59 TC: fuel->loadout, ammo budget {_got_a}kg of {_ask})')
+        s, flags=_flags,
+        amount=(0 if _fuel_ok else max(0, int(_got_f)) & 0xffff),
+        amount2=(100 if _ammo_ok else max(0, int(_got_a)) & 0xffff),
+        reason=f'(spawn-59 TC: fuel {"loadout" if _fuel_ok else f"limited {_got_f}kg"}, '
+               f'ammo {"FULL" if _ammo_ok else f"limited {_got_a}kg"} of ceiling {_ask_a})')
     log('RESUPPLY', f'{s.current_pilot} spawn-59 -> TC grant flags=0x{_flags:02x} '
-                    f'ammo-budget {_got_a}kg (asked {_ask}) fuel-debit {_got_f}kg '
-                    f'[camp{s.nation} pool now ammo {_after["ammo"]} fuel {_after["fuel"]} kg, '
-                    f'{_n} scenes]')
+                    f'{"bomber" if _bomber else "fighter"}(plane={_pt}) '
+                    f'ammo {"FULL ARM" if _ammo_ok else f"LIMITED {_got_a}kg"} '
+                    f'(ceiling {_ask_a}) fuel {"loadout" if _fuel_ok else "LIMITED"} '
+                    f'debit a={_got_a} f={_got_f} kg [{_src} now ammo {_rem_a} fuel {_rem_f} kg]')
 
 def _handle_ask_resources_59(s, pl):
     """v437f5: reply to the client's spawn-time msg-59 with an immediate msg-60 grant."""

@@ -7,42 +7,112 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
 ==============================================================================
+*** BANKED 2026-08-15: v444f5 is a STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v444f5.py' at next convenience.
+    DEFERRED (user, 2026-08-15): initial scene loadout + storage capacity feel
+    LOW - a bomber field can't supply more than ~3 bombers at once before
+    draining. Bump InitialStorage / storage caps when supply amounts are
+    revisited (not now). Constants live in the scene profiles + v284 GAME_DEF
+    patches (InitialStorage / GetFuelWhenLimFuel / GetAmmoWhenLimAmmo).
+==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "Falsify v442f5 (= v440+v441+v442 stacked; DEPLOY TO GCP FIRST - the field
-   reports were all against the online v435f5 box). Read the v442f5, v441f5 and
-   v440f5 entries. In a multi-player online session with join/leave churn:
-   (1) IDENTITY: a leaver's slot is held (SLOT 'retired by' log); a DIFFERENT
-       joiner gets a fresh higher index; the SAME pilot rejoining gets their
-       own slot back. Client logs: no NEW 'Client N already exist', nobody
-       renders under a departed player's name (Milly-as-Cheech class).
-   (2) DOWNLINK: exit to HQ repeatedly over the internet. NO empty-dropdown /
-       callsign-screen blankouts. If a downlink stalls, the run log now shows
-       TX/RELCAP '...un-ACKed reliable sends (cap 160) -> NEW reliable sends
-       refused' and the client RECOVERS when the stuck seq lands (the keeper's
-       'ACKed OK' + drained UI) instead of dying at the mod-512 window. SEQ9
-       'crossed 511' lines with healthy ACK flow remain harmless.
-   (3) EXIT: all THREE exit-appspace sites keep the session on an ACK timeout
-       (SESSION 'session KEPT' - compound, direct cmd=5, scan-inner).
-   (4) SOLO in 7'84: fly solo locally - the client must receive NO 'in 7'
-       frames (0x07 now in NO_ECHO_SUBS + the compound tuple). If any TX/TELEM7
-       line fires, its label names a sender we have not identified - report it.
-   (5) MID-FALL REPAIR: get shot down - no repair while falling/dead (death
-       clears _pos_hist + one-shot; RESUPPLY 'DEATH/EXIT form ... ignored').
-   (6) ACE88: per-evening ACE88 line count collapses (was 5,357); ranks still
-       render for a fresh joiner (the targeted only_to refresh).
-   (7) Regression: v440f5 (no exit-to-HQ CTD, ECHO546/TX-POISON33, spawn grant
-       ~1.5s, PRODQ71, pilot mgmt at HQ), v439f5 TRAIN cadence, kill banners
-       (if a scored kill misses its banner WITH clean identity logs, capture
-       both sides - separate announce bug).
-   KNOWN NON-SERVER: GCEXTREME gunner-seat self-hits (messages24) - client-
-   local ballistics, zero wire traffic; check airborne/other positions.
-   Open: msg-73 peer relay; PACKED_INFO columns; ACWIKI train numbers
-   (D:\FIGHTER_ACE_4_2_DELUXE_EDITION\ACWIKI\CONTENT); trains as world objects
-   (_train_delivery_allowed hook).
+  "Falsify v444f5 (TC supply: CAPS ONLY ON SHORTAGE, per 2009 ground truth -
+   read the v444f5 + v443f5 entries; carry the v442f5 checklist if the GCP
+   deploy has not been field-tested). In a TC (Type=1) room:
+   (1) SUPPLIED SPAWN = FULL ARM, NO CAP LINES: spawn a fighter AND a heavy
+       bomber (Lancaster/B-17 class) at a healthy base - FULL bomb racks, full
+       guns, NO 'Ammunition/Fuel limited to' magenta, NO shortage narration
+       (run log: 'ammo FULL ARM (ceiling 6500)' flags=0x07). THE KEY RISK to
+       falsify: 0x07 at spawn is RE-derived but field-untested - v436f5 proved
+       0x06 leaves a fresh mission plane's guns/ordnance EMPTY; bit2's explicit
+       full reload should arm it (same machinery as the proven bit0 budget
+       path). If a rich-base spawn comes up UNARMED with flags=0x07 in the
+       log, fall back: set the ammo-ok form to 0x03 with amount2=ceiling
+       (budget-reload to 6500 arms everything; costs one magenta line).
+   (2) SHORT AMMO ONLY (kill the ammo scenes, console 'destroy'): spawn ->
+       'Ammunition limited to <yield>' + narration, fuel silent to loadout
+       (flags 0x0b). SHORT FUEL ONLY (kill fuel storage): 'Fuel limited to
+       <yield>' + full guns/ordnance (flags 0x0d). BOTH: 0x09 family.
+   (3) DEBIT SANITY: a bomber spawn at a rich base debits 6500kg ammo (watch
+       the pool drain in RESUPPLY lines + panel); trains (300s) refill. If
+       drain feels too harsh in play, tune the ceilings or prioritise the
+       msg-73 SendRepairInfo reconciliation (client reports the ACTUAL load -
+       refund the unused draw; ACWIKI: equip cost = physical weight loaded).
+   (4) MID-LIFE unchanged from v443f5: 0x06/0x0a/0x0c/0x08 matrix, never bit0.
+       Verify a healthy-base landing still full-restores silently.
+   (5) Regression: 1.5s spawn delay intact, death-form 59 ignored, arcade
+       rooms 0x07 unchanged, unmapped terrains arcade-fallback.
+   OPEN: per-plane loadout weights from the client Data files (exact ACWIKI
+   debit); msg-73 payload decode (Ghidra) for reconciliation + peer relay;
+   ACWIKI train numbers; trains as world objects; PACKED_INFO columns.
    Tools: fs MCP (edit via fs:edit_file, NOT str_replace - read-only mount),
-   ghidra MCP, fa_memdump.py (Admin). Server is server.py ~14740 lines, v442f5."
+   ghidra MCP, fa_memdump.py (Admin). Server is server.py ~14790 lines, v444f5."
 ------------------------------------------------------------------------------
+
+v444f5 [TC/SUPPLY] CAPS ONLY ON SHORTAGE - the v443f5 fixed budgets were wrong
+      (user: a Lancaster carries 14x910lb ~ 5,800kg; a 1500 cap under-arms it).
+      TWO WRITTEN SOURCES settle the design:
+      * ACWIKI TC_PRODUCTION_AND_SUPPLY (local copy, D:\...\ACWIKI\CONTENT\
+        T\C\_\TC_PRODUCTION_AND_SUPPLY_4.HTML): 'in the event that a plane is
+        being created, but resources are not completely available, the plane
+        is created but does not have full fuel or ammo'; equip cost = 'the
+        physical weight of the fuel and ammunition/ordnance used'; production
+        steps once per minute; producers->storage within link radius; vanish
+        when storage full.
+      * 2009 GROUND TRUTH (C:\games\FA\messages04.log, Korea TC, 14 spawns
+        incl. B-17G): a supplied base answers spawn-59 with a FULL arm; the
+        ONLY narration ever shown is the bit3 pair ('Insufficient aircraft
+        units... taking from tank production'); 'Fuel/Ammunition limited to'
+        appears ZERO times in the whole session; several grants are silent.
+        Caps are the exception, not the norm.
+      IMPLEMENTATION (spawn path): per-class CEILING ask (fighter 500 /
+      bomber 6500kg), draw-first; form from the yields:
+        both covered -> 0x07 (bit2 EXPLICIT full guns+ordnance + bit1 fuel
+        loadout; NOT 0x06 - v436f5 proved vfunc20(1) leaves a fresh mission
+        plane empty); ammo short -> 0x03 budget=yield ('Ammunition limited
+        to'); fuel short -> 0x05 amount=yield ('Fuel limited to'); both ->
+        0x01; +0x08 narration on any shortage. Debit = yield (class-level
+        approximation of the ACWIKI physical-weight cost; upgrades: per-plane
+        weights from client Data files, or msg-73 SendRepairInfo
+        reconciliation - client reports the actual load, refund the rest).
+      RISK FLAGGED for the field test: 0x07-at-spawn is RE-derived, untested
+      (fallback documented in the next-session prompt: 0x03 with
+      amount2=ceiling). Mid-life matrix (v443f5) unchanged.
+
+v443f5 [TC/SUPPLY] PER-RESOURCE SUPPLY GRANTS - 'check the scene supply status
+      first, then resupply accordingly' (field spec 2026-08-15). The pool draw
+      IS the check: _tc_pool_draw (shared by spawn-59 / msg-119 / ground-stop
+      poll) draws the ask atomically and every grant is composed from what each
+      resource ACTUALLY yielded - closing the old peek->take race and making
+      destroyed storage bite per-resource (a killed fuel depot zeroes its
+      stores v291 + produces nothing at efficiency 0.0, so the fuel side of
+      the next draw comes up short -> 'Fuel limited to' - and same for ammo
+      dumps -> 'Ammunition limited to').
+      * SPAWN (_grant_spawn_supply): ammo keeps the field-proven v438f5 bit0
+        budget-reload (+1.5s rack delay), but the ask now SCALES WITH THE
+        AIRFRAME: is_bomber_plane(s.plane_type) -> 1500kg budget vs 500kg
+        fighter - THE 'no bombs/rockets even though the base can supply them'
+        FIX (a rich base answering a B-17 with a 500kg cap under-armed the
+        heavy racks; the budget is a cap the client loads up to, debit = what
+        the pool yielded). Fuel goes per-resource: bit1 loadout-fill only when
+        the pool covered SUPPLY_TC_FUEL_ADD_KG; short -> bit1 clear, bit0
+        routes 'Fuel limited to <yield>'. bit3 narration only when MEANING-
+        FULLY short (below the classic 500 rearm cost, not below the generous
+        bomber budget - no false shortage on fighter spawns).
+      * MID-LIFE (_grant_auto_resupply, feeding both the poll and msg-119):
+        per-resource matrix, bit0 NEVER (the v427f5 ordnance-stripper hazard
+        on loaded planes): both covered -> 0x06 silent total restore (out-73);
+        fuel-only -> 0x0a (bit1 loadout fuel + incremental ammo add + bit3);
+        ammo-only -> 0x0c (bit2 full guns/ordnance + incremental fuel + bit3);
+        both short -> 0x08 incremental yields. The LEAN 150kg ammo cap is gone
+        - 'arm according to what CAN be allocated at the time'.
+      * SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG=500 / _BOMBER_KG=1500 added;
+        SPAWN59_FLAGS + SUPPLY_TC_AMMO_ADD_KG retired to reference.
+      NOTE plane_type: out-4 byte[8]; v201's comment says nation-ordinal but
+      months of cross-nation peer rendering (creates carry it) + the v242
+      Fighter/Bomber scoring treat it as the global roster id - is_bomber_plane
+      uses it exactly as the scoring path does.
 
 v442f5 [WIRE/CRITICAL] RELIABLE TX OUTSTANDING CAP (the seq-runaway downlink
       wedge = flak's HQ blankout mechanism) + THIRD EXIT-SITE KEPT + msg-7
