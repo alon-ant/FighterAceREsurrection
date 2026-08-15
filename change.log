@@ -9,32 +9,366 @@ they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "Continue the Fighter Ace TC production-panel investigation. Read change.log
-   entries 'PLAN-UPDATE 3', 'PLAN-UPDATE 2', and the v432f5 bank first. Summary:
-   the map-screen Production Complex panel is blank on our online server but works
-   in offline training on the SAME terrain. Via read-only memdump (gd_offline2.json
-   vs gd_online3.json, both on disk in C:\games\FA Server\) I proved the msg-40
-   camp table, the scene array at 0xc87270, and the host/era flags are all IDENTICAL
-   between working(offline) and blank(online). The ONLY confirmed difference is five
-   bytes in the live GAME_DEF struct at [0xc6e8b4] (same terrain):
-       +0x94: 50 vs 1000   +0xa8: 3 vs 2   +0xb4: 1 vs 64
-       +0xbc: 128 vs 256   +0xec: 0 vs 1
-   TASK: using the ghidra MCP on FA.exe (base 0x400000, no ASLR), xref DAT_00c6e8b4
-   and find what code READS +0x94/+0xa8/+0xb4/+0xbc/+0xec, and whether the map-panel
-   render path or the 'client emits out-71 request' path branches on any of them.
-   Identify the fields (likely among UseSceneUnitProducers / SupplyResourceRadius=
-   10000 / ResourceProducerLinkRadius=0 / PlaneProducerLinkRadius=250 from the 2009
-   arena cfg in C:\games\FA\messages04.log). Then decide: can we set the gating
-   field in our served GAME_DEF (build path around apply_tc_settings / _gamedef_tc_
-   offsets in server.py), or is it a client-INI-only field the wire can't reach
-   (like UseSceneUnitProducers per the earlier +0x474/+0x47c finding)? Do NOT infer
-   struct offsets from decompiles without confirming the object identity - several
-   such inferences were WRONG last session (scene +0x4c, the +0x40..+0xa0 'prod'
-   offsets). RE the read side, confirm, THEN change one value and re-dump.
-   Tools: fs MCP (edit via fs:edit_file, NOT str_replace - read-only mount), ghidra
-   MCP, fa_memdump.py --gamedef (needs Admin). Server is server.py ~13950 lines,
-   build v433f5 banked."
+  "Falsify v442f5 (= v440+v441+v442 stacked; DEPLOY TO GCP FIRST - the field
+   reports were all against the online v435f5 box). Read the v442f5, v441f5 and
+   v440f5 entries. In a multi-player online session with join/leave churn:
+   (1) IDENTITY: a leaver's slot is held (SLOT 'retired by' log); a DIFFERENT
+       joiner gets a fresh higher index; the SAME pilot rejoining gets their
+       own slot back. Client logs: no NEW 'Client N already exist', nobody
+       renders under a departed player's name (Milly-as-Cheech class).
+   (2) DOWNLINK: exit to HQ repeatedly over the internet. NO empty-dropdown /
+       callsign-screen blankouts. If a downlink stalls, the run log now shows
+       TX/RELCAP '...un-ACKed reliable sends (cap 160) -> NEW reliable sends
+       refused' and the client RECOVERS when the stuck seq lands (the keeper's
+       'ACKed OK' + drained UI) instead of dying at the mod-512 window. SEQ9
+       'crossed 511' lines with healthy ACK flow remain harmless.
+   (3) EXIT: all THREE exit-appspace sites keep the session on an ACK timeout
+       (SESSION 'session KEPT' - compound, direct cmd=5, scan-inner).
+   (4) SOLO in 7'84: fly solo locally - the client must receive NO 'in 7'
+       frames (0x07 now in NO_ECHO_SUBS + the compound tuple). If any TX/TELEM7
+       line fires, its label names a sender we have not identified - report it.
+   (5) MID-FALL REPAIR: get shot down - no repair while falling/dead (death
+       clears _pos_hist + one-shot; RESUPPLY 'DEATH/EXIT form ... ignored').
+   (6) ACE88: per-evening ACE88 line count collapses (was 5,357); ranks still
+       render for a fresh joiner (the targeted only_to refresh).
+   (7) Regression: v440f5 (no exit-to-HQ CTD, ECHO546/TX-POISON33, spawn grant
+       ~1.5s, PRODQ71, pilot mgmt at HQ), v439f5 TRAIN cadence, kill banners
+       (if a scored kill misses its banner WITH clean identity logs, capture
+       both sides - separate announce bug).
+   KNOWN NON-SERVER: GCEXTREME gunner-seat self-hits (messages24) - client-
+   local ballistics, zero wire traffic; check airborne/other positions.
+   Open: msg-73 peer relay; PACKED_INFO columns; ACWIKI train numbers
+   (D:\FIGHTER_ACE_4_2_DELUXE_EDITION\ACWIKI\CONTENT); trains as world objects
+   (_train_delivery_allowed hook).
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace - read-only mount),
+   ghidra MCP, fa_memdump.py (Admin). Server is server.py ~14740 lines, v442f5."
 ------------------------------------------------------------------------------
+
+v442f5 [WIRE/CRITICAL] RELIABLE TX OUTSTANDING CAP (the seq-runaway downlink
+      wedge = flak's HQ blankout mechanism) + THIRD EXIT-SITE KEPT + msg-7
+      NEVER ECHOED (the solo in 7'84) + TX/TELEM7 instrument.
+      * (A) REL_MAX_OUTSTANDING=160: the client's reliable QRcv is mod-512 with
+        a fatal window - offset 0x100 from a stuck nExpected is 'Sequence Error
+        -> queue out of range' and the downlink is POISONED (v371f5 RE). The
+        client ACKs in order, so ONE lost send freezes nExpected and every new
+        send widens the gap. GCP field case (run_20260814_214810, flakmagic
+        00:47:53-00:48:26): leave -> one lost reply -> 1Hz 0x43 re-polls each
+        answered with ~10 reliable sends (0xd2 + 6x213 + counts) -> gap crossed
+        the window exactly as his TX seq crossed 511 (00:48:06.677, the second
+        his client went silent; 77 healthy crossings that night harmless).
+        FIX: send_rel refuses NEW sends (no seq allocated, TX/RELCAP log, 5s
+        rate-limited) while len(_evts) >= 160 un-ACKed. Lossy only for an
+        already-deaf client, and every reliable payload is a re-requested
+        answer, re-stated idempotent state, or keeper-backed handshake - the
+        cap is what makes RECOVERY possible (keeper lands the head, client
+        drains, ACKs flow, _evts empties, sends resume). Bonus: the keeper's
+        'KNOWN LIMIT' (seq reuse re-keying a held event after 512 sends) is now
+        unreachable.
+      * (B) THIRD exit-appspace site (scan-inner type=0x40 cmd=5) no longer
+        does a bare closing+sids.pop on an ACK timeout - session KEPT, same as
+        the two v441f5 sites. That bare pop was the harshest of the three (no
+        teardown broadcast at all -> instant ghost + peers never told).
+      * (C) 0x07 (msg-7 TELEMETRY) added to NO_ECHO_SUBS + the compound tuple:
+        telemetry arriving on the RELIABLE channel (wrapped internet forms /
+        occasional reliable-channel frames) fell through to the generic echo -
+        the sender received its OWN telemetry back (the solo 'in 7'84' stream,
+        messages62; relay_telemetry only ever ran on the unreliable path, so
+        peers never depended on the echo - swallow is a pure fix). The v440f5
+        cmd=546 guard already carried 0x07.
+      * (D) TX/TELEM7 instrument in send_unrel: one log per (session,label)
+        when an outbound unreliable payload parses as an opcode-7 frame - if
+        any 'in 7' reflection survives (C), the label names the sender.
+
+v441f5 [IDENTITY+SESSION] SLOT-REUSE COOLDOWN (the Milly-as-Cheech / wrong-name-
+      tags class) + EXIT-REPLY TIMEOUT NO LONGER TEARS THE SESSION DOWN (the
+      empty-HQ-dropdowns class) + TARGETED ACE88 PEER REFRESH (the push flood).
+      Four field reports, online GCP session 2026-08-14/15 (client logs
+      messages22/23(1)/24/33/47/48) - THEN VERIFIED against the GCP run log
+      run_20260814_214810 via the admin panel (server was v435f5; clocks match
+      client local time exactly):
+      * (A-CONFIRMED) IDENTITY: server log shows Cheech idle-reaped 23:54
+        (ungraceful CTD), reconnect 00:00, 'Cheech -> room 65 slot
+        ClientNumber=14 PlayerIndex=14' 00:01:12; TEARDOWN Cheech PI=14 at
+        00:10:47; 'MILLHOUSE13 -> room 65 slot ClientNumber=14 PlayerIndex=14
+        (assigned)' at 00:14:38 - and Angelo's client rendered slot 14 as
+        'Cheech' at 00:15:35. 'Milly' IS MILLHOUSE13 on Cheech's recycled slot.
+        Slot churn is endemic (flakmagic leaves slot 10 00:19:48 -> SpUn takes
+        slot 10 00:19:54). The v441f5 cooldown+same-pilot-preference directly
+        prevents the class.
+        FIX MECHANICS: _SLOT_RETIRED registry - every presence retraction
+        (msg-64 leave, teardown_ingame_presence, hence every _teardown_session
+        path) retires (room, idx) under the leaving pilot's name; allocation
+        skips slots retired < SLOT_REUSE_COOLDOWN_S (3600s) ago by a DIFFERENT
+        pilot and PREFERS a slot this pilot retired earlier (peers' station
+        already carries their name - correct by construction). Safety valve
+        SLOT_INDEX_SOFT_MAX=120 -> plain first-free + SLOT log. Kilo's missing
+        cyan kill banner is the same station table (stale binding -> banner
+        resolution fails while the index-based stat pipeline still scores).
+      * (E) ACE88 FLOOD (CONFIRMED at the source: 5,357 ACE88 push lines in the
+        one GCP evening; clients drowning in 'in 88'7' + 'AceOrRankChangedCB.
+        PlayerIndex=N not found', messages22/33): the spawn-init 'peer refresh'
+        re-broadcast EVERY peer's 88 to the WHOLE room on EVERY spawn - O(N^2).
+        The refresh exists so the NEW SPAWNER's rebuilt world learns everyone's
+        aces/rank (v416f5 relies on it). FIX: send_ace_rank_88(only_to=...) -
+        the spawn-init refresh delivers each peer's 88 to the spawner ONLY
+        (N sends per spawn); genuine state changes (kill/death/team-change/
+        HQ-open) keep the room broadcast. 88/25/96 remain unreliable (v371f5).
+      * (B) EXIT-REPLY TEARDOWN HARDENING (flak 'back in HQ, every dropdown
+        option disappeared'; Angelo 'could not select any planes'): both cmd=5
+        vcncExitAppSpace sites did `if not send_rel(exit reply):
+        _teardown_session('(exit reply timed out)')` (v385f5) - over the
+        internet ONE slow ACK kills a live session even though the v417f5
+        keeper is still delivering. FIX: session KEPT on the timeout (log tag
+        SESSION). GCP VERIFICATION NUANCE: the v435f5 run log shows ZERO such
+        teardowns that night - flak's actual blankout mechanism was his
+        downlink dying at the HQ transition while the server kept answering
+        (his reliable TX seq crossed 511 at 00:48:06.677, the exact silence
+        moment; 77 crossings elsewhere that night were harmless). The fix
+        stays as hardening; the HQ-transition wedge is tracked in OPEN (a).
+      * (C-CONFIRMED) flak's 'mid-fall my plane repaired itself': the GCP log has
+        the exact grant - DELETE3 flakmagic (death, hunter=0x01e3) 01:15:40,
+        then 'RESUPPLY ground-stop -> ARCADE grant (repair + loadout restore)'
+        01:15:58 - the POLL, not a msg-59: the wreck keeps transmitting under
+        the SAME ONumber until impact, then rests STATIC with an advancing tick,
+        which is byte-identical to 'parked' for ground_stop_eligible. FIXES
+        STACKED: obj_confirmed=False on death gates the current poll (v434f5),
+        v440f5 ignores the death-form 59, and v441f5 now ALSO clears _pos_hist
+        (+ latches the one-shot) in the death cleanup, so the judgement fails
+        'no-evidence' regardless of gate state until the next life's telemetry
+        accumulates.
+      * (D) GCEXTREME 'shooting a building registers as hitting my own
+        aircraft' (messages24 11:07pm): CLIENT-LOCAL - B-17G crew position 4,
+        the self-hit storm has ZERO wire traffic in the window (no in/out 28;
+        contrast the real 09:37pm engagement where every 'has hit your' burst
+        follows an in 28). His own turret rounds clip his own airframe on the
+        ground. Not a server defect; noted for a possible future client-side
+        ballistic-mask RE.
+
+v440f5 [CTD/CRITICAL] EXIT-TO-HQ CTD: THE cmd=546 BLIND ECHO (+ TX poison filter
+      + death-form msg-59 ignore).
+      Field (messages62 / run_20260815_003043, 00:33:08, solo 'Nations at war'
+      dogfight room): player parked -> exit to HQ -> instant CTD, engine dump
+      'bounds error ARR<NET::OBJECT*,2048>[65535] 0..2047' (ring.hpp:27), last
+      inbound 'in 33'8' 30-60ms after its own 'out 33'8'.
+      CHAIN: v438f5b stamps Dogfighting rooms Type=1 'Mission' -> exit-to-HQ now
+      runs Msn_Exit and emits ExitEvent(-1) - msg-33, Number=0xFFFF - during the
+      HQ transition on the 546 channel: [ctr][ctr][02][22][21][b1][ff][ff][ty].
+      THE POISON BYTES DEFEAT THE PREFIX DETECTOR: _pfx requires pl[6:8]==0000,
+      but Number=0xFFFF sits exactly at pl[6:8], so the frame skipped every
+      REFRAME/NO_ECHO guard, fell into the cmd==0x0222 branch (len 12 < 15) and
+      hit its UNCONDITIONAL echo - which had NO log() call (send_rel label only),
+      i.e. invisible at every loglevel. The client indexed ring[65535] and died.
+      This was the LAST unguarded echo (v222 sub-byte, v222 type-byte, v360f5
+      compound tuple, v411f5 prefixed-reframe all guarded their own paths).
+      FIXES:
+      * (A) cmd=546 NO-ECHO GUARD: before the echo, detect the carried message id
+        (pl[6:8]==0000 -> well-formed inner, id at pl[8]; else raw/poison shape,
+        id at pl[4]) and SWALLOW ids in NO_ECHO_SUBS + 0x07, log tag ECHO546.
+        pl[4] is only tested in the malformed shape, so pilot-management echoes
+        (whose inner bc can legitimately be 0x03+) are untouched.
+      * (B) _tx_poison_33() TX CHOKE-POINT FILTER in send_rel + send_unrel: an
+        outbound frame parseable as msg-33 with Number=0xFFFF is BLOCKED and
+        logged (tag TX-POISON33) with the send label - covers every known and
+        UNKNOWN path at the last exit before the socket; the server's own 14B
+        credit (small PlayerIndex, no ff ff) passes. Relay sendto (peers) keeps
+        its own v360f5 window guard.
+      * (C) DEATH/EXIT-form msg-59 IGNORED: the client also emits msg-59 at
+        life-teardown with plane fields 0xFF (...3e04 ffffffffffffffff vs the
+        spawn form's live data). v438f5 treated it as a spawn ask and fired a
+        msg-60 grant 1.5s later into a client sitting on the HQ page
+        (entered_game/my_obj_number do NOT flip on a plain exit, so the delayed-
+        grant guards passed) - the ACE88/v416f5 hazard class. Now detected
+        (trailing 8 bytes all 0xFF) -> no grant, no debounce; delayed grant also
+        aborts on s.closing.
+      NOTE for the in 7'84 mystery (same session, solo): the client received its
+      own telemetry back every few seconds - possibly the same 546/silent-echo
+      family; see the NEXT-SESSION PROMPT.
+
+v439f5 [TC/ECONOMY] SUPPLY CHAIN RESHAPED TO TRAIN CADENCE (v438f5 'a little too
+      fast' + the real mechanic is TRAINS).
+      Field: v438f5's continuous per-tick transfer (up to 1000 kg/resource/scene/min)
+      refilled airfields in ~2 minutes. The 2009 system moves supplies as TRAINS -
+      cargo physically crosses the map, stops at scenes, drops and continues;
+      an intercepted/destroyed train delivers nothing.
+      REWRITE (_supply_chain_step): per storage scene, ONE train per
+      SUPPLY_TRAIN_INTERVAL (300s), first arrivals staggered by scene id; one
+      arrival drops at most SUPPLY_TRAIN_LOAD kg per resource (ammo 1500 / fuel
+      900 / metal 600), drawn from the RICHEST same-camp producer above the 25%
+      reserve. Net ~300 kg ammo/min average per airfield (3x slower than v438f5)
+      in discrete bumps. Delivery re-clamped at commit (resupply draws can race
+      the gather/deliver locks). Log tag TRAIN (one line per arrival, cadence is
+      naturally sparse), replaces SUPPLYCHAIN.
+      _train_delivery_allowed(rid, camp, src, dst, load) = the INTERCEPTION HOOK
+      for the world-object stage: currently always True; when trains become
+      spawnable/attackable objects it returns False for killed trains, and
+      dispatch moves to departure-time + travel-time.
+      CONFIRMED per-minute production is already correct: SUPPLY_TICK=60 matches
+      the wiki's one-minute step and the v291 measured -1000 fuel/min. Exact
+      train loads/cadence remain estimates until the ACWIKI local copy is
+      reachable (see NEXT-SESSION PROMPT); the constants are the tuning knobs.
+
+v438f5 [TC/ECONOMY+TYPE] GAME-TYPE SCOPED TO TC ROOMS + SUPPLY CHAIN (producer ->
+      airfield transfer) + SPAWN-59 GRANT DELAY (the 'no bombs available' race).
+      Field evidence (run_20260814_224222, first v437f5 session - CTD gone, PRODQ71
+      replies landing, spawn grant instant, magenta 'ammo limited to 1103lbs' =
+      500 kg client-converted -> amount2 unit CONFIRMED kg):
+      * (A) GAME-TYPE RULE (v438f5b, corrected in-session): OFFICIAL vs CUSTOM,
+        matching 2009. Every recognized official category - Dogfighting, TC, FFA,
+        Events (scoring_mode_for_room != None) - is stamped Type=1 ('Mission');
+        ONLY Custom/unrecognized room types keep the client-created Type=2
+        ('Private'). The first v438f5 cut scoped Type=1 to TC alone, which wrongly
+        turned Dogfighting rooms 'Private' - reverted same session. Consequences:
+        official rooms ALL run the Msn_Prod family (msg-59 spawn ask -> spawn
+        grant, msg-71 map query -> PRODQ71 reply; both handled since v437f5).
+        NOTE the v436f5 'leave FFA untouched' caution is retired on field
+        evidence: dogfight rooms (same 'ffa' scoring class) ran as Mission through
+        v437f5 without issues; a per-arena settings_json game_type=2 remains the
+        one-room backout if a neutral-camp FFA arena ever misbehaves at Type=1.
+        build_lz_gamedef param renamed is_tc -> stamp_mission.
+      * (B) 'Scene production not ticking': production WAS running (SUPPLYTICK
+        #5..#13, units +20/step) - but the tick log shows scene 30 (Bomber
+        Airfield) at sup 96 -> 92 -> 74 never recovering, scene 55 (Tank Factory)
+        parked at cap, scene 5 (Support Factory) pinned at exactly sup50 = fuel
+        100% + metal 0% averaged (fuel capped; metal drained to zero each step by
+        _camp_build_units). ROOT CAUSE: airfields have rates==0 BY DESIGN
+        (storage, fed by the game's convoy/radius supply chain) and the server
+        had NO transfer step - airfield stores could only ever fall.
+        FIX: _supply_chain_step() in the production tick - per room, per camp,
+        per resource: producer scenes (rate>0) holding above SUPPLY_CHAIN_RESERVE
+        (25% of own cap) deliver up to SUPPLY_CHAIN_KG_PER_TICK (1000) kg to each
+        storage scene (rate==0) below cap, round-robin donors. Camp-wide
+        approximation of the convoy chain; per-link-group refinement (the
+        record_link_group topology) is a later stage. Log tag SUPPLYCHAIN, one
+        line per room per step. Master switch SUPPLY_CHAIN.
+      * (C) 'no bombs or rockets available' on a bomb-loadout spawn (while a
+        LATER in-game resupply loaded bombs fine): the v437f5 reply landed ~20ms
+        after the request, racing the client's own spawn build - the msg-60 ammo
+        path's rack-mask check ran before the ordnance racks were mounted, and
+        FUN_004ec5c0 had no racks to fill. Same grant later = works. FIX:
+        SPAWN59_REPLY_DELAY = 1.5s (2009 answered in ~0.4s; 1.5 clears the build
+        window) via threading.Timer; the timer re-checks entered_game and that
+        my_obj_number is unchanged so a death/respawn inside the window drops the
+        stale grant. 0 = old inline behaviour.
+      CONFIRMED THIS SESSION: amount2 is kg (client renders lbs); supply draws
+      debit the pools ('supply requests drain from existing supplies'); PRODQ71
+      query/reply cycle stable at map + hover cadence.
+      FALSIFY: see the NEXT-SESSION PROMPT above.
+
+v437f5 [TC/SUPPLY+CTD] THE TYPE=1 MSN_PROD FAMILY: MAP-OPEN CTD FIXED (msg-71 query
+      answered, never echoed) + SPAWN-TIME msg-59 SUPPLY REPLY (instant, bit0 path
+      with the authentic magenta 'limited to' lines + explicit ordnance load).
+      Field evidence (run_20260814_065611 + messages55, first v436f5 Type=1 live test):
+      * CTD ROOT CAUSE: pressing M -> client emits out 69'7 + out 71'13 (NEW - the
+        map production QUERY, gated on gamedef+0xa8==1, dead until v436f5). Server
+        had no 0x47 handler -> generic echo -> in 71'13 -> the client's msg-71
+        receiver asserts (Length-7) % sizeof(SCENE_TAG_PRODUCTION_MESSAGE::
+        PACKED_INFO=83) == 0 (VNet_Rcv.cpp:1496) -> instant CTD. The server's OWN
+        debounced panel push (40x1+71x3) left 135ms too late - the corpse was
+        already on the ground. 2009 host behaviour (messages04): ALWAYS a reply,
+        out 71'9 -> in 71'90 (7+83x1), out 71'17 -> in 71'422 (7+83x5) - one 83B
+        record per requested scene, header pair echoed.
+        Request decoded from SUPPLY-CAP: [0x47][u32][u16 hdr, echoed] + N x u16
+        scene idx (same scene set as the paired msg-69 query: 5,30,55).
+      * SPAWN SUPPLY: client logs 'Ask resources from AI' + out 59'19 right after
+        ServerConfirm (2009: in 60'8 within 0.4s, then the magenta EVENT lines).
+        v436f5 had no 59 handler -> echoed + plane sat empty until the poll's 0x06
+        grant 10s later ('took a bit long') - which REFUELLED but left guns and
+        ordnance EMPTY and produced NO magenta lines. Handler decompile re-read
+        (FUN_005581c0): the magenta 'Fuel/Ammunition limited to N' strings
+        (0x9f/0xa1) exist ONLY in the bit0 branch; the silent vfunc20(1) shortcut
+        (0x06/0x07) can never show them. bit0|bit1 (0x03) = fuel->HQ loadout
+        silent + 'Ammunition limited to <amount2>' + FUN_004ec5c0(amount2,0)
+        EXPLICIT ordnance reload + FUN_004ebd10 gun finalise + out-73 reply. The
+        v427f5 'ordnance stripper' hazard of bit0&!bit2 is moot at spawn: the
+        mission-mode plane spawns EMPTY, unload-all is a no-op.
+      FIXES (server.py, v437f5):
+      * _handle_scene_prodinfo_query_71(): parse [0x47][hdr6]+Nxu16, reply
+        [0x47][hdr echoed]+Nx83 PACKED_INFO in request order (unknown scenes =
+        zero arrays, never omitted - length is the only client-side check).
+        build_production_info_71(records, hdr=None) grew the hdr echo param.
+        Log tag PRODQ71, rate-limited like SUPPLY69.
+      * _handle_ask_resources_59() + _grant_spawn_supply(): immediate msg-60 on
+        the spawn request. TC rooms: flags 0x03 (SPAWN59_FLAGS), amount2 = ammo kg
+        actually drawn from the camp pool (camp_supply_take, ask =
+        SUPPLY_TC_REARM_AMMO_KG), +bit3 narration on a short draw
+        (SPAWN59_NARRATE_SHORTAGE); fuel debit as RICH. Arcade/unmapped: 0x07
+        full service. NO spawn grace on this path BY DESIGN (this IS the spawn
+        service step; grace guards the REPAIR-rebuild hazard). Airborne movement
+        guard + shared debounce/one-shot kept -> no double-grant with poll/119.
+        The 119/poll repair tiers (0x06/0x08) are UNTOUCHED.
+      * NO-ECHO: 0x3b, 0x47, 0x49 added to NO_ECHO_SUBS AND the compound no-echo
+        tuple (0x47 echo = the CTD; 0x3b echo = client re-ingests its own ask;
+        0x49 = msg-73 SendRepairInfo load-state report - 2009 relays it to PEERS
+        ('Repair PlnID...' on other clients), never to the sender. Peer relay =
+        TODO).
+      * PREFIXED_REFRAME_SUBS: 0x3b/0x47/0x49 added (same no-pl[8]-fallback safety
+        argument as v340's 0x45/0x7d) so wrapped internet-path (GCP) variants reach
+        the new handlers instead of dying in the normalise-and-ignore branch.
+      FALSIFY: see the NEXT-SESSION PROMPT above.
+      OPEN (deliberately deferred): msg-73 peer relay + periodic 73 pushes; the 59
+      request's 19B field decode; PACKED_INFO column mapping (panel content);
+      whether 'Fuel limited to' should ever fire (needs a fuel-poor pool test).
+
+v436f5 [TC/PANEL] PRODUCTION COMPLEX PANEL ROOT CAUSE FOUND + FIXED: THE GAME-TYPE BYTE.
+      Closes the v432f5 blank-panel thread. The gate was one of the five [0xc6e8b4] head
+      diffs after all: +0xa8, the GAME-TYPE enum.
+      RE CHAIN (ghidra, 2026-08-14 - every step confirmed, no inferred offsets):
+      * STRUCT IDENTITY SETTLED: the wire parser FUN_0057bee0's param_1 IS the [0xc6e8b4]
+        object, byte offset = dword index x 4. Proof was already banked on the parser's own
+        plate comment: param_1[0x39] = +0xE4 = TERRAIN (0x39*4=0xE4). PLAN-UPDATE 2's
+        'different object' conclusion was WRONG - the parser writes the live struct
+        directly. (FUN_007226e0, the other +0xa8/+0xec writer, is the OFFLINE/INI applier,
+        called from a config-object destructor chain via FUN_007118b0 - which is why
+        offline and online encode the boolean fields differently.)
+      * ALL FIVE OFFSETS MAPPED to wire fields:
+          +0x94 = param[0x25]  u16, 3rd of the three words after the camps block
+          +0xa8 = param[0x2a]  u8 right after the NAME/COMMENT/PASSWORD cstrings - the
+                               byte extract_terrain_from_gamedef already skips with the
+                               comment '# param[0x2a] Type byte'. THE GATE.
+          +0xb4 = param[0x2d]  = flag-byte-1 & 0x40. The 1-vs-64 diff is ENCODING ONLY
+                               (INI applier stores bool 1, wire parser stores raw mask
+                               64; both truthy). Red herring.
+          +0xbc = param[0x2f]  u16 (the word right after the LobbyType string)
+          +0xec = param[0x3b]  u8 after the terrain byte (StartGround, per the existing
+                               server comment); read only in offline 'NoAirfieldSelection'
+                               Hq_dlg paths. Not the gate.
+      * THREE INDEPENDENT CONSUMERS gate on +0xa8 == 1, two of them ARE the panel:
+          FUN_006ee090 (Mn_dlg.cpp, map screen - renamed MnDlg_UpdateCampProductionPanel_
+          gated_gametype1) and FUN_006db960 (Hq_dlg.cpp - renamed HqDlg_UpdateCampProduction
+          Stats_gated_gametype1) both iterate ARR<CAMP_SCORE_PRODUCTION_DATA,8> @0xc845d4
+          and copy units/stored/capacity into the panel display buffers ONLY inside
+          `if (DAT_00c822d8 != 0 && *(DAT_00c6e8b4+0xa8) == 1)`. With our Type=2 the block
+          is skipped EVERY FRAME -> panel blank regardless of what we send - which is why
+          every wire-level mimic in v431/v432 was correct AND irrelevant.
+          FUN_005578d0 (Msn_Prod.cpp 'Ask/Return resources to AI' - renamed MsnProd_
+          AskReturnResourcesToAI_gated_gametype1) has the same entry gate, so the client's
+          resource-request emission (msg 0x3b, 19B) is also dead at Type=2.
+      * VALUES: 1 = 2009 official TC arenas (panel works), 2 = client-created online rooms
+        (all our arenas), 3 = offline training (fed by the local sim FUN_00557457 instead).
+      FIX (server.py): _gamedef_type_offset() (the terrain walk stopped 3 cstrings in) +
+      apply_game_type() (refuses unless the located byte is already 1..3 - a walk desync
+      can never corrupt an arbitrary byte). Hooked into build_lz_gamedef after the [TC]
+      economy patch: non-FFA rooms get Type -> 1 (GAMETYPE_TC); FFA rooms are untouched
+      (Type=1 would put FFA into TC mode); per-arena settings_json 'game_type' (1..3)
+      overrides. Single length-preserving byte BEFORE the plane block - pad alignment and
+      all later patches unaffected. Logs 'game-type @+N: old -> new'. REVERT:
+      GAMETYPE_FORCE_TC=False.
+      FALSIFY: see the NEXT-SESSION PROMPT above (memdump +0xa8==1, panel fills, new
+      inbound 0x3b expected, regression sweep on a throwaway arena first).
+      BONUS FINDINGS banked in ghidra during the hunt:
+      * Per-camp ACTIVE bitmask lives at GAME_DEF+0x6c - the offline production sim
+        FUN_00557457 iterates camps by `(1<<camp) & [0xc6e8b4+0x6c]`, and its online
+        round-robin sender (via FUN_007e3350, 0x26B) does the same.
+      * The REAL TRN_SCENE array is base 0xc87268 / cap 0xc8726c / count 0xc84ff8
+        (PARR<TRN_SCENE*> RTTI) - the v432f5 memdump sampled 0xc87270, ONE SLOT OFF;
+        that's the adjacent array and explains the 'different class' confusion.
+      * Each scene's ProductionScene sub-object is at scene+0x90 ('ProductionScene is
+        not exists in %s' guards in FUN_0055bef0); scene+0x60 = position obj, +0x64 ->
+        radius@+0x20, and GAME_DEF+0x478 is added as a supply-radius term there.
+      * msg-71 consumer chain: FUN_00491a50 -> FUN_0048ea20 walks a linked list at
+        this+0x14 matching node+0x4c == wire u16 scene id (83B records confirmed),
+        then FUN_0048e910 does the 9-array interleaved copy into node+0x40.. and
+        stamps node+0x24 = timeGetTime().
 
 v435f5 [RESUPPLY] MSG-119 REPAIR REQUEST IS NOW THE PRIMARY SUPPLY TRIGGER - the client asks,
       the server grants, instead of the server inferring 'parked' from telemetry.

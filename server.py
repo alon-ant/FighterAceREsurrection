@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v435f5'
+VERSION = 'v442f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1217,6 +1217,66 @@ def gamedef_startground_offset(d):
     except (ValueError, IndexError):
         pass
     return None
+
+# -- GAME TYPE (the Production Complex panel gate) v436f5 ------------------------
+# GAME_DEF param[0x2a] (the u8 between the PASSWORD cstring and the LobbyType string;
+# live struct [0xc6e8b4]+0xa8) is the client's GAME-TYPE enum. RE 2026-08-14 (closes the
+# v432f5 blank-panel thread): the map-screen camp-production populaters - MnDlg
+# FUN_006ee090 (Mn_dlg.cpp) and HqDlg FUN_006db960 (Hq_dlg.cpp), both iterating
+# ARR<CAMP_SCORE_PRODUCTION_DATA,8> @0xc845d4 - copy units/stored/capacity into the
+# panel's display buffers ONLY inside `if (online && gamedef+0xa8 == 1)`, and the
+# Msn_Prod.cpp "Ask/Return resources to AI" emitter FUN_005578d0 has the same entry
+# gate. Observed values: 1 = 2009 official TC arenas (panel works), 2 = client-created
+# online rooms (our arenas; the gated block is skipped every frame -> panel blank no
+# matter what we send - which is why every wire-level mimic in v431/v432 was correct
+# AND irrelevant), 3 = offline training (fed by the local sim path instead).
+# FIX: stamp Type=1 into served non-FFA GAME_DEFs. Single length-preserving byte write
+# at a position BEFORE the plane block, so pad alignment and every later patch are
+# untouched. FFA rooms are deliberately left alone: +0xa8 is a mode ENUM, not a panel
+# flag, and Type=1 would put an FFA arena into TC mode.
+# EXPECTED SIDE EFFECT: Type=1 re-ENABLES the client's msg-0x3b resource-request
+# emitter (19B, gated on the same ==1) - expect new inbound 0x3b traffic; log it,
+# don't crash on it. Other +0xa8 branches are unmapped: test on a throwaway arena
+# (side-select, scoring, respawn) before trusting it on the GCP instance.
+# Per-arena override: settings_json 'game_type' (1..3) wins over the automatic rule.
+# REVERT: GAMETYPE_FORCE_TC=False kills the whole feature in one flag.
+GAMETYPE_FORCE_TC = True
+GAMETYPE_TC = 1
+
+def _gamedef_type_offset(d):
+    """Byte offset of the game-type byte (param[0x2a] = live struct +0xa8) in a
+    DECOMPRESSED GAME_DEF: the byte right after the NAME/COMMENT/PASSWORD cstrings -
+    the same walk extract_terrain_from_gamedef does, stopped three strings in.
+    Returns None on any parse failure (caller then leaves the struct untouched)."""
+    try:
+        if not d or len(d) < 14:
+            return None
+        p = 20 + d[13]                           # NAME start (ver+3dw+blen+camps+3ushort)
+        for _ in range(3):                       # NAME, COMMENT, PASSWORD
+            p = d.index(0, p) + 1
+        return p if p < len(d) else None         # param[0x2a] Type byte
+    except (ValueError, IndexError):
+        return None
+
+def apply_game_type(d, val):
+    """In-place set the GAME_DEF game-type byte. SAFETY: refuses unless the located
+    byte already looks like a type enum (1..3), so a walk desync can never corrupt an
+    arbitrary byte; also a no-op when the value is already right. Returns
+    (offset, old_value) on write, None on no-op/refusal."""
+    off = _gamedef_type_offset(d)
+    if off is None:
+        return None
+    old = d[off]
+    if old not in (1, 2, 3):                     # doesn't look like the Type byte - refuse
+        return None
+    try:
+        v = int(val)
+    except (TypeError, ValueError):
+        return None
+    if v not in (1, 2, 3) or v == old:
+        return None
+    d[off] = v
+    return off, old
 
 # -- Per-team AIRCRAFT assignment (which nation flies each plane) ----------------
 # WHY: every stored GAME_DEF leaves all 121 planes with record BYTE 0 = 0x1f. That byte is
@@ -2470,7 +2530,7 @@ def apply_tc_settings(d, settings=None):
     return o, old
 
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None,
-                     hide_planes=None):
+                     hide_planes=None, is_ffa=False, stamp_mission=False):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -2661,6 +2721,28 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             f"CapturePercent={_told.get('capture_percent')}")
     else:
         log('GAMEDEF212', '[TC] block not located/verified; economy left as-is')
+    # GAME TYPE: stamp Type=1 (the OFFICIAL 'Mission' type) so the client's Production
+    # Complex panel and the Msn_Prod resource requests unlock (both gate on
+    # gamedef+0xa8==1; client-created rooms store 2 - the v432f5 blank-panel root cause).
+    # v438f5b RULE (matches 2009): `stamp_mission` = the room has a recognized OFFICIAL
+    # category (Dogfighting / TC / FFA / Events); only CUSTOM/unrecognized room types keep
+    # Type=2 ('Private'). The Msn_Prod side effects (msg-59 spawn ask, msg-71 map query)
+    # come with Type=1 in every official room - the server answers both since v437f5.
+    # Per-arena settings_json 'game_type' (1..3) still overrides the automatic rule. See
+    # the _gamedef_type_offset block for the full RE provenance and cautions.
+    if GAMETYPE_FORCE_TC:
+        try:
+            _gt = int((arena_settings or {}).get('game_type'))
+        except (TypeError, ValueError):
+            _gt = None
+        if _gt is None and stamp_mission:
+            _gt = GAMETYPE_TC
+        if _gt is not None:
+            _gr = apply_game_type(d, _gt)
+            if _gr:
+                _go, _gold = _gr
+                log('GAMEDEF212', f'game-type @+{_go}: {_gold} -> {_gt} '
+                                  f'(+0xa8 panel gate; 1=TC 2=custom 3=training)')
     D_orig = len(d)
     # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
@@ -4373,11 +4455,23 @@ def build_gamedef_212(room, hide_planes=None):
     creator = (room[2] or room[1] or 'Arena')
     gidx    = _arena_gameindex(creator, room[0])          # 4 bytes [00 ff ff creator[0]] (non-zero)
     blob    = bytes(room[6]) if len(room) > 6 and room[6] else b''
+    # v438f5b: game-type rule = OFFICIAL vs CUSTOM, matching 2009. Every recognized
+    # official category (Dogfighting / Territorial Combat / Free For All / Events -
+    # scoring_mode_for_room != None) is stamped Type=1 ('Mission'); only rooms with a
+    # CUSTOM/unrecognized room type keep the client-created Type=2 ('Private').
+    # (v438f5's first cut scoped Type=1 to TC only, which wrongly made Dogfighting
+    # rooms 'Private'.)
+    try:
+        _room_official = (scoring_mode_for_room(room[0]) is not None)
+    except Exception:
+        _room_official = False
     comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
                                     force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
                                     plane_camp=plane_camp_for_room(room),
                                     arena_settings=db_get_room_settings(room[0]),
-                                    hide_planes=hide_planes)
+                                    hide_planes=hide_planes,
+                                    is_ffa=is_ffa_room(room),
+                                    stamp_mission=_room_official)  # v438f5b: official -> Type 1
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -5232,8 +5326,17 @@ def build_ace_rank_88(player_index, aces=0, rank=0):
     data += bytes([aces & 0xff, rank & 0xff])
     return bytes(data)
 
-def send_ace_rank_88(s, reason='', aces=None, rank=None):
+def send_ace_rank_88(s, reason='', aces=None, rank=None, only_to=None):
     """v219: push the pilot's AUTHORITATIVE aces/rank to their client via msg 88.
+
+    v441f5: `only_to` targets the push at ONE recipient session instead of the whole room.
+    Used by the spawn-init 'peer refresh': the newly-confirmed spawner needs the FULL SET of
+    everyone's 88s (v416f5 relies on this), but the old implementation re-broadcast every
+    peer's 88 to EVERY room member on EVERY spawn - O(N^2) sends per spawn. Field evidence
+    (GCP run_20260814_214810, 15-player evening): 5,357 ACE88 push lines, clients drowning
+    in 'in 88'7' + 'AceOrRankChangedCB. PlayerIndex=N not found' churn (messages22/33).
+    With only_to, one spawn costs N targeted sends; the broadcast form (only_to=None) is
+    unchanged for genuine state changes (kill/death/team-change/HQ-open).
 
     Values are RE-READ FROM THE DB (db_get_pilot_career) every time, so a team change or room change
     RESTORES the pilot's real career standing rather than zeroing it. The client's GamerClientScore
@@ -5275,6 +5378,12 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None):
     _targets = [t for t in (get_sessions_in_room(s.current_room)
                             if getattr(s, 'current_room', None) is not None else [])
                 if t is not s]
+    if only_to is not None:
+        # v441f5: targeted refresh - deliver this subject's 88 to ONE recipient (the new
+        # spawner). The owner-exclusion above still applies by construction (a spawner
+        # refreshing its own 88 is the msg-25 path's job, and callers never pass
+        # only_to=s's own session for subject s).
+        _targets = [t for t in _targets if t is only_to]
     # *** v416f5: NEVER PUSH 88 AT A CLIENT MID-WORLD-REBUILD (the '82 percent' hang). ***
     # build_ace_rank_88's own RE note has said it from day one: the recipient's score object
     # 'must ALREADY exist ... hence we send it AFTER the spawn is confirmed, not before' - but
@@ -5974,7 +6083,58 @@ def build_unrel(payload, seq=0):
     # after ~32 reliable packets, overruns the delivery callback @0x1002042c -> exit-to-HQ CTD).
     return bytes([0x00, 0x00, 0x20, seq & 0xFF, 0x00, 0x00, 0x00, 0x00]) + bytes(payload)
 
+def _tx_poison_33(payload, label=''):
+    """v440f5 [CTD/DEFENCE]: TX CHOKE-POINT FILTER for the ExitEvent(-1) poison.
+    A msg-33 whose Number field is 0xFFFF makes ANY receiving client index
+    ARR<NET::OBJECT*,2048>[65535] -> bounds error CTD (ring.hpp:27). The RX-side guards
+    (NO_ECHO_SUBS/TYPES, the EXIT33 relay window, the compound tuple, v440f5's cmd=546
+    guard) each cover ONE path; this covers them ALL at the last exit before the socket.
+    Returns True if `payload` must NOT be transmitted. Detection is surgical - only the
+    0xFFFF form is blocked; the server's own 14B credit (small PlayerIndex) passes:
+      * direct  frame: id at payload[4] ([bc][T][00][00][21][b1][Number]...) - ff ff in [5:9]
+      * type    frame: id at payload[1], [2:4]==0000            - ff ff in [4:9] (v360f5 window)
+      * prefixed/raw : id at payload[4] with [2:4]!=0000        - ff ff in [5:9]
+      * wrapped inner: id at payload[8] with [6:8]==0000        - ff ff in [9:13]
+    Logs LOUDLY with the send label so any yet-unknown producing path self-identifies."""
+    try:
+        p = bytes(payload)
+        n = len(p)
+        hit = None
+        if n >= 9 and p[4] == 0x21 and b'\xff\xff' in p[5:9]:
+            hit = 'id@4'
+        elif n >= 9 and p[1] == 0x21 and p[2] == 0 and p[3] == 0 and b'\xff\xff' in p[4:9]:
+            hit = 'id@1'
+        elif n >= 13 and p[6] == 0 and p[7] == 0 and p[8] == 0x21 and b'\xff\xff' in p[9:13]:
+            hit = 'id@8'
+        if hit:
+            log('TX-POISON33', f'BLOCKED outbound msg-33 with Number=0xFFFF ({hit}, {n}B: '
+                               f'{hx(p[:16])}) label="{label}" - transmitting this is a '
+                               f'guaranteed ring[65535] CTD for the recipient (v440f5)')
+            return True
+    except Exception:
+        pass
+    return False
+
 def send_unrel(s, payload, label=''):
+    if _tx_poison_33(payload, label):
+        return False
+    # v442f5 [INSTRUMENT]: name the 'in 7'84' sender. The messages62 SOLO session received an
+    # 84-byte msg-7 every few seconds with no peers in the room - some server path reflects
+    # or emits telemetry-shaped frames. relay_telemetry is excluded (needs peers, never the
+    # sender), parachuter/husk drivers are OFF. Log ONCE per (session, label) when an
+    # unreliable payload would parse as an opcode-7 appspace so the path self-identifies.
+    try:
+        if len(payload) >= 9 and payload[4] == 0x07 and payload[2] == 0 and payload[3] == 0:
+            _seen = s.__dict__.setdefault('_telem7_tx_seen', set())
+            _k = (label or '?')[:40]
+            if _k not in _seen:
+                _seen.add(_k)
+                log('TX/TELEM7', f'{getattr(s, "current_pilot", "?")} outbound UNRELIABLE '
+                                 f'opcode-7 frame ({len(payload)}B) label={_k!r} - if this '
+                                 f'session is SOLO, this is the in-7\'84 reflection source '
+                                 f'(logged once per label per session)')
+    except Exception:
+        pass
     seq = s.nundgram()
     try:
         _p = build_unrel(payload, seq)
@@ -5987,6 +6147,29 @@ def send_unrel(s, payload, label=''):
 REL_RETX_INTERVAL_S = 0.75   # v359f5: retransmit cadence inside the ACK wait window
 REL_KEEPER_INTERVAL_S = 1.0  # v417f5: background keeper cadence after the blocking window
 REL_KEEPER_MAX_S = 120.0     # v417f5: keeper hard cap - past this the client is gone anyway
+
+# v442f5 [WIRE/CRITICAL]: RELIABLE TX OUTSTANDING CAP - the seq-runaway wedge.
+# The client's reliable QRcv is mod-512 with a HARD validity window: an arrival whose offset
+# from nExpected reaches 0x100 hits the SEQUENCE-ERROR branch ('Sequence Error - nOffset 256
+# QSize 0 -> queue out of range') and the downlink is POISONED for the session (v371f5 RE).
+# The client ACKs strictly IN ORDER, so one lost/late send freezes nExpected - and every NEW
+# reliable send after it widens the gap by 1. Field case (GCP run_20260814_214810, flakmagic
+# 00:47:53-00:48:26 = the 'HQ dropdowns empty -> callsign screen' report): his msg-64 leave
+# hit the lobby, one reply around the transition went missing, his client re-polled 0x43 at
+# 1Hz and EVERY answer burned ~10 more seqs (0xd2 ARENALIST + 6x ARENA213 + counts) - the
+# gap crossed the fatal window right as his TX seq crossed 511 (00:48:06.677, the exact
+# second his client went silent; 77 other crossings that night with healthy ACK flow were
+# harmless). THE CAP: while a session holds REL_MAX_OUTSTANDING un-ACKed reliable sends
+# (len(_evts) - a faithful gap proxy under in-order ACKing), NEW reliable sends are REFUSED
+# (no seq allocated) with a rate-limited TX/RELCAP log. 160 << 256 leaves headroom for the
+# dup-ACK edge cases. This is LOSSY ONLY for a client that is already deaf: everything this
+# server sends reliably is either a request-answer the client re-requests (0x43/0xd2/0x3a
+# polls), idempotent state that is re-stated (62/63/213/25/88), or keeper-backed handshakes
+# sent before any freeze - and the CAP is what makes recovery POSSIBLE at all: the keeper
+# lands the stuck head seq, the client drains its (bounded) queue, ACKs flow, _evts empties,
+# and the flow resumes. Without it the gap hits 256 and the session is dead until restart.
+REL_MAX_OUTSTANDING = 160
+REL_CAP_LOG_GAP_S   = 5.0    # rate limit for the TX/RELCAP refusal log, per session
 
 def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
     """v417f5: keep an un-ACKed reliable seq ALIVE after send_rel's blocking window expires.
@@ -6056,6 +6239,27 @@ def send_rel(s, payload, label='', to=5.0):
     # menu), 208 ArenaList responses served and discarded over 200s. The same seq is
     # now re-sent every REL_RETX_INTERVAL_S until ACKed or `to` expires; a late copy
     # un-wedges the client's QRcv, which queues out-of-order arrivals and drains.
+    if _tx_poison_33(payload, label):    # v440f5: never transmit the 0xFFFF ExitEvent form
+        return False
+    # v442f5: RELIABLE TX OUTSTANDING CAP - see the block at REL_MAX_OUTSTANDING. While this
+    # session holds >= cap un-ACKed reliable sends (client's in-order nExpected is stuck),
+    # allocating MORE seqs only marches the gap toward the client's fatal 0x100 window.
+    # Refuse the send (no seq burned); the keeper is still landing the stuck head, and once
+    # ACKs flow again _evts drains and sends resume.
+    try:
+        with s._lock:
+            _outst = len(s._evts)
+    except Exception:
+        _outst = 0
+    if _outst >= REL_MAX_OUTSTANDING:
+        _nowc = time.time()
+        if (_nowc - getattr(s, '_relcap_log_ts', 0.0)) >= REL_CAP_LOG_GAP_S:
+            s._relcap_log_ts = _nowc
+            log('TX/RELCAP', f'{getattr(s, "current_pilot", "?")} downlink stalled: {_outst} '
+                             f'un-ACKed reliable sends (cap {REL_MAX_OUTSTANDING}) -> NEW '
+                             f'reliable sends refused until ACK flow resumes (protects the '
+                             f'client\'s mod-512 window; {label!r} not sent)')
+        return False
     seq=s.nrel(); e=s.mke(seq)
     pkt=build_rel(payload,seq)
     try:
@@ -6112,6 +6316,43 @@ def get_sessions_in_room(room_id):
         return [s for s in sids.values()
                 if s.auth_done and not s.closing and s.entered_game
                 and s.current_room == room_id]
+
+# v441f5 [IDENTITY]: SLOT-REUSE COOLDOWN. Field evidence (online session 2026-08-14/15,
+# messages47/48 'Milly was flying as Cheech', messages33 Kilo's wrong name tags, 42x
+# 'Client N already exist' across six client logs): peers' NET::CLIENT stations PERSIST
+# after a player leaves (type-3 deletes the object, msg-63 REMOVE drops the REMOTE_PLAYER,
+# but nothing deletes the STATION - and the client REJECTS a duplicate station create,
+# 'Client 14 already exist', keeping the OLD name bound). First-free-index allocation then
+# hands the departed pilot's index to the NEXT joiner - who renders on every peer under the
+# DEPARTED pilot's name (Cheech left 00:10:46; 'Repair PlnID:43; 14, Cheech' on Angelo's
+# client at 00:15:35 was Milly). Kill banners fail the same way: the banner resolves the
+# hunter through the same station table, so a stale binding kills the cyan message while
+# the index-based stat pipeline still ticks the score (Kilo's report).
+# THE FIX: a freed slot is RETIRED for SLOT_REUSE_COOLDOWN_S before a DIFFERENT pilot may
+# take it; the SAME pilot re-taking their retired slot is not only allowed but PREFERRED -
+# the peers' station already carries their name, so the binding is correct by construction
+# (this is also why same-pilot rejoin never showed the bug). Safety valve: if the cooldown
+# would push the index past SLOT_INDEX_SOFT_MAX (client-side station arrays are finite),
+# fall back to plain first-free and log - a possible misbinding beats an array overrun.
+SLOT_REUSE_COOLDOWN_S = 3600.0   # a freed slot stays reserved this long for its old pilot
+SLOT_INDEX_SOFT_MAX   = 120      # never let the cooldown push allocation past this index
+_SLOT_RETIRED = {}               # (room_id, idx) -> (pilot_name, t_freed)
+
+def _retire_room_slot(s, why=''):
+    """Record that this session's room slot was freed, so assign_player_slot can hold it
+    for its old pilot (see the SLOT-REUSE COOLDOWN block). Call from every path that
+    retracts a player's presence from a room. Idempotent, never raises."""
+    try:
+        rid = getattr(s, 'current_room', None)
+        idx = getattr(s, 'client_number', None)
+        pn  = getattr(s, 'current_pilot', None)
+        if rid is None or idx is None or not pn:
+            return
+        _SLOT_RETIRED[(rid, int(idx))] = (pn, time.time())
+        log('SLOT', f'room {rid} slot {idx} retired by "{pn}" {why} - held for them '
+                    f'{SLOT_REUSE_COOLDOWN_S:.0f}s (other pilots get a fresh index)')
+    except Exception:
+        pass
 
 def assign_player_slot(s, room_id):
     """Allocate a ClientNumber/PlayerIndex for a player entering a room.
@@ -6217,16 +6458,45 @@ def assign_player_slot(s, room_id):
                  and x.current_room == room_id]
         taken = {getattr(p, 'client_number', None) for p in peers}
         prev = s.__dict__.get('_assigned_slot')
+        _pn  = getattr(s, 'current_pilot', None)
+        _nowm = time.time()
         if prev is not None and prev not in taken:
             idx = prev                   # keep our stable identity across arena changes
         else:
-            idx = 0                      # first free index not already claimed in this room
-            while idx in taken:
-                idx += 1
+            # v441f5: PREFER a slot this pilot retired earlier in this room - the peers'
+            # station already carries their name, so re-taking it restores a CORRECT
+            # binding (see the SLOT-REUSE COOLDOWN block above).
+            _mine = [i for (rid, i), (pn, _tf) in _SLOT_RETIRED.items()
+                     if rid == room_id and pn == _pn and i not in taken]
+            if _mine:
+                idx = min(_mine)
+            else:
+                # first free index that is NOT cooling down for a different pilot
+                def _cooling(_i):
+                    ent = _SLOT_RETIRED.get((room_id, _i))
+                    return (ent is not None and ent[0] != _pn
+                            and (_nowm - ent[1]) < SLOT_REUSE_COOLDOWN_S)
+                idx = 0
+                while idx in taken or _cooling(idx):
+                    idx += 1
+                    if idx > SLOT_INDEX_SOFT_MAX:
+                        # safety valve: plain first-free (accept possible misbinding
+                        # over overrunning the client's finite station arrays)
+                        idx = 0
+                        while idx in taken:
+                            idx += 1
+                        s.__dict__['_slot_fallback_note'] = idx   # logged outside `sl`
+                        break
+        _SLOT_RETIRED.pop((room_id, idx), None)   # v441f5: slot is live again
         s._assigned_slot = idx
         s.client_number = idx
         s.player_index  = idx
         _npeers, _kept = len(peers), (prev == idx)
+    # Log outside the lock - never hold the session lock across I/O.
+    _fb = s.__dict__.pop('_slot_fallback_note', None)
+    if _fb is not None:
+        log('SLOT', f'room {room_id}: cooldown scan passed index {SLOT_INDEX_SOFT_MAX} - '
+                    f'fell back to first-free {_fb} for "{getattr(s, "current_pilot", "?")}"')
     # Log outside the lock - never hold the session lock across I/O.
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
@@ -8900,6 +9170,7 @@ def handle_leave_arena(s):
     takes over (it will then re-request news/arena list itself)."""
     log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
+    _retire_room_slot(s, '(msg-64 leave)')   # v441f5: hold the slot for this pilot
     s._presence_advertised = False   # v355: this path does its own teardown just below
     # v182: tell peers to drop this player's REMOTE_PLAYER object (msg 63 op=REMOVE)
     # BEFORE we clear s.entered_game / s.current_room, so the broadcast still scopes
@@ -9149,6 +9420,7 @@ def teardown_ingame_presence(s, why='(disconnected)'):
                         f'obj={"0x%04x" % s.my_obj_number if s.my_obj_number is not None else "none"} '
                         f'-> peers in room {s.current_room} told to drop plane+player {why}')
         s._presence_advertised = False   # v355: peers no longer hold this player
+        _retire_room_slot(s, f'(presence teardown {why})')   # v441f5: hold the slot for this pilot
         return True
     except Exception as _e:
         log('TEARDOWN', f'[warn] in-game teardown failed for '
@@ -9488,7 +9760,19 @@ def handle_compound(s, outer_cmd, pl):
         log('COMPOUND', 'inner vcncExitAppSpace -> exit reply')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s, bytes(pl2), 'exit appspace reply'):
-            _teardown_session(s, why='(exit reply timed out)')   # v385f5: full cleanup, not a bare pop
+            # v441f5 [SESSION]: DO NOT tear the session down on an exit-reply ACK timeout.
+            # Field (messages22 flak / messages47 Angelo, online GCP session): the pilot
+            # exits to HQ, ONE slow/lost ACK on this reply times send_rel out, v385f5's
+            # teardown killed the LIVE session - and the client sat at the HQ polling
+            # (out 67'1 every second, 20+ times) into a dead server session: every
+            # dropdown empty, back to the callsign screen, plane list gone until a full
+            # client restart. send_rel returning False is NOT 'client gone' since v417f5:
+            # the _rel_keeper keeps re-sending until the ACK lands or its 120s cap - the
+            # late ACK un-wedges the client and the session continues. A truly dead
+            # client is reaped by the heartbeat/vcncDisconnect paths, not here.
+            log('SESSION', f'{getattr(s, "current_pilot", "?")} exit-appspace reply not '
+                           f'ACKed in-window - RELKEEP retries; session KEPT (v441f5, '
+                           f'was: teardown)')
         return
 
     if inner_cmd == 2:
@@ -9752,7 +10036,12 @@ def handle_compound(s, outer_cmd, pl):
     # ARR<NET::OBJECT*,2048>[65535] -> bounds error, ring.hpp:27 (messages63.log
     # 09:16:09: out 33'8 -> in 33'8 21ms later -> CTD). Same guard-copy divergence
     # class as v342. 0x0e (msg 14 reassign) closed for the identical reason.
-    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19):
+    # v437f5: 0x3b/0x47/0x49 ADDED (the Type=1 Msn_Prod family, see NO_ECHO_SUBS). A compound-
+    # wrapped 0x47 echo is the same instant CTD as the direct one (VNet_Rcv.cpp:1496 assert);
+    # swallowing a wrapped 59/71 QUERY loses one reply (the client re-asks), which is safe.
+    # v442f5: 0x07 ADDED - telemetry must NEVER be echoed to its sender (see NO_ECHO_SUBS).
+    if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19,
+                     0x3b, 0x47, 0x49, 0x07):
         log('COMPOUND', f'inner sub=0x{inner_sub:02x} (notify, must not echo) - swallow')
         return
     # msg 31 (0x1f) compound-wrapped: ground-object damage report - consume, NEVER echo
@@ -10476,9 +10765,14 @@ def _fire_server_confirm(s, via='', ident=None):
             # v236: (re)state EVERY OTHER player's rank/aces as well. A client only learns a peer's
             # rank if we send that peer's msg 88 to it - without this a freshly-joined client shows
             # every other pilot as rank 0 ('Cdt').
+            # v441f5: the peer refresh is TARGETED at the new spawner only (only_to=_s).
+            # It exists so the spawner's freshly-built world gets everyone's authoritative
+            # aces/rank (the v416f5 skip relies on it); broadcasting each peer's 88 to the
+            # WHOLE room here was O(N^2) per spawn - the GCP ACE88 flood (5,357 pushes in
+            # one evening, run_20260814_214810).
             for _p in get_sessions_in_room(_s.current_room):
                 if _p is not _s:
-                    send_ace_rank_88(_p, reason='(peer refresh for new spawn)')
+                    send_ace_rank_88(_p, reason='(peer refresh for new spawn)', only_to=_s)
         threading.Thread(target=_send88, daemon=True).start()
     if ADD_TEST_PLAYER:
         def _inject(_s=s):
@@ -10689,6 +10983,19 @@ def _ingame_own_object_removed(s, tb, stored):
         # Re-arm the spawn-confirm so a crashland respawn (InsertPlayer + out 4 with NO StartPlace)
         # still gets a ServerConfirm. A normal death's StartPlace also resets these - harmless.
         s.obj_confirmed = False; s.flying = False
+        # v441f5 [RESUPPLY]: drop the position history at death. The wreck keeps transmitting
+        # under the SAME ONumber until impact, then rests STATIC with an advancing conductor
+        # tick - to ground_stop_eligible that is byte-identical to a parked plane, and on the
+        # GCP v435f5 box the poll granted flags=0x07 (full repair) to flakmagic's falling/dead
+        # plane 18s after his death delete (run_20260814_214810 01:15:58 - the 'mid-fall my
+        # plane repaired itself' report). obj_confirmed=False already gates the current poll;
+        # clearing _pos_hist makes the judgement fail 'no-evidence' regardless of any gate
+        # state until the NEXT life accumulates fresh samples (spawn clears it anyway).
+        try:
+            s._pos_hist = []
+            s.resupplied_this_stop = True   # one-shot latched until real movement re-arms it
+        except Exception:
+            pass
         s.spawn_pending = False   # v416f5: death screen/HQ is a SAFE state for refreshes (proven
                                   # 16:55:53.883) - only the grant->confirm rebuild is gated
     else:
@@ -11346,6 +11653,125 @@ def seed_room_economy(room_id):
     return n
 
 
+# -- SUPPLY CHAIN via TRAINS (producer -> airfield cargo runs) v439f5 -------------
+# HISTORY: v438f5 found the 'production not ticking' root cause - airfields have rates==0 BY
+# DESIGN (storage fed by the supply chain, not producers; scene 30 sup 96->92->74 with no way
+# back up; scene 55 at cap; scene 5 pinned at sup50 = fuel 100% + metal 0% averaged) - and
+# closed it with a continuous per-tick transfer of up to 1000 kg/resource to every storage
+# scene. Field verdict: works, but 'a little too fast' (an airfield refilled in ~2 minutes).
+# THE REAL 2009 MECHANIC: supplies travel as TRAINS on the map - a train departs a producer,
+# stops at a scene, drops its cargo, continues to the next; an intercepted/destroyed train
+# delivers NOTHING. Until trains exist as spawnable/attackable world objects, this models the
+# CADENCE and LOAD of that system without the moving object:
+#   * a storage scene receives a train only every SUPPLY_TRAIN_INTERVAL seconds (first
+#     arrivals staggered per scene id so the whole map doesn't pulse in sync),
+#   * one arrival drops at most SUPPLY_TRAIN_LOAD kg per resource, drawn from the richest
+#     same-camp producer holding above SUPPLY_CHAIN_RESERVE of its own cap,
+#   * _train_delivery_allowed() is the INTERCEPTION HOOK: today every dispatched train
+#     'makes it'; when trains become world objects the hook returns False for killed trains
+#     (and dispatch should move to departure-time + travel-time rather than instant arrival).
+# Net average with defaults: 1500/5min = 300 kg ammo/min per airfield (~3x slower than
+# v438f5) landing in discrete train-sized bumps like the original. Production itself stays
+# per-minute (SUPPLY_TICK=60, matching the wiki model and the v291 -1000 fuel/min
+# measurement). The 2009 arena cfg (v292 notes) has CargoPercent=0 and
+# SupplyResourceRadius=10000m; exact train loads/cadence are still to be mined from the
+# ACWIKI local copy (path currently outside the fs mount) - these constants are the knobs.
+SUPPLY_CHAIN          = True    # master switch for the train deliveries
+SUPPLY_TRAIN_INTERVAL = 300.0   # seconds between train arrivals at one receiving scene
+SUPPLY_TRAIN_LOAD     = {'ammo': 1500, 'fuel': 900, 'metal': 600}   # kg dropped per arrival
+SUPPLY_CHAIN_RESERVE  = 0.25    # donors never drop below this fraction of their own cap
+_TRAIN_NEXT = {}                # (room_id, scene_id) -> monotonic due-time of the next train
+
+def _train_delivery_allowed(rid, camp, src_sidx, dst_sidx, load):
+    """INTERCEPTION HOOK. In FA the cargo physically crosses the map and only lands if the
+    train survives the trip. No train world-objects exist yet, so every dispatched train
+    currently 'makes it'. The world-object stage plugs in here: spawn the train at dispatch,
+    return False (deliver nothing) if it was destroyed enroute."""
+    return True
+
+def _supply_chain_step(rid):
+    """Dispatch due trains for a room: per camp, each storage scene whose timer expired gets
+    one train from the richest same-camp producer(s). Returns kg delivered (log aid)."""
+    trn = _probe_terrain_for_room(rid)
+    camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+    if not camps:
+        return 0
+    now = time.monotonic()
+    by_camp = {}
+    for _sidx, _c in camps.items():
+        if _c <= 7:
+            by_camp.setdefault(_c, []).append(_sidx)
+    delivered_total = 0
+    for _camp, _scenes in sorted(by_camp.items()):
+        # split once per camp: producers (donors) vs storage scenes (train destinations)
+        donors, dests = [], []
+        for _sidx in _scenes:
+            p = scene_profile(trn, _sidx)
+            if not p:
+                continue
+            st, _p2 = supply_state(rid, trn, _sidx)     # takes _SUPPLY_LOCK internally
+            if not st:
+                continue
+            if any(p['rates'].get(r, 0) > 0 for r in ('ammo', 'fuel', 'metal')):
+                donors.append((_sidx, st, p))
+            else:
+                dests.append((_sidx, st, p))
+        if not donors or not dests:
+            continue
+        for _dsidx, _dst_st, _dst_p in dests:
+            _key = (rid, int(_dsidx))
+            _due = _TRAIN_NEXT.get(_key)
+            if _due is None:
+                # first sight: stagger the initial arrival across the interval by scene id
+                _TRAIN_NEXT[_key] = now + (int(_dsidx) * 37) % int(SUPPLY_TRAIN_INTERVAL)
+                continue
+            if now < _due:
+                continue
+            _TRAIN_NEXT[_key] = now + SUPPLY_TRAIN_INTERVAL
+            # one train: per resource, draw from the richest producer above its reserve
+            _drop = {}
+            with _SUPPLY_LOCK:
+                for r in ('ammo', 'fuel', 'metal'):
+                    cap = int(_dst_p['caps'].get(r, 0))
+                    if cap <= 0:
+                        continue
+                    space = cap - int(_dst_st.get(r, 0))
+                    want = min(int(SUPPLY_TRAIN_LOAD.get(r, 0)), space)
+                    if want <= 0:
+                        continue
+                    _best = None
+                    for _ssidx, _s_st, _s_p in donors:
+                        _avail = int(_s_st.get(r, 0)) - int(
+                            int(_s_p['caps'].get(r, 0)) * SUPPLY_CHAIN_RESERVE)
+                        if _avail > 0 and (_best is None or _avail > _best[1]):
+                            _best = (_ssidx, _avail, _s_st)
+                    if _best is None:
+                        continue
+                    _drop[r] = (min(want, _best[1]), _best[0], _best[2])
+            if not _drop:
+                continue
+            _src_for_hook = next(iter(_drop.values()))[1]
+            if not _train_delivery_allowed(rid, _camp, _src_for_hook, _dsidx,
+                                           {r: v[0] for r, v in _drop.items()}):
+                log('TRAIN', f'room {rid}: train to scene {_dsidx} INTERCEPTED - no delivery')
+                continue
+            _srcs = set()
+            with _SUPPLY_LOCK:
+                for r, (take, _ssidx, _s_st) in _drop.items():
+                    # re-clamp at delivery: a resupply draw may have raced the two locks
+                    take = min(take, max(0, int(_s_st.get(r, 0))))
+                    if take <= 0:
+                        continue
+                    _s_st[r] = int(_s_st.get(r, 0)) - take
+                    _dst_st[r] = int(_dst_st.get(r, 0)) + take
+                    delivered_total += take
+                    _srcs.add(_ssidx)
+            log('TRAIN', f'room {rid}: train arrived at scene {_dsidx} (camp {_camp}) '
+                         f'from scene(s) {sorted(_srcs)}: '
+                         + ' '.join(f'+{r} {v[0]}kg' for r, v in sorted(_drop.items()))
+                         + f' | next in {SUPPLY_TRAIN_INTERVAL:.0f}s')
+    return delivered_total
+
 def _supply_tick_loop():
     """One production STEP per SUPPLY_TICK: every seeded scene adds its producers' per-minute rate,
     capped at its storage volume (the wiki's 'if there is no available storage space the resources
@@ -11382,6 +11808,14 @@ def _supply_tick_loop():
                     if hp is not None and hp < SCENE_DEFAULT_HP:
                         SCENE_HP[skey] = min(SCENE_DEFAULT_HP,
                                              hp + SUPPLY_REPAIR_HP_PER_TICK)
+            # v439f5: TRAIN deliveries - due trains from producers drop cargo at the camp's
+            # storage scenes (airfields) at the train cadence, not a continuous drip.
+            if SUPPLY_CHAIN:
+                for _rid in {k[0] for (k, _v) in items}:
+                    try:
+                        _supply_chain_step(_rid)
+                    except Exception:
+                        logx('SUPPLY', f'chain step failed room {_rid}')
             # v429f5 stages 3-5: after resources are produced+stored this step, each camp converts
             # stored metal into aircraft/tank/ship UNITS. Done per-room-per-camp (not per-scene)
             # so it runs exactly once even though _SUPPLY is keyed by scene.
@@ -11495,10 +11929,14 @@ def build_packed_info_71(scene_id, arrays):
     return rec
 
 
-def build_production_info_71(records):
+def build_production_info_71(records, hdr=None):
     """[0x47][u32][u16] + N x 83. The header pair is echoed from the request by the real host but
-    is never read on the INFO path, so zeros are fine for unsolicited sends."""
-    body = bytearray([MSG_SCENE_PRODUCTION_71]) + struct.pack('<IH', 0, 0)
+    is never read on the INFO path, so zeros are fine for unsolicited sends.
+    v437f5: `hdr` = the 6 raw header bytes from an inbound msg-71 QUERY, echoed verbatim
+    (matches the 2009 host behaviour); None -> zeros for the unsolicited panel pushes."""
+    if hdr is not None and len(hdr) != 6:
+        hdr = None
+    body = bytearray([MSG_SCENE_PRODUCTION_71]) + (bytes(hdr) if hdr else struct.pack('<IH', 0, 0))
     for rec in records:
         body += rec
     assert (len(body) - 7) % PACKED_INFO_SIZE == 0, 'length must satisfy (len-7) %% 83 == 0'
@@ -11727,6 +12165,57 @@ def _handle_scene_supply_query_69(s, pl):
     # hovered scene re-pushes but holding still does not.
     if PANEL_OPEN_SEQUENCE:
         _maybe_push_panel(s, tuple(idxs))
+    return True
+
+
+# v437f5: THE MAP-SCREEN CTD (messages55, 2026-08-14 04:00:03). With the v436f5 Type=1 flip the
+# client's map screen now emits a msg-71 QUERY alongside every msg-69 poll:
+#     out 71 = [0x47][u32][u16 header pair] + N x u16 scene index   (same scene set as the 69)
+# The server had NO handler for inbound 0x47, so the request fell through to the default echo -
+# and the client's msg-71 receiver asserts (Length-7) % sizeof(PACKED_INFO=83) == 0
+# (VNet_Rcv.cpp:1496). A 13-byte echo of its own request is an INSTANT CTD. The 2009 host
+# (messages04) always REPLIED: out 71'9 -> in 71'90 (7+83x1), out 71'17 -> in 71'422 (7+83x5) -
+# one 83-byte record per requested scene, header pair echoed. Reply here, never echo (0x47 is
+# also in NO_ECHO_SUBS / the compound no-echo tuple as defence-in-depth).
+PRODQ71_LOG_GAP   = 5.0
+_PRODQ71_LOG_LAST = {}
+_PRODQ71_LOG_LOCK = threading.Lock()
+PRODQ71_MAX_SCENES = 64        # bound a malformed/hostile request; a terrain has <= 60 scenes
+
+def _handle_scene_prodinfo_query_71(s, pl):
+    """Answer an inbound msg-71 SCENE_TAG_PRODUCTION query with a well-formed INFO reply.
+
+    Request : [0x47][u32][u16] + N x u16 scene index.
+    Reply   : [0x47][echoed 6-byte header] + N x 83-byte PACKED_INFO, one per requested scene
+              IN REQUEST ORDER. Unknown scenes get zero arrays rather than being omitted -
+              the client only validates total length, so a dropped record would desync the
+              whole reply against the request list.
+    """
+    body = bytes(pl)
+    i = body.find(MSG_SCENE_PRODUCTION_71, 3)
+    if i < 0 or len(body) < i + 9 or (len(body) - i - 7) % 2 != 0:
+        return False
+    hdr = body[i + 1:i + 7]
+    idxs = [struct.unpack_from('<H', body, p)[0] for p in range(i + 7, len(body) - 1, 2)]
+    if not idxs or len(idxs) > PRODQ71_MAX_SCENES:
+        return False
+    trn = _probe_terrain_for_room(s.current_room)
+    recs = [build_packed_info_71(sid, scene_prodinfo_arrays(s.current_room, trn, sid))
+            for sid in idxs]
+    pkt = build_production_info_71(recs, hdr=hdr)
+    threading.Thread(
+        target=lambda: send_rel(s, pkt, f'<- PRODINFO 71 x{len(recs)} (query reply)', to=3.0),
+        daemon=True).start()
+    _now = time.monotonic()
+    _lk = (id(s), tuple(idxs))
+    with _PRODQ71_LOG_LOCK:
+        _last = _PRODQ71_LOG_LAST.get(_lk, 0.0)
+        _emit = (_now - _last) >= PRODQ71_LOG_GAP
+        if _emit:
+            _PRODQ71_LOG_LAST[_lk] = _now
+    if _emit:
+        log('PRODQ71', f'{s.current_pilot} queried {len(idxs)} scene(s) {idxs} -> '
+                       f'replied 7+{len(recs)}*83 bytes (hdr echoed)')
     return True
 
 
@@ -12132,6 +12621,158 @@ def _handle_repair_request_119(s, pl):
                     f'(movement={_mv}, pos={_pos})')
     _grant_auto_resupply(s, _pos)
 
+# -- SPAWN-TIME 'ASK RESOURCES FROM AI' (msg 59 / 0x3b) v437f5 --------------------
+# Re-enabled by the v436f5 Type=1 flip (the Msn_Prod emitter FUN_005578d0 gates on
+# gamedef+0xa8==1). 2009 protocol (messages04 line 5033-5037): the client logs 'Ask resources
+# from AI' immediately after ServerConfirm at EVERY spawn, emits out 59'19, and the REAL host
+# answered with in 60'8 within ~0.4s - followed by the magenta supply EVENT lines. The msg-60
+# reply is what services the freshly spawned (EMPTY, in mission mode) plane.
+# v436f5 field test (run_20260814_065611 / messages55): with no 59 handler the request fell to
+# the generic echo and the plane sat empty until the background poll granted 10s later ('took
+# a bit long'), with flags=0x06 - which refuelled but left guns/ordnance empty and showed NO
+# magenta limit lines.
+# WHY THE SPAWN REPLY USES THE bit0 PATH (flags 0x03), per the msg-60 handler decompile
+# (FUN_005581c0, re-read 2026-08-14):
+#   * The magenta 'Fuel limited to N' (string 0x9f) and 'Ammunition limited to N' (0xa1)
+#     lines the 2009 arenas showed exist ONLY in the bit0 branch - the silent 0x06/0x07
+#     vfunc20(1) shortcut can never produce them.
+#   * bit0|bit1 (0x03): fuel -> HQ loadout (FUN_004ebfa0 + FUN_004ebf00(+0x4e8)), silent;
+#     ammo (bit2 clear) -> 'Ammunition limited to <amount2>' + rack-mask notice 0xa2 when
+#     empty + FUN_004ec5c0(amount2, 0) EXPLICIT ordnance reload to the amount2 kg budget +
+#     FUN_004ebd10() gun finalise + [plane+0x1b4c]=1 + the out-73 SendRepairInfo reply.
+#   * The v427f5 'ordnance STRIPPER' caution against bit0&!bit2 (unload-all-then-reload)
+#     does NOT apply here: a freshly spawned mission-mode plane is empty by definition, so
+#     unload-all is a no-op and reload-to-budget is exactly the wanted spawn service. The
+#     119/poll REPAIR paths keep their 0x06/0x08 tiers untouched.
+# NO SPAWN GRACE on this path BY DESIGN: this grant IS the spawn supply step the 2009 host
+# performed instantly; AUTO_RESUPPLY_SPAWN_GRACE guards the poll/119 REPAIR-rebuild hazard
+# (v279), not the client's own spawn request. The airborne movement guard stays (a freshly
+# spawned plane has no telemetry divergence -> movement 0 -> grant).
+MSG_ASK_RESOURCES_59     = 0x3b
+SPAWN59_REPLY            = True   # answer spawn-time msg 59 immediately; False -> poll only
+SPAWN59_FLAGS            = 0x03   # bit0|bit1: fuel->loadout silent, ammo->limited-to budget
+SPAWN59_NARRATE_SHORTAGE = True   # add bit3 ('insufficient aircraft units...') on a short draw
+SPAWN59_REPLY_DELAY      = 1.5    # v438f5: seconds to hold the grant after the request. The
+                                  # v437f5 instant (~20ms) reply raced the client's own spawn
+                                  # build: the msg-60 ammo path's rack-mask check ran before
+                                  # the ordnance racks were mounted -> magenta 'no bombs or
+                                  # rockets available' on every bomb-loadout spawn, and the
+                                  # FUN_004ec5c0 reload had no racks to fill (a LATER in-game
+                                  # resupply on the finished plane loaded bombs fine - same
+                                  # grant, different timing). The 2009 host answered in ~0.4s;
+                                  # 1.5s clears the build window with margin. 0 = reply inline.
+
+def _grant_spawn_supply(s):
+    """The msg-60 reply to a spawn-time msg-59. Arcade rooms: silent full service. TC rooms:
+    flags 0x03 with amount2 = the ammo kg actually drawn from the camp pool (the client renders
+    'Ammunition limited to <amount2>' and loads exactly that budget)."""
+    _mode = None
+    try:
+        _mode = scoring_mode_for_room(s.current_room)
+    except Exception:
+        pass
+    if _mode != 'tc':
+        send_supply_grant_60(
+            s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
+            reason=f'(spawn-59 ARCADE: {s.current_pilot})')
+        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> ARCADE full service (mode={_mode})')
+        return
+    if getattr(s, 'nation', None) is None:
+        log('RESUPPLY', f'{s.current_pilot} spawn-59: TC but no camp (nation unset) - no grant')
+        return
+    _trn = _probe_terrain_for_room(s.current_room)
+    _have_pool = bool(SCENE_CAMP_BY_TERRAIN.get(_trn))
+    if _have_pool:
+        _stored, _pcap = camp_economy_totals(s.current_room, _trn, s.nation)
+        if not any(_pcap.values()):
+            _have_pool = False
+    if not _have_pool:
+        # unmapped terrain: serve arcade-style rather than deny (same rationale as the poll)
+        send_supply_grant_60(
+            s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
+            reason=f'(spawn-59 TC-unmapped: {s.current_pilot})')
+        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> TC room, terrain {_trn} unmapped - '
+                        f'arcade-style grant')
+        return
+    _ask = SUPPLY_TC_REARM_AMMO_KG
+    _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
+                                                  _ask, SUPPLY_TC_FUEL_ADD_KG)
+    _flags = SPAWN59_FLAGS
+    if _got_a < _ask and SPAWN59_NARRATE_SHORTAGE:
+        _flags |= 0x08                     # authentic 'insufficient aircraft units' narration
+    send_supply_grant_60(
+        s, flags=_flags, amount=0, amount2=max(0, int(_got_a)) & 0xffff,
+        reason=f'(spawn-59 TC: fuel->loadout, ammo budget {_got_a}kg of {_ask})')
+    log('RESUPPLY', f'{s.current_pilot} spawn-59 -> TC grant flags=0x{_flags:02x} '
+                    f'ammo-budget {_got_a}kg (asked {_ask}) fuel-debit {_got_f}kg '
+                    f'[camp{s.nation} pool now ammo {_after["ammo"]} fuel {_after["fuel"]} kg, '
+                    f'{_n} scenes]')
+
+def _handle_ask_resources_59(s, pl):
+    """v437f5: reply to the client's spawn-time msg-59 with an immediate msg-60 grant."""
+    if not (AUTO_RESUPPLY and SPAWN59_REPLY):
+        return
+    if not getattr(s, 'entered_game', False) or not getattr(s, 'obj_confirmed', False):
+        log('RESUPPLY', f'{getattr(s, "current_pilot", "?")} msg-59 before obj confirm - '
+                        f'ignored (poll will cover)')
+        return
+    if s.current_room is None or getattr(s, 'my_obj_number', None) is None:
+        return
+    # v440f5: the DEATH/EXIT-time msg-59. The client also emits a msg-59 while tearing the
+    # life down (exit-to-HQ / crash) with its plane fields INVALIDATED to 0xFF:
+    #     spawn form: ...3e04 e100 0401 7000 8200   (live plane data)
+    #     exit  form: ...3e04 ffff ffff ffff ffff   (messages62 / run_20260815_003043 00:33:08)
+    # v438f5's handler treated it as a spawn ask and Timer-scheduled a msg-60 grant 1.5s out -
+    # firing supply traffic into a client that is by then sitting on the HQ page with its world
+    # torn down (the ACE88/v416f5 hazard class; entered_game/my_obj_number do NOT flip on a
+    # plain exit, so the delayed-grant guards pass). Not a spawn ask -> no grant, no debounce.
+    if len(pl) >= 23 and bytes(pl[-8:]) == b'\xff' * 8:
+        log('RESUPPLY', f'{s.current_pilot} msg-59 is the DEATH/EXIT form (plane fields '
+                        f'0xFF) -> ignored, no grant scheduled (v440f5)')
+        return
+    now = time.time()
+    # AIRBORNE GUARD only - see the block comment above for why there is no spawn grace here.
+    try:
+        _mv = plane_movement(s)
+    except Exception:
+        _mv = 0
+    if _mv >= CRASH_MOVEMENT_MIN:
+        log('RESUPPLY', f'{s.current_pilot} msg-59 REFUSED - plane moving '
+                        f'(movement={_mv} >= {CRASH_MOVEMENT_MIN})')
+        return
+    # shared DEBOUNCE + ONE-SHOT so the poll / a 119 retry cannot double-grant the same stop
+    if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
+        return
+    s.last_resupply_at = now
+    s.resupplied_this_stop = True
+    try:
+        _hist = getattr(s, '_pos_hist', None)
+        s._grant_pos = _hist[-1][1] if _hist else None
+    except Exception:
+        s._grant_pos = None
+    log('RESUPPLY', f'{s.current_pilot} msg-59 Ask-resources (spawn) -> replying '
+                    f'{f"in {SPAWN59_REPLY_DELAY:.1f}s" if SPAWN59_REPLY_DELAY > 0 else "now"} '
+                    f'(movement={_mv})')
+    if SPAWN59_REPLY_DELAY > 0:
+        # v438f5: hold the grant until the client's spawn build (ordnance racks included) is
+        # done - see SPAWN59_REPLY_DELAY. Guard inside the timer: skip if the session died or
+        # respawned meanwhile (obj number change) so a stale grant can't hit a new life.
+        _onum = getattr(s, 'my_obj_number', None)
+        def _delayed_grant(_s=s, _expect_onum=_onum):
+            try:
+                if not getattr(_s, 'entered_game', False) or getattr(_s, 'closing', False):
+                    return
+                if getattr(_s, 'my_obj_number', None) != _expect_onum:
+                    log('RESUPPLY', f'{getattr(_s, "current_pilot", "?")} spawn-59 delayed '
+                                    f'grant dropped - object changed (respawn/death)')
+                    return
+                _grant_spawn_supply(_s)
+            except Exception:
+                logx('RESUPPLY', 'delayed spawn-59 grant failed')
+        threading.Timer(SPAWN59_REPLY_DELAY, _delayed_grant).start()
+    else:
+        _grant_spawn_supply(s)
+
 def _resupply_poll_loop():
     """v422f5: background poll driving the auto-resupply. The ground-stop decision itself lives
     in ground_stop_eligible() (fail-closed, ONE data path); this loop walks the sessions,
@@ -12218,7 +12859,13 @@ PREFIXED_NORMALISE_SUB = True
 # never told, no DAMAGED mark, no kill latch. Re-framing routes them to the sub==0x1c branch
 # as CLEAN direct bytes (prefix gone), which also retires the v356 in-relay strip's prefixed
 # case and the v352 'relayed with the prefix still attached' mis-walk suspect for this path.
-PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x45, 0x7d}
+# v437f5: 0x3b (msg 59 Ask-resources), 0x47 (msg 71 production query) and 0x49 (msg 73 repair
+# info) join under the SAME safety argument as v340's 0x45/0x7d: none of the three has any
+# pl[8] fallback handler, so re-framing them cannot shift bytes under an existing reader. All
+# three are newly LIVE traffic - the v436f5 Type=1 flip re-enabled the client's Msn_Prod
+# emitters - and the internet (GCP) path wraps pervasively (v364f5), so without the re-frame a
+# wrapped spawn-time msg-59 would silently miss the resupply reply.
+PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x3b, 0x45, 0x47, 0x49, 0x7d}
 
 # v411f5: a full re-frame makes the recovered frame BYTE-IDENTICAL to its direct (cmd==0)
 # form - but the entire in-game dispatch (the delete-notify death path, DAMAGE28/collision
@@ -12356,6 +13003,18 @@ def handle_post_auth(s, cmd, pl):
         # v435f5: the client's explicit REPAIR REQUEST (msg 119). Primary supply trigger -
         # grant on request rather than inferring 'parked' from telemetry (see the handler).
         _handle_repair_request_119(s, stored)
+    if sub == MSG_SCENE_PRODUCTION_71 and getattr(s, 'entered_game', False):
+        # v437f5: the map screen's msg-71 production QUERY (paired with the msg-69 poll,
+        # live since the v436f5 Type=1 flip). MUST be answered and NEVER echoed - the
+        # client's receiver asserts (Length-7) % 83 == 0 (VNet_Rcv.cpp:1496), so the old
+        # echo fallthrough was an instant map-open CTD (messages55). 0x47 also sits in
+        # NO_ECHO_SUBS as defence-in-depth.
+        _handle_scene_prodinfo_query_71(s, stored)
+    if sub == MSG_ASK_RESOURCES_59 and getattr(s, 'entered_game', False):
+        # v437f5: spawn-time 'Ask resources from AI' - answer NOW (2009 replied in ~0.4s;
+        # leaving it to the poll made the spawn service 10s late and echo-reflected the
+        # request). 0x3b also sits in NO_ECHO_SUBS.
+        _handle_ask_resources_59(s, stored)
     _auto_resupply_check(s, sub, stored)         # v267: auto msg-60 resupply on park+engine-off
 
     if cmd in COMPOUND_CMDS:
@@ -13264,8 +13923,14 @@ def handle_post_auth(s, cmd, pl):
                 log('POST-AUTH','scan-inner vcncExitAppSpace -> exit reply')
                 pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
                 if not send_rel(s,bytes(pl2),'exit appspace reply (scan)'):
-                    s.closing=True
-                    with sl: sadrs.pop(s.addr,None); sids.pop(s.sid,None)
+                    # v442f5: session KEPT on the exit-reply ACK timeout - this was the THIRD
+                    # exit-appspace site (the two v441f5 fixed were compound + direct cmd=5)
+                    # and the harshest: a bare closing+pop with no teardown. Same reasoning:
+                    # send_rel False is 'not ACKed in-window', not 'client gone' - the
+                    # _rel_keeper (or the v442f5 REL cap) is still working the downlink, and
+                    # a truly dead client is reaped by heartbeat/vcncDisconnect/idle paths.
+                    log('SESSION', f'{getattr(s, "current_pilot", "?")} exit-appspace reply '
+                                   f'(scan) not ACKed in-window - session KEPT (v442f5)')
                 return
 
         # Messages that must NEVER be echoed. Two kinds:
@@ -13280,7 +13945,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19}  # 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07}  # v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
@@ -13590,6 +14255,32 @@ def handle_post_auth(s, cmd, pl):
         return
 
     if cmd == 0x0222:
+        # v440f5 [CTD/CRITICAL]: THE cmd=546 BLIND ECHO. This branch echoed EVERYTHING back
+        # with only a send_rel label (no log() call) - invisible at every loglevel. The
+        # exit-to-HQ CTD (messages62, 2026-08-15 00:33): v438f5b made Dogfighting rooms
+        # Type=1 'Mission', so exit-to-HQ now runs Msn_Exit and emits ExitEvent(-1) -
+        # out 33'8 with Number=0xFFFF - during the HQ transition, on the 546 channel:
+        #     [ctr][ctr][02][22] [21][AddData][ff][ff][type]...
+        # The POISON BYTES DEFEAT THE PREFIX DETECTOR: _pfx requires pl[6:8]==0000, but
+        # Number=0xFFFF sits exactly at pl[6:8], so the frame skipped the REFRAME path
+        # (hence zero REFRAME lines), fell here (len 12 < 15), and was echoed verbatim.
+        # The client indexed ARR<NET::OBJECT*,2048>[65535] -> bounds error, ring.hpp:27
+        # ('in 33'8' 30-60ms after 'out 33'8'). Same poison class as v222/v360f5 - this was
+        # the LAST unguarded echo. Guard by detected message id at the two possible offsets:
+        #   * pl[6:8]==0000 -> well-formed inner frame -> id at pl[8]
+        #   * pl[6:8]!=0000 -> raw/poison shape        -> id at pl[4]
+        # (pl[4] is only checked in the malformed shape, where it cannot be an inner bc -
+        # so legit pilot-management echoes, whose inner bc can reach 0x03+, are unaffected.)
+        _NOECHO546 = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19,
+                      0x3b, 0x47, 0x49, 0x07}   # NO_ECHO_SUBS + 0x07 (telemetry reflection)
+        _wf546  = (len(pl) > 8 and pl[6] == 0 and pl[7] == 0)
+        _id546  = (pl[8] if _wf546 else (pl[4] if len(pl) > 4 else 0))
+        if _id546 in _NOECHO546:
+            log('ECHO546', f'{getattr(s, "current_pilot", "?")} cmd=546 carries no-echo msg '
+                           f'id 0x{_id546:02x} ({"inner" if _wf546 else "raw"} form, '
+                           f'{len(pl)}B: {hx(bytes(pl[:16]))}) -> SWALLOWED, not echoed '
+                           f'(echoing the 0xFFFF ExitEvent form = ring[65535] CTD, v440f5)')
+            return
         if len(pl) >= 15:
             inner_sub = pl[8] if len(pl)>8 else 0
             if inner_sub == 0xe4:
@@ -13614,7 +14305,11 @@ def handle_post_auth(s, cmd, pl):
         log('POST-AUTH','vcncExitAppSpace (cmd=5)')
         pl2=bytearray(80); pl2[0]=4; pl2[3]=0x64
         if not send_rel(s,bytes(pl2),'exit appspace reply'):
-            _teardown_session(s, why='(exit reply timed out)')   # v385f5: full cleanup, not a bare pop
+            # v441f5: session KEPT on exit-reply ACK timeout - see the compound-path note
+            # (the v385f5 teardown here stranded HQ clients over internet latency; the
+            # _rel_keeper delivers the reply late and the session continues).
+            log('SESSION', f'{getattr(s, "current_pilot", "?")} exit-appspace reply not '
+                           f'ACKed in-window - RELKEEP retries; session KEPT (v441f5)')
     elif cmd==512:
         pilots=db_get_pilots(s.account) if s.account else []
         resp=build_e1_pilot_list(pilots)
