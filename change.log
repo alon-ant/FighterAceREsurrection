@@ -17,38 +17,661 @@ they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "Falsify v444f5 (TC supply: CAPS ONLY ON SHORTAGE, per 2009 ground truth -
-   read the v444f5 + v443f5 entries; carry the v442f5 checklist if the GCP
-   deploy has not been field-tested). In a TC (Type=1) room:
-   (1) SUPPLIED SPAWN = FULL ARM, NO CAP LINES: spawn a fighter AND a heavy
-       bomber (Lancaster/B-17 class) at a healthy base - FULL bomb racks, full
-       guns, NO 'Ammunition/Fuel limited to' magenta, NO shortage narration
-       (run log: 'ammo FULL ARM (ceiling 6500)' flags=0x07). THE KEY RISK to
-       falsify: 0x07 at spawn is RE-derived but field-untested - v436f5 proved
-       0x06 leaves a fresh mission plane's guns/ordnance EMPTY; bit2's explicit
-       full reload should arm it (same machinery as the proven bit0 budget
-       path). If a rich-base spawn comes up UNARMED with flags=0x07 in the
-       log, fall back: set the ammo-ok form to 0x03 with amount2=ceiling
-       (budget-reload to 6500 arms everything; costs one magenta line).
-   (2) SHORT AMMO ONLY (kill the ammo scenes, console 'destroy'): spawn ->
-       'Ammunition limited to <yield>' + narration, fuel silent to loadout
-       (flags 0x0b). SHORT FUEL ONLY (kill fuel storage): 'Fuel limited to
-       <yield>' + full guns/ordnance (flags 0x0d). BOTH: 0x09 family.
-   (3) DEBIT SANITY: a bomber spawn at a rich base debits 6500kg ammo (watch
-       the pool drain in RESUPPLY lines + panel); trains (300s) refill. If
-       drain feels too harsh in play, tune the ceilings or prioritise the
-       msg-73 SendRepairInfo reconciliation (client reports the ACTUAL load -
-       refund the unused draw; ACWIKI: equip cost = physical weight loaded).
-   (4) MID-LIFE unchanged from v443f5: 0x06/0x0a/0x0c/0x08 matrix, never bit0.
-       Verify a healthy-base landing still full-restores silently.
-   (5) Regression: 1.5s spawn delay intact, death-form 59 ignored, arcade
-       rooms 0x07 unchanged, unmapped terrains arcade-fallback.
-   OPEN: per-plane loadout weights from the client Data files (exact ACWIKI
-   debit); msg-73 payload decode (Ghidra) for reconciliation + peer relay;
-   ACWIKI train numbers; trains as world objects; PACKED_INFO columns.
-   Tools: fs MCP (edit via fs:edit_file, NOT str_replace - read-only mount),
-   ghidra MCP, fa_memdump.py (Admin). Server is server.py ~14790 lines, v444f5."
+  "FA server v455f5 (read v455f5 + v454f5 first). DEPLOY v455f5 TO THE ONLINE
+   BOX - it carries every fix v442f5..v455f5 the live players have been
+   hitting (identity slot recycling, FFA air-start cold engine, Ctrl+Tab SP
+   cycling, repeat 119 repair, the CORRECTED BuildingsRepairRate migration).
+   AFTER DEPLOY: (a) watch the startup MIGRATE lines - all rooms should log
+   'BuildingsRepairRate 100 -> 0 baked' (the migration was DRY-RUN VERIFIED
+   against the uploaded production fa_server.db: 19/19 rooms found rate=100
+   at the corrected offset, 19/19 recompress round-trips byte-exact);
+   (b) players must RESTART their clients once to drop cached GAME_DEFs;
+   then buildings stay destroyed (client log prints BuildingsRepairRate=0).
+   CRITICAL CORRECTION LANDED IN v455f5: the v450f5/v453f5 repair-rate
+   offset was WRONG (aa-5 'behind 4 AI bools') - the real production blobs
+   show the ScoreAndDamage tail runs straight into the AA block:
+   [BuildingDamage, Armor, Score, Life, RepairRate][AAx5], so the byte is
+   aa-1. The old guard REFUSED every real blob (harmless no-op, nothing was
+   ever patched or corrupted). Both the serve patch and the migration now
+   use aa-1 with an AA-shape guard.
+   messages04_1_ CTD update: ALL 19 stored blobs pass the FULL deserializer
+   walk + camps validation (uploaded DB) - the data is clean; the suspect is
+   client re-entrancy on rapid-fire 212s (4 within 400ms + interleaved news
+   225). v455f5 paces the arena-list GAME_DEFs at 120ms. If the CTD recurs
+   on v455f5, next step is the serve-time pipeline diff (reproduce
+   build_lz_gamedef output per room and parse it client-exactly).
+   THEN: TANK MISSION reply (msg 146 args 30/49 = target gsi scenes; build
+   the msg-4 NetTank spawn via FUN_004f26b0 layout); msg-33 SCORE EVENT
+   (Score:0; note real blobs serve BuildingsScore=100, 2009 = 250);
+   messages43 stray-StartPlaceList freeze (check the v343 death-landing
+   re-grant for unsolicited sends); host-59/119 decompile; msg-73 parser.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via
+   claude-in-chrome; production DB analysis kit lives at /tmp/fa_lz.py in
+   the container (fa_decompress/fa_compress/gamedef walkers extracted from
+   server source). Server is server.py ~15250 lines, v455f5 (v444f5 = the
+   banked stable point)."
 ------------------------------------------------------------------------------
+
+v455f5 [GAMEDEF/REPAIR - CRITICAL OFFSET CORRECTION + 212 pacing] The user
+      uploaded the ONLINE box's production fa_server.db (19 rooms); dry-
+      running the v453f5 migration against it exposed that the v450f5
+      repair-rate offset derivation was WRONG:
+      * REALITY (19/19 blobs): bytes at aa-5..aa-1 = [0,100,100,100,100] =
+        [BuildingDamage, BuildingsArmor, BuildingsScore, BuildingsLife,
+        BuildingsRepairRate] - the ScoreAndDamage tail runs DIRECTLY into
+        the 5 AA-quality bytes; the [AI] bools are NOT on the wire there
+        (they sit earlier in the walk). So BuildingsRepairRate = aa-1, not
+        aa-5. The old 4-bools guard saw [100,100,100,100] and REFUSED every
+        real blob: the serve patch and migration were harmless no-ops that
+        would never have fixed anything. (This also retroactively explains
+        why nothing was ever corrupted despite the wrong offset.)
+      * FIX: apply_buildings_repair_rate + migrate_stored_gamedefs_repair_
+        rate both patch aa-1, guarded by the AA-quality shape (5 bytes all
+        0..10 - the same trust apply_aa_quality uses on top of the full
+        deserializer-replay locator).
+      * PRODUCTION-PROVEN: dry-run on the uploaded DB: 19/19 rooms located
+        rate=100 at aa-1 (several rooms show real AA qualities 6/1/3/1/1
+        etc., EvP-silent rooms all-zero - guard shape holds either way);
+        19/19 patched copies fa_compress round-trip byte-exact. The
+        migration will bake 0 into every stored arena on first v455f5
+        start.
+      * messages04_1_ CTD FOLLOW-UP: all 19 stored blobs pass the FULL
+        deserializer walk (aa located, startground located, identical 710B
+        tail after AA) and client-exact camps validation - stored data is
+        CLEAN, so the Aug-17 hard CTD mid-212-parse is NOT data corruption.
+        Suspect: client re-entrancy parsing 4 GAME_DEFs in 400ms with a
+        news 225 interleaved. HARDENING: send_arenalist_with_gamedefs inter-
+        212 sleep 10ms -> 120ms.
+      * Analysis tooling: fa_decompress/fa_compress/gamedef walkers
+        extracted to a standalone module for DB forensics (validated
+        against all production blobs).
+
+v454f5 [FLY/RESUPPLY - LIVE-SERVER BUG BATCH] Triage of five player reports
+   of LIVE-SERVER player reports - DEPLOY v454f5 TO THE ONLINE BOX FIRST
+   (it has been up since Aug 15 10:07 on a pre-v446 build; several reported
+   bugs are already fixed locally and just not deployed). Then verify:
+   (1) IDENTITY (Taurus: Duckie rendered as CHARGER, messages75, overnight
+       Aug 14/15): the v441f5 slot-recycling class - Duckie was assigned a
+       recycled ClientNumber mapping to CHARGER's live station (no 'Create
+       client' for Duckie at all in the log). FIXED SINCE v441f5, needs the
+       deploy. Verify: join/leave churn, no player renders under another's
+       name, SLOT 'retired by' lines in the run log.
+   (2) Ctrl+Tab SPAWN POSITION (Taurus, messages86/87): NEW FIX in v454f5 -
+       msg 93 (0x5d) is the TAB position-cycle request (same 3B record as
+       msg 23, N=OldSP+1; client dispatches 23 and 93 to the same handler).
+       We had NO 93 handler -> generic echo -> client parsed its own echo as
+       'SP 0 granted' -> never moved. Now routed to handle_fly_start_place
+       (direct + scan + compound), reply mirrors sub 0x5d, explicit-N grant
+       with occupancy skip (_alloc_start_place wraps mod SP_MAX). Verify:
+       Ctrl+Tab cycles positions; two players tabbing never stack; run log
+       'GRANT N=x (TAB cycle, msg 93)'.
+   (3) REPAIR-ONCE-THEN-CTRL+TAB (Taurus, messages88, NAW II 5-towers): NEW
+       FIX in v454f5 - the explicit msg-119 path no longer carries the
+       poll's one-shot 'resupplied_this_stop' latch (it refused every repeat
+       request at the same stop; evidence shows the client only asks when it
+       needs service). Debounce kept; latch still SET so the poll can't
+       double-grant. Verify: park under flak on 5-towers, repair repeatedly
+       without moving - each deliberate request serviced.
+   (4) FFA COLD-ENGINE AIR SPAWN also hit flakmagic (messages38, Aug 18:
+       OnGround=0 spawn + in 60 grant + client killed 43s later) = the
+       v452f5 air-start fix, needs the deploy.
+   (5) CTDs still OPEN: (a) messages04_1_ (flakmagic, Aug 17 13:24): HARD
+       CTD mid-parse of the 4th 212 in our arena-list push (sizes 604/620/
+       684/700, all bc-aligned; died inside the camps block after 'ccn 2
+       SU') - need the online DB's room blobs to identify which arena's
+       GAME_DEF kills the parser (suspect a client-created room with a
+       malformed camps block, possibly interacting with our serve-time
+       edits). (b) messages43 (Aug 19): in-game freeze - stray
+       'WaitingForStartPlaceList is empty, RestLength=3, POS_DATA=(0,1,2)'
+       (a 23/93 grant arriving when nobody waits - check the v343 death-
+       landing re-grant + the new 93 path for unsolicited sends) + 'Get
+       coord for missing object 1766' flood -> user killed the client.
+       (c) messages42 (Aug 19 19:58): connect timeout (vcncConnect fails,
+       Conductor -140) - transient or box wedge; he connected fine a minute
+       later. Check the online server.err.log tail when convenient.
+   THEN resume: TANK MISSION reply (msg 146 args 30/49 = target gsi scenes;
+   build the msg-4 NetTank spawn); msg-33 SCORE EVENT; BuildingsRepairRate
+   migration verify (MIGRATE log on first v453f5+ start + client restart);
+   host-59/119 decompile; msg-73 parser.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via
+   claude-in-chrome (/admin/logfiles.json; curl=403). Server is server.py
+   ~15240 lines, v454f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v454f5 [FLY/RESUPPLY - LIVE-SERVER BUG BATCH] Triage of five player reports
+      (Taurus messages75/86/87/88, VF10_flakmagic messages38/42/43 +
+      messages04_1_), all from the ONLINE box (up since Aug 15 on a pre-v446
+      build). Two NEW fixes, two already-fixed-pending-deploy, three CTDs
+      documented for follow-up:
+      * NEW (A) msg 93 (0x5d) = Ctrl+Tab SPAWN-POSITION CYCLE. Same 3-byte
+        record as msg 23 ([AF][mid][N]) with N = OldSP+1; the client
+        dispatches ids 23 AND 93 to the same handler (FUN_004f6320). We had
+        no 93 route -> the generic echo returned the request verbatim and
+        the client parsed it as 'SP N 0 granted' (messages86: every 'TAB.
+        Asking (1)' answered 'SP N 0 on AF 1') -> position never changed,
+        'Waiting for position' flash each try. FIX: 93 routed to
+        handle_fly_start_place in all three framings (direct / type-scan /
+        compound), reply mirrors sub 0x5d (reply_sub param), and
+        _alloc_start_place now honours an explicit N with OCCUPANCY SKIP
+        (next free index mod SP_MAX) so tabbing players never stack.
+      * NEW (B) msg-119 repeat repair (messages88: 'repair works the first
+        time, then only after Ctrl+Tab'): the explicit-request path shared
+        the poll's one-shot resupplied_this_stop latch, refusing every
+        repeat 0x77 at the same stop. Field evidence shows the client only
+        asks when it needs service (a full plane is silent for 14 min; a
+        flak-damaged parked plane asks again; grants at 14:26/14:40/14:43
+        each followed a position change = fresh latch). FIX: latch check
+        removed from _handle_repair_request_119 (debounce kept; latch still
+        SET post-grant so the background poll cannot double-grant).
+      * ALREADY FIXED, AWAITING DEPLOY: (C) Duckie-rendered-as-CHARGER
+        (messages75, overnight Aug 14/15) = the v441f5 identity slot-
+        recycling class: Buzzard_Duckie entered at 01:47 with NO 'Create
+        client' line - the server issued him a recycled ClientNumber that
+        Taurus's client still mapped to CHARGER's station; all his hits and
+        the 02:10 kill credit rendered as CHARGER. Same overnight session
+        the v441f5 fix was derived from. (D) flakmagic's messages38 'CTD'
+        (Aug 18) = the v452f5 FFA air-start cold-engine class (OnGround=0
+        spawn + spawn grant; client killed 43s later).
+      * OPEN CTDs: messages04_1_ = hard client death mid-parse of the 4th
+        arena-list 212 (all four bc-aligned - died inside the camps block;
+        needs the online room blobs); messages43 = freeze after a stray
+        StartPlaceList ('WaitingForStartPlaceList is empty, POS_DATA=
+        (0,1,2)') + missing-object-1766 flood; messages42 = transient
+        connect timeout (Conductor -140), recovered a minute later.
+
+v453f5 [GAMEDEF/REPAIR - AT-REST FIX] The building-repair bug was never the
+   the building-repair fix now needs a RESTART+RE-TEST, and the tank-mission
+   REPLY is ready to build (raws captured).
+   (1) BUILDING REPAIR - ROOT CAUSE FOUND + FIXED AT REST: the v450f5 repair
+       patch never applied in the field because a RETURNING client has the
+       arena GAME_DEF CACHED and never re-requests a 212 (run_20260817_083129
+       has NO GAMEDEF212 line; messages73 shows BuildingsRepairRate=100
+       client-side). So the client self-repaired the rubble while the server
+       held the objects permanently destroyed (_SCENE36_DESTROYED) - matching
+       the report EXACTLY: 'buildings appear to repair, scene damage not
+       decreasing, re-bombing doesn't damage them'. v453f5 adds a STARTUP DB
+       MIGRATION (migrate_stored_gamedefs_repair_rate) that bakes
+       BuildingsRepairRate=0 into every stored blob at rest (decompress ->
+       patch -> recompress with round-trip verify -> write back; idempotent).
+       TEST: RESTART THE SERVER (watch the MIGRATE log: 'room 49:
+       BuildingsRepairRate 100 -> 0 baked'), then in the client - CRUCIAL -
+       the client must DROP its cache: fully restart FA (or clear its arena
+       cache) so it re-fetches the now-corrected GAME_DEF. Confirm the client
+       log prints BuildingsRepairRate=0. Then destroy buildings: they must
+       STAY destroyed (no self-repair), scene damage % holds, and re-bombing
+       a still-standing building still damages it.
+   (2) TANK MISSION REPLY - raws captured (run_20260817_083129): msg 146/0x92
+       sub=0x47, arg=30 AND arg=49 both seen (raw ...1e00 / ...3100). arg is
+       almost certainly the TARGET gsi SCENE index (30/49 are valid TRN02
+       scene indices). BUILD THE REPLY: the 2009 host answered by spawning
+       NetTank objects via msg-4 CREATE-OBJECT (FUN_004f26b0, type&0xf==3 =
+       NetTank + camp). Need: the msg-4 wire builder (study an inbound create
+       for a plane/tank in a client log + the deserializer offsets:
+       param_2[3]=camp @+0xb30, param_2[4..0x18]=6 dwords of pos/state), a
+       server-side tank object with an ONumber, position at the target scene
+       (trn_scene_info x/y), and a camp opposing the requester for offensive /
+       matching for defensive. Start minimal: spawn ONE tank at the scene and
+       confirm the client renders 'Create NetTank'.
+   ALSO OPEN: msg-33 SCORE EVENT (Score:0; 2009 BuildingsScore=250, we serve
+   100); does a supply run lower scene damage % (needs SUPPLY_REPAIR_HP_PER_
+   TICK>0 or a supply heal); per-object store loss; host-59 @0x557f20 /
+   host-119 @0x4fc2b0 decompile; msg-73 parser (39B @0x4c8690); GCP deploy of
+   v442f5+ (online box STALE since Aug 15).
+   VERIFY v452f5 held: FFA air spawn = engine running (no 'Fueling and
+   Arming'); bomber lands in TC/NAW -> gets repair (in 60 after out 119).
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via
+   claude-in-chrome (/admin/logfiles.json, curl=403). Server is server.py
+   ~15210 lines, v453f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v453f5 [GAMEDEF/REPAIR - AT-REST FIX] The building-repair bug was never the
+      patch being wrong - it was never RUNNING. Field diagnosis
+      (run_20260817_083129 + messages73, user on v452f5): a returning client
+      has the arena GAME_DEF CACHED, so it never re-requests a 212 - the
+      serve-time apply_buildings_repair_rate (v450f5) has nothing to patch
+      (zero GAMEDEF212 lines all session), and the client keeps its INI
+      default BuildingsRepairRate=100 (printed verbatim in messages73 while
+      the server had already sent 36+30 destroys). Result matched the report
+      precisely: the client self-repairs the rubble, but the server holds
+      every object in _SCENE36_DESTROYED, so scene damage % never drops and
+      re-bombing a 'repaired' (server-dead) building does nothing.
+      FIX: migrate_stored_gamedefs_repair_rate() - a startup DB migration
+      that bakes BuildingsRepairRate=0 into every stored arena blob AT REST
+      (decompress via gamedef_start framing -> patch the RepairRate byte
+      [aa_offset-5, same location as the serve patch, 4 [AI]-bool guard] ->
+      fa_compress -> round-trip verify (decompress==patched or LEAVE
+      UNCHANGED) -> UPDATE rooms). Idempotent (rooms already 0 skipped),
+      fully guarded per-row, gated by APPLY_REPAIR_RATE_MIGRATION. Every
+      future serve now starts from a correct blob, AND a client that drops
+      its cache re-fetches the corrected value. NOTE for the field: the
+      client must still be restarted to discard its cached GAME_DEF; the
+      server migration alone cannot reach an already-cached client.
+      TANK-MISSION raws banked this session (run_20260817_083129): arg=30 and
+      arg=49 (both valid TRN02 gsi scene indices) -> the msg-146 arg is the
+      target scene; reply builder (msg-4 NetTank spawn) is the next step.
+
+v452f5 [RESUPPLY/SPAWN - TWO FIELD BUGS] From player reports (2026-08-16):
+   fixed from player reports (messages30 = VF10_flakmagic, messages77 =
+   Taurus) - VERIFY THEM, then resume ground war (tank-mission reply is the
+   big open item).
+   (1) FFA COLD-ENGINE AIR SPAWN (Taurus): an air-start arena (StartGround=no,
+       StartAlt=1000m - the FFA room) spawned the plane airborne but our
+       spawn-time msg-60 ran the client's 'Fueling and Arming plane' ground
+       service -> engine off, throttle idle, at altitude. v452f5 records each
+       arena's StartGround from the served GAME_DEF (record_air_start_from_
+       blob at 212-serve; _ROOM_AIR_START cache) and _grant_spawn_supply now
+       SKIPS the grant for air-start arenas ('AIR-START arena ... no spawn
+       grant' in the run log). TEST: spawn in the FFA -> engine RUNNING,
+       flying, fully armed, NO 'Fueling and Arming' message. Ground-start
+       arenas (TC) must still get their normal spawn service.
+   (2) NO REPAIR AFTER LANDING (flakmagic, B-17G, Nations at War): he landed,
+       sent out 119'5 three times, every one refused, never repaired, exited.
+       The msg-119 airborne guard used the strict parked threshold
+       (CRASH_MOVEMENT_MIN=64), which a just-landed heavy bomber trips on
+       rollout/approach residual. Since the client's 119 is authoritative (it
+       only sends after rendering 'accepted to this airfield'), v452f5 relaxes
+       that guard to REPAIR_119_AIRBORNE_MIN=4000 (above taxi/rollout, below
+       flight ~250k). TEST: land a bomber in a ground-start arena, wait for
+       'accepted to this airfield', confirm repair/rearm arrives (in 60);
+       watch the run log for 'msg-119 repair REQUEST -> granting'. Regression:
+       a genuine mid-air 119 must still be refused ('clearly airborne').
+   (3) NEW MESSAGE still open from v451f5: TANK MISSION (msg 146/0x92 sub=0x47,
+       offensive/defensive from the Map/HQ dialog) is decoded+swallowed but
+       NOT answered. NEXT BIG STEP: capture several TANKMISN raws (offensive
+       vs defensive, different targets) to decode the arg (u16 tail, 0x1e=30
+       seen), then build the msg-4 CREATE-OBJECT NetTank spawn reply
+       (FUN_004f26b0: type&0xf==3 = NetTank + camp).
+   ALSO STILL OPEN: BuildingsRepairRate=0 patch (v450f5) only applies on a
+   FRESH 212 serve - the online box is STALE (last activity Aug 15, still
+   serves rate=100) and needs the v450f5+ deploy; msg-33 SCORE EVENT for
+   ground kills (Score:0; 2009 BuildingsScore=250, we serve 100); does a
+   supply run lower scene damage %; per-object store loss; bridge
+   destruction; host-59 @0x557f20 / host-119 @0x4fc2b0 decompile; msg-73
+   parser (39B @0x4c8690); GCP deploy of v442f5+ pending.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via the admin
+   browser tab (curl is 403 - use claude-in-chrome to fetch
+   /admin/logfiles.json + log_download). Server is server.py ~15135 lines,
+   v452f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v452f5 [RESUPPLY/SPAWN - TWO FIELD BUGS] From player reports (2026-08-16):
+      * (1) FFA COLD-ENGINE AIR SPAWN (Taurus, messages77): the FFA room is
+        StartGround=no / StartAlt=1000m (Type=1, LobbyType=Custom) - the
+        plane spawns AIRBORNE. But our Type=1 stamp makes the client emit
+        'Ask resources from AI' (out 59) at every spawn; our spawn msg-60
+        reply then triggers the client's 'Fueling and Arming plane' GROUND
+        service (engine off, throttle idle) - invisible on a runway spawn,
+        but at 1000m it strands the plane cold with a dead engine. FIX:
+        _ROOM_AIR_START registry + record_air_start_from_blob() reads the
+        served GAME_DEF's StartGround byte (gamedef_startground_offset,
+        terrain+1) at each build_gamedef_212; _grant_spawn_supply() returns
+        early for an air-start room (the plane spawns fuelled/armed and no
+        ground service is possible at altitude). Ground-start arenas
+        unaffected.
+      * (2) NO REPAIR AFTER LANDING (VF10_flakmagic, B-17G, Nations at War,
+        messages30): landed ('accepted to this airfield'), sent out 119'5 at
+        19:09:54 / 19:10:08 / 19:10:11, got ZERO in 60 back, then exited
+        ('Return resources to AI' + ExitEvent). The msg-119 handler's
+        airborne guard used CRASH_MOVEMENT_MIN (64) - the strict parked
+        threshold the background poll needs - which a just-landed heavy
+        bomber trips on rollout / residual approach divergence in _pos_hist.
+        But the client's 119 is AUTHORITATIVE (only sent after it locally
+        renders 'accepted to this airfield'), so second-guessing it with a
+        strict telemetry test is wrong. FIX: msg-119 gets its own guard
+        REPAIR_119_AIRBORNE_MIN=4000 (above taxi/rollout, far below cruise
+        ~250k) - only a clearly-airborne 119 is refused (the v277 mid-air
+        rearm hazard); the poll keeps CRASH_MOVEMENT_MIN. Note: flakmagic's
+        arena served BuildingsRepairRate=100 (unpatched) - the v450f5 patch
+        needs a fresh 212 serve, and the ONLINE BOX IS STALE (Aug 15,
+        pre-v450) so it still serves 100; deploy v452f5 there.
+      Diagnosis note: online admin logs are reachable only via the browser
+      (curl -> 403); claude-in-chrome fetched /admin/logfiles.json. Both
+      bugs were on the CURRENT local build, confirmed from the two client
+      logs (server run log for the exact refusal reason was unavailable, but
+      the client-side out-119/no-in-60 and out-59/in-60/cold-engine chains
+      are unambiguous).
+
+v451f5 [PVE/GROUND + NET] TANK-MISSION MESSAGE + repair-patch diagnosis, from
+   solid: 2026-08-16 18:27 session destroyed the whole scene-46 Front
+   Airfield building-by-building (Hangar, Fuel tanks, Flak/AA, HeadQuarters,
+   Trees/Fir/Grove) with correct events + damage climbing 8%->23%->33%.
+   THREE THINGS THIS SESSION:
+   (1) NEW MESSAGE FOUND = TANK MISSION: msg 146 (0x92) sub=0x47, 13B, sent
+       when the player launches an Offensive/Defensive tank mission from the
+       Map/HQ dialog. v451f5 gives it a named decode+swallow (TANKMISN log,
+       never echoed - was hitting the generic path). Tail u16 = mission arg
+       (0x1e=30 seen). REPLY NOT BUILT YET: the 2009 host answered by
+       spawning NetTank objects via msg-4 CREATE-OBJECT (FUN_004f26b0,
+       type&0xf==3 = NetTank with camp; ==4 NetTrain, ==5 NetCar, ==7
+       NetSoldier - all in that one deserializer). NEXT: capture several
+       TANKMISN raws (offensive vs defensive, different targets) to decode
+       the arg, then build the msg-4 NetTank spawn reply. (msg 18/0x12
+       sub=04 in the same logs is just the normal out-4 spawn, already
+       handled.)
+   (2) BUILDING REPAIR STILL TOO FAST: the v450f5 BuildingsRepairRate=0
+       patch is CORRECT (2009 dumps confirm rate=0; our client served 100)
+       but it only runs on a FRESH build_gamedef_212 serve - the field
+       session reused a CACHED arena so GAMEDEF212 never logged and the fix
+       never applied. FIELD TEST: fully restart the client (or rejoin from
+       the arena LIST so a new 212 is served) and CONFIRM the GAMEDEF212
+       'BuildingsRepairRate ... 100 -> 0' line appears; only then judge
+       repair. User's insight (correct): a client-repaired building desyncs
+       from the server's permanent _SCENE36_DESTROYED mark - with rate=0 the
+       client won't repair, so they stay in sync; if we ever WANT repair,
+       clear the object from _SCENE36_DESTROYED + restore SCENE_HP together.
+   (3) MAP DAMAGE TALLY confirmed working (8/23/33%). STILL TO VERIFY:
+       whether landing/airdropping supplies drops the damage % back down -
+       needs SUPPLY_REPAIR_HP_PER_TICK>0 (currently 0) OR a supply-driven
+       scene-heal; test with a supply run and watch scene_efficiency/msg-69.
+   KNOWN NEXT: msg-33 SCORE EVENT for ground kills (client shows Score:0;
+   2009 BuildingsScore=250, we serve 100 - check/raise; mine messages04 for
+   the 33+destroy pairing); per-object store loss (Fuel Storage -> fuel);
+   bridge destruction (mode 5, sceneless, 0xff path); host-59 @0x557f20 /
+   host-119 @0x4fc2b0 decompile; msg-73 parser (39B @0x4c8690); GCP deploy
+   of v442f5+ still pending.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin). Server is server.py
+   ~15090 lines, v451f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v451f5 [PVE/GROUND + NET] TANK-MISSION MESSAGE + repair-patch diagnosis, from
+      the 2026-08-16 18:14 field session (run_20260816_181444 / messages72):
+      * NEW MESSAGE - TANK MISSION REQUEST (msg 146 / 0x92 sub=0x47): sent
+        when the player launches an OFFENSIVE or DEFENSIVE tank mission
+        (OFFENSIVE_/DEFENSIVE_MISSIONS_LIST_BOX in the Map/HQ dialog). Wire
+        (direct, 13B): [00][92][0000][47][00 00 00 00 00][arg u16] (arg
+        0x1e=30 seen). It was falling through to the generic echo (logged
+        only as SUPPLY-CAP type=0x92 sub=0x47). v451f5 adds a named handler
+        in handle_post_auth (direct + type-scan-wrapped): decode arg, log
+        TANKMISN + calib, SWALLOW (an unhandled in-arena reliable type
+        echoed back is the 'Unknown Type' CTD class). REPLY IS TBD: the 2009
+        host spawned the tanks via msg-4 CREATE-OBJECT - FUN_004f26b0 is the
+        full NetObject deserializer, type&0xf: 1/8=NetPlane, 2=NetParachuter,
+        3=NetTank(+camp), 4=NetTrain, 5=NetCar, 6=NetShip, 7=NetSoldier.
+        Dispatch: msg 146 slot = 0xc81ed8+146*4 = 0xc82120, written only in
+        the CLIENT-mode table FUN_004f1490 (-> LAB_004f4920, a bare label in
+        undefined code); the HOST table FUN_004f1240 leaves it null, which is
+        why our server never had a handler.
+      * BUILDING REPAIR (user report: still too fast, but repaired buildings
+        are non-destructible): the v450f5 BuildingsRepairRate=0 patch is
+        CORRECT and 2009-authentic (messages04 both dumps: rate=0,
+        BuildingsArmor=100, BuildingsLife=100, BuildingsScore=250) but it
+        only fires on a fresh build_gamedef_212 serve. The field session
+        reused a CACHED arena (no GAMEDEF212 line in the whole log), so the
+        patch never ran and the client kept its INI-default rate=100,
+        self-repairing the buildings. The 'repaired but not destructible'
+        state is exactly the user's diagnosis: the server's _SCENE36_
+        DESTROYED mark is permanent (correct - blocks the re-destroy CTD)
+        while the client visually heals. FIX = get a fresh 212 (restart
+        client / rejoin from the arena list); with rate=0 the client stops
+        repairing and the two stay in sync. No code change needed beyond
+        confirming the serve.
+      * MAP DAMAGE TALLY (fix#3) CONFIRMED working in the field (scene 46:
+        8% -> 11% -> 23% -> 33% as buildings died). Open: does a supply
+        run/airdrop LOWER the damage %? Needs SUPPLY_REPAIR_HP_PER_TICK>0
+        (now 0) or a supply-driven heal - untested.
+
+v450f5 [PVE/GROUND - FIELD FIXES] Kill chain field-proven (2026-08-16 08:06:
+   FIELD-PROVEN: the 2026-08-16 08:06 session destroyed two Fuel tanks by
+   gunfire (objs 1280/1284, scene 46) with correct 'You have destroyed USA
+   Fuel tanks' events. Three field findings fixed in v450f5:
+   (1) BUILDING AUTO-REPAIR: the client repaired destroyed buildings itself
+       - our room templates serve BuildingsRepairRate=100 (client INI
+       default; 2009 arenas ship 0). apply_buildings_repair_rate() forces
+       the u8 to 0 at 212-serve (wire offset = aa_anchor - 5, validated by
+       the 4 [AI] bools; GAMEDEF212 logs '100 -> 0'). Server-side
+       SUPPLY_REPAIR_HP_PER_TICK also 250 -> 0 (2009: no repair at all).
+   (2) EVERYTHING DESTRUCTIBLE (user, from the game): trees fall to gunfire.
+       value<=0 / mode-2 objects now die at OBJ_HP_DECORATION (600) - no
+       value, no scene-completion contribution.
+   (3) MAP DAMAGE TALLY: each kill sets SCENE_HP = SCENE_DEFAULT_HP x
+       (1 - destroyed_value_fraction) via trn_scene_damage_frac - the msg-69
+       map/panel damage byte and production scaling follow per building;
+       AUTOPVE logs 'scene N damage now X%'.
+   FIELD TEST: restart server; on arena serve watch GAMEDEF212
+   'BuildingsRepairRate ... 100 -> 0' (if 'not located' -> REPORT, the
+   client will self-repair again). autopve on. Then:
+   (a) gun a fuel tank -> destroyed, STAYS destroyed;
+   (b) shoot a tree -> falls (~600 dmg);
+   (c) map/production panel shows growing scene damage % per kill;
+   (d) kill everything valuable at one scene -> 'FULLY DESTROYED - stores
+       lost' + HQ panel supply drop.
+   VERIFY v446f5 still: no bombsight mid-flight repair ('special-form'),
+   parked resupply after the 20s holdoff.
+   KNOWN NEXT: msg-33 SCORE EVENT for ground kills (client shows Score:0;
+   BuildingsScore=100 exists in the GAME_DEF; mine messages04 for the 2009
+   33-with-destroy pairing); per-object store loss (Fuel Storage obj ->
+   fuel only); OBJ_HP tuning / possible real HP field in undecoded got
+   bytes; bridge destruction (mode 5, sceneless, the 0xff path); host-59
+   @0x557f20 / host-119 @0x4fc2b0 decompile; msg-73 parser (39B @0x4c8690);
+   GCP deploy of v442f5+ still pending field test.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin). Server is server.py
+   ~15065 lines, v450f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v450f5 [PVE/GROUND - FIELD FIXES] Kill chain field-proven (2026-08-16 08:06:
+      two Fuel tanks gunned down at scene 46, objs 1280/1284, correct 'You
+      have destroyed USA Fuel tanks' events). Three findings fixed:
+      * (A) CLIENT AUTO-REPAIR ROOT CAUSE: messages72 [ScoreAndDamage] shows
+        our arenas serve BuildingsRepairRate=100 (the client INI default in
+        the stored room templates); both 2009 dumps ship 0. The client
+        repairs damaged/destroyed buildings ITSELF at that rate - the user's
+        killed fuel tanks were back in moments. FIX: TC_BUILDINGS_REPAIR_
+        RATE=0 + apply_buildings_repair_rate() at 212-serve. Wire offset
+        derived from the GAME_DEF dumper FUN_005796e0 (struct order mirrors
+        the wire here): ...BuildingsLife, BuildingsRepairRate, LowAA,
+        MediumAA, HighAA, InvincibleAA, [5 AA bytes = _gamedef_aa_offset
+        anchor] -> rate byte = anchor - 5; safety requires the 4 in-between
+        bytes to be booleans (apply_aa_quality style). Verified against the
+        live dump: wire [50,0,100,100,100,100,1,1,1,0] = FriendlyDamage..
+        InvincibleAA field-for-field. Server-side SUPPLY_REPAIR_HP_PER_TICK
+        250 -> 0 to match (raise both knobs together if repair is wanted).
+      * (B) EVERYTHING DESTRUCTIBLE (user): trees fall to gunfire in the
+        real game. value<=0 / mode-2 objects now destroyable at
+        OBJ_HP_DECORATION (600) instead of being skipped; they contribute
+        no value and never count toward scene completion.
+      * (C) MAP DAMAGE TALLY: every kill writes SCENE_HP = SCENE_DEFAULT_HP
+        x (1 - trn_scene_damage_frac) (destroyed-value fraction from the
+        registry + trn tables) - scene_efficiency, the msg-69 map/panel
+        damage byte and the production scaling all follow per building.
+        FULLY-DESTROYED store loss unchanged (fires at fraction 1.0).
+
+v449f5 [PVE/GROUND - PER-OBJECT KILL CHAIN, MAPPING VERIFIED] The dumped
+      trn_tables_trn02.json (user ran fa_dump_trn_tables.py in-arena; counts:
+      20 gst / 3 gat / 84 got / 60 gsi / 1565 goi) settled everything:
+      * VERIFIED: every object the user bombed (1225-1288) maps to gsi scene
+        46 = camp-0 Front Airfield - his exact target. obj 1229 = 'Hangar'
+        (type 42, value 180): the two 250lb directs hit the actual hangar.
+        objs 1249/1250 = TREES (value 0, destroy_mode 2 = indestructible
+        decoration). Panel scene space == gsi space (the earlier 'spaces
+        split' conclusion was wrong).
+      * THE REAL SPLIT: msg-36/30 index goi OBJECTS. goi obj 33 = the camp-0
+        Metal Factory of scene 3 -> our [33, camp 0x00] destroy produced
+        'You have destroyed USA Metal Factory' EXACTLY. Handler xrefs: 36
+        reads PARR<TRN_OBJECT*> @0xc87270 at 0x4f9e56; 30 reads it at
+        0x4f68fc. Bridges are SCENELESS (goi scene = 0x8000xxxx sentinel;
+        RailRoadBridge objs 1549-1564 in 4 groups) and every camp=0xff
+        destroy rendered 'a bridge' whatever the index (8 straight, then the
+        idx-46 repeat hit !Destroyer.PTR -> CTD): 0xff = a neutral/bridge
+        resolution path. NEVER send 0xff.
+      * KILL CHAIN REWRITTEN (_handle_ground_damage_31): per-OBJECT HP =
+        value * OBJ_HP_PER_VALUE(25), floor OBJ_HP_MIN(1500) - Hangar 4500
+        (one 250lb direct ~5600 kills), AA 2500, Metal Factory 5000, Bridge
+        25000. Damage crossing -> 36 [obj, owning scene's REAL camp, 0.0] +
+        30 [obj]; AUTOPVE logs the object NAME; decorations (value<=0 /
+        mode 2) never fire; per-object once-per-run guard (registry semantics
+        updated). weapon_map anchors no longer consulted by the auto path
+        (trn tables only); trn_obj_info / trn_scene_complete helpers added.
+      * STORE LOSS MOVED: broadcast_scene_36's v291 hook zeroed stores keyed
+        by RECORD INDEX (= scenes then, = objects now -> wrong space). Now
+        the auto path fires supply_on_scene_destroyed(scene) + SCENE_HP=0
+        only when trn_scene_complete says the scene's LAST destructible
+        died. Manual destroys/probes cause no store loss.
+      * probe_fire sends the object's real camp when tables exist (probes
+        are obsolete - kept for experiments); build_scene_destroy_36 /
+        build_scene_state_30 docstrings rewritten to OBJECT semantics.
+
+v448f5 [PVE/GROUND - THE MAPPING, SOLVED OFFLINE] Terrain tables decoded from
+      the binary; live-memory extractor written; server consumes the dump as
+      the authoritative obj->scene source.
+      * TERRAIN LOADER FULLY DECOMPILED (FUN_0055f040, Trn.cpp): the client
+        builds each world from five flat tables in its archives, all kept
+        behind fixed globals (base 0x400000, no ASLR):
+          gst SCENE_TYPE_DEF        0x30B  ptr@0xc85028 cnt@0xc84fec (names)
+          gat AIRFIELD_TYPE_DEF     0x10B  ptr@0xc8502c cnt@0xc84ff0
+          got GROUND_OBJECT_TYPE_DEF 0xc0B ptr@0xc85030 cnt@0xc84ff4
+              (+0xa0 s32 Value >0=destructible <0=decoration-skip; +0xb0
+               radius; +0xb4 category; +0xbc destroy-mode byte: 2=never,
+               1=local-kill - FUN_00568eb0)
+          gsi SCENE_INST_DEF        0x18B  ptr@0xc85034 cnt@0xc84ff8
+              (+0 scene-type; +4 flags LOW NIBBLE = CAMP; +8/+0xc x/y)
+          goi GROUND_OBJECT_INST_DEF 0x2cB ptr@0xc85038 cnt@0xc84ffc
+              (+0 TypeIndex->got; +4 SceneInstIndex->gsi = THE OBJ->SCENE
+               MAPPING; +8/+0xc x/y)
+        PARR<TRN_SCENE*> (0xc87268/0xc8726c) is created size=nSceneInst and
+        filled IN gsi ROW ORDER -> the msg-36 scene index IS the gsi row.
+        PARR<TRN_OBJECT*> (0xc87270/0xc87274) filled IN goi ROW ORDER -> the
+        msg-31 object index IS the goi row. The client's startup 'Info TRNnn
+        - scenes with valuable objects' print IS the gsi enumeration
+        (col0=gsi idx, col1=camp, col2=sum of got values, col3=gst name) -
+        so TRN02 room 49: 46 0 2995 Front Airfield = the user's target;
+        33 0 2835 Bomber Airfield.
+      * FILE-OPEN CHAIN (FUN_0042e820 -> FUN_007db550 -> FUN_007dde70): the
+        client tries the REAL filesystem FIRST ('Trn02\table.gsi' relative
+        to the game dir - modding override possible!), then the packed VFS.
+        No Trn02 dir exists on disk; the tables live in Data00..08.all
+        (format still un-RE'd; q6 volumes proven NOT to contain them). The
+        memdump route makes the container format unnecessary.
+      * fa_dump_trn_tables.py (NEW, reuses fa_memdump.py plumbing): attaches
+        read-only to the live FA.exe, reads the 5 ptr/count globals + terrain
+        number @0xc84fe8, decodes all tables, emits trn_tables_trnNN.json
+        with raw tables + derived obj_to_scene {goiRow: gsiRow},
+        scene_objects (value>0 only) and scene_info {camp,name,x,y,
+        total_value,n_destructible} + a sanity print mirroring the client's
+        own listing. RUN ONCE PER TERRAIN while in the arena (Admin).
+      * SERVER: trn_tables(trn) cached loader; trn_scene_info(room, scene);
+        weapon_scene_for(room, obj) NEW SIGNATURE - precedence: eye anchors
+        (weapon_map.json, corrections) OVERRIDE the dumped goi mapping, else
+        None (auto declines, log now points at fa_dump_trn_tables.py). The
+        auto-destroy msg-36 uses the scene's REAL camp from gsi (scene_camp
+        fallback), AUTOPVE log names the scene + destructible count, SENT36
+        calib names the mapping source.
+      * FALSIFICATION TARGET carried in the next-session prompt: does
+        scene_objects['33'] contain a bridge + Metal Factory (progressive
+        model, wire OK) or not (our 36 packing shifts the index)?
+
+v447f5 [PVE/CTD GUARD] ONE msg-36 DESTROY PER SCENE PER RUN + anchor reset -
+      from the 2026-08-15 23:40 field session (run_20260815_234008 /
+      messages70):
+      * THE CTD: 'Exception in Fighter Ace engine: logical error / Assertion
+        failed (!Destroyer.PTR()) / Trn_Obj.cpp:415' on the final in 36'8 -
+        the probe sweep re-destroyed scene 46 (first destroyed 23:46:55 by a
+        manual probe, again 23:52:48 by the sweep) and the client died 2s
+        later. FIX: _SCENE36_DESTROYED registry in broadcast_scene_36 - every
+        destroy path (probe / sweep / console destroy / auto-PvE) flows
+        through it; re-destroys are SKIPPED with a SCENE36 log; force=True
+        exists for deliberate experiments. Registry resets on server restart.
+      * THE MODEL (client-rendered evidence): destroys of 36-idx 33 yielded
+        'You have destroyed a bridge' (23:41:40) then 'You have destroyed USA
+        Metal Factory' (23:50:27) - each msg-36 destroy kills the NEXT
+        remaining destructible object in the scene; exhausting the scene arms
+        the assert. The prog f32 is likely the target value-fraction (2009
+        host: repeated in-36s per scene as buildings died one by one).
+      * INDEX SPACES SPLIT: 36-idx 33 is NOT panel-idx 33 (USA Bomber
+        Airfield): the user bombed the panel-46 frontline airfield's hangar
+        (objs 1225-1288, direct 11250 + 5671 on 1229) and the auto-destroy
+        via the 1229->33 anchor blew up a METAL FACTORY somewhere else.
+        weapon_map.json RESET (all anchors were panel-space); re-anchor only
+        after the 36-space mapping exists (Ghidra 36-handler / .gst decode -
+        see the next-session prompt).
+      * Also observed: ZERO reconciliation msg-31s after any destroy this
+        session ('no captures yet' x3, sweep saved 0) - the July ev=0x00
+        captures likely need another trigger (production panel open?). The
+        probe path is parked until understood.
+
+v446f5 [RESUPPLY/CRITICAL + PVE-UX] BOMBSIGHT MID-FLIGHT REPAIR + DEAD ANCHORS
+      + console misfires - all three from the 2026-08-15 23:07 field session
+      (run_20260815_230717 / messages69):
+      * (A) MID-FLIGHT REPAIR ROOT CAUSE: at 23:15:39 the client began a
+        bombsight run and emitted a 99B bc=5 msg-7 form (TELEM-SIZE); during
+        the run the NORMAL-form frames carried a FROZEN position with a live
+        conductor tick - 8s of identical fresh ticking samples satisfied
+        every ground_stop_eligible test and the poll FULL-repaired the plane
+        MID-BOMB-RUN at 23:15:47.776 (pos=(49993,9699,61751); the exit 46s
+        later proved movement=215554 airborne - the plane really was flying).
+        FIX: (1) _pos_hist accepts position evidence ONLY from
+        TELEM_POS_EVIDENCE_SIZES (84/86/88 - the layouts where [9:15] IS the
+        position); any other size (122B canopy, 99B bombsight) contributes no
+        samples and timestamps s._odd_telem_time; (2) ground_stop_eligible
+        refuses 'special-form' while a sighting is younger than
+        ODD_TELEM_HOLDOFF_S (20s); (3) the msg-119 path gets the same holdoff
+        (its light movement guard reads the same frozen stream).
+      * (B) DEAD ANCHORS: `corr map 1229 33` (23:10:52) wrote weapon_map.json
+        but the in-memory WEAPON_MAP was only ever loaded at STARTUP -
+        `autopve on` (23:11:33) printed '1 anchor(s)' (the stale 1339 entry)
+        and every 1229 bomb hit at 23:15 was declined 'no weapon_map anchor'.
+        FIX: corr_map_save() live-reloads via weapon_map_load(); `autopve on`
+        reloads before printing the count.
+      * (C) CONSOLE MISFIRES (my own recipe error last session): `probe fire
+        49 33` errored and `probe 49` fired the ROOM number as a scene;
+        `probe sweep 49 30 38` parsed lo=49 hi=30 gap=38 (empty sweep). FIX:
+        `probe fire <sceneIdx>` accepted as an alias; usage line states that
+        rooms are auto-detected. Correct forms: `probe 33`, `probe sweep 30
+        38 4`.
+      * FIELD DATA BANKED: the second bombing of the USA Bomber Airfield
+        hangar cluster reproduced objs 1225-1288 with direct hits on obj 1229
+        (35372+17425 - a full stick this time, total 53k); the scene-49 probe
+        destroy produced NO reconciliation (see next-session note).
+
+v445f5 [PVE/GROUND] msg-31 TRUE WIRE LAYOUT - proven from the binary; parser
+      rewritten; probe/corr machinery updated; weapon_map anchor migrated.
+      * THE BUILDER FOUND: outbound sends go through FUN_007e3350 (id = first
+        payload byte). The msg-31 flush is FUN_004fc740 (assert
+        'HitToGOLength>0', VNet_Snd.cpp:0x4d - HitToGO = Hit-To-Ground-Object;
+        renamed VNET_flush_msg31_HitToGO): static buffer DAT_00bff3e8, payload
+        length DAT_00c822ec, 500ms flush deadline. The record ACCUMULATOR is
+        FUN_004fce10 (called from the ground-damage apply code at 0x568cb1/
+        0x568cef - an undefined-code region Ghidra can't decompile yet):
+        appends [p1 s16][p2 s16][p3 u16] 6-byte records and COALESCES same-
+        (p1,p2) by adding damage (0xffff clamp). With raw field logs
+        (run_20260719_013519: '0001 7a05 6608' = attacker 256 = the session's
+        plane Number, obj 0x057a=1402, dmg 2150) the record is:
+           [attacker ONumber s16][ground-object index u16][damage u16]
+      * THE OLD PARSE (v199..v444) WAS WRONG: [atk u16][obj u8][ev u8][dmg] -
+        'ev' was the INDEX HIGH BYTE. 'ev=0x05' was constant because that
+        terrain's strafed pieces sit at 1397..1412 (0x0575..0x0584); the
+        'ev=0x00 reconciliation' records were true low indices 44..65. There
+        is NO event/type field on the wire.
+      * CONSEQUENCES: (a) prior weapon-hit GROUND_HP/calib obj values aliased
+        (true = old + 0x500 on those sessions); (b) objscene_map.json probe
+        entries (ev==0 gate -> high byte 0) carried TRUE indices, remain
+        valid, BUT the multi-scene overlaps are suspect aliasing collisions
+        (true 1402 parsed as 122 collided with true 122) -> REDO the sweep
+        with the fixed parser, expect clean disjoint per-scene sets;
+        (c) weapon_map.json '59: 402' was recorded through the ev==5 gate ->
+        true index 1339; file migrated with a note, re-confirm by eye.
+      * PARSER: [atk s16][obj u16][dmg u16]; probe_observe(room,obj) now
+        attributes EVERY in-window record to the probed scene (run sweeps
+        SOLO); corr_observe(room,obj,dmg) ungated (arm only while strafing);
+        calib DMG logs true indices; AUTO_SCENE_DESTROY unchanged (still
+        anchor-gated, identity fallback still off via AUTO_DESTROY_REQUIRE_
+        MAP).
+      * HOST-CODE DISCOVERY (FUN_004f1240 host dispatch registration): FA.exe
+        CONTAINS the 2009 LAN-host handlers - id 59 -> 0x557f20 (host-gated
+        supply grant: the REAL algorithm behind GetFuelWhenLimFuel/
+        GetAmmoWhenLimAmmo), id 119 -> 0x4fc2b0 (host repair handler), id 106
+        -> 0x559250 (CargoRequest supply drop, decompiled: replies 0x6b +
+        0x76 receipt + 0x7c DELIV_BONUS_SCENE), id 31 -> 0 EVEN FOR HOSTS
+        (the LAN host ignores 31; only the dedicated 2009 master consumed
+        it). Also DECODED + renamed: msg-73 SendRepairInfo builder @0x4c8690
+        (39B loadout report - the supply debit reconciliation vehicle) and
+        msg-40 builder @0x557420 (38B per-camp production push, ~60s round-
+        robin). All noted in the next-session prompt for follow-up.
 
 v444f5 [TC/SUPPLY] CAPS ONLY ON SHORTAGE - the v443f5 fixed budgets were wrong
       (user: a Lancaster carries 14x910lb ~ 5,800kg; a 1500 cap under-arms it).

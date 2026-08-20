@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v444f5'
+VERSION = 'v455f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1050,6 +1050,31 @@ ARENA_PLANESETS = {
 # sides, so the granted start place (AF from the FLY 23 grant) is used as-is - ground
 # start needs no StartAirfield change. We stamp StartGround=1 into every served GAME_DEF.
 FORCE_GROUND_START = False  # reverted 2026-06-28: serve each arena's GAME_DEF untouched; use a native ground-start arena. Set True to re-enable the StartGround rewrite.
+
+# v452f5: per-room AIR-START flag (StartGround=no -> plane spawns airborne at StartAlt).
+# Recorded from the served GAME_DEF (record_air_start), read by the spawn-supply grant so
+# it can SKIP the 'Fueling and Arming plane' service on an air spawn - that grant sets the
+# client into the ground-service state (engine off, throttle idle), which is invisible on a
+# runway spawn but strands an air-spawned plane cold at altitude (Taurus, FFA, messages77).
+_ROOM_AIR_START = {}     # room_id -> True/False (absent = unknown, treated as ground)
+
+def record_air_start_from_blob(room_id, blob):
+    """Decompress a stored GAME_DEF blob and record whether the arena is AIR-START.
+    Best-effort: any failure leaves the room unrecorded (treated as ground). Cheap enough
+    to call once per 212 serve."""
+    try:
+        d = bytearray(decompress_gamedef(blob)) if blob else None
+        if not d:
+            return
+        sg = gamedef_startground_offset(d)
+        if sg is not None:
+            _ROOM_AIR_START[room_id] = (d[sg] == 0)   # StartGround==0 -> air start
+    except Exception:
+        pass
+
+def room_is_air_start(room_id):
+    """True if the arena spawns planes in the air (StartGround=no). Unknown -> False."""
+    return bool(_ROOM_AIR_START.get(room_id, False))
 GAMEDEF_DEBUG = False  # v188: gate the per-212-build decompressed-hex dump. Set True to re-enable when diffing GAME_DEF fields.
 
 def planeset_for_room(room):
@@ -2324,6 +2349,46 @@ def apply_aa_quality(d, values=EVP_AA_QUALITY):
         d[off + i] = max(0, min(255, int(v)))
     return off, old
 
+# v450f5: client-side building auto-repair rate. The 2026-08-16 field session proved the
+# client REPAIRS DAMAGED/DESTROYED BUILDINGS ITSELF at the arena's BuildingsRepairRate -
+# the user's gunned-down fuel tanks were back in moments. 2009 arenas ship 0 (both dumps
+# in messages04); the client-created room templates carry the INI default 100. The server
+# owns repair (SUPPLY_REPAIR_HP_PER_TICK heals SCENE_HP for production), so the client
+# rate is forced to 0 at 212-serve time.
+TC_BUILDINGS_REPAIR_RATE = 0
+# v453f5: run the one-time DB migration that bakes BuildingsRepairRate=0 into every stored
+# arena GAME_DEF at startup (fixes cached clients that never re-request a 212). Idempotent -
+# rooms already at 0 are skipped; safe to leave True.
+APPLY_REPAIR_RATE_MIGRATION = True
+
+def apply_buildings_repair_rate(d, rate=None):
+    """In-place set the [ScoreAndDamage] BuildingsRepairRate u8 in a DECOMPRESSED GAME_DEF.
+    WIRE LOCATION (v455f5 - CORRECTED against the real production DB, 19 blobs): the bytes
+    immediately before the 5 AA-quality bytes are the ScoreAndDamage tail IN STRUCT ORDER:
+        aa-5 = BuildingDamage   (0 on every real blob)
+        aa-4 = BuildingsArmor   (100)
+        aa-3 = BuildingsScore   (100)
+        aa-2 = BuildingsLife    (100)
+        aa-1 = BuildingsRepairRate  <- THE BYTE (100 = the client INI default)
+    matching messages72's printed values field-for-field. (The v450f5 derivation put the
+    rate at aa-5 behind '4 [AI] bools' - WRONG: the AI bools sit earlier in the wire walk;
+    the dry-run against fa_server.db showed [0,100,100,100,100] at aa-5..aa-1, so the old
+    guard refused every real blob and the patch never fired. Harmless but useless.)
+    SAFETY: the locator is the full deserializer replay (_gamedef_aa_offset) plus the AA
+    bytes at aa..aa+4 all being 0..10 (the same shape apply_aa_quality trusts).
+    Returns (offset, old_value) on success, None on no-op."""
+    if rate is None:
+        rate = TC_BUILDINGS_REPAIR_RATE
+    aa = _gamedef_aa_offset(d)
+    if aa is None or aa < 5 or aa + 5 > len(d):
+        return None
+    if not all(0 <= d[aa + i] <= 10 for i in range(5)):     # AA-quality shape check
+        return None
+    off = aa - 1
+    old = d[off]
+    d[off] = max(0, min(255, int(rate)))
+    return off, old
+
 def _gamedef_date_offset(d):
     """Offset of the Reality DATE bytes [day(1)][month(1)][year(2 LE)] in a DECOMPRESSED
     GAME_DEF, or None. Same replay of FUN_0057bee0's walk that _gamedef_aa_offset uses, but it
@@ -2691,6 +2756,18 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                               f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')
         else:
             log('GAMEDEF212', 'EvP AA: quality bytes not located/verified; left as-is')
+    # BUILDING AUTO-REPAIR OFF (v450f5): force BuildingsRepairRate=0 (2009-authentic; room
+    # templates carry the client INI default 100, which visibly self-repaired destroyed
+    # buildings in the 2026-08-16 field test). Length-preserving single-byte write.
+    _br = apply_buildings_repair_rate(d)
+    if _br:
+        _bo, _bold = _br
+        if _bold != TC_BUILDINGS_REPAIR_RATE:
+            log('GAMEDEF212', f'BuildingsRepairRate @+{_bo}: {_bold} -> '
+                              f'{TC_BUILDINGS_REPAIR_RATE} (client auto-repair OFF)')
+    else:
+        log('GAMEDEF212', 'BuildingsRepairRate: byte not located/verified; left as-is '
+                          '(client-side building auto-repair may be active!)')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -2811,6 +2888,74 @@ def decompress_gamedef(blob):
         return d if d and d[0] == 0x8a else None
     except Exception:
         return None
+
+def migrate_stored_gamedefs_repair_rate():
+    """v453f5: PERMANENTLY bake BuildingsRepairRate=0 into every stored arena GAME_DEF.
+    THE PROBLEM this solves: the v450f5 serve-time repair patch (apply_buildings_repair_rate
+    in build_gamedef_212) only runs when the client re-requests a 212 - but a RETURNING
+    player's client has the arena's GAME_DEF CACHED and never asks again, so it keeps its
+    INI-default BuildingsRepairRate=100 and self-repairs destroyed buildings forever
+    (field-confirmed: messages73 shows BuildingsRepairRate=100 client-side while the server
+    had already sent 36+30 destroys; scene damage sticks server-side but the client heals
+    the rubble and re-bombing does nothing because the server holds it destroyed). Patching
+    the blob AT REST fixes it for cached and fresh clients alike, and every future serve
+    starts from the corrected blob.
+    Runs once at startup: for each room, decompress -> patch the RepairRate byte -> if it
+    changed, recompress (preserving the stored blob's exact prefix framing) and write back.
+    Fully guarded: any row that fails to parse/patch is left UNTOUCHED and logged."""
+    if not APPLY_REPAIR_RATE_MIGRATION:
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute('SELECT room_id, game_def_raw FROM rooms').fetchall()
+    except Exception as e:
+        log('MIGRATE', f'repair-rate migration: DB read failed ({e}) - skipped')
+        return
+    _n_patched = _n_ok = _n_skip = 0
+    for room_id, blob in rows:
+        if not blob:
+            continue
+        try:
+            b = bytes(blob)
+            v = gamedef_start(b)
+            if b[v] != 0x8a:
+                _n_skip += 1; continue
+            comp = b[v - 6:]
+            prefix = b[:v - 6]                     # exact stored framing before the LZ stream
+            d = bytearray(fa_decompress(comp, len(comp)))
+            if not d or d[0] != 0x8a:
+                _n_skip += 1; continue
+            aa = _gamedef_aa_offset(d)
+            if aa is None or aa < 5 or aa + 5 > len(d):
+                _n_skip += 1; continue
+            if not all(0 <= d[aa + i] <= 10 for i in range(5)):  # AA-quality shape (v455f5)
+                _n_skip += 1; continue
+            off = aa - 1                       # BuildingsRepairRate (v455f5 corrected offset)
+            if d[off] == TC_BUILDINGS_REPAIR_RATE:
+                _n_ok += 1; continue               # already 0 - nothing to do
+            _old = d[off]
+            d[off] = TC_BUILDINGS_REPAIR_RATE
+            # recompress and reassemble with the ORIGINAL prefix (round-trip verified before write)
+            newcomp = fa_compress(bytes(d))
+            chk = fa_decompress(newcomp, len(newcomp))
+            if not chk or bytes(chk) != bytes(d):
+                log('MIGRATE', f'room {room_id}: recompress round-trip mismatch - LEFT UNCHANGED')
+                _n_skip += 1; continue
+            newblob = prefix + newcomp
+            conn.execute('UPDATE rooms SET game_def_raw=? WHERE room_id=?',
+                         (sqlite3.Binary(newblob), room_id))
+            log('MIGRATE', f'room {room_id}: BuildingsRepairRate {_old} -> '
+                           f'{TC_BUILDINGS_REPAIR_RATE} baked into stored GAME_DEF')
+            _n_patched += 1
+        except Exception as e:
+            log('MIGRATE', f'room {room_id}: repair-rate patch failed ({e}) - left unchanged')
+            _n_skip += 1
+    try:
+        conn.commit(); conn.close()
+    except Exception:
+        pass
+    log('MIGRATE', f'repair-rate migration: {_n_patched} patched, {_n_ok} already 0, '
+                   f'{_n_skip} skipped (of {len(rows)} rooms)')
 
 def gamedef_start(blob):
     """Offset of the GAME_DEF VERSION byte (0x8a) within the stored blob.
@@ -3660,7 +3805,24 @@ def console_handler():
                 rooms = {x.current_room for x in get_all_sessions()
                          if getattr(x, 'entered_game', False) and x.current_room is not None}
                 if not pa:
-                    log('CONSOLE', 'Usage: probe <sceneIdx> | probe sweep [lo hi gap] | probe save | show | stop')
+                    log('CONSOLE', 'Usage: probe <sceneIdx> | probe fire <sceneIdx> | '
+                                   'probe sweep [lo hi gap] | probe save | show | stop '
+                                   '(rooms are auto-detected from in-game players)')
+                elif pa[0] == 'fire' and len(pa) > 1:
+                    # v446f5: alias - `probe fire <sceneIdx>` == `probe <sceneIdx>` (the bare
+                    # form confused a field session into firing the ROOM number as a scene)
+                    pa = pa[1:]
+                    try:
+                        sc = int(pa[0], 0)
+                    except ValueError:
+                        log('CONSOLE', 'probe fire: sceneIdx must be an int'); sc = None
+                    if sc is not None:
+                        if not rooms:
+                            log('CONSOLE', 'probe: no in-game players to probe')
+                        for rid in rooms:
+                            probe_fire(rid, sc)
+                        log('CONSOLE', f'probe scene {sc} fired; reconciliation objects will be '
+                                       f'captured (probe show to view)')
                 elif pa[0] == 'sweep':
                     if not rooms:
                         log('CONSOLE', 'probe: no in-game players to probe')
@@ -3749,8 +3911,10 @@ def console_handler():
                                    f'scene HP threshold={SCENE_DEFAULT_HP}, tracked scenes={len(SCENE_HP)}')
                 elif aa[0] == 'on':
                     AUTO_SCENE_DESTROY = True
+                    _n_anch = weapon_map_load()   # v446f5: reload from disk - anchors recorded
+                                                  # since startup (corr map) must be live
                     log('CONSOLE', 'autopve ON - weapon damage auto-destroys scenes via weapon_map.json '
-                                   f'({len(WEAPON_MAP)} anchor(s) loaded; un-anchored objs are skipped)')
+                                   f'({_n_anch} anchor(s) loaded; un-anchored objs are skipped)')
                 elif aa[0] == 'off':
                     AUTO_SCENE_DESTROY = False
                     log('CONSOLE', 'autopve OFF')
@@ -3906,6 +4070,7 @@ def identify_account_from_syn(syn_data):
 # --- Startup ------------------------------------------------------------------
 
 init_db(); init_rooms_db(); load_ticket_template()
+migrate_stored_gamedefs_repair_rate()   # v453f5: bake BuildingsRepairRate=0 into stored arenas
 for _a, _p, *_ in db_get_all_accounts():
     log('DB', f'account="{_a}" pid={_p} pilots={[n for n,_ in db_get_pilots(_a)]}')
 
@@ -4455,6 +4620,7 @@ def build_gamedef_212(room, hide_planes=None):
     creator = (room[2] or room[1] or 'Arena')
     gidx    = _arena_gameindex(creator, room[0])          # 4 bytes [00 ff ff creator[0]] (non-zero)
     blob    = bytes(room[6]) if len(room) > 6 and room[6] else b''
+    record_air_start_from_blob(room[0], blob)   # v452f5: cache StartGround for the spawn grant
     # v438f5b: game-type rule = OFFICIAL vs CUSTOM, matching 2009. Every recognized
     # official category (Dogfighting / Territorial Combat / Free For All / Events -
     # scoring_mode_for_room != None) is stamped Type=1 ('Mission'); only rooms with a
@@ -5674,7 +5840,13 @@ def send_arenalist_with_gamedefs(s, rooms, label):
             pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
             if pkt is not None:
                 send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
-                time.sleep(0.01)
+                # v455f5: 10ms -> 120ms between GAME_DEFs. flakmagic's Aug-17 hard CTD
+                # (messages04_1_) died mid-parse of the 4th of four 212s that arrived
+                # within 400ms (a news 225 interleaved); every stored blob parses clean
+                # (19/19 full-walk verified against the production DB), so the suspect
+                # is client-side re-entrancy on rapid-fire GAME_DEF parses (each rebuilds
+                # the GLOBAL camp table + UI). Pacing them is cheap insurance.
+                time.sleep(0.12)
     send_rel(s, build_arenalist(rooms), label, to=3.0)
     # v312: the 0xd2 rows now exist client-side, so push each arena's player count. Without
     # this only the arena the user clicks gets a 213 (its on-demand request), which is why
@@ -7511,6 +7683,13 @@ CRASH_MOVEMENT_MIN      = 64    # total |delta| across the 3 axes over the windo
                                 #   anything above idle jitter means airborne. The measured value is
                                 #   LOGGED on every removal, so tune it from real numbers if a slow
                                 #   taxi ever trips it.
+# v452f5: the msg-119 REPAIR request has its own, much looser airborne guard. Unlike the
+# background poll (which INFERS 'parked' and must be strict), a 119 is the client's EXPLICIT
+# 'I am accepted to this airfield, service me' - so we only reject a request that is clearly
+# from a fast-moving plane, well above landing rollout / residual approach divergence. ~250k
+# is full flight; 4000 is comfortably above a taxi/rollout yet far below cruise (VF10_flakmagic
+# B-17G landing bug: a strict 64 threshold refused a legitimate just-landed repair).
+REPAIR_119_AIRBORNE_MIN = 4000
 COUNT_EXIT_TO_HQ_AS_DEATH = False
 
 # -- v400f5: THE ARENA 'EXIT = CRASH' RULE -------------------------------------
@@ -8603,6 +8782,14 @@ TELEM_NORMAL_SIZES = {84, 86, 88}
 # telemetry tick is invisible at ~13/s; relaying one of these is a guaranteed CTD for EVERY
 # recipient. See the block in relay_telemetry for the evidence.
 TELEM_MAX_BC = 5
+# v446f5: the msg-7 appspace sizes whose BODY layout is the standard one (position at [9:15]).
+# Confirmed live sizes: 84/86/88 (TELEM-SIZE 'normal' set). Anything else (the 122B canopy
+# multi-record form, the 99B bc=5 bombsight-run form, ...) shares only the HEADER (tick[5:7],
+# ONumber[7:9]) - its bytes at [9:15] are NOT a position and must never feed _pos_hist.
+TELEM_POS_EVIDENCE_SIZES = (84, 86, 88)
+# How long a special-form sighting disqualifies the ground-stop judgement (the bombsight run
+# emits them for its whole duration; a couple of windows of margin after the last one).
+ODD_TELEM_HOLDOFF_S = 20.0
 
 def relay_telemetry(src, data):
     """Forward src's flying-state datagram to other flying players in the same room."""
@@ -8755,18 +8942,33 @@ def relay_telemetry(src, data):
             # measuring the wrong body entirely.
             _onum_t = int.from_bytes(pl[7:9], 'little')
             if _onum_t == getattr(src, 'my_obj_number', None):
-                _p = struct.unpack_from('<HHH', pl, 9)
-                _now = time.time()
-                _hist = src.__dict__.setdefault('_pos_hist', [])
-                # v422f5: carry the sender's conductor tick with each sample. The ground-stop
-                # judgement needs "tick advancing while the position holds still" to tell a
-                # genuinely parked plane from a frozen conductor re-sending one stale state
-                # (v346's endemic false-static). plane_movement() indexes [0]=t/[1]=pos and is
-                # unaffected by the extra element.
-                _hist.append((_now, _p, src.last_telem_tick))
-                _cut = _now - CRASH_MOVEMENT_WINDOW_S
-                while _hist and _hist[0][0] < _cut:
-                    _hist.pop(0)
+                # v446f5 [RESUPPLY/CRITICAL]: position evidence comes ONLY from the STANDARD
+                # telemetry sizes. Field case (run_20260815_230717 23:15:39-47): during a
+                # BOMBSIGHT run the client emitted a 99B msg-7 form (bc=5, TELEM-SIZE) and its
+                # normal-form frames carried a FROZEN position with a live conductor tick -
+                # ground_stop_eligible read 8s of identical fresh ticking samples as 'parked'
+                # and the poll FULL-repaired the plane MID-BOMB-RUN (grant 23:15:47.776,
+                # pos=(49993,9699,61751); the exit 46s later proved movement=215554 airborne).
+                # A parked plane transmits standard forms only; any special form in flight is
+                # a state (bombsight/autopilot) whose position stream cannot be trusted, so:
+                #   * non-standard sizes contribute NO samples, and
+                #   * their SIGHTING is timestamped - ground_stop_eligible refuses while one
+                #     was seen inside the judgement window (see 'special-form').
+                if len(pl) not in TELEM_POS_EVIDENCE_SIZES:
+                    src._odd_telem_time = time.time()
+                else:
+                    _p = struct.unpack_from('<HHH', pl, 9)
+                    _now = time.time()
+                    _hist = src.__dict__.setdefault('_pos_hist', [])
+                    # v422f5: carry the sender's conductor tick with each sample. The ground-stop
+                    # judgement needs "tick advancing while the position holds still" to tell a
+                    # genuinely parked plane from a frozen conductor re-sending one stale state
+                    # (v346's endemic false-static). plane_movement() indexes [0]=t/[1]=pos and is
+                    # unaffected by the extra element.
+                    _hist.append((_now, _p, src.last_telem_tick))
+                    _cut = _now - CRASH_MOVEMENT_WINDOW_S
+                    while _hist and _hist[0][0] < _cut:
+                        _hist.pop(0)
                 # v254: keep the PLANE's most recent COMPLETE telemetry packet. If this pilot bails,
                 # we clone this exact packet for the parachuter (retargeting only the ONumber) so the
                 # canopy gets a valid position from a byte-for-byte real packet - never a hand-built
@@ -9042,13 +9244,19 @@ def _free_start_place(s):
 def _alloc_start_place(s, af, n_req):
     """Pick a free start-place index on (room, af). Frees the session's previous slot
     first (airfield change / respawn). N=0xff = assign lowest free; an explicit N is
-    honoured. Returns the granted index."""
+    honoured when free, else the next free index >= N (wrapping to 0) - v454f5: the
+    msg-93 TAB cycle asks for OldSP+1 explicitly, and two players tabbing must not
+    stack on one spot. Returns the granted index."""
     _free_start_place(s)
     room = s.current_room
     with _sp_lock:
         occ = _sp_occupied.setdefault((room, af), set())
         if n_req != 0xff:
-            n = n_req
+            n = n_req % SP_MAX
+            _tries = 0
+            while n in occ and _tries < SP_MAX:
+                n = (n + 1) % SP_MAX
+                _tries += 1
         else:
             n = 0
             while n in occ and n < SP_MAX:
@@ -9059,17 +9267,22 @@ def _alloc_start_place(s, af, n_req):
     s.__dict__['sp_room'] = room; s.__dict__['sp_af'] = af; s.__dict__['sp_n'] = n
     return n
 
-def handle_fly_start_place(s, af, mid, n, via=''):
-    """FLY: msg 23 (0x17) StartPlaceList. The Fly button sends one 3-byte record
-    [AF][mid][N] with N=0xff ("give me a start place on airfield AF"). The inbound
-    handler FUN_004f6320 parses 3-byte records, logs "SP N %i on AF %i", and for the
-    waiting player (WaitingForStartPlaceList): N=0xff -> start place -1 -> DENY path
-    (vtable+0x54) - which is what our old echo did, leaving the client hanging at the
-    last gate before the cockpit; valid N -> set position, vtable+8 = SPAWN into the
-    world (FUN_004e9fa0). So we grant: reply msg 23 with the same record, N assigned.
+def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
+    """FLY: msg 23 (0x17) StartPlaceList - AND (v454f5) msg 93 (0x5d), the Ctrl+Tab
+    spawn-position CYCLE, which the client dispatches to the SAME handler (FUN_004f6320:
+    dispatch slots for ids 23 and 93 both point there). The Fly button sends one 3-byte
+    record [AF][mid][N] with N=0xff ('give me a start place'); the TAB sends the SAME
+    record shape with N = OldSP+1 ('give me the NEXT position' - client log: 'TAB. Asking
+    (1) SP on AF... OldSP=0'). The reply mirrors the request's sub so each path's waiting
+    state is satisfied.
+    v454f5 FIELD BUG (Taurus, messages86/87): msg 93 had NO handler and fell to the
+    generic echo - the echoed request parsed client-side as 'SP N 0 granted' (the client
+    printed 'SP N 0 on AF 1' for every ask), so Ctrl+Tab always respawned at position 0
+    with a 'Waiting for position' flash. Routing 93 through the grant (explicit-N with
+    occupancy skip in _alloc_start_place) makes TAB cycle properly.
 
     Wire form is built byte-identical to the echo framing that demonstrably arrived
-    as `in 23'4` / one record (4-byte appspace header, type 0x42) - msg 23 must not
+    as `in 23'4` / one record (4-byte appspace header, type 0x42) - msg 23/93 must not
     gain pad bytes, since pad zeros would parse as bogus [AF=0][N=0] records."""
     old_af  = s.__dict__.get('sp_af')
     grant_n = _alloc_start_place(s, af, n)      # distinct spot per player on this airfield
@@ -9139,16 +9352,18 @@ def handle_fly_start_place(s, af, mid, n, via=''):
             send_rel(s, _pkt, f'<- AddPlayer 62 ({len(records)} peer(s)) (re-fly roster rebuild)', to=5.0)
             log('PLAYER62', f're-fly: re-advertised {len(records)} missing peer(s) to '
                             f'{s.current_pilot}: {[p.current_pilot for p in _missing]}')
-    pkt = bytes([0x00, 0x42, 0x00, 0x00, 0x17, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
+    pkt = bytes([0x00, 0x42, 0x00, 0x00, reply_sub & 0xFF, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
     # v343: remember this grant so a death landing inside SP_REGRANT_WINDOW_S can re-issue it.
     s._last_sp_grant = (time.time(), pkt, af, mid, grant_n)
     # v343: the pilot name was MISSING from this line, which made every grant unattributable -
     # with 14 players you cannot tell whose start place was granted, and that blocked the
     # diagnosis above for two sessions. Never remove it.
     log('FLY23', f'{s.current_pilot} StartPlace request{via} AF={af} mid={mid} '
-                 f'N=0x{n:02x} -> GRANT N={grant_n}')
+                 f'N=0x{n:02x} -> GRANT N={grant_n}' +
+                 (' (TAB cycle, msg 93)' if reply_sub == 0x5d else ''))
     threading.Thread(target=lambda: send_reply(s, pkt,
-                     f'<- StartPlaceList 23 GRANT (AF={af} N={grant_n})', to=5.0),
+                     f'<- StartPlaceList {"93" if reply_sub == 0x5d else "23"} GRANT '
+                     f'(AF={af} N={grant_n})', to=5.0),
                      daemon=True).start()
 
 def handle_leave_arena(s):
@@ -9842,6 +10057,11 @@ def handle_compound(s, outer_cmd, pl):
     if inner_sub == 0x17 and len(inner) >= 8:
         handle_fly_start_place(s, inner[5], inner[6], inner[7], via=' (compound)')
         return
+    # v454f5: Ctrl+Tab spawn-position cycle (msg 93 / 0x5d), compound-wrapped form.
+    if inner_sub == 0x5d and len(inner) >= 8:
+        handle_fly_start_place(s, inner[5], inner[6], inner[7], via=' (TAB compound)',
+                               reply_sub=0x5d)
+        return
 
     # -- ROOM CREATION (inner type=0x92 sub=0xdc) ------------------------------
     # Always arrives via compound cmd=18.
@@ -10141,6 +10361,18 @@ def scene_camp(terrain, scene_idx):
 SCENE_HP = {}
 SCENE_DEFAULT_HP = 4000            # weapon dmg accumulates fast (a bomb = thousands); tune live
 SCENE_MAX_IDX = 65                 # raw scene-instance array is 0..65 on TRN02 (60 named + extras)
+# v449f5: PER-OBJECT destruction thresholds. The kill chain is per goi OBJECT (msg-36/30
+# index objects); an object dies when its accumulated msg-31 damage reaches
+# value * OBJ_HP_PER_VALUE (floor OBJ_HP_MIN). Calibration: a 250lb direct ~= 5600 dmg;
+# Hangar value=180 -> 4500 (one direct kills), AA battery 100 -> 2500 (a good strafing
+# run), Metal Factory 200 -> 5000, Bridge 1000 -> 25000 (a real raid). Tune live.
+OBJ_HP_PER_VALUE = 25
+OBJ_HP_MIN       = 1500
+# v450f5 (user, from the game): EVERYTHING in the world is destructible, trees included -
+# gunfire fells them. Zero-value objects (decorations: trees, fences...) use this low flat
+# HP so a short burst or a bomb splash takes them down. They award no value/score and do
+# not count toward scene completion (scene_objects lists value>0 only).
+OBJ_HP_DECORATION = 600
 
 # GATE: automatically decrement scene HP from msg 31 ev=0x05 and emit msg 36 on depletion.
 # OFF by default. STATUS (msgs23, 02-Jul): the camp-byte fix works (msg 36 now names a real
@@ -10189,11 +10421,15 @@ def build_scene_state_30(indices, progress=None):
 
 
 def build_scene_destroy_36(records):
-    """Build FA msg 36 (0x24) SCENE DESTROY/STATE. `records` = list of
-    (scene_idx:int, camp:int, progress:float). Wire: [0x24] + Nx[u16 LE sceneIdx]
-    [u8 camp][f32 progress]. Framed with build_ingame_pkt so the client's Size == the
-    true byte count (the in-game VNET dispatch passes real length, NOT bc*16+1; the live
-    'in 36'8' = 1 record). camp 0xFF = neutralized/destroyed; progress <= 0 = captured."""
+    """Build FA msg 36 (0x24) GROUND-OBJECT DESTROY/STATE. `records` = list of
+    (obj_idx:int, camp:int, progress:float). Wire: [0x24] + Nx[u16 LE objIdx][u8 camp]
+    [f32 progress]. v449f5 SEMANTICS (field-proven, messages70 + trn_tables dump + handler
+    xref 0x4f9e56 reading PARR<TRN_OBJECT*>): the u16 indexes the goi OBJECT array, not the
+    scene array - [idx=33 camp=0] destroyed goi obj 33 = the camp-0 Metal Factory of scene 3
+    ('You have destroyed USA Metal Factory'). camp must be the owning scene's REAL camp
+    (0..4); camp 0xff routes the client into a neutral/bridge path ('a bridge' for ANY
+    index). progress <= 0 = destroy. Framed with build_ingame_pkt so the client's Size ==
+    the true byte count (the live 'in 36'8' = 1 record)."""
     body = bytearray([MSG_SCENE_STATE_36])
     for scene_idx, camp, progress in records:
         body += struct.pack('<HBf', scene_idx & 0xFFFF, camp & 0xFF, float(progress))
@@ -10282,32 +10518,47 @@ def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff
     log('SUPPLY60', f'room {room_id}: msg 60 broadcast -> {len(sess)} session(s) {reason}')
     return len(sess)
 
-def broadcast_scene_36(room_id, records, reason=''):
+def broadcast_scene_36(room_id, records, reason='', force=False):
     """Send a msg-36 SCENE DESTROY/STATE to every player currently in `room_id`.
     `records` = [(scene_idx, camp, progress), ...]. Reliable (matches the live
-    reliable 'in 36'). Returns the number of sessions the packet was sent to."""
+    reliable 'in 36'). Returns the number of sessions the packet was sent to.
+    v447f5 [CTD GUARD] (v449f5 semantics: PER OBJECT): each goi object is destroyed AT
+    MOST ONCE per room per server run. Field proof (run_20260815_234008 / messages70):
+    TRN_OBJECT::Destroy (FUN_00568210) asserts '!Destroyer.PTR()' (Trn_Obj.cpp:415, instant
+    CTD) when a destroy arrives for an object whose Destroyer is already set - the probe
+    sweep's re-destroy of index 46 killed the client 2s later. Every path (probe, sweep,
+    console destroy, auto-PvE) flows through here, so the registry catches them all;
+    `force=True` bypasses for deliberate experiments only."""
     if room_id is None or not records:
         return 0
+    if not force:
+        _skips = [i for i, _c, _p in records if _p <= 0 and (room_id, i) in _SCENE36_DESTROYED]
+        if _skips:
+            records = [r for r in records if not (r[2] <= 0 and (room_id, r[0]) in _SCENE36_DESTROYED)]
+            log('SCENE36', f'room {room_id}: SKIPPED re-destroy of scene(s) {_skips} - already '
+                           f'destroyed this run (a second destroy of an exhausted scene is the '
+                           f'Trn_Obj.cpp:415 client CTD) {reason}')
+        if not records:
+            return 0
+    for _i, _c, _p in records:
+        if _p <= 0:
+            _SCENE36_DESTROYED.add((room_id, _i))
     pkt = build_scene_destroy_36(records)
     sess = get_sessions_in_room(room_id)
     _desc = ', '.join(f'scene={i} camp=0x{c:02x} prog={p:g}' for i, c, p in records)
     for s in sess:
         _submit_send(send_rel, s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0)
     log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(sess)} session(s) {reason}')
-    # v291: a destroyed scene loses its stored supplies immediately - measured at -15000 fuel the
-    # instant a fuel factory died, well before the next production step. Only prog<=0 counts as a
-    # destroy; a non-zero progress is the capture path, which does not empty the stores.
-    for _i, _c, _p in records:
-        if _p <= 0:
-            _lost = supply_on_scene_destroyed(room_id, _i)
-            if _lost and any(_lost.values()):
-                log('SUPPLY', f'room {room_id}: scene {_i} destroyed - stores lost '
-                              f'ammo={_lost.get("ammo")} fuel={_lost.get("fuel")} '
-                              f'metal={_lost.get("metal")}')
+    # v449f5: the v291 store-loss hook is GONE from here. It keyed record indices as SCENES,
+    # but msg-36 records index goi OBJECTS (field-proven 2026-08-16) - zeroing the stores of
+    # scene idx==objIdx was wrong-space. Scene store loss now lives in the auto-destroy path
+    # (_handle_ground_damage_31), fired when trn_scene_complete says the LAST destructible
+    # object of a scene died. Manual console destroys / probes cause no store loss.
     if SEND_SCENE_STATE_30:
         # v290: msg 36 only ANNOUNCES. msg 30 is what actually clears the object from the world -
         # in the 2009 log every destroy is followed by one. Sent with bit15 clear (2-byte records)
-        # so the client takes vtable[+0x54], the destroy path, rather than the capture-progress one.
+        # so the client takes vtable[+0x54], the destroy path. v449f5: same OBJECT index space
+        # as msg 36 (the 30 handler reads PARR<TRN_OBJECT*> too, xref 0x4f68fc).
         _idx = [i for i, _c, _p in records]
         pkt30 = build_scene_state_30(_idx)
         for s in sess:
@@ -10344,6 +10595,10 @@ WEAPON_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weap
 # When True, an obj with no anchor produces NO msg 36 at all. Turning this off restores the v287
 # and earlier behaviour of guessing identity, which is known to destroy the wrong building.
 AUTO_DESTROY_REQUIRE_MAP = True
+# v447f5: msg-36 destroys already delivered, per (room_id, scene36_idx). ONE destroy per scene
+# per run - the client kills one remaining object per destroy and ASSERTS (Trn_Obj.cpp:415,
+# instant CTD) when a destroy arrives for an exhausted scene. See broadcast_scene_36.
+_SCENE36_DESTROYED = set()
 
 def weapon_map_load():
     """(Re)load weapon_map.json. Returns the number of anchors. Safe to call any time."""
@@ -10356,80 +10611,203 @@ def weapon_map_load():
         log('WEAPONMAP', f'load failed ({e}) - auto-destroy will not fire until anchors exist')
     return len(WEAPON_MAP)
 
-def weapon_scene_for(obj):
-    """Scene index for a weapon-target obj, or None when we have no confirmed anchor."""
-    return WEAPON_MAP.get(int(obj))
+# --- v448f5: AUTHORITATIVE TERRAIN TABLES (dumped from the live client by
+# fa_dump_trn_tables.py). The terrain loader FUN_0055f040 (Trn.cpp, decompiled 2026-08-16)
+# proves: the msg-36 scene index is the row index of Trn%02i\table.gsi (FA3::SCENE_INST_DEF,
+# 24B: +0 scene-type, +4 low-nibble CAMP, +8/+0xc x/y) and the msg-31 ground-object index is
+# the row index of table.goi (FA3::GROUND_OBJECT_INST_DEF, 44B: +0 got-type, +4 SceneInstIndex
+# = THE MAPPING, +8/+0xc x/y). got (+0xa0 Value >0 = destructible) filters decorations.
+# trn_tables_trnNN.json carries the decoded tables + derived obj_to_scene / scene_info.
+_TRN_TABLES = {}          # terrain -> parsed json dict (or None = tried, missing)
+
+def trn_tables(trn):
+    """Load (once) and return the dumped table set for a terrain, or None."""
+    if trn in _TRN_TABLES:
+        return _TRN_TABLES[trn]
+    d = None
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          f'trn_tables_trn{int(trn):02d}.json')
+        if os.path.exists(_p):
+            d = json.load(open(_p))
+            log('TRNTABLES', f'terrain {trn}: loaded {_p} - '
+                             f'{len(d.get("obj_to_scene", {}))} obj->scene entries, '
+                             f'{len(d.get("scene_info", {}))} scenes')
+    except Exception as _e:
+        log('TRNTABLES', f'terrain {trn}: load failed ({_e})')
+        d = None
+    _TRN_TABLES[trn] = d
+    return d
+
+def trn_scene_info(room, scene_idx):
+    """scene_info record (camp/name/value/n_destructible) for a 36-space scene, or None."""
+    t = trn_tables(_probe_terrain_for_room(room))
+    if not t:
+        return None
+    return t.get('scene_info', {}).get(str(int(scene_idx)))
+
+def weapon_scene_for(room, obj):
+    """gsi scene index for a msg-31 ground-object index, or None when unmapped.
+    v448f5 precedence: eye-confirmed weapon_map anchors OVERRIDE (corrections), then the
+    authoritative dumped goi tables (obj row -> SceneInstIndex), else None (auto declines)."""
+    _a = WEAPON_MAP.get(int(obj))
+    if _a is not None:
+        return _a
+    t = trn_tables(_probe_terrain_for_room(room))
+    if t:
+        return t.get('obj_to_scene', {}).get(str(int(obj)))
+    return None
+
+def trn_obj_info(room, obj):
+    """v449f5: per-OBJECT record for a goi index: {'scene','name','value','destroy_mode'}
+    or None when the terrain has no dump / index out of range. Sceneless map objects
+    (bridges - goi scene field is a 0x8000xxxx sentinel) come back with scene < 0."""
+    t = trn_tables(_probe_terrain_for_room(room))
+    if not t:
+        return None
+    goi = t.get('goi') or []
+    got = t.get('got') or []
+    obj = int(obj)
+    if obj < 0 or obj >= len(goi):
+        return None
+    g = goi[obj]
+    ty = got[g['type']] if 0 <= g.get('type', -1) < len(got) else {}
+    return {'scene': g.get('scene'), 'name': ty.get('name') or f'type{g.get("type")}',
+            'value': int(ty.get('value') or 0), 'destroy_mode': int(ty.get('destroy_mode') or 0)}
+
+def trn_scene_complete(room, scene):
+    """True when EVERY destructible (value>0) object of a gsi scene has been destroyed
+    this run (per the _SCENE36_DESTROYED registry). Drives the scene-level store loss."""
+    t = trn_tables(_probe_terrain_for_room(room))
+    if not t:
+        return False
+    objs = t.get('scene_objects', {}).get(str(int(scene))) or []
+    return bool(objs) and all((room, o['obj']) in _SCENE36_DESTROYED for o in objs)
+
+def trn_scene_damage_frac(room, scene):
+    """v450f5: destroyed-VALUE fraction of a gsi scene, 0.0..1.0 - the map/panel damage
+    driver. Sum of got values of this scene's destroyed objects / total destructible value.
+    Decorations (value 0) affect neither side of the ratio."""
+    t = trn_tables(_probe_terrain_for_room(room))
+    if not t:
+        return 0.0
+    objs = t.get('scene_objects', {}).get(str(int(scene))) or []
+    tot = sum(o['value'] for o in objs)
+    if tot <= 0:
+        return 0.0
+    dead = sum(o['value'] for o in objs if (room, o['obj']) in _SCENE36_DESTROYED)
+    return max(0.0, min(1.0, dead / tot))
 
 def _handle_ground_damage_31(s, body, via=''):
-    """FA msg 31 (0x1f) - GROUND-OBJECT DAMAGE REPORT, client->server ONLY. The client's
-    inbound dispatch slot for 31 (0xc81ed8 + 31*4 = 0xc81f54) is hard-zeroed in
-    FUN_004f1240, so 31 must NEVER be echoed or relayed to any client - an inbound 31
-    raises 'NET::MESSAGE with Unknown Type 31' (messages17, 01-Jul session).
-    Body = N x 6-byte records: [attacker ONumber u16 LE][target static-object idx u8]
-    [event u8 (only 0x05 seen)][damage u16 LE]. Observed: strafing bursts dmg 92..1239 on
-    objs 129/130 (fuel tanks, Bomber Airfield), one bomb = one msg with two records
-    (splash over adjacent objects), player crashing INTO a fuel tank = obj 120 dmg 9976.
-    v199: decode, log, accumulate per-object HP in GROUND_HP keyed by (room, obj).
-    v200: when AUTO_SCENE_DESTROY is enabled, also drive per-scene HP (SCENE_HP) down and
-    emit msg 36 on depletion. GATED OFF until the objidx->sceneIdx mapping is confirmed -
-    the raw obj index is used as a PROVISIONAL scene key only inside that gate, never sent
-    to a client while the gate is off. Raw hex is logged so a live test can still falsify
-    the field layout (2nd interpretation: [00][obj u16][05][dmg])."""
+    """FA msg 31 (0x1f) - GROUND-OBJECT DAMAGE REPORT (HitToGO), client->server ONLY. The
+    client's inbound dispatch slot for 31 (0xc81f54) is hard-zeroed in BOTH registrations
+    (FUN_004f1240 host / FUN_004f1490 client) - 31 must NEVER be echoed or relayed.
+    *** v445f5 TRUE WIRE LAYOUT - PROVEN FROM THE BINARY (2026-08-15): ***
+    The client-side accumulator FUN_004fce10 (called from the ground-damage apply code at
+    0x568cb1/0x568cef) appends 6-byte records [p1 s16][p2 s16][p3 u16] into the static
+    buffer DAT_00bff3e8 (id byte 0x1f) and COALESCES same-(p1,p2) records by adding damage
+    (u16, 0xffff clamp). Flush = VNET_flush_msg31_HitToGO / FUN_004fc740 (assert
+    'HitToGOLength>0', VNet_Snd.cpp:0x4d), payload len = DAT_00c822ec, deadline +500ms. So:
+        record = [attacker ONumber s16 LE][ground-object index u16 LE][damage u16 LE]
+    Raw-log proof (run_20260719_013519, room 49): '0001 7a05 6608' = attacker 0x0100=256
+    (the pilot's plane Number that session), obj 0x057a=1402, dmg 2150.
+    *** THE OLD PARSE WAS WRONG: *** v199..v444 read [atk u16][obj u8][ev u8][dmg u16] -
+    the 'ev' byte was the HIGH BYTE of the u16 object index. 'ev=0x05' was constant only
+    because that terrain's strafed pieces lived at indices 1397..1412 (0x0575..0x0584);
+    the 'ev=0x00 reconciliation' records were simply objects 44..65 (high byte 0). Prior
+    weapon-hit GROUND_HP/calib obj values are aliased (true = old + 0x500 on those
+    sessions); objscene_map.json probe entries (gated ev==0) carried true indices and
+    remain valid; weapon_map.json's eye anchor was gated ev==5 -> migrated 59 -> 1339.
+    There is no event/type field; reconciliation-vs-weapon is CONTEXT (a probe window
+    following our own msg-36 destroy)."""
     n = len(body) // 6
     recs = []
-    destroyed = []                 # (sceneIdx) that crossed 0 this message (auto path only)
+    destroyed = []                 # [(obj, info)] objects whose HP crossed 0 this message
     for i in range(n):
         r = body[i*6:i*6+6]
-        atk  = int.from_bytes(r[0:2], 'little')
-        obj  = r[2]
-        ev   = r[3]
+        atk  = int.from_bytes(r[0:2], 'little', signed=True)
+        obj  = int.from_bytes(r[2:4], 'little')          # v445f5: FLAT u16 goi object index
         dmg  = int.from_bytes(r[4:6], 'little')
         key = (s.current_room, obj)
         GROUND_HP[key] = GROUND_HP.get(key, 0) + dmg
-        recs.append(f'atk=0x{atk:04x} obj={obj} ev=0x{ev:02x} dmg={dmg} (total={GROUND_HP[key]})')
-        # live obj->scene probe: record ev=0x00 reconciliation objects against the armed scene
-        probe_observe(s.current_room, obj, ev)
-        # weapon-obj correlation: track ev=0x05 real weapon targets
-        corr_observe(s.current_room, obj, ev, dmg)
-        if ev == 0x05:
-            # Calibration: the RAW weapon-target index, before any mapping is applied. Pair this
-            # with the client's 'You have destroyed <camp> <name>' to recover obj -> real scene.
-            calib('DMG', f'room={s.current_room} pilot={s.current_pilot} obj={obj} dmg={dmg} '
-                         f'total={GROUND_HP[key]}')
-        if AUTO_SCENE_DESTROY and ev == 0x05 and s.current_room is not None:
-            # Translate the per-building weapon index into a SCENE index. Identity is wrong (see
-            # v288 notes); without an anchor we decline to fire rather than destroy something else.
-            scene_idx = weapon_scene_for(obj)
-            if scene_idx is None:
+        recs.append(f'atk={atk} obj={obj} dmg={dmg} (total={GROUND_HP[key]})')
+        # live obj->scene probe: while a window is armed, EVERY record is a candidate
+        # reconciliation echo for the destroyed scene (no ev field exists - see docstring)
+        probe_observe(s.current_room, obj)
+        # weapon-obj correlation: track targets while `corr watch` is armed
+        corr_observe(s.current_room, obj, dmg)
+        calib('DMG', f'room={s.current_room} pilot={s.current_pilot} obj={obj} dmg={dmg} '
+                     f'total={GROUND_HP[key]}')
+        if AUTO_SCENE_DESTROY and s.current_room is not None:
+            # v449f5 PER-OBJECT KILL CHAIN. Field-proven (messages70 + trn_tables dump):
+            # msg-36/30 records index goi OBJECTS, not gsi scenes - our 36 [idx=33 camp=0]
+            # destroyed goi obj 33, which the dump shows is the camp-0 Metal Factory in
+            # scene 3, matching the client's 'You have destroyed USA Metal Factory' exactly
+            # (and the 36 handler reads PARR<TRN_OBJECT*> @0xc87270 at 0x4f9e56). So the
+            # damage the client reports for obj X is answered with a destroy OF obj X:
+            # the same building the pilot is actually bombing.
+            oi = trn_obj_info(s.current_room, obj)
+            if oi is None:
                 if AUTO_DESTROY_REQUIRE_MAP:
                     if obj not in _UNMAPPED_SEEN:
                         _UNMAPPED_SEEN.add(obj)
-                        log('AUTOPVE', f'obj {obj} has no weapon_map anchor - NOT firing msg 36. '
-                                       f'Anchor it with: corr map {obj} <sceneIdx>')
+                        log('AUTOPVE', f'obj {obj}: no trn_tables dump for this terrain - NOT '
+                                       f'firing msg 36. Run fa_dump_trn_tables.py in-arena.')
                         calib('UNMAPPED', f'room={s.current_room} obj={obj} dmg={dmg} '
-                                          f'(no anchor; no msg 36 sent)')
+                                          f'(no tables; no msg 36 sent)')
                     continue
-                scene_idx = obj                      # legacy guess - known to be wrong
-            skey = (s.current_room, scene_idx)
-            hp = SCENE_HP.get(skey, SCENE_DEFAULT_HP) - dmg
-            SCENE_HP[skey] = hp
-            if hp <= 0 and skey not in getattr(s, '_scene_destroyed', set()):
-                s.__dict__.setdefault('_scene_destroyed', set()).add(skey)
-                destroyed.append(scene_idx)
+                continue
+            if oi['value'] <= 0 or oi['destroy_mode'] == 2:
+                # v450f5 (user): decorations are destructible too - in the real game trees
+                # fall to gunfire. Low flat HP; no value, no scene-completion contribution.
+                _hp_need = OBJ_HP_DECORATION
+            else:
+                _hp_need = max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE)
+            okey = (s.current_room, obj)
+            if okey in _SCENE36_DESTROYED:
+                continue        # already dead - a second destroy is the Trn_Obj.cpp:415 CTD
+            if GROUND_HP[key] >= _hp_need:
+                destroyed.append((obj, oi))
     log('GROUND31', f'{s.current_pilot}{via} {n} rec(s): ' + '; '.join(recs) +
                     f' | raw={body.hex()}' + (f' +tail{len(body)%6}' if len(body)%6 else ''))
     if destroyed:
         _trn = _probe_terrain_for_room(s.current_room)
-        broadcast_scene_36(s.current_room,
-                           [(sidx, scene_camp(_trn, sidx), 0.0) for sidx in destroyed],
-                           reason='(auto from msg 31 ev=0x05)')
-        for sidx in destroyed:
-            log('AUTOPVE', f'{s.current_pilot} destroyed scene {sidx} camp={scene_camp(_trn, sidx)} '
-                          f'(weapon damage crossed threshold)')
-            # The OTHER end of the mapping: what we actually told the client to destroy. The client
-            # log then names what that index really was on its side.
-            calib('SENT36', f'room={s.current_room} terrain={_trn} sceneIdx={sidx} '
-                            f'camp={scene_camp(_trn, sidx)} <- obj={sidx} (identity assumption)')
+        def _camp36(sidx):
+            _si = trn_scene_info(s.current_room, sidx)
+            if _si and _si.get('camp') is not None:
+                return int(_si['camp'])
+            return scene_camp(_trn, sidx)
+        # One msg-36 per killed OBJECT, carrying the owning scene's REAL camp (NEVER 0xff -
+        # that value routes the client into the neutral/bridge path: every 0xff destroy in
+        # the 2026-08-15 session rendered 'a bridge' regardless of index).
+        _recs36 = [(obj, _camp36(oi['scene']) if oi['scene'] is not None and oi['scene'] >= 0
+                    else 0, 0.0) for obj, oi in destroyed]
+        broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)')
+        for obj, oi in destroyed:
+            _sc = oi['scene']
+            _hp_need = (OBJ_HP_DECORATION if (oi['value'] <= 0 or oi['destroy_mode'] == 2)
+                        else max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE))
+            log('AUTOPVE', f'{s.current_pilot} destroyed obj {obj} "{oi["name"]}" '
+                           f'(value {oi["value"]}, scene {_sc}) - damage crossed {_hp_need}')
+            calib('SENT36', f'room={s.current_room} terrain={_trn} obj={obj} '
+                            f'name={oi["name"]} scene={_sc} camp={_camp36(_sc) if _sc is not None and _sc >= 0 else "-"}')
+            # scene-level consequences (v450f5): every kill updates the scene's HP to the
+            # destroyed-VALUE fraction - scene_efficiency, the msg-69 map damage byte and
+            # the production scaling all read SCENE_HP, so the map tallies each building
+            # (fix for 'scene damage not tallied and didn't apply on the map'). When the
+            # LAST destructible dies, the scene is gone - stores lost (v291 model).
+            if _sc is not None and _sc >= 0:
+                _frac = trn_scene_damage_frac(s.current_room, _sc)
+                SCENE_HP[(s.current_room, _sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - _frac)))
+                if _frac > 0:
+                    log('AUTOPVE', f'scene {_sc} damage now {int(round(_frac * 100))}% '
+                                   f'(destroyed value fraction; map/panel + production follow)')
+                if trn_scene_complete(s.current_room, _sc):
+                    _lost = supply_on_scene_destroyed(s.current_room, _sc)
+                    _si = trn_scene_info(s.current_room, _sc) or {}
+                    log('AUTOPVE', f'scene {_sc} "{_si.get("name")}" camp={_si.get("camp")} is '
+                                   f'FULLY DESTROYED (all {_si.get("n_destructible")} destructible '
+                                   f'objects down) - stores lost {_lost}')
 
 
 # --- PvE OBJ->SCENE LIVE PROBE (no .q6 needed) ------------------------------
@@ -10463,10 +10841,10 @@ def probe_arm(room, scene, window=PROBE_WINDOW):
     with PROBE_LOCK:
         PROBE.update(active=True, scene=scene, room=room, until=time.time() + window)
 
-def probe_observe(room, obj, ev):
-    """Called for every msg-31 record. Records ev=0x00 objects against the armed scene."""
-    if ev != 0x00:
-        return
+def probe_observe(room, obj):
+    """Called for every msg-31 record. While a probe window is armed, every incoming record
+    is a candidate reconciliation echo for the destroyed scene (v445f5: there is NO event
+    field on the wire - run probe sweeps in a SOLO session so weapon hits can't pollute)."""
     with PROBE_LOCK:
         if not PROBE['active'] or PROBE['room'] != room:
             return
@@ -10492,13 +10870,25 @@ def probe_save():
     return len(inv), PROBE_MAP_PATH
 
 def probe_fire(room, scene):
-    """Arm the window then fire a real destroy(scene) so the client reconciles."""
+    """Arm the window then fire a real destroy so the client reconciles.
+    v449f5: the index is an OBJECT index (msg-36 indexes goi objects) and the camp sent is
+    the object's REAL owning camp when the terrain tables are dumped - camp 0xff routes the
+    client into the neutral/bridge path (every 0xff destroy in the 2026-08-15 session
+    rendered 'a bridge' regardless of index) and must never be sent for real objects.
+    Probes are LARGELY OBSOLETE now that fa_dump_trn_tables.py gives the mapping offline."""
     probe_arm(room, scene)
-    broadcast_scene_36(room, [(scene, SCENE_CAMP_NEUTRAL, 0.0)], reason=f'(probe scene {scene})')
+    _oi = trn_obj_info(room, scene)
+    _camp = SCENE_CAMP_NEUTRAL
+    if _oi and _oi.get('scene') is not None and _oi['scene'] >= 0:
+        _si = trn_scene_info(room, _oi['scene'])
+        if _si and _si.get('camp') is not None:
+            _camp = int(_si['camp'])
+    broadcast_scene_36(room, [(scene, _camp, 0.0)], reason=f'(probe obj {scene})')
 
 def probe_sweep(room, lo, hi, gap=3.0):
     """Walk sceneIdx lo..hi, one destroy each with `gap` seconds between so each scene's
-    ev=0x00 reconciliation lands inside its own window. Daemon thread; `probe stop` cancels."""
+    reconciliation lands inside its own window. Daemon thread; `probe stop` cancels.
+    v445f5: run SOLO - every msg-31 record in the window is attributed to the scene."""
     def _run():
         for sc in range(lo, hi + 1):
             with PROBE_LOCK:
@@ -10533,10 +10923,9 @@ CORR = {'watch': False, 'weapon': {}, 'find_obj': None, 'find_thread': None,
 CORR_LOCK = threading.Lock()
 CORR_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weapon_map.json')
 
-def corr_observe(room, obj, ev, dmg):
-    """Called for every msg-31 record. Tracks ev=0x05 weapon targets + last-seen time."""
-    if ev != 0x05:
-        return
+def corr_observe(room, obj, dmg):
+    """Called for every msg-31 record. Tracks weapon targets + last-seen time while armed
+    (v445f5: no ev field exists; arm `corr watch` only while actively strafing a target)."""
     with CORR_LOCK:
         if not CORR['watch']:
             return
@@ -10552,6 +10941,11 @@ def corr_map_save(obj, scene):
         existing = {}
     existing.setdefault('weapon_obj_to_scene', {})[str(obj)] = scene
     json.dump(existing, open(CORR_MAP_PATH, 'w'), indent=1, sort_keys=True)
+    # v446f5: LIVE-RELOAD the in-memory map. Field case (run_20260815_230717): `corr map
+    # 1229 33` at 23:10:52 wrote the file, `autopve on` printed '1 anchor(s)' (the STARTUP
+    # load), and every 1229 hit at 23:15 was declined 'no weapon_map anchor' - WEAPON_MAP
+    # was never refreshed after the save. The anchor must bite the moment it is recorded.
+    weapon_map_load()
     return CORR_MAP_PATH
 
 def corr_find(room, obj, lo=0, hi=59, gap=4.0):
@@ -11226,7 +11620,12 @@ SUPPLY_TYPE_KEYWORDS = (
 # actually hold today.
 SUPPLY_DAMAGE_SCALES_RATE = True   # destroyed/damaged scenes produce proportionally less
 SUPPLY_MIN_EFFICIENCY     = 0.0    # a fully flattened scene produces nothing
-SUPPLY_REPAIR_HP_PER_TICK = 250    # HP healed per production step (BuildingsRepairRate analogue)
+SUPPLY_REPAIR_HP_PER_TICK = 0      # v450f5: 2009-authentic NO repair (BuildingsRepairRate=0
+                                   # in every 2009 dump; the client's own auto-repair is also
+                                   # forced to 0 at 212-serve now). Destroyed buildings stay
+                                   # destroyed for the run - healing here would shrink map
+                                   # damage % while the rubble stays visible. Raise both
+                                   # knobs together if an arena ever wants repair.
 SUPPLY_TICK_LOG   = True            # v430f5: emit a SUPPLYTICK heartbeat line each production step
 _SUPPLY_TICK_N    = 0               # v430f5: monotonic production-step counter (for the heartbeat)
 SUPPLY_JSON       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_scenes.json')
@@ -12400,6 +12799,12 @@ def ground_stop_eligible(s, now):
     hist = getattr(s, '_pos_hist', None)
     if not hist or len(hist) < AUTO_RESUPPLY_MIN_SAMPLES:
         return False, 'no-evidence', None
+    # v446f5: a SPECIAL telemetry form seen recently (bombsight/autopilot run - the 99B bc=5
+    # frame) means the normal-form position stream is untrustworthy for this window: the field
+    # case showed it FROZEN at one value with a live tick while the plane flew its bomb run.
+    _odd = getattr(s, '_odd_telem_time', 0.0)
+    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S:
+        return False, 'special-form', None
     newest = hist[-1]
     t_new, p_new = newest[0], newest[1]
     if (now - t_new) > AUTO_RESUPPLY_FRESH:
@@ -12522,6 +12927,15 @@ def _grant_auto_resupply(s, pos):
         _mode = scoring_mode_for_room(s.current_room)
     except Exception:
         pass
+    # v452f5: AIR-START arenas (StartGround=no, e.g. the FFA at 1000m) spawn the plane
+    # already flying and fully fuelled/armed. A spawn-time msg-60 there triggers the
+    # client's 'Fueling and Arming plane' ground-service (engine off, throttle idle) on a
+    # plane that is airborne with a running engine - Taurus' FFA cold-engine bug
+    # (messages77). No ground service is possible or wanted at altitude: skip the grant.
+    if room_is_air_start(s.current_room):
+        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> AIR-START arena (StartGround=no) - '
+                        f'no spawn grant (plane spawns fuelled/armed in the air)')
+        return
     if _mode != 'tc':
         # ---- ARCADE: silent full service, no economy ----
         send_supply_grant_60(
@@ -12615,20 +13029,38 @@ def _handle_repair_request_119(s, pl):
         log('RESUPPLY', f'{s.current_pilot} msg-119 request within spawn grace '
                         f'({now - _spawn_t:.1f}s) - deferred')
         return
-    # AIRBORNE GUARD: never rearm a moving plane. plane_movement()==0 for a genuinely parked
-    # plane (v346 calibration), ~250k airborne. NO-EVIDENCE also returns 0, but here that means
-    # 'no telemetry divergence' and the client has asserted it is at a field, so 0 -> grant.
-    # Only a positively-moving plane is refused.
+    # AIRBORNE GUARD (v452f5: relaxed - the client's msg-119 is the AUTHORITY). The client
+    # only emits 0x77 AFTER it renders 'accepted to this airfield' locally, i.e. it has
+    # already decided it is parked and serviceable. We keep a guard only against a CLEARLY
+    # airborne request (a hostile/malformed mid-air rearm rebuilds the plane object and
+    # freezes the client - the v277 hazard), using a generous multiple of the parked
+    # threshold so a just-landed heavy bomber on rollout, or one whose _pos_hist still holds
+    # an approach sample, is NOT refused. Field bug (VF10_flakmagic, B-17G, Nations at War,
+    # messages30): landed, sent out 119'5 three times, every one refused -> never repaired.
+    # A STALE guard reading residual landing divergence was blocking a legitimate request.
     try:
         _mv = plane_movement(s)
     except Exception:
         _mv = 0
-    if _mv >= CRASH_MOVEMENT_MIN:
-        log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - plane moving '
-                        f'(movement={_mv} >= {CRASH_MOVEMENT_MIN}, airborne/taxiing)')
+    if _mv >= REPAIR_119_AIRBORNE_MIN:
+        log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - clearly airborne '
+                        f'(movement={_mv} >= {REPAIR_119_AIRBORNE_MIN})')
         return
-    # DEBOUNCE + ONE-SHOT (shared with the poll): one grant per stop. The client re-sends 0x77
-    # every ~20-60s while parked; without this each retry would re-grant.
+    # v446f5: the special-form holdoff applies here too - during a bombsight run the normal-
+    # form position stream freezes (movement reads 0) while the plane is very much airborne.
+    _odd = getattr(s, '_odd_telem_time', 0.0)
+    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S:
+        log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - special telemetry form '
+                        f'seen {now - _odd:.1f}s ago (bombsight/autopilot window)')
+        return
+    # DEBOUNCE only (v454f5). The one-shot 'resupplied_this_stop' latch is GONE from this
+    # EXPLICIT-request path: field evidence (Taurus, messages88, NAW II 5-towers) shows the
+    # client only sends 0x77 when it actually WANTS service (a full plane goes silent for
+    # 14 minutes; a flak-damaged parked plane asks again) - the latch was refusing every
+    # repeat request at the same stop, so repair worked once and then only after a Ctrl+Tab
+    # (respawn = fresh latch). Each deliberate ask now gets service; the short debounce
+    # coalesces bursts (the client sometimes re-asks ~0.1s after a grant), and the latch is
+    # still SET below so the background POLL cannot double-grant on top of a 119 service.
     if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
         return
     _pos = None
@@ -12638,9 +13070,6 @@ def _handle_repair_request_119(s, pl):
             _pos = _hist[-1][1]
     except Exception:
         _pos = None
-    if getattr(s, 'resupplied_this_stop', False) and _pos is not None \
-            and _pos == getattr(s, '_grant_pos', None):
-        return                                   # same stop, already serviced
     s.resupplied_this_stop = True
     s._grant_pos = _pos
     s.last_resupply_at = now
@@ -13135,6 +13564,28 @@ def handle_post_auth(s, cmd, pl):
         _handle_ground_damage_31(s, bytes(pl[9:]), via=' (scan)')
         return
 
+    # -- TANK MISSION REQUEST (msg 146 / 0x92, sub=0x47) - NEW, v451f5 -------------
+    # First seen 2026-08-16 (run_20260816_181444): the client sends this the moment the
+    # player launches an OFFENSIVE or DEFENSIVE tank mission from the Map/HQ dialog
+    # (OFFENSIVE_MISSIONS_LIST_BOX / DEFENSIVE_MISSIONS_LIST_BOX). Wire (direct, 13B):
+    #   [00][92][00 00][47][00 00 00 00 00][1e 00]
+    #   type 0x92, sub 0x47, then a u16 tail (0x001e=30 observed) = the mission/scene arg.
+    # The 2009 dedicated host answered by CREATING the tank objects (msg-4 CREATE-OBJECT,
+    # type&0xf==3 = NetTank, per FUN_004f26b0) and running the ground mission. We do NOT
+    # yet build that reply - but this type MUST NOT hit the generic echo (an unhandled
+    # in-arena reliable type bounced back is the 'Unknown Type' CTD class). Decode, record
+    # the raw for the reply RE, swallow. Direct AND type-scan-wrapped forms.
+    _tank_mreq = (tb == 0x92 and sub == 0x47) or \
+                 (sub == 0x00 and len(pl) > 8 and pl[8] == 0x92)
+    if _tank_mreq:
+        _arg = int.from_bytes(pl[-2:], 'little') if len(pl) >= 2 else 0
+        log('TANKMISN', f'{s.current_pilot} tank-mission request (msg 146/0x92 sub=0x47, '
+                        f'arg={_arg}) - decoded, NOT echoed (reply builder TBD: 2009 host '
+                        f'spawned NetTanks via msg-4). raw={hx(pl)}')
+        calib('TANKMISN', f'room={s.current_room} pilot={s.current_pilot} arg={_arg} '
+                          f'raw={hx(pl)}')
+        return
+
     # -- NOTIFY MESSAGES, type-scan double-wrapped - must not be echoed ---------
     # 0x03 = NET::OBJECT delete notify (echo -> client-side bounds-error crash),
     # 0x20 = no-handler status (echo -> "Unknown Type 32"). Direct variants are
@@ -13157,6 +13608,16 @@ def handle_post_auth(s, cmd, pl):
         handle_fly_start_place(s, pl[5], pl[6], pl[7]); return
     if sub == 0x00 and len(pl) >= 12 and pl[8] == 0x17:        # type-scan double-wrap
         handle_fly_start_place(s, pl[9], pl[10], pl[11], via=' (scan)'); return
+
+    # -- Ctrl+Tab SPAWN-POSITION CYCLE (msg 93 / 0x5d) - v454f5 ------------------
+    # Same 3-byte record shape as msg 23, N = the WANTED position (OldSP+1). The client
+    # dispatches ids 23 and 93 to the same handler; the reply mirrors sub 0x5d. Without
+    # this route the request fell to the generic echo, which the client parsed as
+    # 'SP 0 granted' - Ctrl+Tab never moved (Taurus, messages86/87).
+    if sub == 0x5d and len(pl) >= 8:                           # direct
+        handle_fly_start_place(s, pl[5], pl[6], pl[7], via=' (TAB)', reply_sub=0x5d); return
+    if sub == 0x00 and len(pl) >= 12 and pl[8] == 0x5d:        # type-scan double-wrap
+        handle_fly_start_place(s, pl[9], pl[10], pl[11], via=' (TAB scan)', reply_sub=0x5d); return
 
     # -- OUT-4 SPAWN STATE, type-scan DOUBLE-WRAPPED (re-spawn / airfield change) --
     # The first spawn's out-4 is DIRECT (msg-id 0x04 @ pl[4], outer type 0x12), caught
