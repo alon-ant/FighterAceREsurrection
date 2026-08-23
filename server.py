@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v462f5'
+VERSION = 'v463f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9952,6 +9952,18 @@ def login(s):
                                 _incr_ms = int((_now_st - s._status_last) * 1000)
                                 s._status_last = _now_st
                                 s._status_seq = (s._status_seq + 1) & 0x1FF
+                                # v463f5 CRITICAL: NEVER advertise seq 511 (0x1FF). run_215056:
+                                # ALL players froze at their ~17-minute mark. 512 seqs x 2.0s =
+                                # 1024s; when the client's latched current-status-index cycles
+                                # through 511 it EQUALS build_time_reply's 0x1FF constant for one
+                                # 2s window -> the v459f5 'never match in-game' guard unlocks ->
+                                # a poisoned NTP sample (offset -28.93s, the base-vs-A divergence)
+                                # is ACCEPTED (22:08:25.665, Sample 14) -> slew -> CRAP meltdown
+                                # 20s later (22:08:45), per client, all within the same minute.
+                                # Skipping 511 keeps the in-game index in 0..510 so the lobby
+                                # constant can never match mid-game, for sessions of ANY length.
+                                if s._status_seq == 0x1FF:
+                                    s._status_seq = 0
                                 try:
                                     sock.sendto(build_status_request(s, _incr_ms), s.addr)
                                     _hb_n += 1
