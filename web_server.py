@@ -155,6 +155,7 @@
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 import os
+import ssl
 import subprocess
 import sqlite3
 import hashlib
@@ -168,7 +169,15 @@ import urllib.request
 from http import cookies
 from html import escape as hesc
 
-WEB_PORT = 80
+# 2026-08-23: HTTPS variant. TLS files live next to this script so the same file runs on
+# Windows and on the GCP VM. If cert+key are present we serve HTTPS on 443; if they are
+# absent (e.g. a test box without keys) we fall back to plain HTTP on 80, exactly like
+# the original web_server.py.
+_WEB_DIR      = os.path.dirname(os.path.abspath(__file__))
+WEB_CERT_FILE = os.path.join(_WEB_DIR, 'fa-re-srv_ddns_net.pem')  # fullchain: leaf + 2 intermediates
+WEB_KEY_FILE  = os.path.join(_WEB_DIR, 'privateKey.key')          # private key (chmod 600 on the VM)
+WEB_TLS       = os.path.exists(WEB_CERT_FILE) and os.path.exists(WEB_KEY_FILE)
+WEB_PORT      = 443 if WEB_TLS else 80
 DEFAULT_CLIENT_PATH = r"C:\games\FA\FA.exe"
 WEB_SESSIONS = {}
 
@@ -2437,7 +2446,46 @@ def _build_httpd():
     # backlog so bursts don't get refused while workers spin up.
     httpd.timeout = 30
     httpd.request_queue_size = 64
+    if WEB_TLS:
+        # 2026-08-23: HTTPS - wrap the listening socket with TLS. Done here (not in
+        # start_web_server) so watchdog restarts via _restart_httpd() -> _build_httpd()
+        # come back up as HTTPS too. Cert is the fullchain for fa-re-srv.ddns.net;
+        # the private key is a separate file.
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(certfile=WEB_CERT_FILE, keyfile=WEB_KEY_FILE)
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     return httpd
+
+def _start_http_redirector():
+    """2026-08-23: When serving HTTPS on 443, keep a tiny listener on port 80 that 301s
+    every request to its https:// equivalent, so old http:// bookmarks and bare-hostname
+    entries keep working. Runs as a daemon thread with no watchdog - if it ever dies the
+    main site is unaffected. If port 80 is already taken the failure is logged and the
+    redirector is simply skipped."""
+    class _RedirectHandler(BaseHTTPRequestHandler):
+        def _redir(self):
+            # Redirect to whatever host the client asked for (minus any :port), so both
+            # fa-re-srv.ddns.net and localhost tests land on the right https URL.
+            host = (self.headers.get('Host') or 'fa-re-srv.ddns.net').split(':')[0]
+            self.send_response(301)
+            self.send_header('Location', f'https://{host}{self.path}')
+            self.send_header('Content-Length', '0')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+        do_GET  = _redir
+        do_HEAD = _redir
+        do_POST = _redir
+        def log_message(self, fmt, *args):
+            pass                    # silent - redirect hits are not worth log lines
+    try:
+        redirector = ThreadingHTTPServer(('', 80), _RedirectHandler)
+    except OSError as e:
+        SRV['log']('WEB', f'http->https redirector could not bind port 80 ({e!r}) - skipped')
+        return
+    threading.Thread(target=redirector.serve_forever, name='web-http-redirect',
+                     daemon=True).start()
+    SRV['log']('WEB', 'http->https redirector listening on port 80')
 
 def _start_httpd_thread():
     """(Re)build the httpd and start its serving thread. Any previous instance must already be
@@ -2471,7 +2519,7 @@ def _restart_httpd(reason=''):
     for attempt in range(1, 6):
         try:
             _start_httpd_thread()
-            SRV['log']('WEB', f'web server restarted on http://localhost:{WEB_PORT}')
+            SRV['log']('WEB', f'web server restarted on {"https" if WEB_TLS else "http"}://localhost:{WEB_PORT}')
             return True
         except OSError as e:
             SRV['log']('WEB', f'rebind attempt {attempt}/5 failed ({e!r}); retrying in 2s')
@@ -2483,10 +2531,15 @@ def _health_ping(timeout=10.0):
     """GET http://localhost:<port>/login and return the elapsed seconds, or None if it failed /
     timed out. /login is used because it needs no DB row and no auth, so a slow reply means the
     server itself is wedged, not a slow query. This is the wget-with-10s-timeout check."""
-    url = f'http://127.0.0.1:{WEB_PORT}/login'
+    scheme = 'https' if WEB_TLS else 'http'
+    url = f'{scheme}://127.0.0.1:{WEB_PORT}/login'
     start = time.monotonic()
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        # The cert names fa-re-srv.ddns.net, not 127.0.0.1, so a verifying client would fail
+        # on hostname mismatch and the watchdog would restart a perfectly healthy server
+        # forever. Verification is pointless for a loopback liveness ping anyway.
+        insecure = ssl._create_unverified_context() if WEB_TLS else None
+        with urllib.request.urlopen(url, timeout=timeout, context=insecure) as r:
             r.read(256)             # drain a little so the handler completes
         return time.monotonic() - start
     except Exception:
@@ -2589,7 +2642,9 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
 
     migrate_web_db()
     _start_httpd_thread()
-    SRV['log']('WEB', f'Web interface running on http://localhost:{WEB_PORT} (threaded)')
+    SRV['log']('WEB', f'Web interface running on {"https" if WEB_TLS else "http"}://localhost:{WEB_PORT} (threaded)')
+    if WEB_TLS:
+        _start_http_redirector()
     # Health watchdog: pings the server and restarts the web portion if it stops answering.
     threading.Thread(target=_web_watchdog, name='web-watchdog', daemon=True).start()
     SRV['log']('WEB', 'Web health watchdog started (30s interval, 10s timeout) - '
