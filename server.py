@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v458f5'
+VERSION = 'v460f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4164,20 +4164,22 @@ def build_synack(fixed_fa=None):
 
 def build_time_reply(cd, sess=None):
     ti = struct.unpack_from('>H',cd,8)[0] if len(cd)>=10 else 0
-    # v458f5: the STATUS-INDEX field (offset 12) must match the client's CURRENT status index or
-    # the sample is REJECTED (vcncNet logs 'Status Index X Current Status Index Y' and skips
-    # tSyncAddMeasurement on mismatch - proven in run_201926: 122/126 ping replies queue-MATCHED
-    # after the v457f5 fix, yet ZERO samples were added once in-game). The client's current index
-    # is whatever it latched from our last STATUS request - and it reads the status sequence from
-    # the LOW 9 BITS of the STATUS ctrl dword (its own log: 62x 'Status Sequence Packet 0'), which
-    # build_status_request always leaves 0 (_status_seq goes into bits 20-28, a different field).
-    # So the client's current index is 0x1FF (default) until the first STATUS arrives, then 0
-    # forever. Echo exactly that: 0x1FF before any STATUS has been sent to this session, 0 after.
-    # (A future version could carry the real incrementing seq through BOTH paths - ctrl low 9 bits
-    # AND here - but the 0-forever contract matches the field-proven v215 STATUS packets as-is.)
+    # v459f5 EMERGENCY REVERT of the v458f5 in-game index match (run_204454, 3-client freeze):
+    # letting in-game samples be ACCEPTED re-armed the 262.144s A-field wrap meltdown. tsync_ms's
+    # docstring describes a v211 per-session re-anchor (sess._ntp_epoch / NTP_REANCHOR_S) but
+    # NOTHING in the file ever sets _ntp_epoch - the getattr branch is dead and A is really the
+    # v207 FA_EPOCH-absolute phase, which wraps on a fixed 262s grid. While in-game samples were
+    # rejected the wrap was invisible; once accepted (v458f5), the first fit window straddling a
+    # phase boundary produced a -259.5s sample (run_204454 t=262.3s), the client slewed, backward
+    # jumps ran away 0.5s -> 141s (4026 CRAP events) and ALL THREE clients froze ~20:49:20.
+    # So: offset 12 goes back to the 0x1FF constant. In-game (client current index 0) the index
+    # compare FAILS and samples are rejected - exactly the stable v457f5 behavior: the ping-reply
+    # flow still satisfies the resync loop + keepalive and the HUD, LOBBY sync (current index
+    # 511) still fully works, and the STATUS packets remain the in-game time keeper (v215).
+    # Re-enabling in-game samples is v460 work and REQUIRES fixing the A timeline first (real
+    # session re-anchor consistent with the STATUS-advanced base - needs vcncNet FUN_10007fc0
+    # decode ground truth via Ghidra before another live test).
     st = STATUS_INDEX
-    if sess is not None and getattr(sess, '_status_base_epoch', None) is not None:
-        st = 0
     ms=tsync_ms(sess); p=bytearray(144); p[0]=2; p[2]=0x80
     struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,st)
     struct.pack_into('>H',p,14,ti); return bytes(p)
@@ -4240,8 +4242,21 @@ def build_status_request(sess, base_incr_ms):
     p = bytearray(36)
     connid = sess._status_connid if sess._status_connid is not None else 0x0240
     struct.pack_into('>H', p, 0, connid & 0xFFFF)
-    p[2] = 0x20                                    # DATA section flag (wire byte 2 == dispatcher byte[7])
-    p[3] = 0x00
+    # v460f5 GROUND TRUTH from vcncNet decompile (dispatcher FUN_100032da + STATUS handler
+    # FUN_100076c2, dll re-opened in Ghidra): the client reads the STATUS sequence from the LOW 9
+    # BITS of ntohs(wire bytes 2-3) - i.e. seq = ((wire[2]&1)<<8) | wire[3] - and GATES ALL STATUS
+    # processing on it CHANGING (if (seq != DAT_1001ce70)): base-time advance (FUN_10007d13),
+    # connection-status update incl. the HUD 'L:' RTT (FUN_100073a4 <- DAT_10020360, the reliable-
+    # ACK smoothed RTT), and fresh reply counters. Our old packet left wire[3]=0 -> seq 0 forever
+    # -> ONE processing event per session (the +2.001s one-time base step seen in run_203008) and
+    # a frozen HUD L:. The ctrl bits 20-28 copy of seq (below) is what the CLIENT'S OWN REPLY
+    # builder uses - the client never reads it in our request; kept for wire symmetry only.
+    # Dispatcher safety: byte 2 bit 0x01 is tested nowhere in FUN_100032da (0x80 TIME, 0x20 DATA,
+    # 0x10 SYN, 0x08, 0x04 addr, 0x02 ACK are the live bits), so carrying seq bit 8 there is inert.
+    # Payload offsets (base_incr @8, counters @12-23) were verified CORRECT against the client's
+    # section-cursor parse (payload = wire byte 8 for a flags=DATA packet) - unchanged.
+    p[2] = 0x20 | ((seq >> 8) & 1)                 # DATA section flag + STATUS seq bit 8
+    p[3] = seq & 0xFF                              # STATUS seq low 8 bits (the field the client reads)
     ctrl = (4 << 29) | (seq << 20) | 0x80000       # sub_type 4 + seq + status bit (matches client)
     struct.pack_into('>I', p, 4, ctrl & 0xFFFFFFFF)
     struct.pack_into('>I', p, 8, base_incr_ms & 0xFFFFFFFF)   # base increment (ms) -> advances base
