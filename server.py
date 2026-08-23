@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v456f5'
+VERSION = 'v458f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4164,8 +4164,22 @@ def build_synack(fixed_fa=None):
 
 def build_time_reply(cd, sess=None):
     ti = struct.unpack_from('>H',cd,8)[0] if len(cd)>=10 else 0
+    # v458f5: the STATUS-INDEX field (offset 12) must match the client's CURRENT status index or
+    # the sample is REJECTED (vcncNet logs 'Status Index X Current Status Index Y' and skips
+    # tSyncAddMeasurement on mismatch - proven in run_201926: 122/126 ping replies queue-MATCHED
+    # after the v457f5 fix, yet ZERO samples were added once in-game). The client's current index
+    # is whatever it latched from our last STATUS request - and it reads the status sequence from
+    # the LOW 9 BITS of the STATUS ctrl dword (its own log: 62x 'Status Sequence Packet 0'), which
+    # build_status_request always leaves 0 (_status_seq goes into bits 20-28, a different field).
+    # So the client's current index is 0x1FF (default) until the first STATUS arrives, then 0
+    # forever. Echo exactly that: 0x1FF before any STATUS has been sent to this session, 0 after.
+    # (A future version could carry the real incrementing seq through BOTH paths - ctrl low 9 bits
+    # AND here - but the 0-forever contract matches the field-proven v215 STATUS packets as-is.)
+    st = STATUS_INDEX
+    if sess is not None and getattr(sess, '_status_base_epoch', None) is not None:
+        st = 0
     ms=tsync_ms(sess); p=bytearray(144); p[0]=2; p[2]=0x80
-    struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,STATUS_INDEX)
+    struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,st)
     struct.pack_into('>H',p,14,ti); return bytes(p)
 
 def build_beacon(seq, idx=0, sess=None):
@@ -14919,19 +14933,38 @@ def on_pkt(data, addr):
         s._status_connid = struct.unpack_from('>H', data, 0)[0]
         log('STATUS/CONNID', f'captured connid=0x{s._status_connid:04x} for STATUS packets '
                              f'({getattr(s,"current_pilot","?")})')
-    if sz==12 and (data[2]&0x80):
+    if sz >= 12 and (data[2]&0x80):
         # 12-byte two-way TIME ping (client FUN_100090e4: flag 0x40 -> wire byte[2]=0x80). In the
         # LOBBY this is the initial clock sync; IN-GAME (v213) it's the client's periodic RESYNC
         # (FUN_100091b7 drops to sync state 2 when its last time sample goes stale). We reply with a
         # fresh timestamp + echoed time-index so it re-baselines cleanly and measures round-trip
         # latency (HUD 'L:'). Logged per session-phase so we can confirm the resync loop is running.
-        ti = struct.unpack_from('>H', data, 8)[0] if sz >= 10 else 0
+        #
+        # v457f5 ROOT-CAUSE FIX (perceived-latency complaint; vcncnet logs 2026-08-23, both
+        # clients): the standalone 12-byte form is NOT the client's only ping. In-game, vcncNet
+        # ATTACHES the 4-byte TIME section to outgoing DATA packets - inserted at bytes 8-11,
+        # AFTER the 8-byte base header and BEFORE the payload (client log proof: plain telemetry
+        # 'hdr size 8' -> 24B; same telemetry with 'Attach TIME Sync request' -> 'hdr size 12'
+        # -> 28B). The old sz==12 gate therefore ignored EVERY in-game ping; the client received
+        # only the 1Hz idx=0 beacons and deduped them as 'Duplicate time message 0' (410 pings
+        # sent, 369 replies discarded, clock model frozen ~60s in, in BOTH logs). Drift then
+        # accumulated, dead reckoning degraded, remote planes warped progressively = the
+        # 'latency' that worsens over a session. This also explains run_220823's 'ZERO 12-byte
+        # pings in-game' (v213 note above): they were attached, not standalone. AND it is the
+        # origin of the v340-v364 incrementing 4-byte 'counter prefix': the >H at byte 8 is the
+        # TimeIndex. The counter-unwrap keeps stripping that prefix downstream, so payload
+        # handling stays UNCHANGED (data[8:], field-proven) - this fix ONLY adds the reply.
+        # build_time_reply reads ti from offset 8, which is correct for BOTH forms.
+        ti = struct.unpack_from('>H', data, 8)[0]
         s._tping_n = getattr(s, '_tping_n', 0) + 1
-        if getattr(s, 'entered_game', False):
-            if (s._tping_n % 4) == 1:
-                log('RX/TIMEPING', f'in-game RESYNC ping #{s._tping_n} ti={ti} '
-                                   f'-> reply A_ms={tsync_ms(s)} ({getattr(s,"current_pilot","?")})')
-        sock.sendto(build_time_reply(data,sess=s),addr); return
+        if (s._tping_n % 4) == 1:
+            log('RX/TIMEPING', f'{"attached" if sz > 12 else "standalone"} ping #{s._tping_n} '
+                               f'ti={ti} sz={sz} -> reply A_ms={tsync_ms(s)} '
+                               f'({getattr(s,"current_pilot","?")})')
+        sock.sendto(build_time_reply(data,sess=s),addr)
+        if sz == 12:
+            return          # pure ping - nothing else in the packet
+        # composite (attached) form: fall through - DATA/ACK sections still need processing
     if sz>=8:
         dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
         if pt==1:
