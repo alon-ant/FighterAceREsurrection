@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v460f5'
+VERSION = 'v462f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8774,17 +8774,43 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
                    f'-> peers in room {s.current_room} {reason}')
     # v343: re-issue a start-place grant that raced this death (see SP_REGRANT_ON_DEATH).
+    # v462f5 RE-GRANT MADE DELAYED + CONDITIONAL (run 21:09: Starfighter hung at 21:27:42 on
+    # 'WaitingForStartPlaceList is empty' right after his post-death respawn; Taurus's log shows
+    # the SAME duplicate-grant error on ALL THREE of his deaths that session, survived each time).
+    # ROOT CAUSE of the every-death duplicate: on a normal death the client emits its msg-23 SP
+    # request and its delete packet IN THE SAME MILLISECOND (Starfighter: out 23'4 + out 3'14
+    # both at .304). We serve the grant ~40ms BEFORE processing the delete, so _last_sp_grant is
+    # always ~0.05s old when DELETE3 runs -> the v343 2.0s window is satisfied on EVERY death ->
+    # we re-sent the just-consumed grant -> the client's WaitingForStartPlaceList was already
+    # empty -> ERROR on every respawn, and one Developer-build freeze. The race v343 fixed is
+    # ordering-identical server-side (grant first, delete second, small age), so age alone CANNOT
+    # discriminate. What CAN: whether the client manages to SPAWN. Normal flow -> CREATE-OBJECT
+    # arrives within ~1s (flying=True at 11120, NEW my_obj_number); the hung race -> never. So:
+    # wait SP_REGRANT_DELAY_S, then re-issue ONLY if the client still hasn't spawned. The hung
+    # client doesn't mind the extra 2.5s; a normal respawn never sees a duplicate. A client whose
+    # load takes >2.5s could still get the (survivable, logged) duplicate - tune the delay up if
+    # that ever shows in the field.
     _sp = getattr(s, '_last_sp_grant', None)
     if SP_REGRANT_ON_DEATH and _sp and 'death' in str(reason).lower():
         _t, _pkt, _af, _mid, _gn = _sp
         _age = time.time() - _t
         s._last_sp_grant = None                  # once only - never loop on repeated deletes
         if _age <= SP_REGRANT_WINDOW_S:
-            log('FLY23', f'{s.current_pilot} start-place grant N={_gn} raced this death '
-                         f'(issued {_age:.3f}s before it) -> re-issuing after the delete')
-            threading.Thread(target=lambda: send_reply(
-                s, _pkt, f'<- StartPlaceList 23 RE-GRANT (AF={_af} N={_gn})', to=5.0),
-                daemon=True).start()
+            _dying_obj = s.my_obj_number
+            def _delayed_regrant(s=s, _pkt=_pkt, _af=_af, _gn=_gn, _age=_age, _dying_obj=_dying_obj):
+                time.sleep(SP_REGRANT_DELAY_S)
+                if getattr(s, 'closing', False) or not getattr(s, 'entered_game', False):
+                    return                       # left the arena/session - nothing to rescue
+                if getattr(s, 'flying', False) or s.my_obj_number != _dying_obj:
+                    log('FLY23', f'{s.current_pilot} re-grant N={_gn} CANCELLED - client respawned '
+                                 f'normally (flying={getattr(s, "flying", False)} '
+                                 f'obj=0x{(s.my_obj_number or 0):04x})')
+                    return
+                log('FLY23', f'{s.current_pilot} start-place grant N={_gn} raced this death '
+                             f'(issued {_age:.3f}s before it) and client has NOT respawned '
+                             f'{SP_REGRANT_DELAY_S}s later -> re-issuing')
+                send_reply(s, _pkt, f'<- StartPlaceList 23 RE-GRANT (AF={_af} N={_gn})', to=5.0)
+            threading.Thread(target=_delayed_regrant, daemon=True).start()
 
 # -- v234: TELEMETRY OPCODES -------------------------------------------------
 # The flying-state object update is [bc][T][00][00][OPCODE][tick u16][ONumber u16][state...].
@@ -8835,6 +8861,7 @@ STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (t
 # after the delete has gone out, so the client has a live grant to spawn on.
 SP_REGRANT_ON_DEATH = True   # flip False to disable instantly if it ever double-spawns
 SP_REGRANT_WINDOW_S = 2.0    # only re-issue a grant this recent; older ones are unrelated
+SP_REGRANT_DELAY_S  = 2.5    # v462f5: wait this long, re-issue ONLY if the client never spawned
 
 # v350: sizes of a msg-7 appspace we have observed being handled safely by the client.
 # 84 = bc5/T=0x42, 86 = bc5/T=0x62, 88 = bc5/T=0x82. Anything else gets logged once by
@@ -8930,6 +8957,28 @@ def relay_telemetry(src, data):
     if _telem is None:
         return                          # not a flying-state object update (e.g. pre-spawn 00c2)
     pl = _telem
+    # v461f5 [TELEM8-ORIGIN]: 'Unsupported message 8' flood, run 21:09 session. Receiving clients
+    # (Oct-Normal AND Dec-Developer builds) REJECT relayed opcode-0x08 telemetry (in-log counts:
+    # Bigalon 677, Taurus 1020, Starfighter 34 - the originator-survives fingerprint says the
+    # dominant emitter was Starfighter's client), so every 0x08 frame we relay is a DROPPED tick
+    # for the peers -> that plane looks choppy/laggy to everyone else. Suspected proper fix:
+    # convert 0x08 -> 0x07 at the relay (strip the extra 9-byte sample block, per the v234
+    # capture) - but the block's position (appended vs interleaved) is unproven, so INSTRUMENT
+    # FIRST: one full hex dump of the first frame of EACH opcode per sender (gives the 07/08
+    # structural diff for the same plane) + a sparse counter. Bounded: two dumps + one count
+    # line per 256 frames per sender per session. Conversion itself is a later flagged version.
+    _opc = pl[4]
+    _dumped = getattr(src, '_telem_op_dumped', None)
+    if _dumped is None:
+        _dumped = set(); src._telem_op_dumped = _dumped
+    if _opc not in _dumped:
+        _dumped.add(_opc)
+        log('TELEM8', f'{src.current_pilot} FIRST opcode-0x{_opc:02x} frame len={len(pl)} '
+                      f'bc={pl[0]} T=0x{pl[1]:02x} hex={hx(bytes(pl))}')
+    if _opc == 0x08:
+        src._telem8_n = getattr(src, '_telem8_n', 0) + 1
+        if (src._telem8_n % 256) == 0:
+            log('TELEM8', f'{src.current_pilot} 0x08 frames relayed so far: {src._telem8_n}')
     # v350: INSTRUMENTATION - find where the 165-byte msg 7 actually comes from.
     # Every CTD in this family ends with `in 7'165` then
     #     bounds error class ARR<class NET::OBJECT *,2048>[<garbage>] 0..2047
