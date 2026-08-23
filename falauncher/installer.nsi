@@ -27,7 +27,7 @@ VIAddVersionKey "FileVersion"     "4.2.0.0"
 VIAddVersionKey "LegalCopyright"  "Fighter Ace community game-preservation project"
 
 !define MUI_WELCOMEPAGE_TITLE "Welcome back, pilot!"
-!define MUI_WELCOMEPAGE_TEXT "This wizard installs the Fighter Ace 4.2 launcher.$\r$\n$\r$\nAfter setup, the launcher downloads the game (about 4.4 GB, shared between pilots via BitTorrent), installs it, and takes you to the login page.$\r$\n$\r$\nClick Next to continue."
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs the Fighter Ace 4.2 launcher.$\r$\n$\r$\nAfter setup, the launcher downloads the game (about 4.4 GB), installs it, and takes you to the login page.$\r$\n$\r$\nClick Next to continue."
 !insertmacro MUI_PAGE_WELCOME
 !define MUI_DIRECTORYPAGE_TEXT_TOP "Choose where Fighter Ace 4.2 will live. The game files, the launcher and the downloaded data all stay inside this one folder."
 !insertmacro MUI_PAGE_DIRECTORY
@@ -42,7 +42,6 @@ Section "Install"
   SetOutPath "$INSTDIR\launcher"
   File "fa_launcher.exe"
   File "payload\aria2c.exe"
-  File "payload\FA42DeluxeEdition_iso.torrent"
   File "payload\aria2-COPYING.txt"
   ; Never clobber a pilot's settings on reinstall/upgrade.
   IfFileExists "$INSTDIR\launcher\launcher.ini" +2 0

@@ -5,5 +5,4 @@
 # Direct links to any web server also work:
 # http://fa-re-srv.ddns.net/FA42DeluxeEdition.iso
 
-http://fa-re-srv.ddns.net/FA42DeluxeEdition.iso
 https://drive.google.com/file/d/1V93JcBbDHDrUSk_EfitC49hgurKxGG7R/view?usp=sharing

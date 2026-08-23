@@ -265,6 +265,21 @@
 //     M0 (list size), M1 (mirror chosen), M! (exhausted).
 //     Falsify by: a machine with no reachable seeds not switching to a
 //     mirror within ~70 s, or a first-mirror 404 not advancing to the next.
+// 2026-08-23: launcher v5.0 - L-FIX-10: torrent era removed. Field result:
+//     the swarm never reached critical mass, so BitTorrent, seeding and all
+//     related machinery are gone: no torrent file, no BT/DHT/LPD ports, no
+//     seed-on-start, no seed-while-playing supervisor (the launcher closes
+//     at game launch again), no PlayUploadLimit, no seed.bat. aria2c remains
+//     purely as the HTTP engine (resume, 8-way split, RPC progress); the
+//     maintained mirrors.txt on the project repo is the ONE download source,
+//     started immediately (no fallback delay). Dead mirrors advance down the
+//     list; an exhausted list is a clear hard stop ('try again later').
+//     After a successful install the downloaded ISO is deleted to free
+//     4.4 GB on the pilot's disk. Old inis with torrent-era keys still load
+//     (unknown keys are ignored).
+//     Falsify by: any BT traffic or listen port from a v5.0 machine, a
+//     download not starting from mirror #0 within seconds, or the ISO still
+//     present after a completed install.
 //     Falsify by: post-install, a file under the target still carrying the R
 //     attribute, GameDir absent from launcher.ini, or the game failing to
 //     launch from the saved path.
@@ -318,23 +333,15 @@ struct Config {
         L"/MK:0 \"/MCD1:0 /MCD2:0 /MTD:0 /NoPreload /PPS:5 /FPS:50 /SDM:1000\"";
     int windowW = 460;
     int windowH = 640;
-    // L-FIX-4: download/share settings. Empty strings get ExeDir-relative
-    // defaults filled in at startup (can't call ExeDir() in a static init).
-    std::wstring torrentFile;                          // <ExeDir>\FA42DeluxeEdition_iso.torrent
-    std::wstring downloadUrl;                          // optional HTTP mirror (extra source)
-    std::wstring downloadDir;                          // <ExeDir>\download
-    std::wstring aria2Exe;                             // <ExeDir>\aria2c.exe
-    std::wstring isoName = L"FA42DeluxeEdition.iso";   // must match the torrent's info.name
-    bool seedOnStart = true;        // quietly seed/resume in the background if data exists
-    bool seedWhilePlaying = true;   // L-FIX-4c: keep seeding while the game runs (the
-                                    // launcher hides and supervises; 0 = old behavior)
-    std::wstring playUploadLimit = L"512K";  // upload cap while playing ("0" = unlimited)
+    // L-FIX-10: download settings (mirror-list HTTP only; the torrent/seeding
+    // era is over). Empty strings get ExeDir-relative defaults at startup.
+    std::wstring downloadDir;                          // <ExeDir>\\download
+    std::wstring aria2Exe;                             // <ExeDir>\\aria2c.exe (HTTP engine)
+    std::wstring isoName = L"FA42DeluxeEdition.iso";
     int  rpcPort = 6811;            // aria2 JSON-RPC port on 127.0.0.1
-    int  btPort  = 6888;            // L-FIX-4b: BT/DHT listen range base (btPort..btPort+9)
-    // L-FIX-9: HTTP mirror fallback when the swarm is empty.
+    // L-FIX-10: the ONLY download source - the maintained mirror list.
     std::wstring mirrorListUrl =
         L"https://raw.githubusercontent.com/alon-ant/FighterAceREsurrection/main/falauncher/mirrors.txt";
-    int mirrorFallbackSecs = 60;    // stall window before switching to mirrors
     // L-FIX-5b: the folder inside the ISO whose CONTENTS are copied to the
     // user-selected target (no installer is run).
     std::wstring isoGameFolder = L"FIGHTER_ACE_4_2_DELUXE_EDITION";
@@ -416,19 +423,12 @@ static bool LoadConfig(const std::wstring& ini, Config& cfg, std::wstring& err) 
         else if (lk == L"launchargs") cfg.launchArgs = v;
         else if (lk == L"windowwidth")  { try { cfg.windowW = std::stoi(v); } catch (...) {} }
         else if (lk == L"windowheight") { try { cfg.windowH = std::stoi(v); } catch (...) {} }
-        // L-FIX-4
-        else if (lk == L"torrentfile")  cfg.torrentFile = v;
-        else if (lk == L"downloadurl")  cfg.downloadUrl = v;
+        // L-FIX-10 (torrent-era keys in old inis are ignored like any unknown key)
         else if (lk == L"downloaddir")  cfg.downloadDir = v;
         else if (lk == L"aria2exe")     cfg.aria2Exe = v;
         else if (lk == L"isoname")      cfg.isoName = v;
-        else if (lk == L"seedonstart")     cfg.seedOnStart     = (v != L"0");
-        else if (lk == L"seedwhileplaying") cfg.seedWhilePlaying = (v != L"0");
-        else if (lk == L"playuploadlimit")  cfg.playUploadLimit = v;
         else if (lk == L"rpcport")      { try { cfg.rpcPort = std::stoi(v); } catch (...) {} }
-        else if (lk == L"btport")       { try { cfg.btPort  = std::stoi(v); } catch (...) {} }
         else if (lk == L"mirrorlisturl") cfg.mirrorListUrl = v;
-        else if (lk == L"mirrorfallbacksecs") { try { cfg.mirrorFallbackSecs = std::stoi(v); } catch (...) {} }
         else if (lk == L"isogamefolder") cfg.isoGameFolder = v;
         else if (lk == L"installsubdir") cfg.installSubdir = v;
         else if (lk == L"installtarget") cfg.installTarget = v;
@@ -458,8 +458,6 @@ static IOleInPlaceActiveObject* g_ipao = nullptr;
 #define WM_DO_DOWNLOAD (WM_APP + 1)
 #define WM_DO_NAVIGATE (WM_APP + 2)
 #define NAV_RETRY_TIMER 1001
-#define GAME_WATCH_TIMER 1003
-static HANDLE g_gameProc = nullptr;   // L-FIX-4c: the running FA.exe we supervise
 
 // ----------------------------------------------------------------------------
 //  L-FIX-2: remember the last logged-in username (lastuser.txt next to the exe)
@@ -589,7 +587,6 @@ static void CaptureLastUser() {
 //  L-FIX-4: game download + sharing (bundled aria2c.exe as the torrent engine)
 // ----------------------------------------------------------------------------
 static bool   g_downloadMode = false;  // the browser is showing the progress page
-static ULONGLONG g_dlStartTick = 0;    // L-FIX-9: when the visible download began
 static bool   g_startInstall = false;  // L-FIX-5: auto-trigger install after startup
 static HANDLE g_ariaProc = nullptr;    // aria2c process handle (nullptr = not running)
 #define DL_POLL_TIMER 1002
@@ -670,18 +667,11 @@ static bool PortFree(int port) {
     return ok;
 }
 
-// Start aria2c. quietSeed=true is the background resume/seed path on normal
-// launcher starts: --bt-seed-unverified skips re-hashing 4.35 GB when the ISO
-// is already complete, so seeding is instant. The interactive download path
-// leaves verification ON (aria2 hash-checks pieces as they arrive anyway).
-static bool StartAria2(bool quietSeed, std::wstring& err) {
+// L-FIX-10: start aria2c as a bare HTTP download engine (RPC only, nothing
+// queued). Mirrors are added over RPC by SwitchToNextMirror.
+static bool StartAria2(std::wstring& err) {
     if (g_ariaProc) return true;
     if (!FileExists(g_cfg.aria2Exe)) { err = L"aria2c.exe was not found next to the launcher:\n" + g_cfg.aria2Exe; return false; }
-    bool haveTorrent = FileExists(g_cfg.torrentFile);
-    if (!haveTorrent && g_cfg.downloadUrl.empty()) {
-        err = L"Neither the torrent file nor a DownloadUrl is configured:\n" + g_cfg.torrentFile;
-        return false;
-    }
     CreateDirectoryW(g_cfg.downloadDir.c_str(), nullptr);
     g_rpcSecret = RandToken();
 
@@ -691,31 +681,13 @@ static bool StartAria2(bool quietSeed, std::wstring& err) {
         if (PortFree(g_cfg.rpcPort + i)) { g_cfg.rpcPort += i; break; }
     }
 
-    std::wstring btRange = std::to_wstring(g_cfg.btPort) + L"-" +
-                           std::to_wstring(g_cfg.btPort + 9);
     std::wstring cmd = L"\"" + g_cfg.aria2Exe + L"\""
         L" --enable-rpc --rpc-listen-all=false"
         L" --rpc-listen-port=" + std::to_wstring(g_cfg.rpcPort) +
         L" --rpc-secret=" + g_rpcSecret +
         L" --dir=\"" + g_cfg.downloadDir + L"\""
         L" --continue=true --file-allocation=none"
-        // L-FIX-4b: fixed, forwardable listen ports + DHT bootstrap + LAN peer
-        // discovery. aria2 takes the first free port in the range, so two
-        // instances on one machine coexist; pilots forward TCP+UDP <BtPort>.
-        L" --listen-port=" + btRange +
-        L" --dht-listen-port=" + btRange +
-        L" --enable-dht=true --bt-enable-lpd=true"
-        L" --dht-entry-point=dht.transmissionbt.com:6881"
-        L" --seed-ratio=0.0 --summary-interval=0 -q";
-    if (quietSeed) cmd += L" --bt-seed-unverified=true";
-    if (haveTorrent) {
-        cmd += L" -T \"" + g_cfg.torrentFile + L"\"";
-        // aria2 treats URIs given alongside -T as extra (web-seed style) sources
-        // for the SAME download - the HTTP mirror and the swarm feed one file.
-        if (!g_cfg.downloadUrl.empty()) cmd += L" \"" + g_cfg.downloadUrl + L"\"";
-    } else {
-        cmd += L" -x 8 -s 8 \"" + g_cfg.downloadUrl + L"\"";
-    }
+        L" --summary-interval=0 -q";
 
     STARTUPINFOW si; ZeroMemory(&si, sizeof si); si.cb = sizeof si;
     PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof pi);
@@ -727,8 +699,7 @@ static bool StartAria2(bool quietSeed, std::wstring& err) {
     }
     CloseHandle(pi.hThread);
     g_ariaProc = pi.hProcess;
-    if (!quietSeed) g_dlStartTick = GetTickCount64();   // L-FIX-9 stall clock
-    Stage(quietSeed ? L"T1: aria2 started (quiet seed)" : L"T1: aria2 started (download)");
+    Stage(L"T1: aria2 started (download engine)");
     return true;
 }
 
@@ -1124,6 +1095,11 @@ static void DoCopyInstall(const std::wstring& target) {
     }
     bool saved = SaveInstallToIni(target, g_cfg.clientExe);
     g_cfg.gameInstalled = true;
+    // L-FIX-10: with sharing gone, the 4.4 GB download is pure disk waste
+    // once installed - remove it (and any control file) to free space.
+    DeleteFileW(iso.c_str());
+    DeleteFileW((iso + L".aria2").c_str());
+    Stage(L"I: download files removed after install");
     g_instState = INST_DONE;
     g_instMsg = L"<b>Installed.</b> Game files copied to<br><code>" + target +
                 L"</code><br>Cleared " + std::to_wstring(cleared) + L" read-only flags" +
@@ -1236,13 +1212,12 @@ static void StartInstall() {
 }
 
 // ----------------------------------------------------------------------------
-//  L-FIX-9: HTTP mirror fallback. If, mirrorFallbackSecs after the torrent
-//  starts, we have zero bytes AND zero seeders, fetch mirrors.txt from the
-//  project repo, resolve each entry (Google Drive links need the large-file
-//  'confirm' interstitial resolved to a direct drive.usercontent URL) and
-//  feed it to the ALREADY-RUNNING aria2 via addUri - resume, multi-connection
-//  and the existing progress UI all keep working. Mirror errors advance down
-//  the list; an exhausted list falls back to the torrent again.
+//  L-FIX-10: mirror-list HTTP download - the one and only source. mirrors.txt
+//  is fetched from the project repo at download start; entries are resolved
+//  (Google Drive links get the large-file confirm interstitial resolved to a
+//  direct drive.usercontent URL) and fed to the running aria2 via addUri.
+//  A dead mirror advances to the next entry; an exhausted list is a hard
+//  stop with a clear message.
 // ----------------------------------------------------------------------------
 static int  g_mirrorIndex = -1;              // -1 = torrent mode
 static bool g_mirrorsExhausted = false;
@@ -1319,7 +1294,7 @@ static std::string CurrentActiveGid() {
 }
 
 // Move to the next mirror (or from torrent to the first one).
-static void SwitchToNextMirror(bool leavingTorrent) {
+static void SwitchToNextMirror(bool firstStart) {
     if (g_mirrorsExhausted) return;
     if (g_mirrors.empty()) {
         std::string txt = WinInetGet(g_cfg.mirrorListUrl, 65536, nullptr);
@@ -1336,18 +1311,15 @@ static void SwitchToNextMirror(bool leavingTorrent) {
     }
     ++g_mirrorIndex;
     if (g_mirrorIndex >= (int)g_mirrors.size()) {
-        // Out of mirrors: go back to the pilot network and stop retrying mirrors.
+        // L-FIX-10: mirrors are the ONLY source now - out of mirrors means
+        // the download cannot proceed. Say so on the page.
         g_mirrorsExhausted = true;
-        g_mirrorIndex = -1;
         g_mirrorHost.clear();
-        Stage(L"M!: mirrors exhausted - back to torrent");
-        StopAria2(1500);
-        std::wstring aerr;
-        if (StartAria2(false, aerr)) g_dlStartTick = GetTickCount64();
+        Stage(L"M!: mirrors exhausted - no sources");
         return;
     }
 
-    // Drop the current transfer. Leaving the torrent at 0 bytes: also remove
+    // Drop any current transfer and its control file (fresh source next).
     // its piece-based control file, which an HTTP download cannot reuse.
     std::string gid = CurrentActiveGid();
     if (!gid.empty())
@@ -1355,7 +1327,7 @@ static void SwitchToNextMirror(bool leavingTorrent) {
                 "\"params\":[\"token:" + WideToUtf8(g_rpcSecret) + "\",\"" + gid + "\"]}");
     std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
     DeleteFileW((iso + L".aria2").c_str());
-    if (leavingTorrent) DeleteFileW(iso.c_str());
+    if (firstStart) DeleteFileW(iso.c_str());   // clear any stale 0-byte stub
 
     std::string url = ResolveMirror(g_mirrors[g_mirrorIndex]);
     // host for the UI
@@ -1386,7 +1358,6 @@ static void SwitchToNextMirror(bool leavingTorrent) {
         "\"continue\":\"true\",\"split\":\"8\",\"max-connection-per-server\":\"8\"," +
         "\"max-tries\":\"3\"}]}";
     RpcCall(body);
-    g_dlStartTick = GetTickCount64();
     Stage((L"M1: mirror #" + std::to_wstring(g_mirrorIndex) + L" " + g_mirrorHost).c_str());
 }
 
@@ -1406,17 +1377,12 @@ static void PollDownload() {
 
     std::string rsp = RpcCall(RpcMethod("aria2.tellActive"));
     bool up = !rsp.empty();
-    unsigned long long done = 0, total = 0, dspd = 0, uspd = 0, uploaded = 0;
-    int conns = 0, seeders = 0;
+    unsigned long long done = 0, total = 0, dspd = 0;
     std::string status;
     if (up && rsp.find("\"gid\"") != std::string::npos) {
         done     = strtoull(JStr(rsp, "completedLength").c_str(), nullptr, 10);
         total    = strtoull(JStr(rsp, "totalLength").c_str(), nullptr, 10);
         dspd     = strtoull(JStr(rsp, "downloadSpeed").c_str(), nullptr, 10);
-        uspd     = strtoull(JStr(rsp, "uploadSpeed").c_str(), nullptr, 10);
-        uploaded = strtoull(JStr(rsp, "uploadLength").c_str(), nullptr, 10);
-        conns    = atoi(JStr(rsp, "connections").c_str());
-        seeders  = atoi(JStr(rsp, "numSeeders").c_str());
         status   = JStr(rsp, "status");
     } else if (up) {
         // nothing active: a plain-HTTP download that finished lands in stopped
@@ -1442,14 +1408,7 @@ static void PollDownload() {
         g_autoInstall = true;
         if (g_mainWnd) PostMessageW(g_mainWnd, WM_DO_INSTALL, 0, 0);
     }
-    // L-FIX-9: empty-swarm fallback - N seconds with zero bytes AND zero
-    // seeders means nobody reachable is sharing right now; switch to mirrors.
-    if (!finished && up && g_mirrorIndex < 0 && !g_mirrorsExhausted && g_dlStartTick &&
-        GetTickCount64() - g_dlStartTick >=
-            (ULONGLONG)g_cfg.mirrorFallbackSecs * 1000ULL &&
-        done == 0 && seeders == 0) {
-        SwitchToNextMirror(true);
-    }
+
     wchar_t pctb[16]; swprintf(pctb, 16, L"%.1f", pct);
 
     std::wstring h;
@@ -1462,10 +1421,7 @@ static void PollDownload() {
              L"<div style='background:#2e7d32;height:22px;width:" + std::wstring(pctb) + L"%'></div></div>";
         h += L"<p><b>" + std::wstring(pctb) + L"%</b> &nbsp; " + FmtGB(done) + L" / " + FmtGB(total) + L"</p>";
         if (finished) {
-            h += L"<p><b>Download complete and verified.</b><br>The ISO is in:<br><code>" +
-                 g_cfg.downloadDir + L"</code></p>";
-            h += L"<p>Now <b>seeding</b> to other pilots (uploaded " + FmtGB(uploaded) +
-                 L", " + FmtSpeed(uspd) + L"). Leave this window open to keep sharing.</p>";
+            h += L"<p><b>Download complete.</b></p>";
             // L-FIX-5: install controls
             h += L"<hr>";
             switch (g_instState) {
@@ -1490,14 +1446,13 @@ static void PollDownload() {
                 break;
             }
         } else {
-            if (g_mirrorIndex >= 0)
-                h += L"<p>Source: <b>mirror</b> (" + g_mirrorHost + L") &nbsp; Down: <b>" +
-                     FmtSpeed(dspd) + L"</b></p>";
-            else
-                h += L"<p>Down: <b>" + FmtSpeed(dspd) + L"</b> &nbsp; Up: " + FmtSpeed(uspd) +
-                     L" &nbsp; Peers: " + std::to_wstring(conns) +
-                     L" (seeds: " + std::to_wstring(seeders) + L")</p>";
-            h += L"<p>Uploaded so far: " + FmtGB(uploaded) + L"</p>";
+            h += L"<p>Source: <b>" + (g_mirrorHost.empty() ? std::wstring(L"...")
+                                                            : g_mirrorHost) +
+                 L"</b> &nbsp; Down: <b>" + FmtSpeed(dspd) + L"</b></p>";
+            if (g_mirrorsExhausted)
+                h += L"<p style='color:#a00'><b>No download sources are available "
+                     L"right now.</b> Please try again later - the mirror list is "
+                     L"updated regularly.</p>";
         }
     }
     h += L"</div>";
@@ -1568,8 +1523,7 @@ static bool LaunchGame(const std::wstring& pid, std::wstring& err,
         err = std::wstring(b2) + cmd; return false;
     }
     CloseHandle(pi.hThread);
-    if (g_cfg.seedWhilePlaying) g_gameProc = pi.hProcess;   // L-FIX-4c: supervise it
-    else CloseHandle(pi.hProcess);
+    CloseHandle(pi.hProcess);
     return true;
 }
 
@@ -1728,27 +1682,9 @@ static void DownloadTicketAndLaunch(const std::wstring& rawUrl) {
     std::wstring err;
     if (!LaunchGame(pid, err, serverClientPath)) { ShowError(err); g_handling = false; return; }
     g_launched = true;
-    if (g_cfg.seedWhilePlaying && g_ariaProc && g_gameProc) {
-        // L-FIX-4c: stay alive (hidden) as the seeding supervisor. Cap upload
-        // so seeding never saturates the pilot's upstream and hurts their ping;
-        // aria2 applies the change live via RPC.
-        if (g_cfg.playUploadLimit != L"0") {
-            std::string body =
-                "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.changeGlobalOption\","
-                "\"params\":[\"token:" + WideToUtf8(g_rpcSecret) + "\","
-                "{\"max-overall-upload-limit\":\"" + WideToUtf8(g_cfg.playUploadLimit) + "\"}]}";
-            RpcCall(body);
-        }
-        Stage(L"S: game launched - hiding and seeding on");
-        if (g_mainWnd) {
-            ShowWindow(g_mainWnd, SW_HIDE);
-            SetTimer(g_mainWnd, GAME_WATCH_TIMER, 3000, nullptr);
-        }
-    } else {
-        // Old behavior: stop the transfer engine and exit with the launcher.
-        StopAria2(1500);
-        if (g_mainWnd) PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
-    }
+    // L-FIX-10: no seeding - stop the download engine and exit with the game.
+    StopAria2(1500);
+    if (g_mainWnd) PostMessageW(g_mainWnd, WM_CLOSE, 0, 0);
 }
 
 // ============================================================================
@@ -2169,14 +2105,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
         }
         if (wp == DL_POLL_TIMER) { PollDownload(); }   // L-FIX-4
-        if (wp == GAME_WATCH_TIMER) {                  // L-FIX-4c
-            if (g_gameProc && WaitForSingleObject(g_gameProc, 0) != WAIT_TIMEOUT) {
-                CloseHandle(g_gameProc); g_gameProc = nullptr;
-                KillTimer(hwnd, GAME_WATCH_TIMER);
-                Stage(L"S: game exited - shutting down");
-                PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            }
-        }
         return 0;
     case WM_DO_DOWNLOAD:
         // Runs on the main thread, AFTER the browser event that posted it has
@@ -2199,7 +2127,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // L-FIX-4c: the launcher now supervises the whole session (it hides
         // instead of exiting while the game runs), so aria2 always stops here.
         StopAria2(1500);
-        if (g_gameProc) { CloseHandle(g_gameProc); g_gameProc = nullptr; }
         // L-FIX-5: don't yank the disc out from under a running installer.
         if (g_instState != INST_RUNNING) DismountIso();
         DestroyBrowser();
@@ -2262,7 +2189,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
     // L-FIX-4: fill ExeDir-relative defaults and pick the starting mode.
     {
         std::wstring dir = ExeDir();
-        if (g_cfg.torrentFile.empty()) g_cfg.torrentFile = dir + L"\\FA42DeluxeEdition_iso.torrent";
         if (g_cfg.downloadDir.empty()) g_cfg.downloadDir = dir + L"\\download";
         if (g_cfg.aria2Exe.empty())    g_cfg.aria2Exe    = dir + L"\\aria2c.exe";
         // L-FIX-6b: ini paths given as RELATIVE resolve against the launcher's
@@ -2271,7 +2197,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
             if (p.size() >= 2 && (p[1] == L':' || (p[0] == L'\\' && p[1] == L'\\'))) return;
             if (!p.empty()) p = dir + L"\\" + p;
         };
-        absify(g_cfg.torrentFile);
         absify(g_cfg.downloadDir);
         absify(g_cfg.aria2Exe);
 
@@ -2282,7 +2207,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
         std::wstring iso     = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
         bool isoComplete     = FileExists(iso) && !FileExists(iso + L".aria2");
         bool isoPartial      = FileExists(iso + L".aria2");
-        bool engineAvailable = FileExists(g_cfg.aria2Exe) && FileExists(g_cfg.torrentFile);
+        bool engineAvailable = FileExists(g_cfg.aria2Exe);   // L-FIX-10
         bool gameMissing     = !GameExeExistsIn(g_cfg.gameDir);   // L-FIX-5f
 
         if (forceGet) {
@@ -2356,8 +2281,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
     // L-FIX-4: spin up the transfer engine.
     if (g_downloadMode) {
         std::wstring aerr;
-        if (StartAria2(false, aerr)) {
+        if (StartAria2(aerr)) {
             SetTimer(g_mainWnd, DL_POLL_TIMER, 2000, nullptr);
+            SwitchToNextMirror(true);   // L-FIX-10: mirrors are the primary source
         } else {
             ShowError(aerr + L"\n\nContinuing to the login page.");
             g_downloadMode = false;
@@ -2368,16 +2294,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
         // L-FIX-5: the user already said Yes to installing at the prompt.
         if (g_downloadMode && g_startInstall)
             PostMessageW(g_mainWnd, WM_DO_INSTALL, 0, 0);
-    } else if (g_cfg.seedOnStart) {
-        // A previous download (complete or partial) exists: quietly resume
-        // seeding/downloading in the background. Best-effort; never bothers
-        // the user - errors only go to the stage log.
-        std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
-        if (FileExists(g_cfg.aria2Exe) && FileExists(g_cfg.torrentFile) &&
-            (FileExists(iso) || FileExists(iso + L".aria2"))) {
-            std::wstring aerr;
-            if (!StartAria2(true, aerr)) Stage((L"T!: quiet seed failed: " + aerr).c_str());
-        }
     }
 
     MSG m;
