@@ -2421,6 +2421,45 @@ class _ThreadedWebServer(ThreadingHTTPServer):
     daemon_threads = True          # worker threads don't block process/thread shutdown
     allow_reuse_address = True     # let a restart re-bind port 80 immediately (no TIME_WAIT wait)
 
+# 2026-08-23 HOTFIX: the first HTTPS build wrapped the LISTENING socket, which runs the TLS
+# handshake inside accept() - i.e. on the single serve_forever loop. Any internet scanner that
+# opened TCP to public port 443 and then sent nothing parked the accept loop in a blocking
+# handshake with no timeout. Health pings then failed, the watchdog called shutdown(), and
+# shutdown() waits for serve_forever() to exit - which it never could - so the watchdog itself
+# wedged and the web UI stayed dead until a process restart (field-observed on the GCP VM,
+# 2026-08-23 11:27 log). Fix: accept plain TCP on the main loop and perform the handshake in
+# the per-connection worker thread, bounded by a 15s timeout. A stalled scanner now costs one
+# daemon thread for 15s instead of the whole server.
+_TLS_CTX = None
+
+def _tls_context():
+    global _TLS_CTX
+    if _TLS_CTX is None:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.load_cert_chain(certfile=WEB_CERT_FILE, keyfile=WEB_KEY_FILE)
+        _TLS_CTX = ctx
+    return _TLS_CTX
+
+class _TLSThreadedWebServer(_ThreadedWebServer):
+    """HTTPS server whose TLS handshake happens in the worker thread (see hotfix note above).
+    finish_request() is called by ThreadingMixIn.process_request_thread, already off the accept
+    loop, so blocking or garbage handshakes cannot freeze serve_forever()."""
+    def finish_request(self, request, client_address):
+        request.settimeout(15)      # hard cap on the handshake: silent scanners get dropped
+        try:
+            tls = _tls_context().wrap_socket(request, server_side=True)
+        except (ssl.SSLError, OSError):
+            # Plain-HTTP probes, TLS scanners, resets mid-handshake: close quietly, no traceback
+            # spam in the journal.
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+        tls.settimeout(60)          # per-IO cap for real requests; idle keep-alives get reaped
+        self.RequestHandlerClass(tls, client_address, self)
+
 # The live server + the thread running it, so the watchdog can restart just this part.
 _WEB = {'httpd': None, 'thread': None}
 
@@ -2441,20 +2480,14 @@ def _serve_forever_guarded():
 
 def _build_httpd():
     server_address = ('', WEB_PORT)
-    httpd = _ThreadedWebServer(server_address, WebInterfaceHandler)
+    # 2026-08-23 HOTFIX: TLS handshakes must not run on the accept loop - see the note above
+    # _TLSThreadedWebServer. The listening socket itself stays plain TCP in both modes.
+    server_cls = _TLSThreadedWebServer if WEB_TLS else _ThreadedWebServer
+    httpd = server_cls(server_address, WebInterfaceHandler)
     # Cap how long a single request may tie up its worker. request_queue_size raises the accept
     # backlog so bursts don't get refused while workers spin up.
     httpd.timeout = 30
     httpd.request_queue_size = 64
-    if WEB_TLS:
-        # 2026-08-23: HTTPS - wrap the listening socket with TLS. Done here (not in
-        # start_web_server) so watchdog restarts via _restart_httpd() -> _build_httpd()
-        # come back up as HTTPS too. Cert is the fullchain for fa-re-srv.ddns.net;
-        # the private key is a separate file.
-        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
-        ctx.load_cert_chain(certfile=WEB_CERT_FILE, keyfile=WEB_KEY_FILE)
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
     return httpd
 
 def _start_http_redirector():

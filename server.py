@@ -15087,17 +15087,10 @@ def get_existing_ticket(account_name: str) -> tuple:
         return bytes(ticket), pid_hex
     raise ValueError(f"Account {account_name} not found in database.")
 
-# 2026-08-23: HTTPS variant (server-https.py). Load the companion web_server-https.py by
-# path - a hyphenated filename cannot be a normal module name, so a plain
-# `from web_server-https import ...` is a SyntaxError. spec_from_file_location sidesteps
-# that. Registered in sys.modules under 'web_server_https' for clean tracebacks.
-import importlib.util as _ilu
-_ws_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web_server-https.py')
-_ws_spec = _ilu.spec_from_file_location('web_server_https', _ws_path)
-_ws_mod  = _ilu.module_from_spec(_ws_spec)
-sys.modules['web_server_https'] = _ws_mod
-_ws_spec.loader.exec_module(_ws_mod)
-start_web_server = _ws_mod.start_web_server
+# 2026-08-23: web_server.py is now the HTTPS-capable variant itself (the temporary
+# web_server-https.py was promoted to the canonical name), so the importlib-by-path loader
+# that lived here is gone and a plain import works again.
+from web_server import start_web_server
 
 def _stall_watch():
     """Background monitor for the reliable-channel stall. The failure signature seen in
