@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v455f5'
+VERSION = 'v456f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6220,20 +6220,57 @@ RECYCLE_OBJ_NUMBERS = False
 # is 0x0100..0xFFFF (65,280 Numbers), which at ~120 spawns per session is hundreds of sessions,
 # so the pool is only ever touched on a very long-lived server.
 OBJ_NUMBER_QUARANTINE_SEC = 300.0
+# v456f5 [CRITICAL - THE 28-PLAYER COLLECTIVE CTD, 2026-08-22 stress test]: the client's
+# object table is a FIXED 2048-entry array - 'class ARR<char *,2048>[2050] 0..2047 bounds
+# error' killed EVERY client in the room simultaneously the moment the server broadcast
+# 'Create NetParachuter ONumber=2050' (messages36/39/67/85 all end on that exact line).
+# The v441f5 monotonic-only reasoning ('65,279 ids = hundreds of sessions') was wrong about
+# the CLIENT: ONumbers must NEVER exceed 0x07FF. The allocator now rings within
+# 0x0100..0x07FF (1792 ids) and skips numbers that are live (any session's plane or
+# parachuter) or inside the history grace window (a peer may still hold them - the v324
+# wrong-plane class), so wrap is safe under churn.
+OBJ_NUMBER_MAX = 0x07FF
+
+def _obj_numbers_in_use():
+    """Set of ONumbers that must not be re-issued right now: every session's live plane and
+    parachuter Number, plus every history entry younger than OBJ_HISTORY_GRACE_SEC (a peer
+    that missed a delete may still map that Number to the old aircraft)."""
+    now = time.time()
+    used = set()
+    try:
+        with sl:
+            sessions = list(sadrs.values())
+        for p in sessions:
+            _n = getattr(p, 'my_obj_number', None)
+            if _n is not None:
+                used.add(_n)
+            _n = getattr(p, 'para_obj_number', None)
+            if _n is not None:
+                used.add(_n)
+            for num, issued in p.__dict__.get('_obj_number_history', ()):
+                if (now - issued) <= OBJ_HISTORY_GRACE_SEC:
+                    used.add(num)
+    except Exception:
+        pass
+    return used
+
 def next_obj_number():
     global _obj_num_next
+    used = _obj_numbers_in_use()          # gathered BEFORE the lock (sl nests outside)
     with _obj_num_lock:
         if RECYCLE_OBJ_NUMBERS and _obj_num_free:
-            # FIFO + quarantine: only the OLDEST entry is eligible, and only once it has been
-            # sitting in the pool longer than OBJ_NUMBER_QUARANTINE_SEC. Anything younger is
-            # still live in some peer's world, so we mint a fresh Number instead.
             n, freed_at = _obj_num_free[0]
             if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC:
                 _obj_num_free.pop(0)
                 return n
-        n = _obj_num_next
-        _obj_num_next = _obj_num_next + 1
-        if _obj_num_next > 0xFFFF: _obj_num_next = 0x0100
+        for _ in range(OBJ_NUMBER_MAX - 0x0100 + 1):
+            n = _obj_num_next
+            _obj_num_next = _obj_num_next + 1
+            if _obj_num_next > OBJ_NUMBER_MAX: _obj_num_next = 0x0100
+            if n not in used:
+                return n
+        # Pathological: every id live/in-grace (needs ~1800 concurrent+recent objects).
+        log('OBJNUM', f'CRITICAL: object-number ring exhausted - issuing {n} despite use')
         return n
 def free_obj_number(n):
     """Return a deleted own-plane Number to the recycle pool, stamped with the time it was
@@ -14626,6 +14663,14 @@ def handle_post_auth(s, cmd, pl):
             # The parachuter gets its OWN slot.
             if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None:
                 s.para_obj_number = _pn
+                # v456f5: parachuter Numbers enter the session history too, so the allocator's
+                # grace window protects them after landing (para_obj_number clears the moment
+                # the canopy lands - without this the id was instantly re-issuable while peers
+                # could still hold the canopy object).
+                _phist = s.__dict__.setdefault('_obj_number_history', [])
+                _phist.append((_pn, time.time()))
+                if len(_phist) > 16:
+                    del _phist[:-16]
                 # v349: remember the plane the pilot just stepped out of. It deliberately keeps
                 # flying, but if they RE-SPAWN before it comes down it has to be despawned from
                 # peers first - see the cleanup at the CONFIRM5 spawn site.

@@ -17,7 +17,78 @@ they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "FA server v455f5 (read v455f5 + v454f5 first). DEPLOY v455f5 TO THE ONLINE
+  "FA server v456f5 (read v456f5 + v455f5 first). DEPLOY v456f5 TO THE ONLINE
+   BOX IMMEDIATELY - it fixes the 28-player COLLECTIVE CTD from the
+   2026-08-22 stress test.
+   THE CTD (solved): every crashed client's log ends on the same two lines -
+   'Create NetParachuter. St=26, ONumber=2050' then 'bounds error
+   class ARR<char *,2048>[2050] 0..2047' (ring.hpp:27; messages36/39/67/85
+   identical). The client's object table is a FIXED 2048-entry array; our
+   v441f5 monotonic-only ONumber counter ('65k ids, never wraps') crossed
+   2047 after an evening of 28-player churn, and the first broadcast create
+   past the bound (a parachuter at 2050) crashed EVERY client in the room at
+   once. FIX: OBJ_NUMBER_MAX=0x07FF; next_obj_number() now rings within
+   0x0100..0x07FF (1792 ids) skipping in-use numbers (_obj_numbers_in_use:
+   every session's live plane + parachuter + history entries younger than
+   OBJ_HISTORY_GRACE_SEC=300s - the v324 wrong-plane protection); parachuter
+   Numbers now enter the session history at allocation so the grace protects
+   them after landing too. In-use set is gathered before the allocator lock
+   (sl never nests inside _obj_num_lock).
+   VERIFY after deploy: long session with bails - ONumbers stay <= 2047
+   (grep 'ONumber=2' creates in client logs / CONFIRM5 numbers in run log);
+   no wrong-plane reports after a wrap (~1800 allocations).
+   LAG (open): players reported lag at high occupancy. Not yet investigated -
+   pull the stress-test run log from the box (claude-in-chrome,
+   /admin/logfiles.json -> the Aug 22/23 run) and read the PERF windows
+   (rx/tx pps, relay backlog, send-thread queue depth) around 28-player
+   peak; candidates: relay fanout ~28x27x13pps ~ 10k pps out (v389f5 relay-
+   send thread IS deployed), GCP egress, per-packet logging overhead.
+   ALSO VERIFY on this deploy (all shipped in v455f5, untested live):
+   MIGRATE lines 19x 'BuildingsRepairRate 100 -> 0 baked' at first start;
+   clients restart once -> BuildingsRepairRate=0 -> buildings stay
+   destroyed; Ctrl+Tab SP cycling (93 GRANTs in log); repeat 119 repair;
+   FFA air spawn engine running; identity under churn (no CHARGER-class
+   renders). THEN: TANK MISSION reply (args 30/49 = target gsi scenes;
+   msg-4 NetTank spawn via FUN_004f26b0); msg-33 SCORE EVENT; messages43
+   stray-StartPlaceList freeze; messages04_1_ 212-parse CTD (watch if the
+   120ms pacing cured it); host-59/119 decompile; msg-73 parser.
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via
+   claude-in-chrome; /tmp/fa_lz.py = DB forensics kit. Server is server.py
+   ~15295 lines, v456f5 (v444f5 = the banked stable point)."
+------------------------------------------------------------------------------
+
+v456f5 [NET/CRITICAL - THE COLLECTIVE CTD] 2026-08-22 stress test, ~28
+      players: most of the room CTD'd simultaneously. Every crashed client
+      log (messages36/39/67/85; 34 died to a secondary DirectSound buffer
+      loss) ends on the SAME event: 'Create NetParachuter. St=26,
+      ONumber=2050' -> 'Exception: bounds error / class ARR<char *,2048>
+      [2050] 0..2047 / ring.hpp:27'.
+      * ROOT CAUSE: the client's object table is a fixed 2048-entry array -
+        ONumbers are hard-capped at 0x07FF. v441f5 made the allocator
+        monotonic-only on the reasoning that the u16 space (0x0100..0xFFFF)
+        'never wraps in a session'; correct for the wire, WRONG for the
+        client. An evening of 28-player spawn/death/bail churn marched the
+        counter past 2047; the first broadcast CREATE above the bound (a
+        bail's parachuter at 2050) indexed out of bounds on every client
+        that received it = the synchronized room-wide crash.
+      * FIX: OBJ_NUMBER_MAX = 0x07FF. next_obj_number() rings within
+        0x0100..0x07FF (1792 ids), skipping the in-use set gathered by
+        _obj_numbers_in_use(): every session's live my_obj_number and
+        para_obj_number, plus all _obj_number_history entries younger than
+        OBJ_HISTORY_GRACE_SEC (300s) - preserving the v324/v441f5 wrong-
+        plane protections across wraps. The set is snapshotted BEFORE
+        _obj_num_lock (lock order: sl never nests inside it). Pathological
+        full-ring exhaustion (~1800 live+recent objects) logs CRITICAL and
+        issues anyway rather than deadlocking spawns.
+      * Parachuter Numbers now also enter the owner's _obj_number_history
+        at allocation - previously para_obj_number=None at landing made the
+        id instantly re-issuable while peers could still hold the canopy.
+      * OPEN from the same night: high-occupancy LAG reports - needs the
+        box's PERF windows around peak (relay fanout at 28 players ~ 10k
+        pps out); not yet investigated.
+
+v455f5 [GAMEDEF/REPAIR - CRITICAL OFFSET CORRECTION + 212 pacing] The user
    BOX - it carries every fix v442f5..v455f5 the live players have been
    hitting (identity slot recycling, FFA air-start cold engine, Ctrl+Tab SP
    cycling, repeat 119 repair, the CORRECTED BuildingsRepairRate migration).
