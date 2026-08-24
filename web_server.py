@@ -594,6 +594,21 @@ def is_user_admin(username):
     except:
         return False
 
+# v464 read-only log access for diagnostics tooling: the four LOG endpoints (logs.json,
+# logfiles.json, log_view, log_download) accept EITHER an admin session OR ?key=<LOG_READ_TOKEN>.
+# Read-only and log-scoped - account/settings/moderation endpoints remain strictly
+# admin-session. Rotate by editing the constant and restarting the web portion.
+LOG_READ_TOKEN = '50b7c538d1a4c104e8b6caa0e93798102eee753a29c74366'
+
+def _log_read_ok(handler, user):
+    if is_user_admin(user):
+        return True
+    try:
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query)
+        return qs.get('key', [''])[0] == LOG_READ_TOKEN
+    except Exception:
+        return False
+
 def arena_owner_account(room_id):
     """Return the account_name that created a room, or '' if unknown."""
     try:
@@ -1833,7 +1848,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 return
             self.send_html(LOG_CONSOLE_PAGE)
         elif self.path.startswith('/admin/logs.json'):
-            if not is_user_admin(user):
+            if not _log_read_ok(self, user):
                 self.send_error(403); return
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             level = (qs.get('level', ['INFO'])[0] or 'INFO').upper()
@@ -1868,7 +1883,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         elif self.path.startswith('/admin/logfiles.json'):
             # v321: directory listing for the admin Logs tab. Loaded lazily by the page so
             # /admin stays fast even with hundreds of run_*.log files accumulated.
-            if not is_user_admin(user):
+            if not _log_read_ok(self, user):
                 self.send_error(403); return
             files = _list_log_files()
             body = json.dumps({'dir': _log_dir() or '', 'files': files}).encode('utf-8')
@@ -1891,7 +1906,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
         elif self.path.startswith('/admin/log_download'):
-            if not is_user_admin(user):
+            if not _log_read_ok(self, user):
                 self.send_error(403); return
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = q.get('name', [''])[0]
@@ -1933,7 +1948,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         elif self.path.startswith('/admin/log_view'):
             # Show the TAIL of a log in the browser, so a 2 MB run log can be peeked at
             # without downloading it.
-            if not is_user_admin(user):
+            if not _log_read_ok(self, user):
                 self.send_error(403); return
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             name = q.get('name', [''])[0]
