@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v472f5'
+VERSION = 'v473f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2610,7 +2610,7 @@ def apply_tc_settings(d, settings=None):
     return o, old
 
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None,
-                     hide_planes=None, is_ffa=False, stamp_mission=False):
+                     hide_planes=None, is_ffa=False, stamp_mission=False, room_name=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -2650,6 +2650,31 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     if len(d) >= 13:
         struct.pack_into('<I', d, 5, _ct_ms)     # CreationTime  (ms)
         struct.pack_into('<I', d, 9, _ct_s)      # CreationTimeSeconds
+    # v473f5 [ARENA RENAME - IN-ARENA NAME]: stamp the DB's room_name into the served GAME_DEF.
+    # The web-admin rename updates the rooms.room_name COLUMN (the lobby list reads it via
+    # build_arenalist r[1]), but the name INSIDE the 212 GAME_DEF still came from the stored
+    # blob - joiners saw the old name in-arena. Name field: DECOMPRESSED offset 20 + d[13],
+    # null-terminated ASCII <=31 (extract_name_from_gamedef is the read-side twin). LENGTH-SAFE
+    # in-place overwrite ONLY: writing within the old name's envelope (null-padded) shifts
+    # nothing, so every downstream offset (settings map, camps, pad alignment) is untouched.
+    # A LONGER new name would shift the stream - refused with a one-line log instead; pick a
+    # name no longer than the original if that ever bites (the lobby list shows it regardless).
+    if room_name and len(d) >= 14:
+        try:
+            _noff = 20 + d[13]
+            _nend = d.find(0, _noff)
+            if 0 < _noff < len(d) and _nend > _noff:
+                _old_env = _nend - _noff
+                _new = room_name.encode('ascii', 'replace')[:31]
+                if len(_new) <= _old_env:
+                    d[_noff:_nend] = _new + b'\x00' * (_old_env - len(_new))
+                elif not getattr(build_lz_gamedef, '_name_toolong_logged', False):
+                    build_lz_gamedef._name_toolong_logged = True
+                    log('GAMEDEF212', f'room_name {room_name!r} ({len(_new)}B) exceeds the stored '
+                                      f'name field ({_old_env}B) - in-arena name left as stored '
+                                      f'(lobby list shows the new name; logged once)')
+        except Exception:
+            pass
     # FFA neutral-team guard: for Free-For-All rooms, rewrite the camps block to a 2-column
     # all-Neutral set (one flyable camp + forced Neutral, both labeled "Neutral") so the
     # side picker / 213 Nations box / roster show Neutral AND the player can still fly
@@ -3077,15 +3102,19 @@ def init_rooms_db():
         log('DB', 'Migration: added settings_json column to rooms table')
     except Exception:
         pass  # column already exists - expected on every normal startup
-    # Always re-derive room_name from the binary GAME_DEF (the old text-regex path
-    # left every room 'Unnamed' since the blob is binary, not INI text). Cheap, and
-    # corrects rooms created before binary name extraction existed.
+    # v473f5 [ARENA RENAME - STOP THE BOOT CLOBBER]: re-derive ONLY when the column is empty
+    # or the 'Unnamed' placeholder. This migration's original job was correcting rooms created
+    # before binary name extraction existed - but running unconditionally it OVERWROTE every
+    # web-admin rename from the stored blob on the next restart (rename -> column updated ->
+    # reboot -> old name re-derived from game_def_raw -> rename silently reverted). The COLUMN
+    # is now authoritative for display (lobby list reads it; the served 212 stamps it in via
+    # build_lz_gamedef room_name=); the blob keeps its original name harmlessly.
     try:
         fixed = 0
         for rid, gdef, cur_name in conn.execute(
                 "SELECT room_id, game_def_raw, room_name FROM rooms WHERE status='open'").fetchall():
             nm = extract_name_from_gamedef(gdef)
-            if nm and nm != cur_name:
+            if nm and nm != cur_name and (not cur_name or cur_name == 'Unnamed'):
                 conn.execute("UPDATE rooms SET room_name=? WHERE room_id=?", (nm, rid))
                 fixed += 1
         if fixed:
@@ -4719,7 +4748,8 @@ def build_gamedef_212(room, hide_planes=None):
                                     arena_settings=db_get_room_settings(room[0]),
                                     hide_planes=hide_planes,
                                     is_ffa=is_ffa_room(room),
-                                    stamp_mission=_room_official)  # v438f5b: official -> Type 1
+                                    stamp_mission=_room_official,  # v438f5b: official -> Type 1
+                                    room_name=(room[1] or None))   # v473f5: DB name -> in-arena
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None

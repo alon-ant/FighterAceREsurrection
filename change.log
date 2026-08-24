@@ -7,56 +7,312 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
 ==============================================================================
-*** BANKED 2026-08-15: v444f5 is a STABLE BANKING POINT (user-approved). ***
-    Snapshot server.py -> 'old files\server_v444f5.py' at next convenience.
-    DEFERRED (user, 2026-08-15): initial scene loadout + storage capacity feel
-    LOW - a bomber field can't supply more than ~3 bombers at once before
-    draining. Bump InitialStorage / storage caps when supply amounts are
-    revisited (not now). Constants live in the scene profiles + v284 GAME_DEF
+*** BANKED 2026-08-24: v472f5 is the STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v472f5.py' at next convenience.
+    (Previous banked point: v444f5, 2026-08-15. v463f5 was banked mid-weekend
+    and superseded the same day by the v465-v472 chain, all field-verified.)
+    DEFERRED (user, 2026-08-15, still open): initial scene loadout + storage
+    capacity feel LOW. Constants live in the scene profiles + v284 GAME_DEF
     patches (InitialStorage / GetFuelWhenLimFuel / GetAmmoWhenLimAmmo).
 ==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "FA server v456f5 (read v456f5 + v455f5 first). DEPLOY v456f5 TO THE ONLINE
-   BOX IMMEDIATELY - it fixes the 28-player COLLECTIVE CTD from the
-   2026-08-22 stress test.
-   THE CTD (solved): every crashed client's log ends on the same two lines -
-   'Create NetParachuter. St=26, ONumber=2050' then 'bounds error
-   class ARR<char *,2048>[2050] 0..2047' (ring.hpp:27; messages36/39/67/85
-   identical). The client's object table is a FIXED 2048-entry array; our
-   v441f5 monotonic-only ONumber counter ('65k ids, never wraps') crossed
-   2047 after an evening of 28-player churn, and the first broadcast create
-   past the bound (a parachuter at 2050) crashed EVERY client in the room at
-   once. FIX: OBJ_NUMBER_MAX=0x07FF; next_obj_number() now rings within
-   0x0100..0x07FF (1792 ids) skipping in-use numbers (_obj_numbers_in_use:
-   every session's live plane + parachuter + history entries younger than
-   OBJ_HISTORY_GRACE_SEC=300s - the v324 wrong-plane protection); parachuter
-   Numbers now enter the session history at allocation so the grace protects
-   them after landing too. In-use set is gathered before the allocator lock
-   (sl never nests inside _obj_num_lock).
-   VERIFY after deploy: long session with bails - ONumbers stay <= 2047
-   (grep 'ONumber=2' creates in client logs / CONFIRM5 numbers in run log);
-   no wrong-plane reports after a wrap (~1800 allocations).
-   LAG (open): players reported lag at high occupancy. Not yet investigated -
-   pull the stress-test run log from the box (claude-in-chrome,
-   /admin/logfiles.json -> the Aug 22/23 run) and read the PERF windows
-   (rx/tx pps, relay backlog, send-thread queue depth) around 28-player
-   peak; candidates: relay fanout ~28x27x13pps ~ 10k pps out (v389f5 relay-
-   send thread IS deployed), GCP egress, per-packet logging overhead.
-   ALSO VERIFY on this deploy (all shipped in v455f5, untested live):
-   MIGRATE lines 19x 'BuildingsRepairRate 100 -> 0 baked' at first start;
-   clients restart once -> BuildingsRepairRate=0 -> buildings stay
-   destroyed; Ctrl+Tab SP cycling (93 GRANTs in log); repeat 119 repair;
-   FFA air spawn engine running; identity under churn (no CHARGER-class
-   renders). THEN: TANK MISSION reply (args 30/49 = target gsi scenes;
-   msg-4 NetTank spawn via FUN_004f26b0); msg-33 SCORE EVENT; messages43
-   stray-StartPlaceList freeze; messages04_1_ 212-parse CTD (watch if the
-   120ms pacing cured it); host-59/119 decompile; msg-73 parser.
-   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP,
-   fa_memdump.py / fa_dump_trn_tables.py (Admin); online logs via
-   claude-in-chrome; /tmp/fa_lz.py = DB forensics kit. Server is server.py
-   ~15295 lines, v456f5 (v444f5 = the banked stable point)."
+  "FA server v472f5 = the banked stable point (read v457f5..v472f5 for the
+   2026-08-23/24 weekend: the whole 2009 timekeeping + telemetry restoration).
+   DEPLOYED AND FIELD-VERIFIED: attached TIME pings answered (v457), STATUS
+   seq gate open -> HUD L: + session timer alive (v460), seq-511 17-minute
+   all-player freeze defused (v463), coherent-A residual + IN-GAME NTP
+   ACCEPTANCE = the 2009 smooth clock (v465/466, validated 56us/s local /
+   20us/s online, zero CRAP over 31.5min + full seq cycles), D: data-loss
+   gauge resurrected with per-interval delta counters (v467/468), directional
+   per-client STATLOSS from the client's STATUS replies (v469/471), and the
+   0x08->0x07 telemetry conversion (v472: 'Unsupported message 8' went
+   1656+255 -> ZERO across both client builds in one deploy).
+   STILL OPEN, in rough priority:
+   (1) THE LONG COMMUNITY NIGHT - multi-hour, full room, on this stack; the
+       session that certifies the clock work end-to-end. Success = past the
+       old ~90min particle fuse with zero CRAP anywhere; grep STATLOSS /
+       TELEM8 / FLY23 / CRAP.
+   (2) relay_telemetry pack_into guard for COMPOSITE (TIME-attached, byte2
+       0xa0) packets - one _guarded traceback in run_221848; payload offset
+       shifts +4 when data[2]&0x80 (the v457 geometry).
+   (3) staged RTT_SAMPLING enable -> truthful L: (currently shows the dup-ACK
+       extend-factor multiples of true RTT; ring cap v217 makes sampling safe).
+   (4) Alon's 340ms route to GCP (~2x expected Ashdod->us-central1).
+   (5) D:/loss% READ-ME for players: a D: that BLIPS and returns = in-flight
+       phantom (amplitude ~ uplink_rate x RTT, alternates +/-, sums to 0);
+       a D: that SITS elevated = real loss (STATLOSS EWMA separates the two
+       server-side automatically).
+   (6) carried over, untouched this weekend: TANK MISSION reply (args 30/49;
+       msg-4 NetTank via FUN_004f26b0); msg-33 SCORE EVENT; host-59/119
+       decompile; msg-73 parser; high-occupancy PERF review (netstat -su on
+       the box shows ZERO kernel drops at 13.1M rx / 50.3M tx - server
+       exonerated as a loss source, so any future lag hunt starts at STATLOSS
+       + PERF, not the socket layer).
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP
+   (vcncnet.dll AND FA.exe projects both annotated this weekend); ONLINE LOGS
+   now via the v464 token route - /admin/logfiles.json + log_download?key=
+   LOG_READ_TOKEN (constant in web_server.py) - no browser needed;
+   fa_memdump.py / fa_dump_trn_tables.py (Admin); /tmp/fa_lz.py = DB
+   forensics kit. Server is server.py ~15600 lines, v472f5 (banked)."
 ------------------------------------------------------------------------------
+
+v473f5 [ARENA RENAME - PERSISTENT ACROSS RESTARTS + IN-ARENA] Web-admin
+      arena renames appeared to stick only in live memory. The REAL bug was
+      the reverse: /admin/edit_arena writes rooms.room_name correctly, but
+      the boot-time migration RE-DERIVED room_name from the binary GAME_DEF
+      blob unconditionally - every restart clobbered the rename back to the
+      name stored inside game_def_raw. Three-part fix, blob never mutated:
+      * Migration re-derives ONLY when the column is empty/'Unnamed' (its
+        original backfill job) - the COLUMN is now display-authoritative.
+      * Lobby list already reads the column (build_arenalist r[1]) - renames
+        show on the next list refresh, no restart needed.
+      * In-arena name: build_lz_gamedef gained room_name= (stamped at the
+        212 serve site from room[1]) - LENGTH-SAFE in-place overwrite of the
+        null-terminated name field at decompressed offset 20+d[13], null-
+        padded within the old name's envelope so nothing shifts; a LONGER
+        name is refused with a once-per-run log (lobby still shows it).
+
+v472f5 [TELEM/0x08-CONVERT - 'UNSUPPORTED MESSAGE 8' ELIMINATED] The final
+      act of the msg-8 saga. GROUND TRUTH from both binaries: FA.exe registrar
+      FUN_007e5e80 hard-wires receive-table (0xcbc190) entries 8-11 to the
+      'Unsupported message %i' stub while building SEND channels for all of
+      7-11 -> types 8+ are client->server-only telemetry variants the 2009
+      server never relayed raw. Every relayed 0x08 was a dropped tick on every
+      watcher's screen (emitter stutters; 1656 (Taurus-build) + 255 (Bigalon)
+      client errors in the 19:54 session alone; emitters that night: Bigalon,
+      Meno, FG_BoogDog, SinneR - a client STATE, not one build). The v469
+      TELEM8-TRANS capture (run_204429: same object, consecutive frames,
+      ticks 13 apart = 260ms) localized the structure byte-exactly:
+        0x07 payload = [pos-sample 9B][motion 21B][state 39B]  (landmark @+30)
+        0x08 payload = [pos 9B][pos-sample2 9B][motion][state] (landmark @+39)
+      = DOUBLE-SAMPLED position, sample2 the LATER point.
+      * FIX: TELEM8_CONVERT rewrites 0x08->0x07 at the relay - opcode patched,
+        one sample spliced out (TELEM8_KEEP_FIRST=False keeps the LATER,
+        fresher one; flag = the A/B), size nibbles recomputed generically
+        (size = bc*16 + (T>>4); -9), inconsistent-nibble frames relayed as-is
+        + logged once. Output lands in TELEM_NORMAL_SIZES; all downstream
+        (tick harvest, position evidence, per-recipient re-stamp) sees a
+        normal 07.
+      * VERIFIED run_205857 + client logs: conversions fired for Bigalon
+        (21:00:10) and SinneR (21:09:43) INSIDE the sampled sessions, and
+        both uploaded client logs (Dec-Developer AND Oct-Normal builds) show
+        ZERO Unsupported messages of any kind. User: 'much smoother'.
+
+v471f5 [STATLOSS - REPLY OFFSETS CORRECTED] The v470 RAW dumps decoded the
+      client STATUS reply as a MIRRORED LEDGER: our echoed counters at 12-23
+      (the v469 dl==ul artifact), the client's own at 24-35 (sent u16@24,
+      recvd u16@26, bytes u32@28/@32). Proof interval (Taurus 20:46:42): we
+      sent 12pkt/989B, client reports 12/989 received; client sent 8/370, we
+      counted 8/370 - perfect complement. Parse moved to 24/26; STATLOSS live
+      (run_205857: dl/ul independent, EWMA ~0 +/-1% on healthy links).
+
+v470f5 [STATLOSS - RAW REPLY DIAGNOSTIC] run_203941 exposed dl==ul TO THE
+      DIGIT in every STATLOSS line - impossible for independent directions ->
+      u16@12/14 of the reply echo OUR values. Added a 3-per-session RAW hex
+      dump of the reply to read the true offsets against the client's own
+      vcnc ledger printout. (Answer landed in v471.)
+
+v469f5 [STATLOSS + TELEM8-TRANS - TWO INSTRUMENTS, ONE VERSION]
+      * STATLOSS: parse the client's STATUS REPLY (subtype-4, previously
+        ignored; non-returning insert in on_pkt so piggybacked ACK sections
+        are untouched) against the deltas we packed into the matching STATUS
+        -> per-client DIRECTIONAL loss (downlink = our sent vs their recvd;
+        uplink = their sent vs our recvd) with EWMA(1/8) + running totals.
+        The EWMA is the phantom-vs-real separator: in-flight skew alternates
+        +/- and sums ~0 (run_195327: skew +1,-1,+5,-5,+2,-2, sum=2 = the only
+        2 real losses in 155 intervals on Alon's 0.35s link - downlink 0.00%,
+        uplink 0.14%); real loss is one-sided and settles the EWMA at its
+        rate. Phantom amplitude ~ uplink_rate x RTT - THE explanation for
+        'most players show D: even at 0.05' (physics, not the server; kernel
+        confirms: netstat -su = 0 rcv/snd buffer errors at 13.1M/50.3M pkts).
+      * TELEM8-TRANS: capture a 07->08->07 sequence per emitter (max 2/
+        session) - consecutive frames share flight state, so the byte-diff
+        localizes the 0x08 insert exactly (the v461 FIRST-frame dumps were
+        minutes apart and would not align). Paid off next session.
+      * (Initial reply-offset assumption wrong - see v470/v471.)
+
+v468f5 [D: DATA-LOSS GAUGE, TAKE 2 - PER-INTERVAL DELTAS] The client's own
+      ledger printout (drop=5% run 19:39) proved its ce-counters are PER-
+      INTERVAL - 'msgs sent from client' went 52, 1, 12, 17, 9 (zeroed each
+      processed STATUS) while our v467 cumulatives grew 65, 68, 78, 92. The
+      loss diff was dominated by our cumulative tx-vs-rx imbalance (world-
+      entry burst) decaying to zero and drowning real drops - the observed
+      11-18% -> 0 curve in BOTH drop tests ('must be accumulated' - the
+      user's first-read diagnosis, correct before any grep). Wire counters
+      are now DELTAS since the last STATUS build (per-session snapshots);
+      lost-STATUS consistency is automatic (client only processes on seq
+      change; both sides span the same longer interval). VERIFIED at
+      TEST_DROP 15%: per-interval readings 0/8/9/11% jumping = small-sample
+      quantization (3-12 pkts/interval solo-local), MEAN = injected rate
+      (7 lost / 62 sent vs expected 9.3) - working as 2009 designed; real
+      rooms have 5-10x the denominator and read smooth.
+
+v467f5 [D: DATA-LOSS GAUGE, TAKE 1 - COUNTER GROUND TRUTH] The dead-since-
+      2009 'D:' HUD symbol. vcncnet decompile: the client counts EVERY
+      datagram at its two transport doors (FUN_1000731f send via generic
+      transmit FUN_100071b0 - 14 callers; FUN_1000734e recv via dispatcher
+      FUN_100032da, pre-section, all accepted datagrams; bytes = 0x1c + len
+      each) and FUN_100073a4 computes COMBINED bidirectional loss from our
+      wire[12-23] + its own counters. Old sess.sq/sess.rx ticked in reliable-
+      seq units the client never counts -> diff clamped 0 forever -> D: dead.
+      * TX at ONE choke point no send site can bypass: _CountingSock, a thin
+        delegating proxy around the UDP socket (socket method slots are
+        READ-ONLY on Windows - the sendto monkeypatch AttributeErrors; proxy
+        delegates recvfrom/setsockopt/bind/fileno via __getattr__). RX at
+        on_pkt's single door.
+      * TEST_DROP_PCT: test-only loss injector (counts as sent, does not
+        transmit; entered_game-gated - NOTE 40% starves the world-state
+        download and blocks arena entry; test in the 5-15% range). NEVER
+        deploy >0. Deployed value confirmed 0.0.
+      * (Counter SEMANTICS wrong in this take - cumulative vs the client's
+        per-interval; fixed in v468.)
+
+v466f5 [TSYNC ACCEPTANCE VALIDATED + SP RE-GRANT DELAY 6s] The deploy config
+      for the smooth clock. run_140554 (30 min LOCAL, acceptance ON):
+      samples flowed the ENTIRE session (67 accepted / 144 measurements,
+      never dark), offset ONE smooth line -0.236 -> -0.135 = +56us/s genuine
+      crystal drift, no steps, no 262s artifacts, zero CRAP across ~7
+      A-boundaries + the full seq cycle. run_144454 (30 min ONLINE, 2-3
+      players): +20us/s, 17 slew events absorbing it, zero CRAP. 500x
+      cleaner than the -28ms/s poison of v458's era; the remainder is
+      hardware, exactly what the client's drift regression exists to model.
+      REBASING REJECTED on the 2009 ground truth (v209: base is a FIXED
+      connect constant; every past rebase attempt - v204, v211/212 - caused
+      the jumps it was meant to prevent). Plus SP_REGRANT_DELAY_S 2.5 -> 6.0:
+      run_170533 showed the hangar-0x18 cancel only fires when the player
+      actively clicks; an idle respawn-screen player is app-silent =
+      indistinguishable from hung. Residual duplicate on an idle death =
+      KNOWN-BENIGN logged client error, accepted deliberately (rescue value:
+      2 field saves in run_221848).
+
+v465f5 [COHERENT-A RESIDUAL - THE TRUE-TO-2009 CLOCK FIX] User's call:
+      'correct the time updates instead of rejecting them' - the v459 guard
+      was triage, not design. Ground truth: client decodes server_time =
+      base + A/1000 (v205) and FUN_10007d13 advances base by exactly our
+      STATUS credits (v215). So the coherent A is the RESIDUAL - elapsed-
+      since-connect MINUS ms already credited - bounded [0, ~2.2s] forever,
+      NEVER wraps by construction, reduces to the field-proven v211 elapsed
+      formula in the lobby (credits 0). The -28.93s poison sample of
+      run_215056 was the mod-262.144 ALIAS of exactly this elapsed-vs-
+      credited mismatch (1024s mod 262.144 = 237.4s = -28.9+262.1, less the
+      pre-STATUS gap) - the measurement that proves the model. Credits
+      counted at the STATUS send site; TSYNC_ACCEPT_INGAME flag (echo the
+      live status seq at reply offset 12) added default-OFF for staged
+      enable. Lost-credit self-heal: with acceptance on, a missed STATUS
+      shows up as measured offset and the client slews it out - the
+      mechanism doing its 2009 job.
+
+v464f5 [SP RE-GRANT - HANGAR DISCRIMINATOR] run_221848 lines 534/535 proved
+      the v462 check wrong: after a normal death the grant is consumed
+      INSTANTLY by the respawn UI but the player sits at the hangar - flying
+      stays False, no new object - so 'not respawned at 2.5s' fired on
+      virtually EVERY death and the re-grant WAS the duplicate ('Waiting-
+      ForStartPlaceList is empty' ~2.5s after each death, all builds, all
+      night; my v462 double-dispatch theory was wrong - server log showed
+      ONE FLY23 GRANT per request). New cancel signal: msg 0x18 hangar
+      arrival after the death (healthy death: +0.86s; stuck client: never),
+      timestamped in _supply_msg_instrument before any log gating.
+      (Discriminator proven WEAK for idle players in run_170533 -> v466
+      delay + documented-benign residual.)
+
+v463f5 [TSYNC - THE SEQ-511 17-MINUTE BOMB] run_215056: ALL players froze
+      at their ~17-minute mark. 512 seqs x ~2.0s = 1024s: when a client's
+      latched current-status-index cycles through 511 it EQUALS
+      build_time_reply's 0x1FF constant for one 2s window -> the v459
+      'never match in-game' guard silently unlocks -> a poisoned NTP sample
+      is ACCEPTED (22:08:25.665 Sample 14, offset -28.93s = the base-vs-A
+      divergence) -> slew -> CRAP meltdown 20s later (22:08:45), per client,
+      all within the same minute (entry-time offsets). Internal consistency
+      perfect: wrap at 22:08:24-26 per the Current-Status-Index trail 6,7,8
+      by :39-:44. FIX: never advertise seq 511 (skip 0x1FF in the
+      increment) - in-game index lives in 0..510, the lobby constant can
+      never match mid-game, sessions of ANY length. Kept as defense-in-depth
+      after v465/466 (the echo mirrors the seq, 0x1FF unreachable anyway).
+      Lesson: 'reply with an index that never matches' was only sound while
+      the index space was one frozen value - v460 made it CYCLE.
+
+v462f5 [SP RE-GRANT - DELAYED + CONDITIONAL] First fix attempt for the
+      duplicate StartPlaceList grant: v343's race guard fired on EVERY
+      normal death (client emits its 23-request + delete in the same
+      millisecond; we serve the grant ~40ms before processing the delete, so
+      _last_sp_grant is always ~0.05s old at DELETE3 -> the 2.0s window is
+      always satisfied). Re-grant made a 2.5s-delayed thread that skips if
+      the client respawned (flying / new my_obj_number). Starfighter's
+      21:27:42 freeze sat on this error (collision context, Dec-Developer
+      build); Taurus survived the same error 3x that session. (Discriminator
+      incomplete - see v464/v466. The RESCUE side field-proven: 2 stuck
+      spawns saved at 5-7s in run_221848.)
+
+v461f5 [TELEM8 - 0x08 ORIGIN INSTRUMENTATION] 'Unsupported message 8' flood
+      (21:09 session: Bigalon 677, Taurus 1020, Starfighter 34 - the
+      originator-survives fingerprint). Zero msg-8 in every session without
+      Starfighter... a lead later BROADENED: the FIRST-frame dumps this
+      version added caught Bigalon, Meno and FG_BoogDog all emitting 0x08 =
+      a client STATE, not a build. Opcode 0x08 = telemetry + one extra
+      9-byte block (v234 capture); receivers reject it -> every relayed 0x08
+      is a dropped tick for all watchers = 'some individuals look laggy'.
+      Bounded: 2 hex dumps + 1 counter line / 256 frames / sender / session.
+
+v460f5 [STATUS SEQ GATE - L: AND THE SESSION TIMER, ALIVE SINCE 2009]
+      HUD L: static forever: vcncnet FUN_100076c2 GATES ALL STATUS
+      processing on the sequence CHANGING - and reads that sequence from
+      the LOW 9 BITS of ntohs(wire bytes 2-3): seq = ((wire2&1)<<8)|wire3.
+      Our packet left wire3=0 -> seq 0 forever -> ONE processing event per
+      session (= the one-time +2.001s base step seen in run_203008) and a
+      frozen ConnectionStatus. Dispatcher geometry decoded en route (code
+      offsets = wire+4; section cursor; payload at wire 8 - the v215 base_
+      incr/counter offsets were ALREADY CORRECT). FIX: two bytes - seq low 8
+      into wire3, bit 8 into wire2 bit0 (dispatcher never tests 0x01).
+      VERIFIED 31.5-min run: 370 processings, seq marching, session timer
+      counting, L: updating (with values = dup-ACK extend-factor multiples
+      of true RTT - the RTT_SAMPLING item; DAT_10020360 is the L: source via
+      FUN_100073a4 param_3, chain decompiled). SIDE EFFECT: armed the
+      seq-511 bomb (v463) - the client's index space now cycles.
+
+v459f5 [TSYNC - EMERGENCY REVERT OF IN-GAME ACCEPTANCE] run_204454: 3-client
+      freeze. Letting in-game samples be accepted (v458) re-armed the
+      262.144s A-field wrap: tsync_ms's docstring describes a v211 per-
+      session re-anchor but the re-anchor never runs - A = naked elapsed-
+      since-connect, and at t=262.3s the first fit window straddling the
+      wrap produced a -259.5s sample -> slew -> backward jumps 0.5s -> 141s
+      (4026 CRAP events) -> all three clients froze ~20:49:20. Offset 12
+      back to the 0x1FF constant: in-game samples index-rejected (stable
+      v457 behavior - ping replies still satisfy the resync loop +
+      keepalive, lobby sync fully works, STATUS remains the in-game
+      timekeeper). Re-enable gated on fixing the A timeline (-> v465).
+
+v458f5 [TSYNC - STATUS-INDEX ECHO (SUPERSEDED SAME DAY)] Second gate found:
+      v457's replies queue-MATCHED (97%) but ZERO tSyncAddMeasurement once
+      in-game - the client REJECTS samples whose reply status-index (offset
+      12) mismatches its latched current index, which flipped 511 -> 0 at
+      the first STATUS. Echoed 0x1FF pre-STATUS / 0 after; local run_203008
+      validated 100% index match + 36 measurements across the session.
+      ALSO exposed the +2.0s offset step (explained in v460) and the
+      -0.25 -> +1.77 creep - and then run_204454 melted down on the wrap
+      (-> v459). The version that proved the pipeline and found the
+      landmine in the same afternoon.
+
+v457f5 [TSYNC - ATTACHED TIME PINGS - ROOT CAUSE OF THE LATENCY COMPLAINT]
+      Player latency complaint -> vcncnet log forensics: wire CLEAN (RTT
+      109-128ms stable, ZERO reliable loss, telemetry p99 255ms) but the
+      client's clock model FROZE ~60s into every session: 410 timesync
+      requests, 17 matched, 369 replies discarded as 'Duplicate time
+      message 0'. The client's in-game pings are not standalone 12-byte
+      packets - vcncNet ATTACHES the 4-byte TIME section to outgoing DATA
+      packets (inserted at wire 8-11, payload shifts to 12; client log
+      proof: plain telemetry 'hdr size 8'/24B vs attached 'hdr size 12'/
+      28B). The old sz==12 gate ignored EVERY in-game ping; clients got
+      only the 1Hz idx-0 beacons and deduped them; drift accumulated ->
+      dead reckoning degraded -> planes warp progressively = 'latency' that
+      worsens over a session, on a clean wire. FIX: reply to ANY packet
+      with data[2]&0x80 (build_time_reply already reads ti from offset 8 -
+      correct for BOTH forms); composite packets fall through to normal
+      processing. BONUS UNIFICATIONS: the attached TIME section IS the
+      long-mysterious v340-v364 incrementing 4-byte 'counter prefix' (the
+      >H at 8 is the TimeIndex - the unwrap had been stripping the ping and
+      answering no one), and run_220823's 'ZERO 12-byte pings in-game'
+      (v213) - they were attached all along.
 
 v456f5 [NET/CRITICAL - THE COLLECTIVE CTD] 2026-08-22 stress test, ~28
       players: most of the room CTD'd simultaneously. Every crashed client
