@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v466f5'
+VERSION = 'v468f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4286,12 +4286,29 @@ def build_status_request(sess, base_incr_ms):
     ctrl = (4 << 29) | (seq << 20) | 0x80000       # sub_type 4 + seq + status bit (matches client)
     struct.pack_into('>I', p, 4, ctrl & 0xFFFFFFFF)
     struct.pack_into('>I', p, 8, base_incr_ms & 0xFFFFFFFF)   # base increment (ms) -> advances base
-    # status counters (wire 12-23): server msgs sent / recvd so far, then two spare u32s. These drive
-    # the loss%/RTT display; monotonic counts keep it sane.
-    struct.pack_into('>H', p, 12, sess.sq & 0xFFFF)          # msgs sent from server (approx)
-    struct.pack_into('>H', p, 14, sess.rx & 0xFFFF)          # msgs recvd by server
-    struct.pack_into('>I', p, 16, 0)
-    struct.pack_into('>I', p, 20, 0)
+    # v467f5 [D: DATA-LOSS GAUGE] status counters (wire 12-23), semantics from the vcncnet decompile
+    # (see the sendto wrapper comment): cumulative packets sent server->client and received
+    # server<-client (u16-truncated - the u16 wraps at ~65k pkts; the client's diff glitches one
+    # interval around a wrap and self-corrects, a 2009 wart we mirror faithfully), then the byte
+    # totals in the same order the client's own reply uses (ce58 sent, ce54 recvd). The old
+    # sess.sq/sess.rx values ticked in reliable-seq units the client never counts -> the loss diff
+    # sat clamped at 0 forever -> the D: gauge stayed dead.
+    # v468f5 [D: DATA-LOSS GAUGE, take 2]: the client's ledger printout (run 19:39, drop=5%)
+    # proved its ce-counters are PER-INTERVAL - 'msgs sent from client' went 52, 1, 12, 17, 9 -
+    # zeroed at every processed STATUS, while our v467 cumulatives grew 65, 68, 78, 92... The
+    # loss diff was therefore dominated by our cumulative tx-vs-rx imbalance (world-entry burst),
+    # which decays to zero and drowns the real per-interval drops - the observed 11-18% -> 0
+    # curve in BOTH drop tests. So the wire counters are DELTAS since the last STATUS build,
+    # matching the client's units. Lost-STATUS consistency is automatic: the client only
+    # processes on seq change, and until it does, BOTH sides keep accumulating the same longer
+    # interval. Byte fields (16-23) are deltas too, mirroring ce58/ce54.
+    _txn = getattr(sess, 'pkt_tx_n', 0);  _rxn = getattr(sess, 'pkt_rx_n', 0)
+    _txb = getattr(sess, 'byte_tx_n', 0); _rxb = getattr(sess, 'byte_rx_n', 0)
+    struct.pack_into('>H', p, 12, (_txn - getattr(sess, '_st_tx0', 0)) & 0xFFFF)   # pkts sent, this interval
+    struct.pack_into('>H', p, 14, (_rxn - getattr(sess, '_st_rx0', 0)) & 0xFFFF)   # pkts recvd, this interval
+    struct.pack_into('>I', p, 16, (_txb - getattr(sess, '_st_txb0', 0)) & 0xFFFFFFFF)
+    struct.pack_into('>I', p, 20, (_rxb - getattr(sess, '_st_rxb0', 0)) & 0xFFFFFFFF)
+    sess._st_tx0 = _txn; sess._st_rx0 = _rxn; sess._st_txb0 = _txb; sess._st_rxb0 = _rxb
     return bytes(p)
 
 # v371f5 [RELIABLE-VOLUME]: idempotent SCOREBOARD state does not need reliable delivery - it is
@@ -6063,6 +6080,40 @@ class S:
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+# v467f5 [D: DATA-LOSS GAUGE] central TX counters. Ghidra ground truth (vcncnet.dll): the client
+# counts EVERY datagram at its two transport doors - FUN_1000731f (ce4c pkts / ce58 bytes, 0x1c +
+# len per packet) on SEND via FUN_100071b0, and FUN_1000734e (ce50/ce54) on RECEIVE via the
+# dispatcher FUN_100032da - and the STATUS handler FUN_100073a4 computes loss as
+#   (server_sent + client_sent) - (server_recv + client_recv)  over  (server_sent + client_sent)
+# i.e. COMBINED bidirectional datagram loss, with OUR wire[12-13]/[14-15] as CUMULATIVE u16-
+# truncated packet counts and wire[16-23] the matching byte totals. Undercounting our sent side
+# drives the diff negative -> clamped 0 -> the D: gauge stays dead, so TX must be counted at ONE
+# choke point that no send site can bypass: this sendto wrapper. RX has its single door in on_pkt.
+# TEST_DROP_PCT: TEST-ONLY loss injector for validating the gauge on localhost (real loss there is
+# 0%): counts the packet as sent, then deliberately does not transmit it, for in-game packets only
+# (handshake/lobby never dropped). D: should read ~= the configured percentage. NEVER deploy >0.
+import random as _rnd
+TEST_DROP_PCT = 0.0
+class _CountingSock:
+    """v467f5: thin delegating proxy - socket method slots are read-only on Windows, so the
+    TX-counting choke point is a wrapper object instead of a sendto monkeypatch. Everything
+    except sendto passes straight through via __getattr__ (recvfrom, setsockopt, bind, fileno)."""
+    __slots__ = ('_s',)
+    def __init__(self, s): self._s = s
+    def sendto(self, payload, addr):
+        try:
+            sess = sadrs.get(addr)
+        except Exception:
+            sess = None
+        if sess is not None:
+            sess.pkt_tx_n  = getattr(sess, 'pkt_tx_n', 0) + 1
+            sess.byte_tx_n = getattr(sess, 'byte_tx_n', 0) + 0x1c + len(payload)
+            if TEST_DROP_PCT > 0.0 and getattr(sess, 'entered_game', False) \
+                    and _rnd.random() * 100.0 < TEST_DROP_PCT:
+                return len(payload)      # counted as sent, deliberately NOT transmitted
+        return self._s.sendto(payload, addr)
+    def __getattr__(self, n): return getattr(self._s, n)
+sock = _CountingSock(sock)
 # v388f5: enlarge the OS socket buffers. The recv loop processes non-SYN packets (telemetry
 # relay, ACKs, RELIABLE auth/command DATA) SYNCHRONOUSLY on this one thread, so while it is busy
 # relaying a busy dogfight to ~10 peers it is NOT calling recvfrom() - and with the tiny default
@@ -10015,6 +10066,8 @@ def login(s):
                                         log('TX/STATUS', f'in-game seq={s._status_seq} '
                                                         f'base_incr={_incr_ms}ms '
                                                         f'connid=0x{(s._status_connid or 0x0240):04x} '
+                                                        f'tx={getattr(s, "pkt_tx_n", 0)} '
+                                                        f'rx={getattr(s, "pkt_rx_n", 0)} '
                                                         f'({s.current_pilot})')
                                 except OSError:
                                     pass
@@ -15061,6 +15114,10 @@ def on_pkt(data, addr):
                                f'(was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if not s: return
     s.last_rx = time.time()   # v387f5: liveness beacon for the idle reaper (time-pings keep it fresh)
+    # v467f5 [D: DATA-LOSS GAUGE] RX counters - the receive-side twin of the sendto wrapper. Count
+    # every datagram + the client's 0x1c-per-packet byte formula so both ends tick the same units.
+    s.pkt_rx_n  = getattr(s, 'pkt_rx_n', 0) + 1
+    s.byte_rx_n = getattr(s, 'byte_rx_n', 0) + 0x1c + sz
     # v215: capture the connection id the client stamps in its own packets (wire bytes 0-1) so our
     # STATUS request can carry the value the client expects. The 12-byte TIME pings carry it (e.g.
     # 001e...); grab it once. Falls back to a beacon-style default in build_status_request if unseen.
