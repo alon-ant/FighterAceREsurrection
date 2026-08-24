@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v463f5'
+VERSION = 'v466f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -268,6 +268,15 @@ HEARTBEAT_INTERVAL = 1.0   # v206: seconds between in-game keepalive/TIME beacon
                            # client's NET-time offset drifts without a steady beacon stream (18-bit
                            # A field wraps ~262s) -> respawn re-fit snaps backward -> freeze. 1s
                            # keeps the client re-anchored well inside the wrap window.
+TSYNC_ACCEPT_INGAME = True  # v466f5: VALIDATED in run_140554 (30 min local, acceptance on): samples
+                             # flowed the entire session (67 accepted / 144 measurements, never
+                             # dark), offset a single smooth line -0.236 -> -0.135 = +56us/s genuine
+                             # crystal drift, NO steps, NO 262s artifacts, zero CRAP across ~7
+                             # A-boundaries + the full seq cycle. This restores the 2009 smooth-clock
+                             # architecture (continuous slew) and removes the STATUS staircase that
+                             # ground the particle engine into the line-387 freeze at ~90min. Set
+                             # False to fall back to the v459-era rejection guard (safe, but
+                             # re-introduces the staircase).
 NTP_REANCHOR_S = 999999.0   # v212: re-anchor DISABLED (set huge). v211's mid-session SYNACK
                            # re-anchor did not update the client base (set-base is connect-only), so
                            # it just reset A and dropped server_time ~elapsed -> froze mid-slew. A now
@@ -4115,7 +4124,18 @@ def tsync_ms(sess=None):
     phase, a constant ~246s offset vs the client's elapsed-since-base -> the 262s wrap then slewed
     to death). v211 sends elapsed-since-anchor + periodic re-anchor: offset ~0, no wrap."""
     if sess is not None and getattr(sess, '_ntp_epoch', None) is not None:
-        return int((time.time() - sess._ntp_epoch) * 1000) & 0x3FFFF
+        # v465f5 COHERENT A: the client decodes server_time = base + A/1000 (v205 ground truth),
+        # and FUN_10007d13 advances base by exactly the base_incr credits our STATUS packets
+        # deliver (v215). So the coherent A is the RESIDUAL - elapsed-since-connect MINUS the
+        # ms already credited into the client's base - which is bounded to [0, ~2.2s] for the
+        # whole session and NEVER wraps by construction (credits always arrive well inside the
+        # 262.144s field range). Pre-STATUS (lobby) credits are 0, so this reduces to the v211
+        # elapsed formula that has been field-proven at connect since day one. The -28.93s
+        # poison sample of run_215056 was the mod-262.144 alias of exactly this elapsed-vs-
+        # credited mismatch (1024s elapsed mod 262.144 = 237.4s = -28.9s + 262.1s, less the
+        # ~4s pre-STATUS gap) - i.e. the measurement that PROVES the residual model.
+        return (int((time.time() - sess._ntp_epoch) * 1000)
+                - getattr(sess, '_credited_ms', 0)) & 0x3FFFF
     return int((time.time() - FA_EPOCH) * 1000) & 0x3FFFF
 
 def build_synack(fixed_fa=None):
@@ -4180,6 +4200,12 @@ def build_time_reply(cd, sess=None):
     # session re-anchor consistent with the STATUS-advanced base - needs vcncNet FUN_10007fc0
     # decode ground truth via Ghidra before another live test).
     st = STATUS_INDEX
+    if TSYNC_ACCEPT_INGAME and sess is not None and getattr(sess, '_status_base_epoch', None) is not None:
+        # v465f5: echo the LIVE status seq (the value the client latched from our last STATUS)
+        # so the index-compare PASSES and the sample is ACCEPTED. Within the <=2s window where
+        # the client hasn't yet processed the newest STATUS, the compare fails harmlessly and
+        # that one sample is dropped - the next poll lands. Requires coherent-A (tsync_ms).
+        st = getattr(sess, '_status_seq', 0)
     ms=tsync_ms(sess); p=bytearray(144); p[0]=2; p[2]=0x80
     struct.pack_into('>I',p,8,ms&0x3FFFF); struct.pack_into('>H',p,12,st)
     struct.pack_into('>H',p,14,ti); return bytes(p)
@@ -8797,10 +8823,18 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         s._last_sp_grant = None                  # once only - never loop on repeated deletes
         if _age <= SP_REGRANT_WINDOW_S:
             _dying_obj = s.my_obj_number
-            def _delayed_regrant(s=s, _pkt=_pkt, _af=_af, _gn=_gn, _age=_age, _dying_obj=_dying_obj):
+            _death_t = time.time()
+            def _delayed_regrant(s=s, _pkt=_pkt, _af=_af, _gn=_gn, _age=_age,
+                                 _dying_obj=_dying_obj, _death_t=_death_t):
                 time.sleep(SP_REGRANT_DELAY_S)
                 if getattr(s, 'closing', False) or not getattr(s, 'entered_game', False):
                     return                       # left the arena/session - nothing to rescue
+                # v464f5: a client that reached the HANGAR after this death consumed its grant
+                # fine - re-issuing would be the every-death duplicate (see _supply_msg_instrument).
+                if getattr(s, '_hangar_msg_t', 0) > _death_t:
+                    log('FLY23', f'{s.current_pilot} re-grant N={_gn} CANCELLED - client reached '
+                                 f'the hangar after the death (grant consumed)')
+                    return
                 if getattr(s, 'flying', False) or s.my_obj_number != _dying_obj:
                     log('FLY23', f'{s.current_pilot} re-grant N={_gn} CANCELLED - client respawned '
                                  f'normally (flying={getattr(s, "flying", False)} '
@@ -8861,7 +8895,15 @@ STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (t
 # after the delete has gone out, so the client has a live grant to spawn on.
 SP_REGRANT_ON_DEATH = True   # flip False to disable instantly if it ever double-spawns
 SP_REGRANT_WINDOW_S = 2.0    # only re-issue a grant this recent; older ones are unrelated
-SP_REGRANT_DELAY_S  = 2.5    # v462f5: wait this long, re-issue ONLY if the client never spawned
+SP_REGRANT_DELAY_S  = 6.0    # v466f5: was 2.5. run_170533 showed the hangar-0x18 cancel signal only
+                             # appears when the player actively clicks - an idle player at the
+                             # respawn screen is app-silent, indistinguishable from a hung client,
+                             # so the re-grant fired on quiet deaths and the client logged its benign
+                             # 'WaitingForStartPlaceList is empty' line. 6s lets active players'
+                             # hangar traffic cancel it; a truly stuck client is waiting anyway and
+                             # still gets rescued. The residual duplicate on an idle death is a
+                             # KNOWN-BENIGN logged error, accepted deliberately - the rescue value
+                             # (2 field saves, run_221848) outweighs a cosmetic client log line.
 
 # v350: sizes of a msg-7 appspace we have observed being handled safely by the client.
 # 84 = bc5/T=0x42, 86 = bc5/T=0x62, 88 = bc5/T=0x82. Anything else gets logged once by
@@ -9860,6 +9902,7 @@ def handle_syn(data, addr):
     with sl: sids[s.sid]=s; sadrs[addr]=s
     time.sleep(0.015)
     _now = time.time(); s._ntp_epoch = _now; s._ntp_last_reanchor = _now  # v211: base<->epoch same instant
+    s._credited_ms = 0   # v465f5: ms of base_incr credited to this client via STATUS (see tsync_ms)
     synack,fa_s,fa_frac=build_synack(); s.synack_base=(fa_s,fa_frac)   # v209: keep for HQ re-anchor
     sock.sendto(synack,addr); log('TX/SYNACK',f'FA_s=0x{fa_s:08X}')
     time.sleep(0.025)
@@ -9966,6 +10009,7 @@ def login(s):
                                     s._status_seq = 0
                                 try:
                                     sock.sendto(build_status_request(s, _incr_ms), s.addr)
+                                    s._credited_ms = getattr(s, '_credited_ms', 0) + int(_incr_ms)
                                     _hb_n += 1
                                     if (s._status_seq % 8) == 1:
                                         log('TX/STATUS', f'in-game seq={s._status_seq} '
@@ -12830,6 +12874,21 @@ def _supply_msg_instrument(s, sub, cmd, pl):
     channel the spawn/supply msgs appear as different subs (e.g. type=0x12 sub=0x60 sz=5 at spawn, a
     prefixed sub=0x40). Logging everything in-arena lets us spot the real supply/repair messages
     instead of guessing their numbers."""
+    # v464f5: HANGAR-ARRIVAL timestamp for the FLY23 re-grant discriminator (see DELETE3).
+    # run_20260823_221848 line 534/535 proved the v462 check wrong: after a normal death the
+    # grant is consumed INSTANTLY by the respawn UI but the player then SITS AT THE HANGAR -
+    # flying stays False and no new object exists until they click Fly, so 'not respawned at
+    # 2.5s' fired on virtually EVERY death and the re-grant WAS the duplicate (client error
+    # 'WaitingForStartPlaceList is empty' ~2.5s after each death, all builds, all night).
+    # The true tell is field-visible in the same log: a HEALTHY death reaches the hangar and
+    # sends msg 0x18 within ~1s (Bigalon: death 22:21:31.030 -> 0x18 at .891); a STUCK client
+    # ('Waiting for position') never does. Recorded before any instrument gating so the signal
+    # exists regardless of logging flags; both direct and prefixed forms.
+    try:
+        if sub == 0x18 or (cmd and len(pl) > 8 and pl[8] == 0x18):
+            s._hangar_msg_t = time.time()
+    except Exception:
+        pass
     if not SUPPLY_MSG_INSTRUMENT:
         return
     if not getattr(s, 'entered_game', False):
