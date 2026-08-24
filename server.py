@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v469f5'
+VERSION = 'v470f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15195,6 +15195,15 @@ def on_pkt(data, addr):
             # phantom -> EWMA hovers near 0; real -> EWMA settles at the loss rate. Parsing is
             # non-returning: the packet continues through the normal flow untouched.
             try:
+                # v470f5: RAW dump of the first replies per session. run_203941 exposed that
+                # u16@12/14 of the reply ECHO OUR OWN counters (dl==ul to the digit in every
+                # STATLOSS line - impossible for independent directions), so the client's own
+                # counters live at OTHER offsets. Read them off this dump against the client's
+                # vcnc ledger (which prints the same values), then fix the parse offsets.
+                if getattr(s, '_statreply_raw_n', 0) < 3:
+                    s._statreply_raw_n = getattr(s, '_statreply_raw_n', 0) + 1
+                    log('STATLOSS', f'{getattr(s,"current_pilot","?")} RAW reply sz={sz} '
+                                    f'hex={hx(data[:40])}')
                 _c_txd = struct.unpack_from('>H', data, 12)[0]
                 _c_rxd = struct.unpack_from('>H', data, 14)[0]
                 _s_txd = getattr(s, '_st_last_txd', None)
