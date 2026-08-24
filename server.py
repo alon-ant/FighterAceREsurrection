@@ -260,10 +260,16 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v470f5'
+VERSION = 'v472f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
+TELEM8_CONVERT    = True   # v472f5: rewrite client 0x08 double-sample telemetry to 0x07 at the
+                           # relay (receivers hard-reject 8-11; see the [TELEM8-CONVERT] block in
+                           # relay_telemetry for the full FA.exe + transition-capture ground truth).
+TELEM8_KEEP_FIRST = False  # v472f5: which of the two position samples survives conversion.
+                           # False = keep the LATER sample (fresher, default). Flip for A/B if
+                           # 0x08-emitting planes ever look laggy/odd to watchers.
 HEARTBEAT_INTERVAL = 1.0   # v206: seconds between in-game keepalive/TIME beacons. Was 5s, but the
                            # client's NET-time offset drifts without a steady beacon stream (18-bit
                            # A field wraps ~262s) -> respawn re-fit snaps backward -> freeze. 1s
@@ -9094,6 +9100,43 @@ def relay_telemetry(src, data):
                             f'hex={hx(src._t8_last07)}')
         log('TELEM8-TRANS', f'{src.current_pilot} [2/3] this-08 len={len(pl)} hex={hx(bytes(pl))}')
         src._t8_want07 = True
+    # v472f5 [TELEM8-CONVERT] opcode 0x08 -> 0x07 at the relay. GROUND TRUTH, both ends:
+    # FA.exe registrar FUN_007e5e80 hard-wires receive entries 8-11 to the 'Unsupported
+    # message %i' stub while building SEND channels for all of 7-11 - types 8+ are client->
+    # server-only variants the 2009 server never relayed raw; every relayed 0x08 is a DROPPED
+    # tick on every watcher's screen (the emitting plane stutters/freezes; 1656+255 client
+    # errors in the 19:54 session alone). And the run_204429 TELEM8-TRANS capture (same object,
+    # consecutive frames, ticks 13 apart) localized the structure byte-exactly:
+    #   0x07 payload = [pos-sample 9B][motion 21B][state 39B...]      (landmark 1102.. at +30)
+    #   0x08 payload = [pos-sample 9B][pos-sample2 9B][motion][state] (landmark at +39)
+    # i.e. 0x08 is DOUBLE-SAMPLED position (sample2 = the LATER point - its triplet leads
+    # sample1 along the motion). Conversion: drop one sample, rewrite opcode to 7, fix the
+    # size nibbles (size = bc*16 + (T>>4); -9). Default keeps the LATER sample (fresher for
+    # dead reckoning); TELEM8_KEEP_FIRST flips the A/B if emitters ever look off. Output lands
+    # in TELEM_NORMAL_SIZES so every downstream consumer (tick harvest, position evidence,
+    # per-recipient re-stamp at 'relayed = bytearray(pl)') sees a normal 07.
+    if _opc == 0x08 and TELEM8_CONVERT and len(pl) >= 28:
+        _t8size = pl[0] * 16 + (pl[1] >> 4)
+        if _t8size == len(pl) - 4:
+            _nsz = _t8size - 9
+            _nhdr = bytes([_nsz // 16, ((_nsz % 16) << 4) | (pl[1] & 0x0F)])
+            if TELEM8_KEEP_FIRST:
+                _npl = bytearray(_nhdr + bytes(pl[2:18]) + bytes(pl[27:]))
+            else:
+                _npl = bytearray(_nhdr + bytes(pl[2:9]) + bytes(pl[18:]))
+            _npl[4] = 0x07
+            pl = _npl
+            src._telem8_conv = getattr(src, '_telem8_conv', 0) + 1
+            if src._telem8_conv == 1 or (src._telem8_conv % 512) == 0:
+                log('TELEM8', f'{src.current_pilot} 0x08->0x07 CONVERTED '
+                              f'({_t8size + 4}B -> {_nsz + 4}B, keep='
+                              f'{"first" if TELEM8_KEEP_FIRST else "later"} sample, '
+                              f'n={src._telem8_conv})')
+        elif not getattr(src, '_telem8_convfail_logged', False):
+            src._telem8_convfail_logged = True
+            log('TELEM8', f'{src.current_pilot} 0x08 frame with INCONSISTENT size nibbles '
+                          f'(bc={pl[0]} T=0x{pl[1]:02x} len={len(pl)}) - NOT converted, relayed '
+                          f'as-is (old behavior; logged once)')
     # v350: INSTRUMENTATION - find where the 165-byte msg 7 actually comes from.
     # Every CTD in this family ends with `in 7'165` then
     #     bounds error class ARR<class NET::OBJECT *,2048>[<garbage>] 0..2047
@@ -15204,8 +15247,14 @@ def on_pkt(data, addr):
                     s._statreply_raw_n = getattr(s, '_statreply_raw_n', 0) + 1
                     log('STATLOSS', f'{getattr(s,"current_pilot","?")} RAW reply sz={sz} '
                                     f'hex={hx(data[:40])}')
-                _c_txd = struct.unpack_from('>H', data, 12)[0]
-                _c_rxd = struct.unpack_from('>H', data, 14)[0]
+                _c_txd = struct.unpack_from('>H', data, 24)[0] if sz >= 36 else 0
+                _c_rxd = struct.unpack_from('>H', data, 26)[0] if sz >= 36 else 0
+                # v471f5: offsets CORRECTED from the run_204429 RAW dumps - the reply is a
+                # MIRRORED ledger: our echoed counters at 12-23 (tx,rx,txb,rxb - the source of
+                # v469's dl==ul artifact), the CLIENT'S own at 24-35 (sent u16@24, recvd u16@26,
+                # bytes sent u32@28, bytes recvd u32@32). Proof interval (Taurus 20:46:42):
+                # ours 12pkt/989B sent, client reports 12/989 received; client 8/370 sent,
+                # we counted 8/370 - perfect complement, zero loss, self-validating.
                 _s_txd = getattr(s, '_st_last_txd', None)
                 _s_rxd = getattr(s, '_st_last_rxd', None)
                 if _s_txd:  # have a paired interval and we sent something
