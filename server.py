@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v468f5'
+VERSION = 'v469f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4304,11 +4304,15 @@ def build_status_request(sess, base_incr_ms):
     # interval. Byte fields (16-23) are deltas too, mirroring ce58/ce54.
     _txn = getattr(sess, 'pkt_tx_n', 0);  _rxn = getattr(sess, 'pkt_rx_n', 0)
     _txb = getattr(sess, 'byte_tx_n', 0); _rxb = getattr(sess, 'byte_rx_n', 0)
-    struct.pack_into('>H', p, 12, (_txn - getattr(sess, '_st_tx0', 0)) & 0xFFFF)   # pkts sent, this interval
-    struct.pack_into('>H', p, 14, (_rxn - getattr(sess, '_st_rx0', 0)) & 0xFFFF)   # pkts recvd, this interval
+    _txd = _txn - getattr(sess, '_st_tx0', 0); _rxd = _rxn - getattr(sess, '_st_rx0', 0)
+    struct.pack_into('>H', p, 12, _txd & 0xFFFF)   # pkts sent, this interval
+    struct.pack_into('>H', p, 14, _rxd & 0xFFFF)   # pkts recvd, this interval
     struct.pack_into('>I', p, 16, (_txb - getattr(sess, '_st_txb0', 0)) & 0xFFFFFFFF)
     struct.pack_into('>I', p, 20, (_rxb - getattr(sess, '_st_rxb0', 0)) & 0xFFFFFFFF)
     sess._st_tx0 = _txn; sess._st_rx0 = _rxn; sess._st_txb0 = _txb; sess._st_rxb0 = _rxb
+    # v469f5 [STATLOSS]: remember the deltas just packed - the client's REPLY to this STATUS
+    # reports ITS matching interval, and pairing the two yields DIRECTIONAL loss (see on_pkt).
+    sess._st_last_txd = _txd; sess._st_last_rxd = _rxd
     return bytes(p)
 
 # v371f5 [RELIABLE-VOLUME]: idempotent SCOREBOARD state does not need reliable delivery - it is
@@ -9072,6 +9076,24 @@ def relay_telemetry(src, data):
         src._telem8_n = getattr(src, '_telem8_n', 0) + 1
         if (src._telem8_n % 256) == 0:
             log('TELEM8', f'{src.current_pilot} 0x08 frames relayed so far: {src._telem8_n}')
+    # v469f5 [TELEM8-TRANSITION]: capture a 07 -> 08 -> 07 sequence from one sender (max 2 per
+    # session). Consecutive frames ~250ms apart share near-identical flight state, so byte-
+    # diffing the pair localizes the inserted 9-byte block EXACTLY - the last unknown for the
+    # 0x08->0x07 relay conversion (the FIRST-frame dumps of run_221848 were minutes apart in
+    # different flight states and would not align). Bounded: three hex lines per capture.
+    if _opc == 0x07:
+        if getattr(src, '_t8_want07', False):
+            src._t8_want07 = False
+            src._t8_caps = getattr(src, '_t8_caps', 0) + 1
+            log('TELEM8-TRANS', f'{src.current_pilot} [3/3] next-07 len={len(pl)} hex={hx(bytes(pl))}')
+        src._t8_last07 = bytes(pl)
+    elif _opc == 0x08 and getattr(src, '_t8_caps', 0) < 2 \
+            and getattr(src, '_t8_last07', None) is not None \
+            and not getattr(src, '_t8_want07', False):
+        log('TELEM8-TRANS', f'{src.current_pilot} [1/3] prev-07 len={len(src._t8_last07)} '
+                            f'hex={hx(src._t8_last07)}')
+        log('TELEM8-TRANS', f'{src.current_pilot} [2/3] this-08 len={len(pl)} hex={hx(bytes(pl))}')
+        src._t8_want07 = True
     # v350: INSTRUMENTATION - find where the 165-byte msg 7 actually comes from.
     # Every CTD in this family ends with `in 7'165` then
     #     bounds error class ARR<class NET::OBJECT *,2048>[<garbage>] 0..2047
@@ -15159,6 +15181,46 @@ def on_pkt(data, addr):
         # composite (attached) form: fall through - DATA/ACK sections still need processing
     if sz>=8:
         dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
+        if pt==4 and sz >= 24:
+            # v469f5 [STATLOSS]: the client's STATUS REPLY (subtype 4) - previously ignored. It
+            # carries the client's PER-INTERVAL transport counters at the mirrored offsets
+            # (vcncnet FUN_100073a4 reply builder: pkts sent u16@12, pkts recvd u16@14, bytes
+            # sent u32@16, bytes recvd u32@20 - the same ledger its debug log prints). Pairing
+            # them with the deltas we packed into the matching STATUS request yields DIRECTIONAL
+            # loss per client per interval:
+            #   downlink = our sent vs their received;  uplink = their sent vs our received.
+            # Skew NOTE (run_195327 analysis): in-flight packets make single intervals read
+            # phantom loss that ALTERNATES +/- and sums to ~0; REAL loss is one-sided and
+            # accumulates. The EWMA (alpha=0.125) and the running totals separate the two:
+            # phantom -> EWMA hovers near 0; real -> EWMA settles at the loss rate. Parsing is
+            # non-returning: the packet continues through the normal flow untouched.
+            try:
+                _c_txd = struct.unpack_from('>H', data, 12)[0]
+                _c_rxd = struct.unpack_from('>H', data, 14)[0]
+                _s_txd = getattr(s, '_st_last_txd', None)
+                _s_rxd = getattr(s, '_st_last_rxd', None)
+                if _s_txd:  # have a paired interval and we sent something
+                    _dl = (_s_txd - _c_rxd) / _s_txd            # + = downlink shortfall
+                    s._loss_dl_ewma = 0.875*getattr(s,'_loss_dl_ewma',0.0) + 0.125*_dl
+                    s._loss_dl_tx  = getattr(s,'_loss_dl_tx',0)  + _s_txd
+                    s._loss_dl_rx  = getattr(s,'_loss_dl_rx',0)  + _c_rxd
+                if _c_txd:
+                    _ul = (_c_txd - (_s_rxd or 0)) / _c_txd     # + = uplink shortfall
+                    s._loss_ul_ewma = 0.875*getattr(s,'_loss_ul_ewma',0.0) + 0.125*_ul
+                    s._loss_ul_tx  = getattr(s,'_loss_ul_tx',0)  + _c_txd
+                    s._loss_ul_rx  = getattr(s,'_loss_ul_rx',0)  + (_s_rxd or 0)
+                s._statreply_n = getattr(s, '_statreply_n', 0) + 1
+                if (s._statreply_n % 16) == 1:
+                    _dt = s._loss_dl_tx if getattr(s,'_loss_dl_tx',0) else 1
+                    _ut = s._loss_ul_tx if getattr(s,'_loss_ul_tx',0) else 1
+                    log('STATLOSS', f'{getattr(s,"current_pilot","?")} '
+                        f'dl_ewma={getattr(s,"_loss_dl_ewma",0.0)*100:+.1f}% '
+                        f'ul_ewma={getattr(s,"_loss_ul_ewma",0.0)*100:+.1f}% '
+                        f'dl_total={(1-getattr(s,"_loss_dl_rx",0)/_dt)*100:+.2f}% '
+                        f'ul_total={(1-getattr(s,"_loss_ul_rx",0)/_ut)*100:+.2f}% '
+                        f'(n={s._statreply_n})')
+            except Exception:
+                pass
         if pt==1:
             s.rx+=1; cs=data[3] if sz>3 else 0
             pl=data[8:] if sz>8 else b''
