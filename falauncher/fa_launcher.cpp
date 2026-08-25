@@ -285,6 +285,40 @@
 //     launch from the saved path.
 //     Revert by: delete the L-FIX-5 block + the BeforeNavigate2 catch + the
 //     two WndProc messages + the wWinMain offer changes.
+// 2026-08-25: launcher v5.2 - L-FIX-10b: torrent leftovers scrubbed. L-FIX-10
+//     removed the machinery but four references survived; one was live UI:
+//     the fresh-install offer still promised 'via BitTorrent + mirror,
+//     shared with other pilots'. That dialog now says 'direct download from
+//     the project mirror list'. The other three were stale comments only
+//     (g_mirrorIndex '-1 = torrent mode', the SwitchToNextMirror header, the
+//     L-FIX-4 section banner) - zero behavior change; the aria2c command
+//     line was audited and carries no BT/DHT/seed flags.
+//     Falsify by: the word 'BitTorrent' appearing anywhere in the built
+//     binary's strings, or any dialog mentioning seeding/sharing.
+// 2026-08-25: launcher v5.3 - L-FIX-11: mirror content validation. Field
+//     failure: Google Drive over daily quota answers HTTP 200 with an HTML
+//     'Quota exceeded' page (~2 KB); ResolveMirror found no confirm uuid in
+//     it and fed the URL to aria2 anyway, which saved the page as the ISO
+//     with no .aria2 control file - so PollDownload reported 'complete',
+//     auto-install fired on a web page, and startup forever saw a finished
+//     disc. Three layers now:
+//     * ProbeMirrorUrl: before addUri, GET the first 512 bytes + headers of
+//       the resolved URL; text/html content-type, an HTML-looking body, or
+//       a Content-Length under MIN_ISO_BYTES (3 GiB floor; queried as a
+//       string - the DWORD query overflows past 4 GB) rejects the mirror
+//       and the pick loop moves down the list ('M!: mirror #N rejected').
+//     * PollDownload: a 'complete' file failing IsIsoFileValid (size floor
+//       + HTML sniff) is deleted and the download rotates to the next
+//       mirror instead of offering install. StartInstall has the same
+//       guard with a clear message.
+//     * Startup: an existing 'complete' ISO failing IsIsoFileValid is
+//       deleted, so machines that already saved the quota page self-heal
+//       into a normal download offer.
+//     Falsify by: a quota'd first mirror not being skipped within seconds,
+//     an install ever starting from a <3 GiB file, or a machine with a
+//     saved quota page not offering a fresh download on next start.
+//     Revert by: delete the L-FIX-11 blocks (probe loop back to plain
+//     ++g_mirrorIndex; drop the three IsIsoFileValid call sites).
 // ============================================================================
 
 #ifndef UNICODE
@@ -584,7 +618,8 @@ static void CaptureLastUser() {
 }
 
 // ----------------------------------------------------------------------------
-//  L-FIX-4: game download + sharing (bundled aria2c.exe as the torrent engine)
+//  L-FIX-4 -> L-FIX-10: game download (bundled aria2c.exe, now a pure
+//  mirror-list HTTP download engine - no BitTorrent)
 // ----------------------------------------------------------------------------
 static bool   g_downloadMode = false;  // the browser is showing the progress page
 static bool   g_startInstall = false;  // L-FIX-5: auto-trigger install after startup
@@ -1025,6 +1060,53 @@ static void StartPermissionsFix() {
 // dialog), clear the read-only attributes, and save the path to launcher.ini
 // so the launcher can launch from it. No installer is executed.
 // Shared tail of the install: mount, copy, unlock, persist, shortcut, login.
+// ----------------------------------------------------------------------------
+//  L-FIX-11: mirror content validation. An over-quota / broken mirror answers
+//  HTTP 200 with an HTML error page (e.g. Google Drive "Quota exceeded"),
+//  which aria2 saves as a 2 KB "ISO" with no .aria2 control file - so every
+//  later stage sees a "complete" disc. These helpers recognize that garbage.
+// ----------------------------------------------------------------------------
+static const unsigned long long MIN_ISO_BYTES =
+    3ULL * 1024 * 1024 * 1024;   // sanity floor; the real disc is ~4.35 GB
+
+static bool LooksLikeHtml(const std::string& head) {
+    size_t i = 0;
+    if (head.size() >= 3 && (unsigned char)head[0] == 0xEF &&
+        (unsigned char)head[1] == 0xBB && (unsigned char)head[2] == 0xBF)
+        i = 3;                                          // UTF-8 BOM
+    while (i < head.size() && (unsigned char)head[i] <= ' ') ++i;
+    std::string s = head.substr(i, 16);
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return s.rfind("<!doctype", 0) == 0 || s.rfind("<html", 0) == 0 ||
+           s.rfind("<head", 0) == 0     || s.rfind("<?xml", 0) == 0;
+}
+
+// Is the file on disk plausibly the game ISO (and not a saved error page)?
+static bool IsIsoFileValid(const std::wstring& path, std::wstring* why = nullptr) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        if (why) *why = L"the file could not be read";
+        return false;
+    }
+    LARGE_INTEGER sz; sz.QuadPart = 0;
+    GetFileSizeEx(h, &sz);
+    char b[512]; DWORD got = 0;
+    ReadFile(h, b, sizeof b, &got, nullptr);
+    CloseHandle(h);
+    if (LooksLikeHtml(std::string(b, got))) {
+        if (why) *why = L"it is a web page, not a disc image";
+        return false;
+    }
+    if ((unsigned long long)sz.QuadPart < MIN_ISO_BYTES) {
+        if (why) *why = L"it is far too small (" +
+                        std::to_wstring((unsigned long long)sz.QuadPart) + L" bytes)";
+        return false;
+    }
+    if (why) why->clear();
+    return true;
+}
+
 static void DoCopyInstall(const std::wstring& target) {
     std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
     g_instState = INST_RUNNING;
@@ -1137,6 +1219,20 @@ static void StartInstall() {
         g_instMsg = L"The ISO was not found:<br><code>" + iso + L"</code>";
         return;
     }
+    // L-FIX-11: refuse to "install" a saved mirror error page.
+    {
+        std::wstring why;
+        if (!IsIsoFileValid(iso, &why)) {
+            DeleteFileW(iso.c_str());
+            DeleteFileW((iso + L".aria2").c_str());
+            g_instState = INST_FAIL;
+            g_instMsg = L"The downloaded file is not the game disc - " + why +
+                        L".<br>A mirror served an error page instead of the ISO. "
+                        L"The bad file was removed; please run the download again.";
+            Stage(L"I: install refused - iso invalid (removed)");
+            return;
+        }
+    }
     // L-FIX-6b2: even without InstallTarget= (e.g. a broken v4.0 install),
     // running from a folder literally named 'launcher' means the game target
     // is our parent directory - use it rather than asking.
@@ -1219,16 +1315,20 @@ static void StartInstall() {
 //  A dead mirror advances to the next entry; an exhausted list is a hard
 //  stop with a clear message.
 // ----------------------------------------------------------------------------
-static int  g_mirrorIndex = -1;              // -1 = torrent mode
+static int  g_mirrorIndex = -1;              // -1 = not started; first switch picks entry 0
 static bool g_mirrorsExhausted = false;
 static std::vector<std::string> g_mirrors;   // parsed mirrors.txt (utf-8)
 static std::wstring g_mirrorHost;            // for the progress page
 
 // Small HTTPS/HTTP GET via WinINet (redirects followed). Body capped.
+// L-FIX-11: optionally reports Content-Length (queried as a string - the
+// DWORD form would overflow on a 4.35 GB disc). 0 = unknown/absent.
 static std::string WinInetGet(const std::wstring& url, DWORD maxBytes,
-                              std::wstring* contentType) {
+                              std::wstring* contentType,
+                              unsigned long long* contentLen = nullptr) {
     std::string out;
     if (contentType) contentType->clear();
+    if (contentLen)  *contentLen = 0;
     HINTERNET hNet = InternetOpenW(L"FALauncher", INTERNET_OPEN_TYPE_PRECONFIG,
                                    nullptr, nullptr, 0);
     if (!hNet) return out;
@@ -1243,6 +1343,11 @@ static std::string WinInetGet(const std::wstring& url, DWORD maxBytes,
             wchar_t ct[128] = L""; DWORD cl = sizeof ct;
             if (HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_TYPE, ct, &cl, nullptr))
                 *contentType = ct;
+        }
+        if (contentLen) {
+            wchar_t lb[64] = L""; DWORD ls = sizeof lb;
+            if (HttpQueryInfoW(hUrl, HTTP_QUERY_CONTENT_LENGTH, lb, &ls, nullptr))
+                *contentLen = wcstoull(lb, nullptr, 10);
         }
         char b[4096]; DWORD got = 0;
         while (out.size() < maxBytes && InternetReadFile(hUrl, b, sizeof b, &got) && got > 0)
@@ -1288,12 +1393,34 @@ static std::string ResolveMirror(const std::string& raw) {
     return base;   // small file / already direct
 }
 
+// L-FIX-11: the pre-flight check. Read the headers + first bytes of the
+// resolved URL and reject anything that is HTML (an over-quota / error page)
+// or that announces a Content-Length far too small to be the game disc.
+// A rejected mirror is skipped; the caller moves on to the next entry.
+static bool ProbeMirrorUrl(const std::string& url, std::wstring& why) {
+    std::wstring ct; unsigned long long clen = 0;
+    std::string head = WinInetGet(Utf8ToWide(url), 512, &ct, &clen);
+    if (head.empty()) { why = L"no response"; return false; }
+    std::wstring lct = ct;
+    std::transform(lct.begin(), lct.end(), lct.begin(), ::towlower);
+    if (lct.find(L"text/html") != std::wstring::npos || LooksLikeHtml(head)) {
+        why = L"serves a web page (over quota / error), not the ISO";
+        return false;
+    }
+    if (clen > 0 && clen < MIN_ISO_BYTES) {
+        why = L"file too small (" + std::to_wstring(clen) + L" bytes)";
+        return false;
+    }
+    why.clear();
+    return true;
+}
+
 static std::string CurrentActiveGid() {
     std::string rsp = RpcCall(RpcMethod("aria2.tellActive"));
     return JStr(rsp, "gid");
 }
 
-// Move to the next mirror (or from torrent to the first one).
+// Move to the next mirror (or start with the first one).
 static void SwitchToNextMirror(bool firstStart) {
     if (g_mirrorsExhausted) return;
     if (g_mirrors.empty()) {
@@ -1309,14 +1436,25 @@ static void SwitchToNextMirror(bool firstStart) {
         }
         Stage((L"M0: mirrors.txt entries=" + std::to_wstring(g_mirrors.size())).c_str());
     }
-    ++g_mirrorIndex;
-    if (g_mirrorIndex >= (int)g_mirrors.size()) {
-        // L-FIX-10: mirrors are the ONLY source now - out of mirrors means
-        // the download cannot proceed. Say so on the page.
-        g_mirrorsExhausted = true;
-        g_mirrorHost.clear();
-        Stage(L"M!: mirrors exhausted - no sources");
-        return;
+    // L-FIX-11: pick the next mirror that actually serves the ISO. Probing
+    // has no side effects on aria2, so it happens before the current
+    // transfer is dropped; a rejected mirror is logged and skipped.
+    std::string url;
+    for (;;) {
+        ++g_mirrorIndex;
+        if (g_mirrorIndex >= (int)g_mirrors.size()) {
+            // L-FIX-10: mirrors are the ONLY source now - out of mirrors means
+            // the download cannot proceed. Say so on the page.
+            g_mirrorsExhausted = true;
+            g_mirrorHost.clear();
+            Stage(L"M!: mirrors exhausted - no sources");
+            return;
+        }
+        url = ResolveMirror(g_mirrors[g_mirrorIndex]);
+        std::wstring why;
+        if (ProbeMirrorUrl(url, why)) break;
+        Stage((L"M!: mirror #" + std::to_wstring(g_mirrorIndex) +
+               L" rejected - " + why).c_str());
     }
 
     // Drop any current transfer and its control file (fresh source next).
@@ -1329,7 +1467,6 @@ static void SwitchToNextMirror(bool firstStart) {
     DeleteFileW((iso + L".aria2").c_str());
     if (firstStart) DeleteFileW(iso.c_str());   // clear any stale 0-byte stub
 
-    std::string url = ResolveMirror(g_mirrors[g_mirrorIndex]);
     // host for the UI
     {
         size_t hs = url.find("://");
@@ -1400,6 +1537,19 @@ static void PollDownload() {
 
     double pct = total ? (100.0 * (double)done / (double)total) : 0.0;
     bool finished = (total > 0 && done >= total) || status == "complete";
+    // L-FIX-11: a "complete" download that is actually a saved HTML error
+    // page (the mirror went over quota) is garbage - drop it and move to
+    // the next mirror instead of offering to install it.
+    if (finished) {
+        std::wstring isoPath = g_cfg.downloadDir + L"\\" + g_cfg.isoName, why;
+        if (!IsIsoFileValid(isoPath, &why)) {
+            Stage((L"M!: finished file invalid - " + why + L"; next mirror").c_str());
+            DeleteFileW(isoPath.c_str());
+            SwitchToNextMirror(false);
+            finished = false;
+            done = total = 0; pct = 0.0; status.clear();
+        }
+    }
     // L-FIX-5d: the moment a download WE WATCHED finishes, open the install
     // dialog automatically (once). A pre-completed ISO doesn't trigger this -
     // the startup offer handles that case.
@@ -2206,6 +2356,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
 
         std::wstring iso     = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
         bool isoComplete     = FileExists(iso) && !FileExists(iso + L".aria2");
+        // L-FIX-11: a saved mirror error page masquerading as a complete ISO
+        // (over-quota HTML with no control file) is removed here, so the
+        // pilot gets a clean download offer instead of a broken install.
+        if (isoComplete && !IsIsoFileValid(iso)) {
+            DeleteFileW(iso.c_str());
+            isoComplete = false;
+        }
         bool isoPartial      = FileExists(iso + L".aria2");
         bool engineAvailable = FileExists(g_cfg.aria2Exe);   // L-FIX-10
         bool gameMissing     = !GameExeExistsIn(g_cfg.gameDir);   // L-FIX-5f
@@ -2236,7 +2393,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
                 if (MessageBoxW(nullptr,
                         L"The game client was not found at the fallback path.\n\n"
                         L"Download Fighter Ace 4.2 Deluxe Edition now (4.35 GB,\n"
-                        L"via BitTorrent + mirror, verified, shared with other pilots)?",
+                        L"via direct download from the project mirror list)?",
                         L"FA Secure Launcher", MB_YESNO | MB_ICONQUESTION) == IDYES)
                     g_downloadMode = true;
             }

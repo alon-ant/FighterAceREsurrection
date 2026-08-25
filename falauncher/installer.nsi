@@ -1,9 +1,15 @@
 ; ============================================================================
-;  Fighter Ace 4.2 - NSIS installer (L-FIX-8b)
+;  Fighter Ace 4.2 - NSIS installer (L-FIX-8c)
 ;  Standard, AV-recognized installer stub replacing the custom self-extractor.
 ;  Installs the launcher toolset to <target>\launcher, records InstallTarget=,
 ;  and hands over to fa_launcher.exe /getgame for download + game install.
-;  Build:  makensis installer.nsi   (needs fa_launcher.exe + payload\ beside it)
+;  L-FIX-8c: legacy Direct3D wrapper DLLs (d3d8.dll, d3d9.dll) are deployed
+;  to the game root ($INSTDIR) during extraction, so they sit beside FA.exe
+;  once the launcher copy-installs the game into the same folder, fixing the
+;  full-screen bugs. Pristine copies are also kept in launcher\redist so a
+;  hand-repair is always possible.
+;  Build:  makensis installer.nsi   (needs fa_launcher.exe + payload\ beside
+;  it; payload\ must now also contain d3d8.dll and d3d9.dll)
 ; ============================================================================
 Unicode true
 !include "MUI2.nsh"
@@ -39,10 +45,24 @@ VIAddVersionKey "LegalCopyright"  "Fighter Ace community game-preservation proje
 !insertmacro MUI_LANGUAGE "English"
 
 Section "Install"
+  ; L-FIX-8c: legacy Direct3D wrapper DLLs into the GAME ROOT. The launcher
+  ; later copy-installs the game into this same folder ($INSTDIR ==
+  ; InstallTarget), so these land beside FA.exe. Unconditional File (default
+  ; overwrite) so a reinstall/upgrade always propagates the current wrappers.
+  SetOutPath "$INSTDIR"
+  File "payload\d3d8.dll"
+  File "payload\d3d9.dll"
+
   SetOutPath "$INSTDIR\launcher"
   File "fa_launcher.exe"
   File "payload\aria2c.exe"
   File "payload\aria2-COPYING.txt"
+  ; L-FIX-8c: pristine copies for manual repair / re-assertion if anything
+  ; (e.g. an ISO file of the same name) ever clobbers the game-root pair.
+  SetOutPath "$INSTDIR\launcher\redist"
+  File "payload\d3d8.dll"
+  File "payload\d3d9.dll"
+  SetOutPath "$INSTDIR\launcher"
   ; Never clobber a pilot's settings on reinstall/upgrade.
   IfFileExists "$INSTDIR\launcher\launcher.ini" +2 0
     File /oname=launcher.ini "payload\launcher.ini"
