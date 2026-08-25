@@ -284,7 +284,7 @@ LOG_CONSOLE_PAGE = """
                   if(!el) return;
                   if(!p){ el.textContent='players: n/a'; el.style.color='#888'; return; }
                   el.style.color = p.connected>0 ? '#7ec97e' : '#888';
-                  el.textContent = p.connected+' connected \u00b7 '+p.in_arena+' in arena \u00b7 '+p.flying+' flying';
+                  el.textContent = p.connected+' connected \\u00b7 '+p.in_arena+' in arena \\u00b7 '+p.flying+' flying';
                 }
                 var timer=null;
                 function toggle(){var on=document.getElementById('auto').checked;
@@ -850,10 +850,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
 
     def send_html(self, content):
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
         html = f"""<!DOCTYPE html><html>
         <head>
+            <meta charset="utf-8">
             <title>FA Server Control</title>
             <style>
                 body {{ font-family: sans-serif; background: #f4f4f9; padding: 20px; color: #333; }}
@@ -1775,6 +1776,58 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </script>
             """
             self.send_html(content)
+
+        # ---- Public player ticker (no login needed) ------------------------
+        # /ticker.json - bare counts as JSON, CORS-open so any site can poll it.
+        # /ticker      - a tiny self-refreshing dark badge page made for
+        #                embedding in an <iframe> on the community website.
+        # Exposes ONLY the three aggregate counts (nothing about who they are).
+        elif self.path == '/ticker.json':
+            counts = None
+            pc = SRV.get('player_counts')
+            if pc:
+                try:
+                    counts = pc()
+                except Exception:
+                    counts = None
+            if not isinstance(counts, dict):
+                counts = {'connected': 0, 'in_arena': 0, 'flying': 0}
+            body = json.dumps(counts).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path == '/ticker':
+            page = ("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                    "<title>Fighter Ace - players online</title>"
+                    "<style>"
+                    "html,body{margin:0;padding:0;background:#1e1e1e;}"
+                    "#t{font-family:Consolas,monospace;color:#7ec97e;font-size:15px;"
+                    "padding:8px 14px;white-space:nowrap;}"
+                    "#t.zero{color:#888;}"
+                    "</style></head><body>"
+                    "<div id=\"t\">&hellip;</div>"
+                    "<script>"
+                    "function tick(){"
+                    "fetch('/ticker.json').then(function(r){return r.json();})"
+                    ".then(function(p){"
+                    "var el=document.getElementById('t');"
+                    "el.textContent=p.connected+' connected \\u00b7 '+p.in_arena+"
+                    "' in arena \\u00b7 '+p.flying+' flying';"
+                    "el.className=p.connected>0?'':'zero';"
+                    "}).catch(function(){});"
+                    "}"
+                    "tick();setInterval(tick,5000);"
+                    "</script></body></html>")
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
 
         elif self.path == '/login':
             content = """
