@@ -76,6 +76,39 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v485f5 [MULTIPLAYER - PEER CREATE-BEFORE-TELEMETRY ORDER (CTD FIX) + DIAG] First
+      2-player test on the GCP box CTD'd Bigalon the instant his client built the
+      peer's NetPlane. Client (messages38): 'Get coord for missing object 256' ->
+      create client 0 (Starfighter@FA) -> Create NetPlane (F4U-1c) -> Access
+      violation 0x5F52454A type:1 (an EXECUTE fault through a vtable overwritten with
+      ASCII 'JER_/_REJ'). Server (server__2_.log 20:07:20.576): CREATE2 client+object
+      Starfighter St=0 ONumber=0x0100 plane=9 -> AC2E_Bigalon. ROOT CAUSE: the relay
+      fires the create ASYNC (send pool, v357f5) but relays the sender's telemetry
+      INLINE on the same frame, so telemetry BEAT the queued create; the peer stubbed
+      the slot ('missing object N') and the first-create then landed on an occupied
+      slot -> Network.cpp !Objects[N]/440 CTD. The v190 death-path comment ASSUMED
+      'CREATE lands first, then telemetry', but the 'flying' filter only gates
+      telemetry until ServerConfirm - it never actually ordered create vs telemetry.
+      Record builders are FINE (build_client_record bounds the name, build_object_
+      record lays St/ONumber/plane correctly) - it is purely ordering.
+      * FIX: relay_telemetry now HOLDS a sender's telemetry to a peer until that
+        peer's create has had time to arrive - skip the relay on the create-fire
+        frame, then keep skipping until RELAY_CREATE_SETTLE_S (0.5s) has elapsed
+        (_created_at[peer], refreshed on every (re)create; _created_peers pop at
+        respawn re-arms it). Toggle RELAY_HOLD_TELEM_UNTIL_CREATE=False reverts to
+        the old unordered behaviour. plane_movement/relay/tick paths untouched.
+      * DIAG (CREATE-ORDER): logs 'create fired ... holding telemetry Ns' when the
+        create goes out and 'telemetry released Nms after create (CREATE-first OK)'
+        when it resumes - confirms the ordering per (sender->peer) pair on the next
+        2-player run. Cost: the peer briefly holds the plane at the create position
+        (0,0,0) until telemetry snaps it in - a short pop-in, not a crash.
+      NOT the resupply chain, and NOT the 'Shadow' account (a SEPARATE box hammering
+      179 SYNs in a pre-arena reconnect loop - real but distinct; its reaps never
+      touched room 53). Starfighter = account Dutchwing, a clean session throughout.
+      OPEN/NEXT: (a) confirm CREATE-ORDER shows create-first + no CTD on the retest;
+      (b) the Shadow 179-SYN loop - _reap_stale_sessions reaps on EVERY re-SYN incl.
+      a live session, worth a freshness guard; likely Shadow's own client/network.
+
 v484f5 [RESUPPLY - AIR-START LAND REPAIR: GUARD ON RELIABLE AXES ONLY] The
       v483f5 raw dump pinned it (server.log 22:42:22). Refused msg-119, all native
       op=0x07, last 8 samples:

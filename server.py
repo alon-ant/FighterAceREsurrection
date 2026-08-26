@@ -7138,6 +7138,19 @@ _TELEM_MARK = b'\x05\x42\x00\x00\x07'
 # we never cross into the <-12 'future' error window that snapped the plane.
 RELAY_TICK_LEAD = 0
 
+# v485f5 [CREATE-BEFORE-TELEMETRY]: hold a sender's relayed telemetry to a peer until that
+# peer's CREATE-OBJECT has had time to arrive. The relay fires the create async-reliable
+# (send pool, off the RX thread) but relays telemetry INLINE on the same frame, so telemetry
+# beat the queued create; the peer stubbed the slot ('Get coord for missing object N') and the
+# first-create then landed on an occupied slot -> Network.cpp !Objects[N]/440 CTD (Bigalon
+# 20:07:20, obj 0x0100, F4U-1c, 2-player room). The 'flying' filter only gates telemetry until
+# the peer's ServerConfirm - it never actually ordered create vs telemetry. This enforces it.
+# Set False to revert to the old (unordered) behaviour.
+RELAY_HOLD_TELEM_UNTIL_CREATE = True
+RELAY_CREATE_SETTLE_S = 0.5   # seconds to hold telemetry to a peer after firing its create
+                              # (reliable create + a normal-link RTT). The peer briefly holds
+                              # the plane at the create position before telemetry snaps it in.
+
 # -- msg 2 CREATE-OBJECT (remote plane) --------------------------------------
 # Reversed from FA.exe: msg-2 dispatch LAB_007e4e00 + NetPlane ctor @0x4f2850.
 # Payload = [1 skip byte] + records.  Plane object record = 41 bytes:
@@ -9441,6 +9454,7 @@ def relay_telemetry(src, data):
     if not peers:
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
+    _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
     for p in peers:
         if SEND_CREATE_OBJECT and src.my_obj_number is not None:
             _cp = src.__dict__.setdefault('_created_peers', set())
@@ -9461,6 +9475,32 @@ def relay_telemetry(src, data):
                 # desynced -> FATALLOSTCONNECTION ~30s later (messages54.log).
                 # v357f5: via the send pool - still off the RX thread, no thread spawn.
                 _submit_send(send_create_object_for, src, p, with_client=_wc)
+                # v485f5 [CREATE-BEFORE-TELEMETRY]: the create is now queued (async); do NOT
+                # relay this frame's telemetry to p - it would beat the create and stub the
+                # slot (occupied-slot CTD). Hold p's telemetry for RELAY_CREATE_SETTLE_S so the
+                # create arrives first. DIAG: log the fire, and the later release + its delay.
+                if RELAY_HOLD_TELEM_UNTIL_CREATE:
+                    src.__dict__.setdefault('_created_at', {})[p.addr] = _now_relay
+                    src.__dict__.setdefault('_telem_released', set()).discard(p.addr)
+                    _pn = getattr(p, 'current_pilot', '?')
+                    log('CREATE-ORDER', f'{src.current_pilot} -> {_pn}: create fired '
+                                        f'(wc={_wc}); holding telemetry {RELAY_CREATE_SETTLE_S}s '
+                                        f'so CREATE arrives before it')
+                    continue
+            elif RELAY_HOLD_TELEM_UNTIL_CREATE:
+                # still inside the post-create settle window -> keep holding this peer's telemetry
+                _t0 = src.__dict__.get('_created_at', {}).get(p.addr)
+                if _t0 is not None:
+                    _dt = _now_relay - _t0
+                    if _dt < RELAY_CREATE_SETTLE_S:
+                        continue
+                    _rel = src.__dict__.setdefault('_telem_released', set())
+                    if p.addr not in _rel:
+                        _rel.add(p.addr)
+                        _pn = getattr(p, 'current_pilot', '?')
+                        _ms = int(_dt * 1000)
+                        log('CREATE-ORDER', f'{src.current_pilot} -> {_pn}: telemetry released '
+                                            f'{_ms}ms after create (CREATE-first OK)')
         # Re-stamp the object tick to the RECIPIENT's own latest tick so their move loop
         # sees a small +delta (object slightly behind -> interpolate) instead of the
         # sender's absolute tick, which is skewed ~tens of cycles vs the receiver and
