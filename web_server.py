@@ -1050,14 +1050,19 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             if not is_user_admin(user):
                 self.send_html("<h2>Access Denied</h2><p>Administrator privileges required.</p><a href='/'>&larr; Back</a>")
                 return
-                
+            # v475b [WEBPERF-DETAIL]: coarse per-section timing so the 1.3s /admin build names
+            # its own hot spot on the next load. Logged once per request at the end.
+            _ps = {}
+            _pt0 = time.time()
             conn = sqlite3.connect(SRV['db_path'])
             users = conn.execute("SELECT account_name, is_admin FROM accounts ORDER BY account_name").fetchall()
+            _ps['users_q'] = time.time() - _pt0
 
             # Pilot stats management. Pilots live in the `pilots` table. v240: the msg-25 stat block
             # is fully mapped, so EVERY row of the in-game HQ Scores screen has its own column and is
             # editable - the editor doubles as an end-to-end test harness for the block.
             pilot_html = ""
+            _pt0 = time.time()
             try:
                 pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
                 if 'pilot_name' in pcols:
@@ -1096,10 +1101,12 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     pilot_html = "<tr><td colspan='2'>No pilots table in the database.</td></tr>"
             except Exception as e:
                 pilot_html = f"<tr><td colspan='2'>Error loading pilots: {e}</td></tr>"
+            _ps['pilots'] = time.time() - _pt0
 
             # Arena (room) management. Rooms live in the `rooms` table; expose name,
             # title (the arena-list section header / category) and status for editing.
             arena_html = ""
+            _pt0 = time.time()
             try:
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
                 cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
@@ -1154,6 +1161,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     </tr>"""
             except Exception as e:
                 arena_html = f"<tr><td>Error loading arenas: {e}</td><td></td></tr>"
+            _ps['arenas'] = time.time() - _pt0
 
             user_html = ""
             acct_options = ''.join(
@@ -1207,6 +1215,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </tr>"""
 
             conn.close()
+            try:
+                SRV['log']('WEBPERF', 'admin sections: '
+                           + ' '.join(f'{k}={v*1000:.0f}ms' for k, v in _ps.items()))
+            except Exception:
+                pass
 
             content = f"""
                 {ADMIN_TABS_ASSETS}
