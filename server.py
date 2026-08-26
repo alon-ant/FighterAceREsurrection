@@ -479,13 +479,7 @@ def strip_staff_tags(name):
     canonical pilot_name in the DB (tag and all) is never altered."""
     if not name:
         return name
-    low = name.lower()
-    cut = len(name)
-    for tag in RESERVED_TAGS:
-        i = low.find(tag.lower())
-        if i != -1 and i < cut:
-            cut = i
-    return name[:cut].strip()
+    return name.split('@')[0].strip()
 
 def db_pilot_name_taken(name):
     """True if a pilot with this name already exists (pilot_name is the PRIMARY KEY, so names are
@@ -6026,29 +6020,38 @@ def send_arenalist_with_gamedefs(s, rooms, label):
     sent_map = getattr(s, '_gamedef_sent', None)
     if sent_map is None:
         sent_map = s._gamedef_sent = {}
+    # v476f5c: the client fires ~5 polls in the first ~350ms of opening the tab (run_113521:
+    # gaps 36/115/101/98ms) - all of them entered here and read _gamedef_sent before the first
+    # had finished writing it, so overlapping polls re-sent the SAME GAME_DEFs (the primed
+    # 9/7/5/3/1 interleave). A per-session lock serializes the prime: the first poll streams
+    # the 212s once; polls that arrive while it holds the lock wait, then find everything
+    # cached and skip straight to the list. One prime, not five overlapping ones.
+    _lock = getattr(s, '_gamedef_lock', None)
+    if _lock is None:
+        _lock = s._gamedef_lock = threading.Lock()
     primed = 0
-    for r in rooms:
-        if len(r) > 6 and r[6]:
-            # cheap change-key: room id -> hash of the stored blob. Re-send only on first
-            # sight or when the blob changed (web rename/settings edit rewrites it).
-            try:
-                blob_key = hash(bytes(r[6]))
-            except Exception:
-                blob_key = id(r[6])
-            if sent_map.get(r[0]) == blob_key:
-                continue                                  # this session already has this exact 212
-            pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
-            if pkt is not None:
-                send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
-                sent_map[r[0]] = blob_key
-                primed += 1
-                # v455f5: 120ms between GAME_DEFs - flakmagic's Aug-17 hard CTD (messages04_1_)
-                # died mid-parse of 4 rapid 212s; client re-entrancy on GAME_DEF parse rebuilds
-                # the GLOBAL camp table + UI. Pacing STAYS - but now only paid on the FIRST
-                # prime / after an edit, never on a steady-state refresh poll.
-                time.sleep(0.12)
+    with _lock:
+        for r in rooms:
+            if len(r) > 6 and r[6]:
+                try:
+                    blob_key = hash(bytes(r[6]))
+                except Exception:
+                    blob_key = id(r[6])
+                if sent_map.get(r[0]) == blob_key:
+                    continue                              # this session already has this exact 212
+                pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
+                if pkt is not None:
+                    send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
+                    sent_map[r[0]] = blob_key
+                    primed += 1
+                    # v455f5: 120ms between GAME_DEFs - flakmagic's Aug-17 hard CTD
+                    # (messages04_1_) died mid-parse of 4 rapid 212s; client re-entrancy on
+                    # GAME_DEF parse rebuilds the GLOBAL camp table + UI. Pacing STAYS - paid
+                    # only on the FIRST prime / after an edit, once per session, never on a
+                    # steady-state refresh poll.
+                    time.sleep(0.12)
     if primed:
-        log('ARENALIST', f'{s.current_pilot}: primed {primed} GAME_DEF(s) this poll '
+        log('ARENALIST', f'{s.current_pilot}: primed {primed} GAME_DEF(s) '
                          f'(cached {len(sent_map)} total for this session)')
     send_rel(s, build_arenalist(rooms), label, to=3.0)
     # v312: the 0xd2 rows now exist client-side, so push each arena's player count. Without
