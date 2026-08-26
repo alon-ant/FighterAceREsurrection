@@ -5634,6 +5634,27 @@ def plane_movement(s):
         total += sum(abs(b[k] - a[k]) for k in range(3))
     return total
 
+def plane_movement_xz(s):
+    """v484f5: movement over axes 0 and 2 ONLY (X + altitude), EXCLUDING the middle axis (1).
+    RE finding (v483f5, two air-start captures + the raw frame at server.log 22:42:22): in the
+    native-0x07 telemetry form the middle position u16 (pl[11:13]) carries a motion-active
+    subfield in its high byte (pl[12]) that swings ~10k<->51k during ground roll-out - low byte
+    pinned - and settles only when the plane is FULLY stopped. Axes 0 (pl[9:11]) and 2
+    (pl[13:15]) are clean coordinates that settle as the plane rolls to a stop (X+Z on that same
+    roll-out summed to ~234 vs the 200k+ the middle axis injected). The msg-119 airborne guard
+    uses THIS so a landing plane on roll-out is not falsely read as airborne; a genuinely flying
+    plane still moves in X and/or altitude. plane_movement() (all 3 axes) is UNCHANGED - crash
+    detection and the poll's exact-0 test judge only a fully-stopped plane, where the middle
+    axis is settled too, so they stay correct."""
+    hist = getattr(s, '_pos_hist', None)
+    if not hist or len(hist) < 2:
+        return 0
+    total = 0
+    for i in range(1, len(hist)):
+        a, b = hist[i - 1][1], hist[i][1]
+        total += abs(b[0] - a[0]) + abs(b[2] - a[2])
+    return total
+
 def plane_was_flying(s):
     """True if the plane was airborne//in motion when it was removed (see plane_movement)."""
     return plane_movement(s) >= CRASH_MOVEMENT_MIN
@@ -9404,7 +9425,7 @@ def relay_telemetry(src, data):
                     # genuinely parked plane from a frozen conductor re-sending one stale state
                     # (v346's endemic false-static). plane_movement() indexes [0]=t/[1]=pos and is
                     # unaffected by the extra element.
-                    _hist.append((_now, _p, src.last_telem_tick))
+                    _hist.append((_now, _p, src.last_telem_tick, _opc))
                     _cut = _now - CRASH_MOVEMENT_WINDOW_S
                     while _hist and _hist[0][0] < _cut:
                         _hist.pop(0)
@@ -13415,7 +13436,7 @@ def _tc_pool_draw(s, ammo_ask, fuel_ask):
     return _got_a, _got_f, _pk2['ammo'], _pk2['fuel'], f'scene AFRAW={_af}'
 
 
-def _grant_auto_resupply(s, pos):
+def _grant_auto_resupply(s, pos, explicit=False):
     """v425f5: THE EXPLICIT TWO-LEVEL SUPPLY POLICY (the refactor's level 1 / level 2).
     Mode = scoring_mode_for_room(): 'tc' -> economy; anything else -> arcade. Flag semantics
     per the v425f5 probe table above. Camp-pool rationale: v424f5 block above camp_supply_take.
@@ -13426,14 +13447,16 @@ def _grant_auto_resupply(s, pos):
         _mode = scoring_mode_for_room(s.current_room)
     except Exception:
         pass
-    # v452f5: AIR-START arenas (StartGround=no, e.g. the FFA at 1000m) spawn the plane
-    # already flying and fully fuelled/armed. A spawn-time msg-60 there triggers the
-    # client's 'Fueling and Arming plane' ground-service (engine off, throttle idle) on a
-    # plane that is airborne with a running engine - Taurus' FFA cold-engine bug
-    # (messages77). No ground service is possible or wanted at altitude: skip the grant.
-    if room_is_air_start(s.current_room):
-        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> AIR-START arena (StartGround=no) - '
-                        f'no spawn grant (plane spawns fuelled/armed in the air)')
+    # v480f5: air-start skip is now a POLL-ONLY guard. It exists to stop the ground-stop
+    # poll from servicing a JUST-SPAWNED airborne plane (the false ground-stop that ran
+    # 'Fueling and Arming' at altitude - Taurus FFA cold-engine, messages77). The explicit
+    # msg-119 request is the client's own authority that it is parked at a field and wants
+    # service - and that path already refuses movement >= REPAIR_119_AIRBORNE_MIN - so a
+    # plane that LANDS in an air-start arena MUST still repair. Skip inference only, never
+    # an explicit request. (The spawn grant itself is now guarded in _grant_spawn_supply.)
+    if not explicit and room_is_air_start(s.current_room):
+        log('RESUPPLY', f'{s.current_pilot} poll ground-stop -> AIR-START arena '
+                        f'(StartGround=no) - poll grant suppressed (explicit 119 still serviced)')
         return
     if _mode != 'tc':
         # ---- ARCADE: silent full service, no economy ----
@@ -13538,12 +13561,45 @@ def _handle_repair_request_119(s, pl):
     # messages30): landed, sent out 119'5 three times, every one refused -> never repaired.
     # A STALE guard reading residual landing divergence was blocking a legitimate request.
     try:
-        _mv = plane_movement(s)
+        _mv = plane_movement(s)          # all-3-axes (crash-detector metric; kept for the log)
+        _mv_xz = plane_movement_xz(s)    # v484f5: reliable axes only (X + altitude) - THE guard
     except Exception:
-        _mv = 0
-    if _mv >= REPAIR_119_AIRBORNE_MIN:
+        _mv = _mv_xz = 0
+    # v484f5: gate on the RELIABLE-axis movement, NOT the full 3-axis sum. RE (v483f5, raw frame
+    # at server.log 22:42:22): the MIDDLE position axis carries a motion-active subfield (pl[12])
+    # that swings ~10k<->51k during ground roll-out and settles only at a FULL stop, so the
+    # 3-axis sum read a rolling/landed plane as airborne (movement 200k+) and refused a legit
+    # repair - the pilot had to fully stop + re-ask to get serviced. X @9:11 and Z @13:15 are
+    # clean, so X+Z is ~234 on that same roll-out: well under the threshold, restoring v435f5's
+    # intended 'allow the rollout' behaviour. A genuinely flying plane still moves in X and/or
+    # altitude, so a real mid-air 119 is still caught.
+    if _mv_xz >= REPAIR_119_AIRBORNE_MIN:
+        # v482f5 [DIAG, read-only]: air-start landing repair keeps getting refused as 'airborne'
+        # on a plane the pilot reports parked + engine-off (movement should be ~0). The 0x08->
+        # 0x07 telemetry conversion is proven faithful (native-07 == 08 sample2 when still,
+        # server.log 13:27:11 TELEM8-TRANS), so the movement reading is REAL - dump the retained
+        # samples to see whether the position stream is genuinely sweeping (true motion / the
+        # air-start 'landing' is not a recognised field-park) or oscillating (a parse artifact).
+        # pos=(x,y,z), op=source opcode (0x07 native / 0x08 converted), tick=conductor tick.
+        try:
+            _samp = [(e[1], f'0x{e[3]:02x}' if len(e) >= 4 else '?',
+                      e[2] if len(e) >= 3 else None)
+                     for e in (getattr(s, '_pos_hist', None) or [])[-8:]]
+        except Exception:
+            _samp = '<err>'
+        # v483f5 [DIAG, read-only]: the v482f5 dump localised the noise to the MIDDLE position
+        # axis (offset 11:13) - its low byte is pinned (0xFD) while the parsed high byte swings
+        # 10k<->51k, so struct.unpack_from('<HHH', pl, 9) is reading the middle u16 off the real
+        # layout for this native-0x07 form (X @9:11 and Z @13:15 are both clean). Dump the raw
+        # last plane telemetry frame so the true position offsets can be pinned before any fix.
+        try:
+            _raw = getattr(s, 'last_plane_telem', None)
+            _rawhx = _raw.hex() if _raw else '<none>'
+        except Exception:
+            _rawhx = '<err>'
         log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - clearly airborne '
-                        f'(movement={_mv} >= {REPAIR_119_AIRBORNE_MIN})')
+                        f'(xz_movement={_mv_xz} >= {REPAIR_119_AIRBORNE_MIN}, full3={_mv}) | '
+                        f'last8 [pos,op,tick]={_samp} | raw last_plane_telem={_rawhx}')
         return
     # v446f5: the special-form holdoff applies here too - during a bombsight run the normal-
     # form position stream freezes (movement reads 0) while the plane is very much airborne.
@@ -13574,7 +13630,7 @@ def _handle_repair_request_119(s, pl):
     s.last_resupply_at = now
     log('RESUPPLY', f'{s.current_pilot} msg-119 repair REQUEST -> granting '
                     f'(movement={_mv}, pos={_pos})')
-    _grant_auto_resupply(s, _pos)
+    _grant_auto_resupply(s, _pos, explicit=True)
 
 # -- SPAWN-TIME 'ASK RESOURCES FROM AI' (msg 59 / 0x3b) v437f5 --------------------
 # Re-enabled by the v436f5 Type=1 flip (the Msn_Prod emitter FUN_005578d0 gates on
@@ -13643,6 +13699,15 @@ def _grant_spawn_supply(s):
     killed fuel depot limits fuel and a killed ammo dump limits ammo, independently. Debit =
     the yield (approximates ACWIKI's 'physical weight of the fuel and ammunition/ordnance
     used' at class granularity; msg-73 reconciliation is the exactness upgrade)."""
+    # v481f5: DO NOT skip the spawn grant on air-start. v480f5 tried exactly that (premise:
+    # 'air-start planes spawn fuelled/armed, no service needed') and it CTD'd the client on
+    # the FIRST ground impact. The client STILL emits msg-59 at an air-start spawn and needs
+    # the msg-60 reply to initialise plane loadout/damage state; without it the death path
+    # dereferences uninitialised memory (messages33: 'Player crashed into ground', ExitEvent
+    # (257) Hits=-1, Access violation 0x4050414D = ASCII 'MAP@' - a garbage pointer). The
+    # spawn-59 reply is SOLICITED and has always fired here without cold-engine - the Taurus
+    # cold-engine bug was the UNSOLICITED poll grant, which stays guarded in
+    # _grant_auto_resupply. Grant proceeds normally for air-start too.
     _mode = None
     try:
         _mode = scoring_mode_for_room(s.current_room)

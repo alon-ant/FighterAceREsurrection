@@ -17,22 +17,37 @@ they explain why a specific line is the way it is and must stay with it.
 ==============================================================================
 NEXT-SESSION PROMPT (paste this to start the new thread):
 ------------------------------------------------------------------------------
-  "FA server v472f5 = the banked stable point (read v457f5..v472f5 for the
-   2026-08-23/24 weekend: the whole 2009 timekeeping + telemetry restoration).
-   DEPLOYED AND FIELD-VERIFIED: attached TIME pings answered (v457), STATUS
-   seq gate open -> HUD L: + session timer alive (v460), seq-511 17-minute
-   all-player freeze defused (v463), coherent-A residual + IN-GAME NTP
-   ACCEPTANCE = the 2009 smooth clock (v465/466, validated 56us/s local /
-   20us/s online, zero CRAP over 31.5min + full seq cycles), D: data-loss
-   gauge resurrected with per-interval delta counters (v467/468), directional
-   per-client STATLOSS from the client's STATUS replies (v469/471), and the
-   0x08->0x07 telemetry conversion (v472: 'Unsupported message 8' went
-   1656+255 -> ZERO across both client builds in one deploy).
-   STILL OPEN, in rough priority:
-   (1) THE LONG COMMUNITY NIGHT - multi-hour, full room, on this stack; the
-       session that certifies the clock work end-to-end. Success = past the
-       old ~90min particle fuse with zero CRAP anywhere; grep STATLOSS /
-       TELEM8 / FLY23 / CRAP.
+  "FA server: v472f5 = the banked STABLE point; v473f5..v479f5 are DEPLOYED on
+   the live box and running clean (read those changelog entries first - they
+   cover the 2026-08-25/26 run: arena rename persistence, the Taurus atomic
+   pre-delete CTD fix, the WEB/arena-cleanup batch, the arena-list GAME_DEF-
+   storm fix, pilot-name anti-impersonation, the pre-arena ghost reap, and the
+   97% spawn-freeze work). The 2026-08-23/24 weekend before that (v457..v472)
+   was the 2009 timekeeping + telemetry restoration - still the foundation.
+   VERIFY-ON-NEXT-STRESS-TEST (top priority - these shipped but want a full
+   room to certify):
+   (A) v479f5 SPAWN-FREEZE (the 97% freeze). DEPLOYED, no problems in light
+       play, but the failure only reproduced under latency+load. During the
+       next busy session grep SPAWN-WATCH (a grant that never confirmed) and
+       FLY23 for 'duplicate StartPlace ask ... dropping' (the de-dup firing).
+       Expected healthy outcome: de-dup lines appear for high-latency players
+       (Taurus especially), SPAWN-WATCH stays silent. If SPAWN-WATCH DOES fire,
+       its line + the flightrec dump names the ask-path (compound/scan?) and
+       load-state - that is the hard data we still lack on whether a single
+       solicited-but-mistimed grant can wedge the client. Root cause is the
+       exe's WaitingForStartPlace one-bit gate (FUN_0046ae70); server fix is a
+       mitigation (stop making double-grants), not a cure. Constants:
+       SP_ASK_DEDUP_S=0.75, SP_CONFIRM_WATCH_S=12.0.
+   (B) v478f5 DUP-REAP: watch for wrongful reaps in the first multi-player
+       session (should only ever reap the OLDER of two same-account sessions;
+       lone sessions untouched). IDLE_SESSION_REAP=False disables if needed.
+   (C) v476/477 arena-list first-open pacing: GAMEDEF_PACING_S=0.12 is the
+       remaining ~1.1s first-open cost; A/B lower (0.06/0.04) with several
+       clients opening the tab AT ONCE and watch for a flakmagic-style rapid-
+       212-parse CTD before trusting a smaller value.
+   ALSO STILL OPEN, lower priority:
+   (1) THE LONG COMMUNITY NIGHT - already achieved once (v472 field-cert,
+       5h56m, zero CRAP); do it again on THIS stack to certify v473-v479.
    (2) relay_telemetry pack_into guard for COMPOSITE (TIME-attached, byte2
        0xa0) packets - one _guarded traceback in run_221848; payload offset
        shifts +4 when data[2]&0x80 (the v457 geometry).
@@ -41,21 +56,174 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    (4) Alon's 340ms route to GCP (~2x expected Ashdod->us-central1).
    (5) D:/loss% READ-ME for players: a D: that BLIPS and returns = in-flight
        phantom (amplitude ~ uplink_rate x RTT, alternates +/-, sums to 0);
-       a D: that SITS elevated = real loss (STATLOSS EWMA separates the two
-       server-side automatically).
-   (6) carried over, untouched this weekend: TANK MISSION reply (args 30/49;
-       msg-4 NetTank via FUN_004f26b0); msg-33 SCORE EVENT; host-59/119
-       decompile; msg-73 parser; high-occupancy PERF review (netstat -su on
-       the box shows ZERO kernel drops at 13.1M rx / 50.3M tx - server
-       exonerated as a loss source, so any future lag hunt starts at STATLOSS
-       + PERF, not the socket layer).
-   Tools: fs MCP (edit via fs:edit_file, NOT str_replace), ghidra MCP
-   (vcncnet.dll AND FA.exe projects both annotated this weekend); ONLINE LOGS
-   now via the v464 token route - /admin/logfiles.json + log_download?key=
-   LOG_READ_TOKEN (constant in web_server.py) - no browser needed;
-   fa_memdump.py / fa_dump_trn_tables.py (Admin); /tmp/fa_lz.py = DB
-   forensics kit. Server is server.py ~15600 lines, v472f5 (banked)."
+       a D: that SITS elevated = real loss (STATLOSS EWMA separates them).
+   (6) ALT-TAB CTD: RESOLVED via D3D windowed proxy DLLs (d3d9.dll/d3d8.dll
+       beside the exe, force Windowed - Skyyr-confirmed across 2 PCs/3 GPUs);
+       installer.nsi extracts both to $INSTDIR. Pending on Alon's box: drop
+       the 2 DLLs into falauncher\payload\ + makensis + verify a fresh
+       install doesn't wipe them during game extraction.
+   (7) carried over: TANK MISSION reply (args 30/49; msg-4 NetTank via
+       FUN_004f26b0); msg-33 SCORE EVENT; host-59/119 decompile; msg-73
+       parser; high-occupancy PERF review (netstat -su = ZERO kernel drops at
+       13.1M rx / 50.3M tx - server exonerated as a loss source).
+   Tools: fs MCP (edit via fs:edit_file, NOT str_replace - and note the
+   multi-edit atomic quirk that eats the line after a changelog/version
+   splice, restore it each time); ghidra MCP (vcncnet.dll AND FA.exe both
+   annotated); ONLINE LOGS via the v464 token route - /admin/logfiles.json +
+   log_download?key=LOG_READ_TOKEN (constant in web_server.py), + WEBPERF
+   lines (v475) time any web request >=200ms; fa_memdump.py /
+   fa_dump_trn_tables.py (Admin); /tmp/fa_lz.py = DB forensics kit. Server is
+   server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
+
+v484f5 [RESUPPLY - AIR-START LAND REPAIR: GUARD ON RELIABLE AXES ONLY] The
+      v483f5 raw dump pinned it (server.log 22:42:22). Refused msg-119, all native
+      op=0x07, last 8 samples:
+        X @9:11 : 20918 20986 21041 21087 21117 21135 21145 21149 (clean, rolling
+                  to a stop; total |d| = 231)
+        Z @13:15: 2916 2915 2914 2914 2913 2913 2913 2913          (clean; |d| = 3)
+        Y @11:13: 29693 39421 59901 22013 62973 48637 40445 36349  (noise; ~201600)
+      Raw frame ...ad8500019d52fd8d610b58...: pl[9:11]=X=21149, pl[11:13]=Y=0x8dfd,
+      pl[13:15]=Z=2913 - so X and Z are proper coordinates, but the MIDDLE u16's high
+      byte (pl[12]) is a motion-active subfield that swings while the low byte stays
+      pinned (every Y ends 0xFD). It settles only at a FULL stop - which is exactly why
+      the pilot's workaround worked: engine on/off forced a full stop, the client re-
+      asked, movement read 0 (22:43:14 grant, pos=(21152,34301,2913)), serviced. The
+      3-axis plane_movement summed that middle-axis noise (200k+) and tripped
+      REPAIR_119_AIRBORNE_MIN on a legitimately-landing plane.
+      * FIX: new plane_movement_xz() sums axes 0 and 2 ONLY (X + altitude); the msg-119
+        airborne guard uses it. On the same refused roll-out X+Z = ~234, well under
+        4000 -> GRANT. Restores v435f5's documented 'allow the rollout' intent. A real
+        mid-air 119 still moves in X and/or altitude, so it is still refused; and the
+        client only emits 0x77 at a field, so pure-level-North flight (the one case a
+        2-axis measure could miss) does not reach here anyway.
+      * plane_movement() (all 3 axes) UNCHANGED - crash detection + the poll's exact-0
+        test judge only a fully-stopped plane, where the middle axis is settled too.
+      * v482f5/v483f5 diagnostics KEPT (now fire only on genuine airborne 119s): the
+        refusal log shows xz_movement + full3 + last-8 samples + raw frame.
+      STILL OPEN (pre-existing, NOT from this chain - the exit path is untouched and
+      it fires with OR without a resupply): returning to HQ from a landed air-start
+      plane CTDs the client, deterministically. messages34 AND messages36, byte-
+      identical: 'Return resources to AI' / out 59'19 / ExitEvent(256) MEC=26 / out
+      83'2 / Access violation 0x83E6B9 v.addr:0x14 Main.cpp:2407. Crashing+respawning
+      is fine; only land->exit-to-HQ CTDs. Needs Ghidra on 0x83E6B9 (what it reads at
+      +0x14 on exit) - likely a null field/mission pointer that a real ground-start
+      landing would populate. Separate work item.
+
+v483f5 [RESUPPLY/DIAG - AIR-START LAND REFUSAL LOCALISED TO THE MIDDLE POS AXIS]
+      The v482f5 dump caught it (server.log 22:31:02, an air-start FFA landing).
+      Refused msg-119, movement=213976, last 8 samples (all native op=0x07):
+        X: 45240 45133 45046 44979 44932 44903 44888 44880  (clean, rolling to a
+           stop - steps 107>87>67>47>29>15>8)
+        Z: 2819 2820 2820 2821 2821 2821 2821 2821           (clean, constant alt)
+        Y: 44541 18941 51197 10749 28157 38909 44541 47101   (GARBAGE, 10k<->51k)
+      The whole 213976 is the Y axis. Tell: every Y ends in 0xFD (0xADFD 0x49FD
+      0xC7FD 0x29FD 0x6DFD 0x97FD 0xADFD 0xB7FD) - low byte PINNED, only the parsed
+      high byte swings. So the middle u16 that struct.unpack_from('<HHH', pl, 9)
+      reads at offset 11:13 is a stable byte (0xFD) glued to a wild byte from an
+      adjacent field; X @9:11 and Z @13:15 are proper coordinates. i.e. the 3x-u16
+      position parse is mis-aligned on the middle axis for this native-0x07 form.
+      Explains the intermittency: the client sends its one 119 during roll-out; the
+      clean exit 14s later logged movement=0 (adjacent field happened to align).
+      NOT the 0x08 conversion (all samples op=0x07).
+      * ADDED (read-only): the msg-119 airborne-refusal now also dumps raw
+        last_plane_telem hex, to pin the TRUE position offsets before any fix.
+        Likely fix once confirmed: correct the middle-axis offset (so a parked
+        air-start plane reads movement 0 and the existing guard passes), OR compute
+        the airborne check from the reliable axes only. Do NOT change plane_movement
+        blindly - it also drives crash detection. Awaiting one raw frame.
+
+v482f5 [RESUPPLY/DIAG - AIR-START 'PARKED' READS AIRBORNE] Post-v481f5 the air
+      spawn now supplies correctly, but landing in an air-start FFA still won't
+      resupply: the client sends msg-119 (renders 'accepted to airfield' first) yet
+      the server refuses it as airborne - movement=184128 then 226802 on a plane the
+      pilot reports parked, engine off (server.log 22:10:27 / 22:11:08). A ground-
+      start parked plane reads movement=0, so only air-start is affected. RULED OUT
+      the obvious suspect: the 0x08->0x07 telemetry conversion is FAITHFUL - the
+      13:27:11 TELEM8-TRANS capture shows native-07 position == 08 sample2 position
+      exactly when the plane is still (23137,61949,47915 in all three consecutive
+      frames). So the movement reading is REAL: this 'landed' air-start plane is
+      still transmitting flight-magnitude position changes. Working hypothesis: an
+      air-start 'landing' (StartGround=no, StartAirfield=-1) is not a client-
+      recognised field-park - the plane never enters the parked-at-field state - which
+      would explain BOTH the never-zero movement AND the HQ-return CTD below.
+      * ADDED (read-only, no behaviour change): _pos_hist samples now carry their
+        source opcode as a 4th tuple element (all readers index [0]/[1]/[2] with
+        len guards, unaffected); the msg-119 airborne-refusal now dumps the last 8
+        [pos, opcode, tick] samples. Next air-start landing test will show whether
+        the position stream sweeps (true motion / unsupported landing) or oscillates
+        (a parse artifact) - decides the fix instead of guessing.
+      SEPARATE PRE-EXISTING BUG (NOT from v480/481f5 - the exit path is untouched,
+      and v479f5 hits the same land->no-service->exit sequence): returning to HQ from
+      a landed air-start plane CTDs the client. messages34: 'Return resources to AI' /
+      out 59'19 / ExitEvent(256) MissExitCode=26 / out 83'2 / Access violation
+      0x83E6B9 v.addr:0x14 (NULL+0x14 deref) Main.cpp:2407. debug*.htm are device
+      logs, not crash stacks, so no client call stack; chasing it needs Ghidra on
+      0x83E6B9 (what it reads at +0x14 on exit). Likely the same root as the movement
+      issue: a field/mission pointer that a real landing would set is null here.
+
+v481f5 [RESUPPLY - REVERT v480f5 SPAWN SKIP: IT CTD'd ON GROUND IMPACT] The
+      v480f5 'part 2' (skip the msg-60 spawn grant in air-start arenas, on the
+      premise that air-start planes come up fuelled/armed) was WRONG and crashed
+      the client. Local repro (air-start FFA, server.log 21:59:54): out-4 spawn
+      ServerConfirm=257 -> client emits msg-59 (spawn ask) -> v480f5 logged
+      'AIR-START arena - no spawn grant' and sent NO msg-60. Pilot then flew into
+      the ground and the client CTD'd: messages33 shows 'Player crashed into
+      ground', ExitEvent(257) Hits=-1, then 'Access violation ... 0x4050414D'
+      (Main.cpp:2407). 0x4050414D is ASCII 'MAP@' - an uninitialised/garbage
+      pointer; Hits=-1 is uninitialised damage tracking. i.e. the client STILL
+      asks for supply at an air-start spawn and NEEDS the msg-60 reply to
+      initialise plane loadout/damage state - it does NOT self-supply. Without it
+      the death/exit path dereferences uninitialised memory -> CTD.
+      * FIX: removed the air-start guard from _grant_spawn_supply; the spawn-59
+        reply now fires for air-start rooms exactly as it did through v479f5
+        (which never CTD'd here). The spawn reply is SOLICITED and safe; the
+        Taurus cold-engine bug (v452f5, messages77) was the UNSOLICITED poll
+        grant, which is still suppressed in air-start rooms via
+        _grant_auto_resupply's explicit=False default.
+      * KEPT from v480f5: 'part 1', the landing-repair fix - _grant_auto_resupply
+        gains explicit=False and the msg-119 call site passes explicit=True, so a
+        plane that LANDS in an air-start arena still repairs/rearms on request.
+        Unaffected by this CTD (different path) and retained.
+      NET after v481f5: air-start SPAWN -> normal spawn-59 grant (initialises the
+      plane, no CTD); air-start LANDING + explicit 119 -> serviced; air-start POLL
+      inference -> still suppressed. Ground-start rooms unchanged. FUTURE NOTE: if
+      a TC air-start room ever shows cold-engine on the spawn grant specifically,
+      the fix is to force the silent restore flags (0x06/0x07) for that grant, NOT
+      to skip it - skipping is what caused this CTD.
+
+v480f5 [RESUPPLY - AIR-START LANDING REPAIR + GUARD RELOCATION] Aircraft that
+      landed at a field in an AIR-START arena (StartGround=no) could never repair
+      or rearm on the ground. Local repro (messages32, StartGround=no StartAlt=
+      1000m: client renders 'accepted to airfield' + emits out-119; run_213025
+      21:35: msg-119 REFUSED airborne, then 'AIR-START arena - no spawn grant').
+      Contrast run_205133 (ground-start TC): the identical ground-stop path
+      granted 'TC FULL loadout-restore' every time. Root cause: the v452f5 air-
+      start skip was placed in _grant_auto_resupply, which is NOT the spawn path -
+      it is the LANDING path, reached ONLY from the explicit msg-119 request
+      (_handle_repair_request_119) and the ground-stop poll. So the guard (a)
+      never protected the spawn grant it was written for, and (b) blocked every
+      legitimate landing repair for the whole life of the room.
+      * _grant_auto_resupply(s, pos, explicit=False): the air-start skip is now
+        gated on `not explicit`, so it is a POLL-ONLY guard against the just-
+        spawned airborne false ground-stop (the Taurus cold-engine case). The
+        msg-119 call site passes explicit=True - the client only emits 0x77 after
+        it locally accepts an airfield, so it is the authority that it is parked;
+        the path's own airborne guard (movement >= REPAIR_119_AIRBORNE_MIN=4000)
+        still refuses a genuine mid-air 119. Poll site keeps the default -> still
+        suppressed in air-start rooms (spawn-grace + ground_stop_eligible remain).
+      * _grant_spawn_supply: the air-start skip now lives HERE too, at the top of
+        the actual spawn (msg-59 reply) path - so a spawn-time msg-60 no longer
+        runs 'Fueling and Arming' on the 1000m airborne spawn. This closes the
+        latent case seen in run_213025 21:33:10 ('spawn-59 -> ARCADE full service'
+        firing unguarded in an air-start FFA). Air-start planes spawn fuelled/
+        armed, so no spawn service is wanted; a plane that later LANDS is serviced
+        via the 119/poll path, which no longer carries the skip.
+      Net: air-start spawn -> no grant; air-start landing + explicit 119 -> full
+      service; air-start poll inference -> still suppressed. Ground-start rooms
+      unchanged. NOT yet field-tested - verify next session: an air-start room
+      should show 'msg-119 repair REQUEST -> granting' followed by a real SUPPLY60
+      where it previously logged 'AIR-START arena ... no spawn grant'.
 
 v479f5 [SPAWN-STATE - THE 97% LOADING FREEZE] Taurus froze at 97% entering
       Two Islands II (messages23, run_140046). NOT a render hang and NOT a
