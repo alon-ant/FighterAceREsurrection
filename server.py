@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v473f5'
+VERSION = 'v474f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7090,16 +7090,31 @@ def send_create_object_for(src, dst, with_client=True):
     if src.my_obj_number is None:
         return False
     if not with_client:
-        # OBJECT-ONLY re-create (airfield change / re-entry): dst may STILL hold this
-        # object number. The client ASSERTs !Objects[N] on create (Network.cpp:391) ->
-        # creating over a live object is a hard CTD (messages42: dup ONumber=257). Send a
-        # bare type-3 OBJECT delete FIRST (same thread -> ordered before the create) so the
-        # create lands on an empty slot; if the object was already gone, the delete is a
-        # harmless no-op. client_number=None -> the NET::CLIENT station is left intact.
-        _predel = build_delete_object_3(onumber=src.my_obj_number, client_number=None)
-        send_rel(dst, _predel,
-                 f'<- pre-delete obj 0x{src.my_obj_number:04x} on {dst.current_pilot} (re-create resync)',
-                 to=3.0)
+        # v474f5 ATOMIC PRE-DELETE + CREATE (Taurus CTD 2026-08-25 23:14:10, messages18):
+        # the v-earlier pattern sent the pre-delete and the create as TWO reliable messages.
+        # Taurus's reliable downlink stalled ~46s (RELKEEP holding seqs 192-195 from
+        # 23:13:36); when it flushed, his client received ONE 'Server require delete 425'
+        # and TWO 'Receive create object 425' (the .131 + .360 double-send) - one pre-delete
+        # went missing across the stall - so create #2 landed on the occupied slot and the
+        # client's !Objects[N] guard (Network.cpp:391) killed it. Two messages can ALWAYS be
+        # split by loss, reorder, stalls or duplicate re-arms; ONE message cannot. So the
+        # object-only re-create is now a SINGLE msg-13 batch carrying [delete-record]
+        # [create-record]: the client dispatches the pair in order inside one reliable seq -
+        # slot cleared then filled atomically. Duplicate delivery of the WHOLE pair is now
+        # harmless by construction (each copy self-clears first). First-creates
+        # (with_client=True) stay unchanged - a truly-new peer's slot is empty by definition.
+        _del_raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) \
+                 + struct.pack('<H', src.my_obj_number & 0xFFFF)
+        _obj = build_object_record(src.client_number, src.my_obj_number, (src.nation or 0),
+                                   getattr(src, 'plane_type', PLANE_TYPE_ID),
+                                   (0.0, 0.0, 0.0), DEFAULT_SKIN)
+        pkt = build_msg13(_del_raw, bytes([0x02]) + _obj)
+        send_rel(dst, pkt, f'<- ATOMIC predel+create obj 0x{src.my_obj_number:04x} '
+                           f'({src.current_pilot} -> {dst.current_pilot})', to=3.0)
+        log('CREATE2', f'create-object(object-only ATOMIC predel+create) {src.current_pilot} '
+                       f'St={src.client_number} ONumber=0x{src.my_obj_number:04x} '
+                       f'plane={getattr(src, "plane_type", PLANE_TYPE_ID)} -> {dst.current_pilot}')
+        return True
     pkt = build_create_object_2(st=src.client_number, onumber=src.my_obj_number,
                                 nation=(src.nation or 0),
                                 player_index=src.player_index,

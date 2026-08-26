@@ -57,6 +57,31 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    forensics kit. Server is server.py ~15600 lines, v472f5 (banked)."
 ------------------------------------------------------------------------------
 
+v474f5 [NET/CREATE - ATOMIC PRE-DELETE+CREATE] Taurus CTD 2026-08-25
+      23:14:10 ('runtime error, no warning', 11 min into a buff climb; first
+      read as a memory leak - the debug htm's MEMORY SHORTAGE cycles are the
+      render backlog purging NORMALLY and were a red herring). Real chain:
+      his reliable downlink stalled ~46s (RELKEEP holding seqs 192-195);
+      when it flushed, the compressed burst delivered ONE 'Server require
+      delete 425' but TWO 'Receive create object 425' (the server had sent
+      the object-only re-create to him twice, .131 + .360, each supposedly
+      paired with a pre-delete - one pre-delete went missing across the
+      stall). Create #2 hit the occupied slot -> client !Objects[N] guard
+      (Network.cpp:391) -> hard exception. The allocator was CLEAN: v456's
+      history grace held, 425 was never re-issued server-side - the dup was
+      a re-delivery, not a re-allocation.
+      * FIX: the object-only re-create is now ONE msg-13 batch carrying
+        [delete-record][create-record] - a single reliable seq the client
+        dispatches in order (build_msg13 is variadic; delete of a missing
+        object is a proven no-op). Slot cleared-then-filled atomically;
+        duplicate delivery of the whole pair self-clears. Two messages can
+        always be split by loss/reorder/stalls; one cannot.
+      * OPEN threads filed, not fixed: why the .360 duplicate re-create
+        fired 229ms after the first (now harmless but unexplained), and
+        Taurus's recurring long reliable stalls (also 23:01, 54 retx ->
+        session closed) - his link genuinely drops; STATLOSS/RELKEEP now
+        document it per event.
+
 v473f5 [ARENA RENAME - PERSISTENT ACROSS RESTARTS + IN-ARENA] Web-admin
       arena renames appeared to stick only in live memory. The REAL bug was
       the reverse: /admin/edit_arena writes rooms.room_name correctly, but
