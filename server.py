@@ -6010,19 +6010,46 @@ def send_arenalist_with_gamedefs(s, rooms, label):
     the GAME_DEF's terrain ushort. build_lz_gamedef now patches that ushort from 0 to a
     valid terrain (FORCE_GAMEDEF_TERRAIN), so when the single arena is auto-selected and
     the list-box builds its Trn preview, _TrnNumber>=1 holds. (v163 sent the list alone
-    and still asserted: with no 212 the current terrain stayed 0.)"""
+    and still asserted: with no 212 the current terrain stayed 0.)
+
+    v476f5b [ARENA-LIST LATENCY - THE REAL CAUSE]: the client POLLS 0xd2 every ~1s to keep
+    the arena tab fresh (run_112131: requests at :29,:30,:31,:32...). Each poll re-ran this
+    whole function, re-streaming all 9 rooms' 212 GAME_DEF blobs with the MANDATORY 120ms
+    inter-blob pacing (v455 anti-CTD) = ~1.1s of GAME_DEF storm PER POLL. Polls piled onto
+    each other and the list never settled = the '3-4s, multiple refreshes' symptom. But the
+    212s only need to arrive ONCE per session - they prime the client's terrain cache; the
+    blob a room serves is stable between edits. So: stream the GAME_DEFs only for rooms this
+    session hasn't already been sent (tracked in s._gamedef_sent), and re-send a room's 212
+    only if its blob actually CHANGED (web edit -> new game_def_raw). A refresh poll then
+    costs just the 0xd2 list + 9 tiny concurrent counts (~one RTT), not a 1.1s GAME_DEF storm.
+    First open of the tab is unchanged (full prime); every poll after is light."""
+    sent_map = getattr(s, '_gamedef_sent', None)
+    if sent_map is None:
+        sent_map = s._gamedef_sent = {}
+    primed = 0
     for r in rooms:
         if len(r) > 6 and r[6]:
+            # cheap change-key: room id -> hash of the stored blob. Re-send only on first
+            # sight or when the blob changed (web rename/settings edit rewrites it).
+            try:
+                blob_key = hash(bytes(r[6]))
+            except Exception:
+                blob_key = id(r[6])
+            if sent_map.get(r[0]) == blob_key:
+                continue                                  # this session already has this exact 212
             pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
             if pkt is not None:
                 send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
-                # v455f5: 10ms -> 120ms between GAME_DEFs. flakmagic's Aug-17 hard CTD
-                # (messages04_1_) died mid-parse of the 4th of four 212s that arrived
-                # within 400ms (a news 225 interleaved); every stored blob parses clean
-                # (19/19 full-walk verified against the production DB), so the suspect
-                # is client-side re-entrancy on rapid-fire GAME_DEF parses (each rebuilds
-                # the GLOBAL camp table + UI). Pacing them is cheap insurance.
+                sent_map[r[0]] = blob_key
+                primed += 1
+                # v455f5: 120ms between GAME_DEFs - flakmagic's Aug-17 hard CTD (messages04_1_)
+                # died mid-parse of 4 rapid 212s; client re-entrancy on GAME_DEF parse rebuilds
+                # the GLOBAL camp table + UI. Pacing STAYS - but now only paid on the FIRST
+                # prime / after an edit, never on a steady-state refresh poll.
                 time.sleep(0.12)
+    if primed:
+        log('ARENALIST', f'{s.current_pilot}: primed {primed} GAME_DEF(s) this poll '
+                         f'(cached {len(sent_map)} total for this session)')
     send_rel(s, build_arenalist(rooms), label, to=3.0)
     # v312: the 0xd2 rows now exist client-side, so push each arena's player count. Without
     # this only the arena the user clicks gets a 213 (its on-demand request), which is why
