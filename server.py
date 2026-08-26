@@ -260,10 +260,19 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v476f5'
+VERSION = 'v477f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
+GAMEDEF_PACING_S = 0.12    # v477f5: seconds between consecutive 212 GAME_DEF blobs in the arena-
+                           # list prime (send_arenalist_with_gamedefs). 0.12 is the v455 anti-CTD
+                           # value (flakmagic's Aug-17 hard CTD died mid-parse of 4 rapid 212s;
+                           # the client rebuilds the GLOBAL camp table + UI per parse and is
+                           # re-entrant under rapid fire). It is now the ONLY cost of the first
+                           # arena-tab open (~9*0.12 = ~1.1s) since v476 made the prime once-per-
+                           # session; lowering it speeds first-open but risks the parse CTD, so
+                           # A/B it with several clients opening the tab before trusting a smaller
+                           # value. Change here only - the loop reads this constant.
 TELEM8_CONVERT    = True   # v472f5: rewrite client 0x08 double-sample telemetry to 0x07 at the
                            # relay (receivers hard-reject 8-11; see the [TELEM8-CONVERT] block in
                            # relay_telemetry for the full FA.exe + transition-capture ground truth).
@@ -471,12 +480,12 @@ def db_ensure_pilot(name, acct, slot):
     conn.commit(); conn.close()
 
 def strip_staff_tags(name):
-    """v475f5: return `name` with any reserved staff tag (and everything after it) removed, for
-    IMPERSONATION-collision comparison. 'Taurus@HQ' -> 'Taurus', 'Bob@FA3' -> 'Bob'. A tag marks
-    the end of the real nick (the retail service appended them), so we cut from the first tag
-    onwards. Case-insensitive match, but the returned base keeps its original casing. Names with
-    no tag come back unchanged. NOTE: this is ONLY for the duplicate/impersonation check - the
-    canonical pilot_name in the DB (tag and all) is never altered."""
+    """v475f5: return `name` truncated at the first '@', for IMPERSONATION-collision comparison.
+    'Taurus@HQ' -> 'Taurus', 'Bob@FA3' -> 'Bob'. The '@' begins a service tag (@HQ/@FA/@FA3/...)
+    that the retail service appended after the real nick, so everything from the first '@' on is
+    dropped - this catches ANY tag, including ones not in a fixed list, and a tagless name comes
+    back unchanged. NOTE: comparison only - the canonical pilot_name in the DB (tag and all) is
+    never altered."""
     if not name:
         return name
     return name.split('@')[0].strip()
@@ -488,13 +497,13 @@ def db_pilot_name_taken(name):
     feedback. Case-sensitive to match the DB key exactly (FA treats distinct casings as distinct
     keys here).
 
-    v475f5 ANTI-IMPERSONATION: also treats a name as taken if its STAFF-TAG-STRIPPED form
-    collides with an existing pilot's stripped form. So while 'Taurus@HQ' (an admin pilot)
-    exists, plain 'Taurus' is refused - a griefer can't drop the tag to masquerade as staff.
-    The comparison is case-insensitive on the stripped base (an admin is 'Taurus@HQ', so
-    'taurus', 'TAURUS', 'Taurus @FA' are all blocked). Reserved-tag names themselves are caught
-    earlier by is_reserved_name; this closes the tagless-base hole beneath it. Empty stripped
-    base (name was ONLY a tag) falls back to the plain exact check."""
+    v475f5 ANTI-IMPERSONATION: also treats a name as taken if its TAG-STRIPPED form (everything
+    before the first '@') collides with an existing pilot's stripped form. So while 'Taurus@HQ'
+    (an admin pilot) exists, plain 'Taurus' is refused - a griefer can't drop the tag to
+    masquerade as staff. Case-insensitive on the stripped base ('taurus', 'TAURUS', 'Taurus@FA'
+    all blocked). Reserved-tag names themselves are caught earlier by is_reserved_name; this
+    closes the tagless-base hole beneath it. Empty stripped base (name was ONLY a tag) falls
+    back to the plain exact check."""
     if not name:
         return False
     conn = sqlite3.connect(DB_PATH)
@@ -505,8 +514,8 @@ def db_pilot_name_taken(name):
     base = strip_staff_tags(name)
     if base:
         # Does any existing pilot reduce to the same base (case-insensitive)? This catches the
-        # 'Taurus' vs stored 'Taurus@HQ' impersonation. Done in Python over the pilot list so the
-        # tag set stays defined in one place (RESERVED_TAGS) rather than duplicated in SQL.
+        # 'Taurus' vs stored 'Taurus@HQ' impersonation. Done in Python over the pilot list -
+        # strip_staff_tags cuts at the first '@', so no tag list to keep in sync.
         base_low = base.lower()
         for (pn,) in conn.execute("SELECT pilot_name FROM pilots").fetchall():
             if strip_staff_tags(pn).lower() == base_low:
@@ -6044,12 +6053,13 @@ def send_arenalist_with_gamedefs(s, rooms, label):
                     send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
                     sent_map[r[0]] = blob_key
                     primed += 1
-                    # v455f5: 120ms between GAME_DEFs - flakmagic's Aug-17 hard CTD
-                    # (messages04_1_) died mid-parse of 4 rapid 212s; client re-entrancy on
-                    # GAME_DEF parse rebuilds the GLOBAL camp table + UI. Pacing STAYS - paid
-                    # only on the FIRST prime / after an edit, once per session, never on a
-                    # steady-state refresh poll.
-                    time.sleep(0.12)
+                    # v455f5/v477f5: pacing between GAME_DEFs (GAMEDEF_PACING_S) - flakmagic's
+                    # Aug-17 hard CTD (messages04_1_) died mid-parse of 4 rapid 212s; client
+                    # re-entrancy on GAME_DEF parse rebuilds the GLOBAL camp table + UI. Pacing
+                    # STAYS - paid only on the FIRST prime / after an edit, once per session,
+                    # never on a steady-state refresh poll. Tunable at the constant to A/B
+                    # first-open latency vs parse safety.
+                    time.sleep(GAMEDEF_PACING_S)
     if primed:
         log('ARENALIST', f'{s.current_pilot}: primed {primed} GAME_DEF(s) '
                          f'(cached {len(sent_map)} total for this session)')
