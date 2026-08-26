@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v478f5'
+VERSION = 'v479f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9115,6 +9115,23 @@ SP_REGRANT_DELAY_S  = 6.0    # v466f5: was 2.5. run_170533 showed the hangar-0x1
                              # KNOWN-BENIGN logged error, accepted deliberately - the rescue value
                              # (2 field saves, run_221848) outweighs a cosmetic client log line.
 
+# v479f5 [SPAWN-STATE] De-dup window for identical StartPlace asks (the 97% freeze fix).
+# Deliberately TIGHT: it must catch a compound-batched DUPLICATE of one ask (the client
+# re-sends the same [af][place][0xff] triplet within a few ms when it batches under latency),
+# but must NOT suppress a genuine RE-ask seconds later (death -> respawn same airfield, or a
+# player TABbing back to a spot). 0.75s is well above the ~tens-of-ms batch spacing and well
+# below the client's own re-ask cadence (its RealSendAskStartPlace retry is on the order of
+# seconds). If a real re-ask ever gets swallowed (symptom: a player who can't respawn on the
+# SAME airfield within <1s of a previous grant), lower this; raise it only if batch-duplicates
+# still slip through and freeze.
+SP_ASK_DEDUP_S = 0.75
+# v479f5 [SPAWN-WATCH] how long after a StartPlace GRANT to wait for a spawn confirmation
+# (flying=True / msg-59) before logging the grant as stuck. Must be comfortably longer than a
+# normal heavy-terrain load + spawn handshake so it never warns on a slow-but-fine client;
+# Taurus's failed grant sat 140s with no confirm, so anything in the 8-15s range cleanly
+# separates 'stuck' from 'still loading'. Pure observation - never triggers a re-grant.
+SP_CONFIRM_WATCH_S = 12.0
+
 # v350: sizes of a msg-7 appspace we have observed being handled safely by the client.
 # 84 = bc5/T=0x42, 86 = bc5/T=0x62, 88 = bc5/T=0x82. Anything else gets logged once by
 # relay_telemetry so the 165B frame that keeps killing peers can finally be identified.
@@ -9706,6 +9723,27 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     Wire form is built byte-identical to the echo framing that demonstrably arrived
     as `in 23'4` / one record (4-byte appspace header, type 0x42) - msg 23/93 must not
     gain pad bytes, since pad zeros would parse as bogus [AF=0][N=0] records."""
+    # v479f5 [SPAWN-STATE - DUPLICATE ASK DE-DUP] Part 2 of the 97% freeze fix. FA.exe ground
+    # truth (FUN_0046ae70, Msn_Serv.cpp): the client gates its ask on a one-bit state,
+    # p->WaitingForStartPlace (piVar5[0x6aa]); it sets the bit when it asks and CLEARS it only
+    # after processing our grant. If a SECOND grant lands while the bit is still set, the next
+    # ask asserts '!p->WaitingForStartPlace' - FATAL in the Developer build = Taurus's 97%
+    # freeze. Under latency+load the client compound-BATCHES its ask (the cmd=0x1203 'scan'
+    # path), so the SAME ask can reach us twice within a few ms; answering both stacks two
+    # grants against one flag. De-dup identical asks inside a short window: answer the first,
+    # drop the rest (the client only expects ONE StartPlaceList per ask; its own
+    # RealSendAskStartPlace re-fires later if it truly got no usable reply). Keyed on
+    # (af,mid,n,reply_sub) so a genuine airfield change or TAB to a new spot is NOT suppressed.
+    _ask_key = (af, mid, n, reply_sub)
+    _now_ask = time.time()
+    _last_ask = s.__dict__.get('_last_sp_ask')
+    if _last_ask and _last_ask[0] == _ask_key and (_now_ask - _last_ask[1]) < SP_ASK_DEDUP_S:
+        log('FLY23', f'{s.current_pilot} duplicate StartPlace ask{via} AF={af} mid={mid} '
+                     f'N=0x{n:02x} within {(_now_ask - _last_ask[1])*1000:.0f}ms - already '
+                     f'answered, dropping (avoids double-grant into WaitingForStartPlace)')
+        s._last_sp_ask = (_ask_key, _now_ask)      # refresh so a sustained retry stays suppressed
+        return
+    s._last_sp_ask = (_ask_key, _now_ask)
     old_af  = s.__dict__.get('sp_af')
     grant_n = _alloc_start_place(s, af, n)      # distinct spot per player on this airfield
     af_changed = (old_af is not None and old_af != af)
@@ -9777,6 +9815,13 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     pkt = bytes([0x00, 0x42, 0x00, 0x00, reply_sub & 0xFF, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
     # v343: remember this grant so a death landing inside SP_REGRANT_WINDOW_S can re-issue it.
     s._last_sp_grant = (time.time(), pkt, af, mid, grant_n)
+    # v479f5 [SPAWN-WATCH] record the grant instant + whether the client looks mid-load, so the
+    # confirmation watchdog can flag a grant that never turns into a spawn (the 97% freeze
+    # signature: GRANT with no following flying=True / msg-59 resource-ask). spawn_pending was
+    # just set True above; it clears when the client's out-4 ServerConfirm arrives (a real
+    # spawn). The watchdog reads _sp_grant_t/_sp_grant_via to name a stuck grant in the log.
+    s._sp_grant_t = time.time(); s._sp_grant_via = via or '(direct)'
+    s._sp_confirmed = False
     # v343: the pilot name was MISSING from this line, which made every grant unattributable -
     # with 14 players you cannot tell whose start place was granted, and that blocked the
     # diagnosis above for two sessions. Never remove it.
@@ -11469,6 +11514,7 @@ def _fire_server_confirm(s, via='', ident=None):
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s.spawn_pending = False   # v416f5: world rebuilt + player inserted -> refreshes are safe again
+    s._sp_confirmed = True    # v479f5: this spawn completed - the SPAWN-WATCH watchdog stands down
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -15655,6 +15701,34 @@ def _stall_watch():
                     _p=_rec_dump(s, f'reliable stall ({held} kept send(s), {_state}, '
                                     f'rel DATA idle {rel_idle:.1f}s, last_cs='
                                     f'{getattr(s,"_rel_rx_last_cs",None)})')
+                    if _p:
+                        log('REC', f'flight recorder dumped -> {_p}')
+            # v479f5 [SPAWN-WATCH] Part 3 (OBSERVATION ONLY): a StartPlace GRANT that never
+            # became a spawn. FA.exe ground truth: the client clears p->WaitingForStartPlace only
+            # after processing a usable grant; the 97% freeze is a grant that landed while the
+            # client was mid-load and was dropped/asserted, so flying/msg-59 never follow. We do
+            # NOT blind-re-grant here (a re-grant is itself an unsolicited grant that can trip the
+            # same assertion - that is exactly what v479 Parts 1+2 stop). We LOG it once, with the
+            # channel state, so the next occurrence is hard data: did the grant's ask arrive via
+            # the compound/scan path? was the client ALIVE-NO-TICKS (loading) at the time?
+            _gt=getattr(s,'_sp_grant_t',0.0)
+            if (_gt>0 and not getattr(s,'_sp_confirmed',False)
+                    and not getattr(s,'flying',False)
+                    and not getattr(s,'_sp_watch_logged',False)
+                    and (now-_gt)>SP_CONFIRM_WATCH_S):
+                s._sp_watch_logged=True
+                _tt2=getattr(s,'_tick_rx_time',0.0)
+                _alive='ALIVE-NO-TICKS (loading)' if (now-getattr(s,'_unrel_rx_time',0.0))<5.0 \
+                       else 'silent'
+                log('SPAWN-WATCH', f'[warn] {s.current_pilot}: StartPlace GRANT '
+                                   f'{s._sp_grant_via} issued {now-_gt:.1f}s ago never confirmed '
+                                   f'(no spawn/flying/msg-59) | client {_alive} | this is the 97% '
+                                   f'freeze signature - client likely dropped the grant mid-load '
+                                   f'(NOT re-granting: would re-trip WaitingForStartPlace)')
+                if not getattr(s,'_rec_dumped',False):
+                    s._rec_dumped=True
+                    _p=_rec_dump(s, f'spawn grant never confirmed ({s._sp_grant_via}, '
+                                    f'{now-_gt:.1f}s, {_alive})')
                     if _p:
                         log('REC', f'flight recorder dumped -> {_p}')
 

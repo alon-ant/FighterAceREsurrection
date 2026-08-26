@@ -57,6 +57,97 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    forensics kit. Server is server.py ~15600 lines, v472f5 (banked)."
 ------------------------------------------------------------------------------
 
+v479f5 [SPAWN-STATE - THE 97% LOADING FREEZE] Taurus froze at 97% entering
+      Two Islands II (messages23, run_140046). NOT a render hang and NOT a
+      slow load: FA.exe RE (FUN_0046ae70, Msn_Serv.cpp) shows the client gates
+      its StartPlace ask on a one-bit state, p->WaitingForStartPlace
+      (piVar5[0x6aa]) - set when it asks, cleared ONLY after it processes a
+      usable grant. A SECOND grant arriving while the bit is still set makes
+      the next ask assert '!p->WaitingForStartPlace' - FATAL in the Developer
+      build = the freeze. Ask sender is RealSendAskStartPlace (FUN_004fcbd0);
+      payload builder FUN_004fd5b0 emits [af][place][0xff] triplets - the
+      protocol is strict request->response, one grant per ask. Log proof:
+      Taurus's FAILED grant (14:09:18) came via the COMPOUND/scan path
+      (cmd=0x1203) while mid-load and was followed by NO msg-59/SUPPLY60
+      (spawn never completed, 140s dead air then relog); his SUCCESSFUL
+      15:19 grant was a bare/clean ask followed by the normal SUPPLY60. Under
+      latency+load the client compound-BATCHES its ask, so the same ask can
+      reach us twice within ms and we answered both -> two grants, one flag.
+      * Part 1 (solicited-only): confirmed all 6 handle_fly_start_place call
+        sites are ask-driven; the ONLY eager path is the v462 death-re-grant,
+        which is already heavily guarded (cancels on hangar/flying/respawn,
+        6s delay, 2 field rescues) - left as-is, not ripped out.
+      * Part 2 (de-dup): handle_fly_start_place drops an identical ask
+        (af,mid,n,reply_sub) seen within SP_ASK_DEDUP_S=0.75s - catches the
+        compound-batch duplicate, never a real re-ask seconds later (the
+        client's own RealSendAskStartPlace retry is on a seconds cadence).
+      * Part 3 (SPAWN-WATCH, observation only): the _stall_watch loop now
+        logs a GRANT that never became a spawn (no flying/msg-59 within
+        SP_CONFIRM_WATCH_S=12s) with the channel state + a flightrec dump, so
+        the next occurrence is hard data. Deliberately does NOT re-grant - a
+        blind re-grant is itself the unsolicited grant Parts 1+2 exist to
+        stop. NOTE: this is a mitigation; the true cure (client not dropping
+        a grant received mid-load) is in the exe. Watch for SPAWN-WATCH lines
+        after deploy to confirm the de-dup caught the batch case.
+
+v478f5 [SESSION - PRE-ARENA GHOST / DOUBLE-LOBBY] Taurus@HQ (acct Sinistarr,
+      340ms link) stuck at pilot select, appeared TWICE in the lobby, then
+      timed out (messages27/28, run_152706). Root cause is NOT server-side:
+      his first reliable DATA arrived 15.47s after SYN (the server auth-ACKed
+      it in 71ms) - i.e. client-side plane preload + init on a slow path,
+      brushing the client's own ~14s connect timeout (the long-open v351
+      note). Not fixable server-side (would need the exe). But two server
+      behaviours made it WORSE, both fixed:
+      * DOUBLE-LOBBY: a high-latency client whose advancing response was lost
+        re-sends pilot-select every few seconds; the 0x62/0xe4 handler re-ran
+        the FULL join each time, re-broadcasting '[x] has joined the lobby' +
+        broadcast_player_join -> same pilot shown twice. Fix: re-selection of
+        the SAME pilot on the SAME pre-arena session is now idempotent -
+        re-sends the advancing responses (MyRights, UI lists, echo) so the
+        stuck client can unstick itself, but skips the one-time join
+        broadcasts. First selection unchanged.
+      * PRE-ARENA GHOST not reaped: _reap_stale_sessions enforces one-
+        connection-per-account, but only fires on a NEW SYN - Taurus's stuck
+        client kept retrying on its OLD session (last_rx stayed fresh, so the
+        idle reaper's silence test never caught it) and didn't re-SYN for 4
+        min. Fix: the idle-reaper loop now ALSO reaps duplicate-account
+        sessions continuously - when two live authed sessions share an
+        account, the older t0 is the ghost and is torn down (DUP-REAP),
+        keeping only the newest connection. Decision made under sl; lone
+        sessions never touched. Enforces the one-per-account invariant
+        between SYNs, not just at them.
+
+v477f5 [ARENA-LIST + IMPERSONATION + GAMEDEF PACING TUNABLE]
+      * GAMEDEF_PACING_S constant (default 0.12) - the per-212 pacing in the
+        arena-list prime is now tunable at one place to A/B first-open
+        latency vs the v455 rapid-parse CTD. v476 made the prime once-per-
+        session (see below), so this pacing is the only remaining first-open
+        cost (~9x0.12=1.1s); lower with live multi-client testing.
+      * strip_staff_tags simplified to name.split('@')[0] (user edit) -
+        cuts at the first '@', catching ANY service tag, no fixed list.
+      * db_pilot_name_taken anti-impersonation (v475f5, refined): a name
+        whose '@'-stripped base collides with an existing pilot's base is
+        refused, so plain 'Taurus' is blocked while 'Taurus@HQ' exists.
+
+v476f5 [ARENA-LIST LATENCY - GAME_DEF STORM] The in-game arena tab took 3-4s
+      and 'refreshed multiple times' (NOT the web page - that was WEBPERF/
+      v475). The client POLLS 0xd2 ~1/s to keep the tab fresh; each poll
+      re-ran send_arenalist_with_gamedefs, re-streaming all 9 rooms' 212
+      GAME_DEF blobs at 120ms pacing = ~1.1s of GAME_DEF storm PER POLL,
+      overlapping so the list never settled. (The first suspect, the 213
+      counts-reply pacing, was a red herring - v476f5 made those concurrent,
+      harmless but not the cause.) Fix chain:
+      * f5b: GAME_DEFs primed ONCE per session - tracked in s._gamedef_sent
+        keyed by a hash of the stored blob, re-sent only on first sight or
+        when the blob changed (web edit). A refresh poll now costs just the
+        0xd2 list + concurrent counts (~one RTT). v455 anti-CTD pacing kept,
+        paid only on the first prime.
+      * f5c: per-session lock around the prime - the client fires ~5 polls in
+        the first ~350ms of opening the tab, which raced on _gamedef_sent and
+        re-primed; the lock serializes so exactly one prime happens.
+      Result (user): 'much faster for good connections, page more responsive.'
+      Remaining first-open floor is the pacing itself -> v477 tunable.
+
 v475f5 [WEB/ARENAS - PERF INSTRUMENTATION + PERSISTENT FLAG + CLEANUP]
       Arena-page slowness report (4-5s live, 'multiple refreshes'): measured
       anonymously the shell serves in 0.17s TTFB (network/TLS innocent), WAL
