@@ -577,6 +577,10 @@ def migrate_web_db():
         rcols = [row[1] for row in c.execute("PRAGMA table_info(rooms)").fetchall()]
         if rcols and 'category' not in rcols:
             c.execute("ALTER TABLE rooms ADD COLUMN category TEXT NOT NULL DEFAULT 'Custom Arenas'")
+        if rcols and 'persistent' not in rcols:
+            # v475: cleanup-exemption flag, set from the arena-management checkbox. The game
+            # server's init_rooms_db adds this too; harmless if already present.
+            c.execute("ALTER TABLE rooms ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
 
@@ -884,6 +888,23 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         self.wfile.write(html.encode('utf-8'))
 
     def do_GET(self):
+        # v475 [WEBPERF]: per-request timing - the layer never had it, and the 'arena page
+        # takes 4-5s with multiple refreshes' report was unanswerable from logs. Anything
+        # >=200ms gets a WEBPERF line (path only, query stripped); one page load now names
+        # the slow request(s) directly. Wraps the real handler; POST likewise.
+        _t0 = time.time()
+        try:
+            self._do_GET_inner()
+        finally:
+            _dt = time.time() - _t0
+            if _dt >= 0.2:
+                try:
+                    SRV['log']('WEBPERF', f'GET {self.path.split("?")[0]} '
+                                          f'took {_dt*1000:.0f}ms')
+                except Exception:
+                    pass
+
+    def _do_GET_inner(self):
         user = self.get_current_user()
         
         if self.path == '/':
@@ -1082,17 +1103,19 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             try:
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
                 cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
+                pers_sel = "COALESCE(persistent,0)" if 'persistent' in rcols else "0"
                 arena_rows = conn.execute(
                     "SELECT room_id, COALESCE(room_name,''), COALESCE(creator_pilot,''), "
                     "COALESCE(status,'open'), COALESCE(terrain,1), " + cat_sel + ", "
-                    "(SELECT COUNT(*) FROM room_players rp WHERE rp.room_id=rooms.room_id) "
-                    "FROM rooms ORDER BY created_at DESC").fetchall()
+                    "(SELECT COUNT(*) FROM room_players rp WHERE rp.room_id=rooms.room_id), "
+                    + pers_sel + " FROM rooms ORDER BY created_at DESC").fetchall()
                 if not arena_rows:
                     arena_html = "<tr><td>No arenas in the database.</td><td></td></tr>"
-                for rid, rname, creator, status, terrain, category, pcount in arena_rows:
+                for rid, rname, creator, status, terrain, category, pcount, pers in arena_rows:
                     sel_open   = 'selected' if status == 'open' else ''
                     sel_closed = 'selected' if status != 'open' else ''
                     row_bg = '' if status == 'open' else 'background:#f3f3f3;'
+                    pers_chk = 'checked' if pers else ''
                     arena_html += f"""
                     <tr style="{row_bg}">
                         <td>
@@ -1110,6 +1133,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                             <option value="open" {sel_open}>open</option>
                                             <option value="closed" {sel_closed}>closed</option>
                                         </select>
+                                    </label>
+                                    <label style="font-size:0.8em; color:#666; white-space:nowrap;" title="Persistent arenas are exempt from the 24h auto-cleanup and the console 'cleanup' command.">
+                                        Persistent<br>
+                                        <input type="checkbox" name="persistent" value="1" {pers_chk} style="width:18px; height:18px; margin:8px 0;">
                                     </label>
                                     <button type="submit" class="btn-green" style="width:auto; padding:8px 16px; margin:0;">Save</button>
                                 </div>
@@ -2043,6 +2070,19 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        _t0 = time.time()   # v475 [WEBPERF] - see do_GET
+        try:
+            self._do_POST_inner()
+        finally:
+            _dt = time.time() - _t0
+            if _dt >= 0.2:
+                try:
+                    SRV['log']('WEBPERF', f'POST {self.path.split("?")[0]} '
+                                          f'took {_dt*1000:.0f}ms')
+                except Exception:
+                    pass
+
+    def _do_POST_inner(self):
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length).decode('utf-8')
         qs = urllib.parse.parse_qs(post_data)
@@ -2189,14 +2229,24 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             if rid:
                 conn = sqlite3.connect(SRV['db_path'])
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+                # v475: the persistent checkbox lives in THIS form (row form -> this endpoint,
+                # its own handler - the settings form posts elsewhere and never touches it).
+                # Absence of the field = unchecked = 0, standard checkbox semantics.
+                _pers = 1 if qs.get('persistent', [''])[0] == '1' else 0
+                _pers_set = ', persistent=?' if 'persistent' in rcols else ''
+                _pers_args = [_pers] if _pers_set else []
                 if 'category' in rcols:
-                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=? WHERE room_id=?",
-                                 (room_name, category, status, rid))
+                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=?"
+                                 + _pers_set + " WHERE room_id=?",
+                                 (room_name, category, status, *_pers_args, rid))
                 else:
-                    conn.execute("UPDATE rooms SET room_name=?, status=? WHERE room_id=?",
-                                 (room_name, status, rid))
+                    conn.execute("UPDATE rooms SET room_name=?, status=?"
+                                 + _pers_set + " WHERE room_id=?",
+                                 (room_name, status, *_pers_args, rid))
                 conn.commit(); conn.close()
-                SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} status={status}")
+                SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} "
+                                  f"status={status}"
+                                  + (f" persistent={_pers}" if _pers_set else ""))
             self.send_response(302)
             self.send_header('Location', '/admin')
             self.end_headers()

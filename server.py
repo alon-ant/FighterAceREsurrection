@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v474f5'
+VERSION = 'v475f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -470,18 +470,58 @@ def db_ensure_pilot(name, acct, slot):
                  (name, acct, slot))
     conn.commit(); conn.close()
 
+def strip_staff_tags(name):
+    """v475f5: return `name` with any reserved staff tag (and everything after it) removed, for
+    IMPERSONATION-collision comparison. 'Taurus@HQ' -> 'Taurus', 'Bob@FA3' -> 'Bob'. A tag marks
+    the end of the real nick (the retail service appended them), so we cut from the first tag
+    onwards. Case-insensitive match, but the returned base keeps its original casing. Names with
+    no tag come back unchanged. NOTE: this is ONLY for the duplicate/impersonation check - the
+    canonical pilot_name in the DB (tag and all) is never altered."""
+    if not name:
+        return name
+    low = name.lower()
+    cut = len(name)
+    for tag in RESERVED_TAGS:
+        i = low.find(tag.lower())
+        if i != -1 and i < cut:
+            cut = i
+    return name[:cut].strip()
+
 def db_pilot_name_taken(name):
     """True if a pilot with this name already exists (pilot_name is the PRIMARY KEY, so names are
     GLOBALLY unique across all accounts). Used to reject duplicate pilot creation up front rather
     than relying on INSERT OR IGNORE + the soft select-time block, which gave the client no
     feedback. Case-sensitive to match the DB key exactly (FA treats distinct casings as distinct
-    keys here)."""
+    keys here).
+
+    v475f5 ANTI-IMPERSONATION: also treats a name as taken if its STAFF-TAG-STRIPPED form
+    collides with an existing pilot's stripped form. So while 'Taurus@HQ' (an admin pilot)
+    exists, plain 'Taurus' is refused - a griefer can't drop the tag to masquerade as staff.
+    The comparison is case-insensitive on the stripped base (an admin is 'Taurus@HQ', so
+    'taurus', 'TAURUS', 'Taurus @FA' are all blocked). Reserved-tag names themselves are caught
+    earlier by is_reserved_name; this closes the tagless-base hole beneath it. Empty stripped
+    base (name was ONLY a tag) falls back to the plain exact check."""
     if not name:
         return False
     conn = sqlite3.connect(DB_PATH)
     row = conn.execute("SELECT 1 FROM pilots WHERE pilot_name=?", (name,)).fetchone()
+    if row is not None:
+        conn.close()
+        return True
+    base = strip_staff_tags(name)
+    if base:
+        # Does any existing pilot reduce to the same base (case-insensitive)? This catches the
+        # 'Taurus' vs stored 'Taurus@HQ' impersonation. Done in Python over the pilot list so the
+        # tag set stays defined in one place (RESERVED_TAGS) rather than duplicated in SQL.
+        base_low = base.lower()
+        for (pn,) in conn.execute("SELECT pilot_name FROM pilots").fetchall():
+            if strip_staff_tags(pn).lower() == base_low:
+                conn.close()
+                log('PILOT', f'name "{name}" blocked - impersonation collision with existing '
+                             f'pilot "{pn}" (shared base "{base}")')
+                return True
     conn.close()
-    return row is not None
+    return False
 
 def db_get_account_by_pid(pid_hex):
     conn = sqlite3.connect(DB_PATH)
@@ -3072,6 +3112,14 @@ def init_rooms_db():
         log('DB', 'Migration: added room_slot column to rooms table')
     except Exception:
         pass  # column already exists - expected on every normal startup
+    # v475f5: persistent flag for custom arenas - set from the web arena-management checkbox.
+    # persistent=1 exempts a room from BOTH the 24h auto-cleanup and the console 'cleanup'.
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        log('DB', 'Migration: added persistent column to rooms table')
+    except Exception:
+        pass
     # Migration: add terrain column + backfill from each room's stored GAME_DEF text.
     try:
         conn.execute("ALTER TABLE rooms ADD COLUMN terrain INTEGER DEFAULT 1")
@@ -3487,7 +3535,7 @@ def perform_restart(actor='console'):
         _update_lock.release()
 
 def console_handler():
-    log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | update | loglevel | logmute | logtags | help')
+    log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | cleanup | update | loglevel | logmute | logtags | help')
     threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
     while running:
         try:
@@ -3616,6 +3664,11 @@ def console_handler():
                 n = cur.rowcount
                 conn.commit(); conn.close()
                 log('CONSOLE', f'Re-opened {n} closed room(s) (now visible in the arena list)')
+            elif cmd == 'cleanup':
+                # v475f5: remove ALL empty non-persistent custom arenas NOW (no age gate).
+                n = cleanup_custom_arenas(force=True, by=f'console:{_src}')
+                log('CONSOLE', f'cleanup: {n} custom arena(s) removed '
+                               f'(empty + not persistent; persistent/occupied/official kept)')
             elif cmd == 'destroy':
                 # destroy <sceneIdx> [camp] [progress]  - fire msg 36 SCENE DESTROY/STATE at a
                 # KNOWN scene index, to validate the msg-36 wire format live (independent of the
@@ -15583,6 +15636,54 @@ for _gdf in ('FFA', 'TC'):
     except Exception as _e:
         log('GDFDUMP', f'{_gdf}.gdf dump failed: {_e}')
 threading.Thread(target=console_handler, daemon=True).start()
+
+def cleanup_custom_arenas(force=False, by='auto'):
+    """v475f5: remove EMPTY, NON-PERSISTENT custom arenas from the DB.
+    Scope guards, all mandatory: category='Custom Arenas' only (official/system arenas are
+    untouchable regardless of flags); COALESCE(persistent,0)=0 (the web checkbox exempts);
+    NO live session currently in the room (a room with players is never deleted, even by
+    force); and - unless force - created_at older than 24h. force=True (the console
+    'cleanup' command) drops the age gate only. Deletes rooms + their room_players rows.
+    Returns the number of rooms removed."""
+    try:
+        with sl:
+            occupied = {getattr(s, 'current_room', None) for s in sids.values()}
+        occupied.discard(None)
+        conn = sqlite3.connect(DB_PATH)
+        rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
+        if 'category' not in rcols:
+            conn.close(); return 0
+        _pers = "COALESCE(persistent,0)=0" if 'persistent' in rcols else "1=1"
+        _age  = "1=1" if force else "created_at <= datetime('now','-1 day')"
+        rows = conn.execute(
+            "SELECT room_id, COALESCE(room_name,''), created_at FROM rooms "
+            "WHERE COALESCE(category,'')='Custom Arenas' AND " + _pers + " AND " + _age).fetchall()
+        removed = 0
+        for rid, rname, created in rows:
+            if rid in occupied:
+                log('CLEANUP', f'arena {rid} ({rname!r}) skipped - players in room')
+                continue
+            conn.execute("DELETE FROM room_players WHERE room_id=?", (rid,))
+            conn.execute("DELETE FROM rooms WHERE room_id=?", (rid,))
+            removed += 1
+            log('CLEANUP', f'arena {rid} ({rname!r}, created {created}) removed by {by}')
+        if removed:
+            conn.commit()
+        conn.close()
+        if removed or by != 'auto':
+            log('CLEANUP', f'{removed} empty non-persistent custom arena(s) removed ({by})')
+        return removed
+    except Exception as e:
+        log('CLEANUP', f'cleanup failed: {e}')
+        return 0
+
+def _arena_cleanup_loop():
+    """v475f5: periodic auto-cleanup - every 10 min, silently removes empty non-persistent
+    custom arenas older than 24h. Manual/immediate: console command 'cleanup'."""
+    while running:
+        time.sleep(600)
+        cleanup_custom_arenas(force=False, by='auto')
+threading.Thread(target=_arena_cleanup_loop, name='arena-cleanup', daemon=True).start()
 
 # Start the separate web server and inject our local server variables into it
 threading.Thread(

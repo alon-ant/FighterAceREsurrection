@@ -57,6 +57,51 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    forensics kit. Server is server.py ~15600 lines, v472f5 (banked)."
 ------------------------------------------------------------------------------
 
+v475f5 [WEB/ARENAS - PERF INSTRUMENTATION + PERSISTENT FLAG + CLEANUP]
+      Arena-page slowness report (4-5s live, 'multiple refreshes'): measured
+      anonymously the shell serves in 0.17s TTFB (network/TLS innocent), WAL
+      already on (v357) so lock-blocking is out - the seconds live in the
+      logged-in build or stacked sub-requests. Rather than guess:
+      * WEBPERF: do_GET/do_POST wrapped with per-request timing; anything
+        >=200ms logs 'WEBPERF <method> <path> took Nms'. One page load now
+        names the slow request. (The measurement also caught the LIVE box
+        still serving /admin + /admin/logs to anonymous - the local file's
+        gates were never opened, so this deploy re-closes them.)
+      * PERSISTENT flag: rooms.persistent column (migrations in BOTH
+        init_rooms_db and the web schema verify), checkbox in the arena-
+        management row form. Marker-guarded in the shared /admin/edit_arena
+        POST so the settings form (which posts to the same endpoint without
+        the checkbox) can never clear it.
+      * CLEANUP: cleanup_custom_arenas() - removes category='Custom Arenas'
+        rooms that are EMPTY (no live session in-room; checked against
+        sids under sl - never deletes an occupied room, even forced) and
+        NOT persistent. Auto: 10-min daemon loop, 24h age gate. Manual:
+        console command 'cleanup' (age gate dropped, empty+non-persistent
+        only). Official arenas untouchable by category guard. Deletes
+        rooms + room_players rows; every removal logged [CLEANUP].
+      * CORRECTION (this entry, later the same session): the 'LATENT BUG'
+        originally filed here was MY misreading - the row form and the
+        settings form post to SEPARATE endpoints (/admin/edit_arena vs
+        /admin/arena_settings), each writing only its own fields; no
+        settings wipe exists. The real bug was in my own first wiring: the
+        persistent-marker logic sat in the settings handler while the
+        checkbox lives in the row form - the checkbox did nothing. Fixed:
+        persistent is parsed in the ROW handler (its own endpoint, plain
+        checkbox semantics, no marker needed); the settings handler is
+        reverted to its original clean form.
+      * ANTI-IMPERSONATION (pilot names): db_pilot_name_taken now also
+        blocks a name whose STAFF-TAG-STRIPPED base collides with an
+        existing pilot's base - so while 'Taurus@HQ' (admin) exists, plain
+        'Taurus'/'taurus'/'Taurus@FA' are all refused. Closes the hole
+        beneath is_reserved_name (which blocks tagged names but not the
+        tagless base a griefer would use to masquerade as staff). New
+        strip_staff_tags() cuts from the first RESERVED_TAG onwards; base
+        compare is case-insensitive over the pilot list (tag set stays
+        defined once). Canonical pilot_name in the DB is never altered.
+        Scope note: protection is relative to EXISTING pilots - the tagged
+        staff pilot must exist for its base to be reserved (account-level
+        proactive reservation was not requested).
+
 v474f5 [NET/CREATE - ATOMIC PRE-DELETE+CREATE] Taurus CTD 2026-08-25
       23:14:10 ('runtime error, no warning', 11 min into a buff climb; first
       read as a memory leak - the debug htm's MEMORY SHORTAGE cycles are the
