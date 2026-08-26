@@ -76,6 +76,31 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v486f5 [DIAG - RELIABLE-BUDGET MAP (exit-to-HQ ~32 CTD)] History (chat 9e9c3337,
+      2026-06-28) + tonight's run_204610 confirm the exit-to-HQ CTD is the known client
+      ~32-reliable-packet callback-array overrun (vcncNet .data 0x1002042c): the array
+      overruns silently around 32 RECEIVED reliables, corrupts adjacent heap metadata,
+      and only DETONATES on the exit-to-HQ 'DelObject -1' wipe's heap-free (decompiled
+      FUN_0083e6b0, NULL bin ptr -> v.addr:0x14, address 0x83E6B9). NOT air-start /
+      resupply / solo-specific (my earlier guesses were wrong): Bigalon's reliable seq
+      hit 58+ (RELKEEP) - each PEER JOIN costs him ~4 reliables (UI ADD + AddPlayer 62 +
+      ChangePlayer 63 + CreateObject 2), and _Shadow_/FG_BoogDog churn + v484f5's NEW
+      reliable landing-resupply grants blew past 32. Quiet/solo sessions stay under -> no
+      CTD (why it 'didn't return' solo). The SEND_EXIT/GAMEPLAY_UNRELIABLE mitigations
+      stay OFF: they risk a dropped ServerConfirm/GRANT -> stuck spawn over internet, and
+      the June test showed they STILL crashed on 3rd re-entry (incomplete, shelved).
+      * ADDED (read-only): per-session/per-connection reliable tally in send_rel, keyed by
+        category (_rel_budget_cat: create/delete/confirm/startplace/addplayer/changeplayer/
+        supply60/ace88/ui_roster/reattach/catalog/score/panel/echo/sys/other). Logs
+        'RELBUDGET ... reliable total=N :: <breakdown>' every +8 and flags the >=32 wall;
+        snapshots the total at each exit-to-HQ (msg-59 exit form). NOT reset on respawn or
+        HQ re-entry (mirrors the client's array, which only resets on a new connection).
+      NEXT (proposed, not yet done): split the msg-60 grants - keep the spawn-59 reply
+      RELIABLE (client blocks on it for loadout/damage init; ~1/spawn) but move the
+      landing/poll ground-stop resupply grants to UNRELIABLE-with-resend (a dropped one =
+      unserviced plane the client re-polls for, NOT a CTD). Also consider trimming the
+      per-peer-join reliable bundle. Map with RELBUDGET first to size the win.
+
 v485f5 [MULTIPLAYER - PEER CREATE-BEFORE-TELEMETRY ORDER (CTD FIX) + DIAG] First
       2-player test on the GCP box CTD'd Bigalon the instant his client built the
       peer's NetPlane. Client (messages38): 'Get coord for missing object 256' ->

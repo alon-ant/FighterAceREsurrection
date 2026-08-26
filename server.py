@@ -6710,6 +6710,29 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         s._rec_dumped = False
         log('STALL-WATCH', f'{s.current_pilot}: ACK flow RESTORED (last kept send ACKed)')
 
+def _rel_budget_cat(label):
+    # v486f5 [RELIABLE-BUDGET MAP]: bucket a reliable send by its label so we can see WHICH
+    # traffic eats the client's ~32-reliable array (the exit-to-HQ overrun wall). Cheap keyword
+    # match, distinctive words only (never bare numbers - they collide with seqs). 'other' catches
+    # anything unmapped so nothing is silently lost from the tally.
+    l = label or ''
+    if 'CreateObject' in l: return 'create'
+    if 'DeleteObject' in l or 'predel' in l: return 'delete'
+    if 'ServerConfirm' in l: return 'confirm'
+    if 'StartPlace' in l or 'GRANT' in l: return 'startplace'
+    if 'AddPlayer' in l: return 'addplayer'
+    if 'ChangePlayer' in l: return 'changeplayer'
+    if 'Supply' in l or 'SUPPLY' in l or 'supply' in l: return 'supply60'
+    if 'AceOrRank' in l or 'ACE' in l or 'rank' in l: return 'ace88'
+    if 'UI ADD' in l or 'UI REM' in l: return 'ui_roster'
+    if 're-attach' in l or 'reattach' in l: return 'reattach'
+    if 'ArenaList' in l or 'catalog' in l: return 'catalog'
+    if 'Score' in l or 'score' in l: return 'score'
+    if 'Panel' in l or 'Prod' in l or 'PROD' in l: return 'panel'
+    if 'echo' in l: return 'echo'
+    if 'sys' in l: return 'sys'
+    return 'other'
+
 def send_rel(s, payload, label='', to=5.0):
     # v359f5 [WIRE/CRITICAL]: RETRANSMISSION. The client's reliable RX is strictly
     # in-order (vcnc 'QRcv :: Now expecting packet N'): ONE lost server->client
@@ -6746,6 +6769,20 @@ def send_rel(s, payload, label='', to=5.0):
         sock.sendto(pkt,s.addr)
         _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5
     except OSError: s.rme(seq); return False
+    # v486f5 [RELIABLE-BUDGET MAP]: tally this reliable send (it advances the client's ~32
+    # array). Per-session/per-connection - NOT reset on respawn or HQ re-entry, which mirrors
+    # the client's array (that only resets on a NEW connection). Logs the running total + a
+    # per-category breakdown every +8, and flags the ~32 overrun wall. Read-only diagnostic.
+    _rt = s.__dict__.setdefault('_rel_tally', {})
+    _rc = _rel_budget_cat(label)
+    _rt[_rc] = _rt.get(_rc, 0) + 1
+    _rtot = sum(_rt.values())
+    if _rtot >= s.__dict__.get('_rel_tally_next', 8):
+        s.__dict__['_rel_tally_next'] = _rtot + 8
+        _pn = getattr(s, 'current_pilot', '?')
+        _wall = '  *** PAST ~32 WALL (exit-to-HQ overrun risk) ***' if _rtot >= 32 else ''
+        _brk = ', '.join(f'{k}={v}' for k, v in sorted(_rt.items(), key=lambda kv: -kv[1]))
+        log('RELBUDGET', f'{_pn} reliable total={_rtot}{_wall} :: {_brk}')
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
     _rec(s, 'S->C', 'RELTX',
@@ -13813,6 +13850,15 @@ def _handle_ask_resources_59(s, pl):
     if len(pl) >= 23 and bytes(pl[-8:]) == b'\xff' * 8:
         log('RESUPPLY', f'{s.current_pilot} msg-59 is the DEATH/EXIT form (plane fields '
                         f'0xFF) -> ignored, no grant scheduled (v440f5)')
+        # v486f5 [RELIABLE-BUDGET MAP]: snapshot the reliable tally this client carried INTO its
+        # exit-to-HQ - the client's ~32 array overruns silently and only detonates on the exit
+        # wipe's heap-free, so THIS is the number that matters for the CTD correlation.
+        _rt = s.__dict__.get('_rel_tally')
+        if _rt:
+            _rtot = sum(_rt.values())
+            _wall = '  *** >=32: exit-to-HQ CTD risk ***' if _rtot >= 32 else ''
+            _brk = ', '.join(f'{k}={v}' for k, v in sorted(_rt.items(), key=lambda kv: -kv[1]))
+            log('RELBUDGET', f'{s.current_pilot} EXIT-TO-HQ at reliable total={_rtot}{_wall} :: {_brk}')
         return
     now = time.time()
     # AIRBORNE GUARD only - see the block comment above for why there is no spawn grace here.
