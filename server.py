@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v475f5'
+VERSION = 'v476f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5902,7 +5902,19 @@ def _room_nation_counts(room_id):
 
 def send_all_arena_counts(s, rooms, reason=''):
     """Send one msg 213 per arena so EVERY row in the arena list shows its player count,
-    not just the selected one. MUST be called AFTER the 0xd2 list has been sent."""
+    not just the selected one. MUST be called AFTER the 0xd2 list has been sent.
+
+    v476f5 [ARENA-LIST LATENCY]: the client bursts its per-arena 213 requests in ~30-60ms
+    (messages18: 9 requests in <0.5s) then STALLS ~0.6-1.3s waiting for replies and RE-REQUESTS
+    the ones it never got - the '3-4s with multiple refreshes' the arena tab shows on a
+    high-RTT link. Cause was HERE: this loop sent each 213 with send_rel SERIALLY plus a 10ms
+    sleep, so on a 340ms link the 9 replies dribbled out one-ACK-per-RTT (~3s for the set) and
+    the client gave up waiting and re-requested. Fix: fire all 9 through the send pool at once
+    (still reliable - the client needs delivery - but concurrent, no serial ACK-blocking) and
+    drop the sleep. The 10ms was cargo-culted from the 212 loop; unlike 212 (heavy GAME_DEF
+    blobs that CTD the client on rapid rebuild - that pacing STAYS), a 213 is a 33-byte counts
+    packet with no parse cost, and these are idempotent (re-pushed live on any change), so
+    concurrent delivery is safe. Replies now land inside one RTT instead of nine."""
     if not SEND_ALL_ARENA_COUNTS:
         return
     sent = 0
@@ -5911,13 +5923,12 @@ def send_all_arena_counts(s, rooms, reason=''):
         try:
             counts, total, unassigned = _room_nation_counts(r[0])
             pkt = build_arena_players_213(r, counts=counts)
-            send_rel(s, pkt, f'<- 213 count (room {r[0]} {r[1]!r} n={total})', to=3.0)
+            _submit_send(send_rel, s, pkt, f'<- 213 count (room {r[0]} {r[1]!r} n={total})', to=3.0)
             sent += 1
             desc.append(f'{r[1]}={total}' + (f'(+{unassigned}u)' if unassigned else ''))
-            time.sleep(0.01)        # same pacing as the 212 loop
         except Exception as e:
             log('ARENACNT', f'213 push failed for room {r[0]}: {e!r}')
-    log('ARENACNT', f'pushed {sent} arena count(s) {reason}: {desc}')
+    log('ARENACNT', f'pushed {sent} arena count(s) concurrently {reason}: {desc}')
 
 # --- v313: LIVE arena counts for lobby spectators ------------------------------
 # v312 fills the list when it is SERVED. This keeps it live: whenever a room's
