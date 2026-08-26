@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v477f5'
+VERSION = 'v478f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14621,18 +14621,28 @@ def handle_post_auth(s, cmd, pl):
             pname, explicit_slot = parse_e4_selection(pl)
             if pname:
                 slot = explicit_slot or db_get_pilot_slot(s.account, pname) or 0
+                # v477f5 [PRE-ARENA RETRY / DOUBLE-LOBBY]: a high-latency client whose advancing
+                # response was lost re-sends this same pilot-select every few seconds (Taurus@HQ
+                # 15:28-15:31: repeated 'granted MyRights (pilot select)'). The old handler re-ran
+                # the FULL join each time - re-broadcasting '[x] has joined the lobby' and
+                # broadcast_player_join - which is exactly how the same pilot appeared TWICE in
+                # the lobby. Make re-selection of the SAME pilot on the SAME session idempotent:
+                # re-send the advancing responses (so the stuck client unsticks itself) but skip
+                # the one-time join broadcasts. First selection is unchanged.
+                _reselect = (getattr(s, 'current_pilot', None) == pname and not s.entered_game)
                 s.current_pilot = pname; s.current_slot = slot
-                log('POST-AUTH',f'Pilot selected: "{pname}" slot={slot}')
+                log('POST-AUTH', f'Pilot {"re-" if _reselect else ""}selected: "{pname}" slot={slot}')
                 if _enforce_ban_on_select(s, pname): return
-                push_myrights(s, '(pilot select)')   # v301: moderator grant, no-op for normal pilots
+                push_myrights(s, '(pilot re-select)' if _reselect else '(pilot select)')
                 # NOTE (v151): NO room auto-restore. The real client never auto-joins
                 # a room on reconnect - the player lands on the tabbed menu and only
                 # sees rooms when they open the Arenas tab (via the 0xcb list). The old
                 # restore + 0x92 echo made the client believe it owned/occupied a room
                 # and start 0x43 polling, which confounded every list test. The room
                 # still exists server-side (db_get_open_rooms) and appears in 0xcb.
-                broadcast_system(f'[{pname}] has joined the lobby')
-                broadcast_player_join(pname, exclude_sess=s)
+                if not _reselect:
+                    broadcast_system(f'[{pname}] has joined the lobby')
+                    broadcast_player_join(pname, exclude_sess=s)
                 threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
                 threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
             threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe4',to=5.0),daemon=True).start()
@@ -15763,12 +15773,39 @@ def _idle_session_reaper():
             victims = [x for x in list(sids.values())
                        if x.auth_done and not getattr(x, '_torn_down', False)
                        and now - getattr(x, 'last_rx', x.t0) > IDLE_REAP_S]
+            # v477f5 [DUPLICATE-ACCOUNT REAP]: enforce one-connection-per-account continuously,
+            # not only at SYN (_reap_stale_sessions). A high-latency client can get stuck
+            # pre-arena and keep RETRYING on its old session (so last_rx stays fresh and the
+            # idle test above never catches it) while the player force-quits and reconnects on a
+            # NEW session - Taurus@HQ 15:27-15:31 showed both alive for ~4 min ('appeared
+            # twice'). When two live authed sessions share an account, the one with the older t0
+            # is the ghost: reap it. The newest connection is always the real one (a reconnect
+            # supersedes). Never reaps a lone session - only true duplicates.
+            by_acct = {}
+            for x in sids.values():
+                if x.auth_done and x.account and not getattr(x, '_torn_down', False):
+                    by_acct.setdefault(x.account, []).append(x)
+            dupes = []
+            for acct, xs in by_acct.items():
+                if len(xs) > 1:
+                    xs.sort(key=lambda z: z.t0)          # oldest first
+                    dupes.extend(xs[:-1])                 # keep the newest, reap the rest
+            _dupset = set(id(d) for d in dupes)
+            for d in dupes:
+                if d not in victims:
+                    victims.append(d)
         for x in victims:
             silent = now - getattr(x, 'last_rx', x.t0)
-            _teardown_session(x, why='(idle %.0fs - dead client)' % silent, tag='IDLE-REAP',
-                              msg='reaped idle session sid=%s account="%s" pilot=%s - no inbound for '
-                                  '%.0fs (ungraceful CTD, no reconnect)'
-                                  % (x.sid, x.account, getattr(x, 'current_pilot', None), silent))
+            if id(x) in _dupset:
+                _teardown_session(x, why='(superseded by newer connection)', tag='DUP-REAP',
+                                  msg='reaped duplicate session sid=%s account="%s" pilot=%s - a '
+                                      'newer connection for this account exists (one per account)'
+                                      % (x.sid, x.account, getattr(x, 'current_pilot', None)))
+            else:
+                _teardown_session(x, why='(idle %.0fs - dead client)' % silent, tag='IDLE-REAP',
+                                  msg='reaped idle session sid=%s account="%s" pilot=%s - no inbound for '
+                                      '%.0fs (ungraceful CTD, no reconnect)'
+                                      % (x.sid, x.account, getattr(x, 'current_pilot', None), silent))
 
 threading.Thread(target=_relay_send_loop, daemon=True, name='relay-send').start()  # v389f5: async telemetry-relay sendto
 threading.Thread(target=_perf_stats_loop, daemon=True, name='perf-stats').start()  # v399f5: load counters snapshot
