@@ -6621,6 +6621,7 @@ def send_unrel(s, payload, label=''):
         sock.sendto(_p, s.addr)
         _perf['tx'] += 1; _perf['txb'] += len(_p)   # v399f5
     except OSError: return False
+    _txseq(s, 'UNR', payload, label)   # v487f5: join-seq transcript
     log('TX/UNREL', f'dseq={seq} type=0x{payload[1]:02x} {label}')
     return True
 
@@ -6710,6 +6711,26 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         s._rec_dumped = False
         log('STALL-WATCH', f'{s.current_pilot}: ACK flow RESTORED (last kept send ACKed)')
 
+TXSEQ_WINDOW_S = 3.0   # v487f5: seconds after a spawn during which every send to that client is transcripted
+
+def _txseq(s, kind, payload, label=''):
+    # v487f5 [JOIN-SEQ TRANSCRIPT]: during the spawn/join window (armed at ServerConfirm), log the
+    # ORDERED stream of everything the server sends this client - kind (REL/UNR), msg type, size,
+    # and the first 24 head bytes - so the exact sequence AND content around the busy-join memory-
+    # corruption CTD is visible. GENERAL (all reliable + unreliable sends), not tied to one msg type.
+    try:
+        if time.time() >= s.__dict__.get('_txseq_until', 0):
+            return
+        _n = s.__dict__.get('_txseq_n', 0) + 1
+        s.__dict__['_txseq_n'] = _n
+        _t = payload[1] if len(payload) > 1 else 0
+        _th = '%02x' % _t
+        _head = bytes(payload[:24]).hex()
+        _pn = getattr(s, 'current_pilot', '?')
+        log('JOINSEQ', f'{_pn} #{_n} {kind} type=0x{_th} sz={len(payload)} {label} head={_head}')
+    except Exception:
+        pass
+
 def _rel_budget_cat(label):
     # v486f5 [RELIABLE-BUDGET MAP]: bucket a reliable send by its label so we can see WHICH
     # traffic eats the client's ~32-reliable array (the exit-to-HQ overrun wall). Cheap keyword
@@ -6783,6 +6804,7 @@ def send_rel(s, payload, label='', to=5.0):
         _wall = '  *** PAST ~32 WALL (exit-to-HQ overrun risk) ***' if _rtot >= 32 else ''
         _brk = ', '.join(f'{k}={v}' for k, v in sorted(_rt.items(), key=lambda kv: -kv[1]))
         log('RELBUDGET', f'{_pn} reliable total={_rtot}{_wall} :: {_brk}')
+    _txseq(s, 'REL', payload, label)   # v487f5: join-seq transcript
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
     _rec(s, 'S->C', 'RELTX',
@@ -11703,6 +11725,10 @@ def _fire_server_confirm(s, via='', ident=None):
                         f'peer(s) onto them (client GC-dropped peers during the descent)')
     s.spawn_time = time.time()       # v279: starts the auto-resupply spawn grace window
     s._left_world = False            # fresh spawn re-arms the exit/leave guard
+    # v487f5 [JOIN-SEQ TRANSCRIPT]: arm the transcript window - the next TXSEQ_WINDOW_S of sends to
+    # this client (the create/roster/ace/supply join burst) get logged in order via _txseq.
+    s.__dict__['_txseq_until'] = time.time() + TXSEQ_WINDOW_S
+    s.__dict__['_txseq_n'] = 0
     s.spawn_ident_next = ident + 1   # keep fallback counter in lock-step with the client
     log('CONFIRM5', f'out 4 spawn{via} -> ServerConfirm Number={number} ident={ident} ({_isrc})')
     threading.Thread(target=lambda nn=number, ii=ident: send_reply(

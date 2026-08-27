@@ -76,6 +76,30 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v487f5 [DIAG - GENERAL JOIN-SEQ TRANSCRIPT (busy-join memory-corruption CTD)] The
+      join CTD is confirmed a memory-STACK corruption, not a logic bug: the client's
+      persisted 'last aircraft + loadout' (a separate allocation from any NetPlane)
+      comes back CHANGED after a crash join, so the overflow smears across client
+      memory - taking out both a peer NetPlane vtable (jump to garbage: 0xC17CE5 =
+      undefined 00-bytes region messages42; 0x5F524544 = ASCII 'DER_' messages43;
+      cf. original 0x5F52454A 'JER_') AND the menu state. Intermittent (42 CTD, 43 CTD,
+      44 lost-conn, 45 clean), plane-INDEPENDENT (different aircraft both crashed) -> a
+      RACE in the busy peer-create burst, NOT v485f5's telemetry race (that held:
+      CREATE-first OK on every peer). Corruptor unknown - do NOT assume ACE88.
+      * ADDED (read-only, GENERAL - not msg-type specific): _txseq join transcript. A
+        window is armed at each ServerConfirm/spawn (TXSEQ_WINDOW_S=3.0s); during it
+        EVERY send to that client - reliable (send_rel) and unreliable (send_unrel) -
+        is logged in order as 'JOINSEQ <pilot> #N <REL/UNR> type=0xNN sz=B <label>
+        head=<first 24 bytes hex>'. Shows the exact ORDER and the CONTENT (head bytes)
+        of the create/roster/ace/supply burst so the overflowing/oversized message and
+        its mis-ordering self-identify on the next crash join. Telemetry relay excluded
+        (fixed-size frames, and held 0.5s by v485f5 anyway).
+      NEXT: reproduce a crash join, pull JOINSEQ for the joiner, look for an oversized/
+        malformed message or an out-of-order reference (side-msg before its create), and
+        cross-check against FA.exe's expected spawn/despawn message order. (FA.exe RE
+        note: Ghidra analysis of FA.exe is register-level - thiscall args unresolved -
+        so the empirical JOINSEQ transcript is the more reliable way to establish order.)
+
 v486f5 [DIAG - RELIABLE-BUDGET MAP (exit-to-HQ ~32 CTD)] History (chat 9e9c3337,
       2026-06-28) + tonight's run_204610 confirm the exit-to-HQ CTD is the known client
       ~32-reliable-packet callback-array overrun (vcncNet .data 0x1002042c): the array
