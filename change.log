@@ -76,6 +76,196 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v492f5 [GAME - LANDED-TAB FLAG WIPE FIX (Taurus session-46: silent repair denial +
+      'lost all other players')] Field report cross-analysis (Taurus messages46/47 -
+      SAME evening, back-to-back sessions - + online run_20260827_130422): msg-119
+      has ONE wire form after all ([5]=ctr, [7]=flags, retry flag 0x04 CONFIRMED on
+      the wire); the client sends it both at engine-off AND as the airfield-
+      acceptance ask ~30ms after an SP grant in the landed-TAB flow ('You are
+      accepted to this airfield'). ROOT CAUSE of session 46: the FLY23 StartPlace
+      grant cleared obj_confirmed+flying UNCONDITIONALLY (assuming a new out-4
+      always follows). In the land-and-rearm flow no out-4 follows -> the pilot's
+      session stayed not-in-world for the REST OF THE FLIGHT: (1) every msg-119
+      died on the entered_game/obj_confirmed guard (server capture: 19:28:10.568
+      msg-23 flying=True -> .648 msg-119 flying=False; retry at 19:31:30 fl=04;
+      Starfighter hit it too at 19:30:30), (2) the pilot dropped out of every
+      RELAY RECIPIENT filter (telemetry + create fanouts gate on flying) while
+      deletes still arrived -> peers vanished from map and air. Session 47 (fresh
+      login, no landed-TABs before asks) was 9-for-9 grants in <70ms - same code.
+      * FIX: clear the flags at the SP grant only for non-flying claimants (post-
+        death respawn path, unchanged). A FLYING claimant keeps its world flags and
+        gets sp_regrant_pending, popped inside _fire_server_confirm at the next
+        out-4 - so the plane-change flow still re-arms ServerConfirm, and the
+        rearm-only flow keeps repairs AND relays alive.
+      DEPLOY: the online box (pre-v488) urgently wants v488..v492 together - this
+      fix + the 119 disposition logging + FIN-ACK + persona recording.
+
+v491f5 [LOBBY - SERVER-SIDE PERSONA: the wrong-aircraft/toggling FIX] Full RE chain
+      (FA.exe, dispatch table 0xc81ed8 registered in FUN_004f1490): id 228/0xe4 reply
+      handler = FUN_004ee120 (was undefined code - function created at 004ee120):
+      reply layout [4]=0xe4 [5]=status [6:10]=u32 LE -> stored to DAT_00cb06dc;
+      FUN_004f88f0 (VNET::JoinToGameAnswerCB, id 201) passes DAT_00cb06dc as the 5th
+      arg of local-player creation at EVERY game join (offline path passes -1); the
+      Zak1_dlg ('order' dialog) selection writes the same global (list item +0xc).
+      So: selection survives arena re-entries (in-memory global) but the client asks
+      with a ZERO skeleton at pilot-select and our blind echo returned zeros -> the
+      global reset every reconnect -> the toggling. The 2009 server returned the u32
+      FILLED (the persona channel). Also ruled out: 225/0xe1 pilot-list reply
+      (FUN_004eee80) parses NUL-terminated names only - no persona there; the client
+      out-228 upload is name+zeros (nothing to store from it); pilots.cnf never
+      created locally (nothing to cache without server data); Configs422.cnf = global
+      config only (names/input/video/keymaps, written as a raw memory dump full of
+      uninitialized-buffer bleed - old log fragments, dev-era E:\FA paths).
+      * FIX: personas.json store {account:{pilot:{plane:N}}} - recorded at every
+        out-4 spawn (byte[8], where PLANE already logs) and injected into the 0xe4
+        echo u32 (offset [6:10] LE) ONLY when the client's copy is zeros (client-
+        supplied value always wins; negatives client-clamped to 0 = safe). Logged as
+        PERSONA. Open q: id-space of the u32 (plane index vs Zak1 row) - one login
+        answers it; if the menu preselects a shifted plane, adjust the mapping.
+      VERIFY: fly plane A, quit fully, relaunch, login: PERSONA 'restored selection
+      id' in the server log and plane A preselected in the menu. personas.json
+      appears next to server.py after the first spawn.
+      v491f5b TESTED (run_215916): pipeline PROVEN end-to-end - spawn plane 6
+      recorded, second login injected 'restored selection id 6' - but the menu plane
+      did NOT change => DAT_00cb06dc is NOT the menu plane. Best hypothesis now:
+      it is the SQUADRON id (build_client_record rec[1:3]=squadron u16; AC2E_ squad
+      tags; a lobby-list selection attached to the player at join = squad membership;
+      player object stores it at +0x28). Injection DISABLED (PERSONA_E4_INJECT=False
+      inline), persona RECORDING kept. NEXT RE: trace the true selected-plane
+      variable - find the client's out-4 spawn-request builder and the source global
+      of byte[8]; its writers reveal the real restore channel (or prove the menu
+      preselect is UI-only, leaving the 2009 206'4949 lobby blob as the remaining
+      persona-channel candidate).
+
+v490f5 [NETWORK - TRANSPORT FIN-ACK: clean disconnect handshake (10s exit hang +
+      dirty-close fix)] ROOT CAUSE of 'the game isn't really disconnecting correctly',
+      found by RE of vcncNet.dll (loaded in Ghidra) + the client's own vcncnet logs:
+      the close is TWO layers. (1) APP layer: vcncDisconnect sends the cmd=2 request
+      (reliable, 4B pl=00000002) and requires a reply whose command field == 100
+      (0x64) - v386f5's reply is CORRECT and the client consumes it. (2) TRANSPORT
+      layer: the DLL then enters WaitForClose (FUN_10003e89), sends an 8-byte FIN
+      control frame - [session-id u16 BE][flags u16 BE 0x0800 = type 4][dword 0] -
+      and ONLY a received frame with the FIN flag (input dispatch FUN_100032da,
+      state-4 branch -> FUN_10004170 -> 'Network connection closed.') ends the wait.
+      We never sent one -> 'Resend FIN packet.' at +5s/+10s -> 10-SECOND HANG on
+      EVERY exit -> forced dirty teardown ('~DLIS not empty, N elements remains' in
+      every modern client log; the 2009 service closed properly - messages04 ends
+      SUSPEND/RESUME + clean). Downstream of the dirty close: the client's clean-
+      shutdown state-commit never runs -> the saved 'last aircraft + loadout' comes
+      back STALE/out-of-order on reconnect (the wrong-aircraft reports; selection
+      survives arena re-entries within a connection, scrambles across reconnects).
+      * FIX: stateless FIN-ACK in the raw RX loop - an 8B datagram with wire byte2 ==
+        0x08 (pure FIN) is answered by mirroring the client's id back with the FIN
+        flag: data[:2] + 08 00 00 00 00 00. Stateless because the FIN arrives ~400ms
+        after cmd=2 already tore the session down; idempotent per retransmit. Logged
+        as FINACK. App-layer cmd=2/cmd=5 handling unchanged.
+      * RE BONUS (banked): sending a FIN-flagged frame TO a connected client makes it
+        FIN back twice and close cleanly (state-2 branch) = a graceful server-side
+        KICK primitive for the future. Wire spec: flags u16 = (type<<9)|(size&0x1ff);
+        types seen: 8=SYN, 4=FIN, 1=ACK-class; SYNACK id adopted from reply offset 10.
+      VERIFY: vcncnet log shows 'Network connection closed.' (no Resend FIN) within
+      ~1s of quitting; messagesXX ends with NO '~DLIS not empty'; then the real test -
+      fly a plane, quit fully, reconnect: the SAME plane should be selected. Also
+      expect faster relaunch loops (no 10s zombie socket).
+      TESTED: transport close CONFIRMED CLEAN (vcncnet 20260827181347: FIN sent ->
+      FIN-ACK received same millisecond -> 'Network connection closed!' -> no resends,
+      ~2s total vs 10s). REMAINING: '~DLIS not empty' (3 elements) persists and the
+      aircraft toggling persists -> the dirt is the APP/LOBBY layer, not transport.
+      LOGIN-PHASE DIFF (2009 messages04 = bigalon's own live-service log, vs modern):
+      the 2009 lobby answered RICH data where we send stubs - in 206'4949 (LARGE-
+      chunked via in 1'1452 xN), 202'3350, 203'1374, 210'1110, 225'36 - and the
+      client UPLOADS a 38-byte blob at login (out 228'38) that the 2009 server echoed
+      back symmetric (in 228'38). That symmetric 228 exchange is the prime candidate
+      for PERSONA persistence (hangar/last plane/loadout): within a connection the
+      selection is in-memory; across connections the 2009 client got it FROM the
+      server - we never send it -> stale/out-of-order local fallback = the toggling.
+      * PROTO_WATCH gate change: entered_game condition REMOVED (login-time lobby 2xx
+        now captured; pilot-name fallback to account/?). EXPERIMENT: two logins with
+        different selected planes -> diff out-228 (and out-225) hex; if a byte tracks
+        the plane -> implement store-per-account + echo-at-login (no field decode
+        needed initially). SUSPEND/RESUME close choreography still banked (likely the
+        ~DLIS cleanup); VCNCMD system-command numbers findable in vcncNet.dll SYSTEM
+        dispatch when we take it up.
+
+v489f5 [DIAG - PROTO-WATCH (parked-toggle protocol-mapping test)] Wires the empirical
+      mapping experiment for the v488f5 unmapped-outbound list. _ingame_msg_instrument
+      now hosts an un-gated capture: any inbound sub in PROTO_WATCH_SUBS {14, 31, 32,
+      33, 65, 67, 68, 76, 77, 84, 96, 102, 125, 200, 203, 206, 210, 212, 213, 220,
+      222, 224, 225, 228} from an in-arena client logs 'PROTOWATCH <pilot> out-msg N
+      (0xNN) len=B pl=<full hex>'. TEST PROTOCOL: park on a runway, then ONE action at
+      a time with a few seconds between - engine off, engine on, wheel brakes, canopy,
+      flaps, gear, lights, padlock/view - and each action's message self-identifies in
+      the log with its payload. Excluded as known/chatty: 20 (parachuter), 24/25/26/
+      28/34/57 (flight-rate), 69/71 (map-screen queries - v488f5 correction). Toggle
+      PROTO_WATCH=False (or trim the set) once mapped. List also banked to memory for
+      the later Ghidra pass (emitter RE of whichever msg maps to engine-off/ground).
+      TEST RESULTS (run_20260827_172343, local, solo TC room 49): ANSWERED. There is
+      no separate ground-state message - msg-119 (0x77) itself IS the ENGINE-OFF
+      signal: fired at engine-off parked (17:25:21, movement=0) AND at engine-off
+      while still ROLLING (17:26:04, movement=167392, granted via the xz guard).
+      Brakes on/off emit NOTHING. msg 68 = the mapped team/camp change (remove from
+      the unmapped list); 32/65/67/84/96/102 fire at join/screen transitions, not
+      toggles. EXPLAINS the Shadow FFA report: engine-running landings never ask, and
+      air-start suppresses the poll -> engine-off is the ONLY trigger there; Taurus/
+      Spun cut engines, Shadow sometimes did not. Community guidance: 'cut engine to
+      rearm' (period-authentic). OPEN: does engine-off AT ALTITUDE (gliding) also
+      emit 119? If yes the xz airborne guard is LOAD-BEARING (keep forever); micro-
+      test pending. -> RESOLVED (run_20260827_173348, flight test: ground spawn,
+      takeoff, ENGINE KILL AT ALTITUDE, restart, crashland exit=0x22 plane-swap,
+      respawn): ZERO msg-119 in the whole flight - the client gates the ask on being
+      AT A FIELD, not merely engine-off, so a legitimate client can never emit a
+      mid-air 119. The xz airborne guard is PURE SPOOF-ARMOR (never fires on legit
+      traffic post-v484f5) - keep as free defence-in-depth; retiring it is also safe.
+      NEW: wrong-aircraft phenomenon CONFIRMED in clean solo sessions (no CTD, no
+      busy join): test1 spawned plane 23 (= the previous evening's join-CTD session
+      plane), test2 plane 21 (= the FFA Spitfire) - both from the client's OWN out-4
+      byte[8], restoring STALE selections out of order. So baseline wrong-plane is
+      NOT (only) memory corruption - likely client-local persistence keyed per-
+      context (nation/arena/airfield?). SP grant (msg-23 [AF][mid][N]) carries NO
+      plane - server injection ruled out there. Watch crumbs: msg-84 (12B) fires
+      immediately BEFORE every out-4 spawn (pre-spawn config/loadout report; near-
+      constant within a session, differs across) - prime RE target for the plane-
+      selection question; msg-67 21B form = identical login/logout state blob; no
+      2xx 'save persona' at solo exit (2xx family = online/lobby only so far).
+      NEXT (wrong-plane): controlled test - fly plane A, exit, rejoin SAME nation/
+      arena (restores A?), then rejoin DIFFERENT nation/arena (restores what?).
+      ALSO: 119 byte7 observed 0x1e (not the documented 00/04) - the
+      v488f5 retry-tag offsets need recalibration. BONUS: exit-to-HQ at reliable
+      total=34 (past ~32), solo, parked, triple-resupplied -> NO CTD - more evidence
+      the exit CTD needs the busy/peer ingredient, not resupply+exit alone.
+
+v488f5 [DIAG - MSG-119 DISPOSITION (Shadow FFA missed-repairs) + 2009 PROTOCOL DIG]
+      Protocol sanity check settled (code + field log): the CLIENT is the initiator -
+      every msg-60 in the FFA log is a reply to out 59 (spawn ask) or out 119 (repair
+      ask); zero unsolicited grants. The server-side ground-stop poll is a fallback
+      only (and suppressed in air-start rooms). The spawn grant MUST stay reliable +
+      unguarded (client blocks on it; airborne BY DESIGN in air-start); the 119 path's
+      xz guard is anti-spoof armor only - retire/keep decision deferred to data.
+      * ADDED (read-only): 119 disposition logging. EVERY inbound 119 now logs
+        'msg-119 arrived ctr=N fl=N' (byte7==0x04 tagged '*** RETRY - previous ask
+        went unanswered ***' - the client's own evidence of a lost/ignored ask), and
+        every silent drop now speaks: AUTO_RESUPPLY-off, state guard (entered_game/
+        obj_confirmed), no-room/no-object, and the DEBOUNCE (logs seconds-since-grant).
+        With the existing deferred/refused/granted logs, no 119 can vanish silently.
+        Next busy session answers Shadow's '5-6 players, no repair each landing'.
+      * 2009 ARCHAEOLOGY (C:\games\FA\messages01-04.log, live-service captures):
+        messages01/02 = lobby-only. messages04 (full in-game, Korea, 2009-05-16):
+        NO out 119 in the whole session (but the local pilot crashed/respawned every
+        sortie - never landed-repaired - so not proof the 2009 client lacked 0x77);
+        constant 'Repair PlnID' broadcasts = peers repairing (a peer-repair NOTIFY
+        our server does not yet send). out 69/71 present in 2009 and modern logs -
+        initially looked like a ground-state report (fires post-spawn/post-landing/
+        TAB, never in flight) but they are ALREADY MAPPED: the map-screen scene
+        supply/production queries (v294/v437f5) - players open the map at those
+        moments. NOT a ground-state message.
+      * UNMAPPED OUTBOUND CANDIDATES for an 'on-ground/stationary/engine-off' state
+        report (modern FFA inventory): the 1-byte toggles out 65'1, 67'1, 77'1,
+        102'1, 96'1 + small forms out 68'3, 84'8, 14, 31, 32, 76 and the 2xx family.
+        Right SIZE for engine/brake/state toggles. NEXT: controlled mapping test -
+        park, toggle engine off/on, brakes, canopy etc. one action at a time while a
+        watch-capture logs which msg fires (extend _ingame_msg_instrument's watch
+        set); then Ghidra the identified emitter for the exact state bits.
+
 v487f5 [DIAG - GENERAL JOIN-SEQ TRANSCRIPT (busy-join memory-corruption CTD)] The
       join CTD is confirmed a memory-STACK corruption, not a logic bug: the client's
       persisted 'last aircraft + loadout' (a separate allocation from any NetPlane)

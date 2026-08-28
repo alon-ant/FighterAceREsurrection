@@ -6711,6 +6711,37 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         s._rec_dumped = False
         log('STALL-WATCH', f'{s.current_pilot}: ACK flow RESTORED (last kept send ACKed)')
 
+# v491f5 [PERSONA STORE - server-side pilot persistence] The 2009 service persisted each
+# pilot's selection (the Zak1/'order' dialog u32) and returned it in the 0xe4 pilot-select
+# reply; personas.json is the thin reconstruction: {account: {pilot: {'plane': N}}},
+# recorded at every out-4 spawn (byte[8]) and injected into the 0xe4 echo. Load-once at
+# boot; saves are rare (once per spawn) and serialized by a lock.
+import json as _pjson
+_PERSONA_FILE = 'personas.json'
+_persona_lock = threading.Lock()
+def _persona_load():
+    try:
+        with open(_PERSONA_FILE, 'r', encoding='utf-8') as f:
+            return _pjson.load(f)
+    except Exception:
+        return {}
+_personas = _persona_load()
+def _persona_get_plane(account, pilot):
+    try:
+        return _personas.get(account or '', {}).get(pilot or '', {}).get('plane')
+    except Exception:
+        return None
+def _persona_set_plane(account, pilot, plane):
+    if not account or not pilot:
+        return
+    try:
+        with _persona_lock:
+            _personas.setdefault(account, {}).setdefault(pilot, {})['plane'] = int(plane)
+            with open(_PERSONA_FILE, 'w', encoding='utf-8') as f:
+                _pjson.dump(_personas, f, indent=1, sort_keys=True)
+    except Exception as e:
+        log('PERSONA', f'persona save failed: {e}')
+
 TXSEQ_WINDOW_S = 3.0   # v487f5: seconds after a spawn during which every send to that client is transcripted
 
 def _txseq(s, kind, payload, label=''):
@@ -9872,7 +9903,24 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     # session-elapsed (~290-327s in messages60) = the SAME 'CRAP backward NET Time' freeze, just
     # caused by the reset instead of the 262s wrap. The NET-time counter must be strictly monotonic
     # for the life of the connection; see build_beacon/tsync for the real (non-resetting) fix.
-    s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
+    # v492f5 [TAURUS SESSION-46 FIX - the landed-TAB flag wipe]: this clear used to run
+    # UNCONDITIONALLY, assuming every StartPlace grant precedes a new spawn (out-4). That
+    # is FALSE for the classic land-and-rearm flow: a LANDED, ALIVE pilot TABs to claim a
+    # field SP and keeps flying the SAME plane - no out-4 follows, so flying/obj_confirmed
+    # stayed False for the rest of the flight. Consequences (run_20260827_130422, Taurus
+    # 19:28:10.568 msg-23 flying=True -> .648 msg-119 flying=False): (1) the airfield-
+    # acceptance msg-119 that follows the grant by ~80ms died on the 119 state guard -
+    # and every later ask + retry (fl=0x04 captured) - 'landed, no repairs, changed
+    # airfields, still no repair'; (2) the pilot vanished as a RELAY RECIPIENT (telemetry
+    # fanout + create fanouts all filter recipients on flying) while deletes still
+    # arrived -> 'lost all other players on the map and in the air'. Post-death respawns
+    # are unchanged (death already cleared flying, so the clear still runs); a FLYING
+    # claimant instead gets sp_regrant_pending, popped by _fire_server_confirm at the
+    # next out-4 (the plane-change flow still re-arms ServerConfirm correctly).
+    if not getattr(s, 'flying', False):
+        s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
+    else:
+        s.sp_regrant_pending = True   # alive landed-TAB: keep world flags; defer to next out-4
     # v416f5: mark the grant->ServerConfirm window. Between this grant and CONFIRM5 the client
     # is REBUILDING ITS WORLD (terrain load + the 82% WaitingForStartPlaceList screen) and has
     # not yet inserted its player, so scoreboard pushes about players it may not have built
@@ -11625,6 +11673,12 @@ def _fire_server_confirm(s, via='', ident=None):
     client's out-4 full-state, which arrives DIRECT (msg-id @ pl[4]) on the first spawn
     and FA type-scan DOUBLE-WRAPPED (msg-id @ pl[8]) on a re-spawn (airfield change) -
     both must reach here or the re-spawned plane stays cold (engine won't start)."""
+    if s.__dict__.pop('sp_regrant_pending', False):
+        # v492f5: a FLYING pilot claimed a StartPlace (landed-TAB) and then DID re-plane -
+        # this out-4 is the new spawn. Clear the world flags NOW so the gate below re-arms
+        # ServerConfirm for the new plane. In the land-and-rearm flow (no out-4 follows)
+        # this pop never runs and the pilot keeps flying/obj_confirmed uninterrupted.
+        s.obj_confirmed = False; s.flying = False
     if not (SERVERCONFIRM_READY and not s.obj_confirmed):
         return
     _isrc = 'from out-4'             # v198: the client's registration ident is IN its out-4
@@ -12038,10 +12092,32 @@ def _msg20_instrument(s, variant, channel, text, pl):
 # 0x1e=30 (tiny per-object state, the deploy candidate), 0x48=72, 0x49=73, 0x14=20 (roster).
 PARA_WATCH_TYPES = {0x1e, 0x48, 0x49, 0x14, 0x1f, 0x28}
 
+# v489f5 [PROTO-WATCH]: empirical protocol mapping for the UNMAPPED outbound messages
+# (the change.log v488f5 candidate list). The parked-toggle test: park on a runway and
+# perform ONE action at a time - engine off, engine on, brakes, canopy, flaps, gear,
+# lights, view/padlock - while this logs every watched message with FULL hex, so each
+# action maps to its message number empirically BEFORE any Ghidra work. Set False (or
+# trim the set) once mapped. msg 20 (parachuter) and the high-rate flight msgs
+# (24/25/26/28/34/57) are excluded - already mapped or too chatty to be state toggles.
+PROTO_WATCH = True
+PROTO_WATCH_SUBS = {14, 31, 32, 33, 65, 67, 68, 76, 77, 84, 96, 102,
+                    125, 200, 203, 206, 210, 212, 213, 220, 222, 224, 225, 228}
+
 def _ingame_msg_instrument(s, sub, pl):
     """v258: while a bail is in progress (parachuter alive), dump the FULL bytes of any watched
     in-game message type, so we can find the one that carries the parachuter descent + deploy state.
-    Only fires when this pilot has an active parachuter, to keep the log focused."""
+    Only fires when this pilot has an active parachuter, to keep the log focused.
+    v489f5: also hosts the PROTO-WATCH capture (un-gated by the parachuter) - see above."""
+    if PROTO_WATCH and sub in PROTO_WATCH_SUBS:
+        # v490f5: entered_game gate REMOVED - the lobby 2xx exchanges fire at LOGIN (before any
+        # arena), and the 2009-vs-modern diff shows they are the rich persona/lobby data channel
+        # (2009: in 206'4949, 202'3350, 203'1374, 225'36, 228'38 echo vs our stubs). The out-228
+        # 38-byte login upload is the prime candidate for the client's persisted hangar/last-
+        # plane blob - capture it so two logins with different planes can be diffed byte-by-byte.
+        _b = bytes(pl)
+        _sx = '%02x' % sub
+        _pw_pn = getattr(s, 'current_pilot', None) or getattr(s, 'account', None) or '?'
+        log('PROTOWATCH', f'{_pw_pn} out-msg {sub} (0x{_sx}) len={len(_b)} pl={hx(_b)}')
     if not MSG20_INSTRUMENT or getattr(s, 'para_obj_number', None) is None:
         return
     if sub not in PARA_WATCH_TYPES:
@@ -13640,11 +13716,28 @@ def _handle_repair_request_119(s, pl):
     cannot trigger a mid-air rearm (which rebuilds the plane object and freezes the client - the
     hazard v277 chased). The ground-stop background poll stays as a FALLBACK for any client that
     does not ask; one-shot + debounce are shared with it so the two paths cannot double-grant."""
+    # v488f5 [119-DISPOSITION]: every inbound 119 logs its arrival AND its fate - a request
+    # can no longer vanish silently. byte5 = the client's request counter (nonce); byte7 =
+    # 0x04 on the client's own unanswered-retry, so a RETRY arriving is direct evidence the
+    # previous ask went unanswered (lost uplink, or one of the drops below). The Shadow FFA
+    # report ('with 5-6 players it did not repair each damaged landing') is what this pins.
+    _ctr = pl[5] if len(pl) > 5 else -1
+    _rfl = pl[7] if len(pl) > 7 else -1
+    _rtag = ' *** RETRY - previous ask went unanswered ***' if _rfl == 4 else ''
+    log('RESUPPLY', f'{s.current_pilot} msg-119 arrived ctr={_ctr} fl={_rfl}{_rtag}')
     if not AUTO_RESUPPLY:
+        log('RESUPPLY', f'{s.current_pilot} msg-119 DROPPED - AUTO_RESUPPLY disabled')
         return
     if not getattr(s, 'entered_game', False) or not getattr(s, 'obj_confirmed', False):
+        _eg = getattr(s, 'entered_game', False)
+        _oc = getattr(s, 'obj_confirmed', False)
+        log('RESUPPLY', f'{s.current_pilot} msg-119 DROPPED - state guard '
+                        f'(entered_game={_eg} obj_confirmed={_oc})')
         return
     if s.current_room is None or getattr(s, 'my_obj_number', None) is None:
+        _mo = getattr(s, 'my_obj_number', None)
+        log('RESUPPLY', f'{s.current_pilot} msg-119 DROPPED - no room/object '
+                        f'(room={s.current_room} obj={_mo})')
         return
     now = time.time()
     # SPAWN GRACE: a just-spawned plane is still being built client-side; repairing mid-build
@@ -13719,7 +13812,12 @@ def _handle_repair_request_119(s, pl):
     # (respawn = fresh latch). Each deliberate ask now gets service; the short debounce
     # coalesces bursts (the client sometimes re-asks ~0.1s after a grant), and the latch is
     # still SET below so the background POLL cannot double-grant on top of a 119 service.
-    if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
+    _since = now - getattr(s, 'last_resupply_at', 0.0)
+    if _since < AUTO_RESUPPLY_DEBOUNCE:
+        # v488f5: the burst-coalescing debounce now logs what it eats. A ~0.1s echo right
+        # after a grant is expected; a legit re-ask landing here is a real missed repair.
+        log('RESUPPLY', f'{s.current_pilot} msg-119 DEBOUNCED - {round(_since, 2)}s since '
+                        f'last grant (< {AUTO_RESUPPLY_DEBOUNCE}s burst window)')
         return
     _pos = None
     try:
@@ -14555,6 +14653,8 @@ def handle_post_auth(s, cmd, pl):
                 if len(pl) >= 9:
                     s.plane_type = pl[8]
                     log('PLANE', f'{s.current_pilot} selected plane index {pl[8]} (out-4 byte[8])')
+                    # v491f5: record the pilot's last-flown plane for the 0xe4 persona restore
+                    _persona_set_plane(getattr(s, 'account', None), s.current_pilot, pl[8])
                 _fire_server_confirm(s, ident=_ident)   # DIRECT out-4; double-wrapped variant caught earlier
                 return
             return
@@ -14868,7 +14968,35 @@ def handle_post_auth(s, cmd, pl):
                     broadcast_player_join(pname, exclude_sess=s)
                 threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
                 threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
-            threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe4',to=5.0),daemon=True).start()
+            # v491f5 [PERSONA RESTORE - the wrong-aircraft/toggling fix] RE (FA.exe
+            # FUN_004ee120 reply handler + FUN_004f88f0 VNET::JoinToGameAnswerCB): the 0xe4
+            # reply layout is [4]=0xe4 [5]=status [6:10]=u32 LE selection id. The client
+            # stores that u32 in global DAT_00cb06dc and passes it as the 5th arg of local-
+            # player creation at every game join; the Zak1 ('order') dialog selection writes
+            # the SAME global (list item field +0xc) - which is exactly why the selection
+            # survives arena re-entries in one connection but died at reconnect: the client
+            # sends this u32 as ZEROS (skeleton) and we echoed the zeros back, while the
+            # 2009 server returned it FILLED (the persona channel; cf. in 228'38 echoes in
+            # messages04). Patch the echoed skeleton with the pilot's persisted last-flown
+            # plane (personas.json, recorded at every out-4 spawn). Fill ONLY when the
+            # client's copy is zero so a client-supplied value always wins; negatives are
+            # client-clamped to 0, so any stored value is safe.
+            _resp_e4 = bytearray(stored)
+            _pp = _persona_get_plane(getattr(s, 'account', None), pname)
+            # v491f5b: injection DISABLED pending field identification - the u32 restored fine
+            # (delivery proven, run_215916 22:02:09) but the menu plane did NOT change, and the
+            # evidence (build_client_record rec[1:3]=squadron; AC2E_ squad tags; a lobby-list
+            # selection attached to the player at join) says DAT_00cb06dc is most likely the
+            # SQUADRON id, not the plane. Keep recording personas; re-enable when the real
+            # menu-plane variable is traced (next RE: the out-4 byte[8] source global).
+            PERSONA_E4_INJECT = False
+            if (PERSONA_E4_INJECT and _pp is not None and len(_resp_e4) >= 10 and _resp_e4[4] == 0xe4
+                    and _resp_e4[6:10] == b'\x00\x00\x00\x00'):
+                struct.pack_into('<I', _resp_e4, 6, int(_pp) & 0xffffffff)
+                log('PERSONA', f'{pname} pilot-select reply: restored selection id {_pp} '
+                               f'into the 0xe4 u32 (was zeros)')
+            _resp_e4 = bytes(_resp_e4)
+            threading.Thread(target=lambda:send_rel(s,_resp_e4,'<- echo 0xe4 (+persona)',to=5.0),daemon=True).start()
             return
 
         if tb == 0x01:
@@ -15490,6 +15618,14 @@ def handle_post_auth(s, cmd, pl):
         if len(pl) >= 15:
             inner_sub = pl[8] if len(pl)>8 else 0
             if inner_sub == 0xe4:
+                # v490f5 [PERSONA-WATCH]: this 0xe4 pilot-select compound IS the client's
+                # out-228'38 persona record. The 2009 server replied with the STORED record
+                # (the persistence channel); we blind-echo the client's own transient copy
+                # below, which is why nothing - including the selected plane - survives a
+                # reconnect. Log the full hex so two logins with different planes locate
+                # the plane field; then the fix is store-per-pilot + reply-with-stored.
+                _pn_e4 = getattr(s, 'current_pilot', None) or getattr(s, 'account', None) or '?'
+                log('PERSONA', f'{_pn_e4} pilot-select 0xe4 ({len(pl)}B): {hx(bytes(pl))}')
                 sb14 = pl[14] if len(pl)>14 else 0
                 if sb14 < 0x20: pname = pl[15:].split(b'\x00')[0].decode('ascii','replace')
                 else:             pname = pl[14:].split(b'\x00')[0].decode('ascii','replace')
@@ -16106,6 +16242,25 @@ while running:
     if sz==912 and pt==0:
         threading.Thread(target=_guarded, args=(handle_syn, data, addr), daemon=True).start()
     elif sz==8 and data[2]==2: _guarded(on_pkt, data, addr)
+    elif sz==8 and data[2]==0x08 and data[3]==0x00:
+        # v490f5 [TRANSPORT FIN-ACK - the 10s exit hang / dirty-close fix] vcncNet's close
+        # handshake (RE: FUN_10003e89 'WaitForClose' + input dispatch FUN_100032da, vcncNet.dll):
+        # on vcncDisconnect the client sends an 8-byte control frame - [session-id u16 BE]
+        # [flags u16 BE = 0x0800 (type 4 = FIN)] [dword 0] - enters WaitForClose and accepts
+        # ONLY a frame carrying the FIN flag (wire byte2 = 0x08) from our addr as the close
+        # ack (state-4 branch -> FUN_10004170 -> 'Network connection closed.'). Our v386f5
+        # reply was an app-layer reliable 0x64 - correct for the cmd=2/cmd=5 APP exchange but
+        # invisible to WaitForClose - so every disconnect resent the FIN at +5s/+10s and
+        # force-closed dirty after 10s (client '~DLIS not empty' leftovers; the clean-
+        # shutdown state-commit never ran -> stale plane/loadout restored on reconnect).
+        # This ack is STATELESS by design: the FIN arrives ~400ms AFTER the app-level cmd=2
+        # already tore the session down, so we mirror the client's own id back with the FIN
+        # flag set. Idempotent - each FIN retransmit just earns another ack. (RE bonus, for
+        # later: sending a FIN-flagged frame TO a connected client makes it FIN back twice
+        # and close cleanly - the state-2 branch - i.e. a graceful server-initiated kick.)
+        try: sock.sendto(data[:2] + b'\x08\x00\x00\x00\x00\x00', addr)
+        except OSError: pass
+        log('FINACK', f'transport FIN from {addr[0]}:{addr[1]} id={hx(data[:2])} -> FIN-ACK mirrored (clean close)')
     elif sz==8: _guarded(on_pkt, data, addr)
     elif pt==2: _guarded(on_pkt, data, addr)
     elif pt==0: _guarded(on_pkt, data, addr)
