@@ -320,6 +320,10 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
 STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+STATUS_RESUME_MAX_S = 10.0 # v493f5: a gap between STATUS sends larger than this means the keeper was
+                           # PAUSED (entered_game=False at HQ, or a mid-flight stall/sleep/alt-tab),
+                           # not a normal cadence tick. Crediting that whole gap as one base_incr lump
+                           # is what melts the client clock (see the resume re-anchor in the _hb loop).
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
                            # (v217 step 1) is confirmed stable - the RTT ring is finally bounded at 32
                            # (cfg[0x40] now correctly delivered at packet byte 88), so slot writes
@@ -10469,6 +10473,35 @@ def login(s):
                             if s._status_base_epoch is None:
                                 s._status_base_epoch = _now_st
                                 s._status_last = _now_st
+                            elif (_now_st - s._status_last) > STATUS_RESUME_MAX_S:
+                                # v493f5 [NET-TIME RUNAWAY / HQ-IDLE RESUME]: STATUS is gated on
+                                # entered_game, so an HQ stay (entered_game=False) FREEZES _status_last.
+                                # The first STATUS after a long HQ/idle gap would otherwise credit the
+                                # ENTIRE gap as one base_incr lump (Taurus 2026-08-28: 34 min at HQ ->
+                                # ~2.04M ms in a single packet on the 14:53 re-fly). With in-game NTP
+                                # samples ACCEPTED (v465/466), the client fits that offset step into its
+                                # drift-rate regression (RecalculateDriftRate) and its NET clock runs
+                                # away - the world clock galloped 13-30x real, so the flight model
+                                # integrated fast (plane streaks across the terrain) and the render loop
+                                # starved on catch-up sim steps (the low framerate reported). FIX: on a
+                                # resume gap >> cadence, re-anchor the keeper instead of crediting the
+                                # gap - _status_last/_ntp_epoch to now and _credited_ms to 0, so A
+                                # restarts near 0 coherent with a base that advances from here (the
+                                # connect-time model), and no multi-minute step ever reaches the client's
+                                # regression. Next tick then credits a normal ~2s interval. Also covers
+                                # mid-flight stalls (lag spike, sleep, alt-tab), not just HQ. Single-site;
+                                # reverts by deleting this elif. WATCH (live test): if the client keeps
+                                # NET high-order from base+A literally (v215) rather than its own wall
+                                # clock (v205), the un-credited gap may show as a brief backward-NET blip
+                                # on the first re-fly after a LONG idle instead of the runaway - if so,
+                                # fall back to the v459f5 settle-window in-game-sample reject.
+                                log('NETTIME', f'{s.current_pilot}: STATUS resume after '
+                                               f'{_now_st - s._status_last:.0f}s idle/HQ gap - '
+                                               f're-anchoring NET clock (was crediting the whole gap as '
+                                               f'one base lump -> client clock runaway)')
+                                s._status_last = _now_st
+                                s._ntp_epoch   = _now_st
+                                s._credited_ms = 0
                             if (_now_st - s._status_last) >= STATUS_INTERVAL_S:
                                 _incr_ms = int((_now_st - s._status_last) * 1000)
                                 s._status_last = _now_st

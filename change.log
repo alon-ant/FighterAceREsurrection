@@ -76,6 +76,36 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v493f5 [NETWORK - NET-TIME RUNAWAY on re-fly after a long lobby/idle stay (Taurus
+       "low framerate + plane flies super fast across the terrain", messages51 /
+       online run_20260828_121752)] ROOT CAUSE: the v215 STATUS time-keeper computes
+       base_incr = wall-ms since the last STATUS, but the whole STATUS block is gated
+       on entered_game, and handle_leave_arena clears it (back-to-lobby). So a long
+       stay on the arena-list FREEZES _status_last; the first STATUS on the eventual
+       re-fly credits the ENTIRE idle gap as one base_incr lump (Taurus: 34 min idle
+       -> ~2.04M ms in a single packet). With in-game NTP samples accepted (v465/466),
+       the client fits that offset step into its drift-rate regression
+       (RecalculateDriftRate) and its NET clock runs away: from the client frame log,
+       StartTime / CurrentTick / world-Seconds all galloped together 5x -> 13x -> 30x
+       real, so the flight model integrated on the fast clock (plane streaks across the
+       terrain) and the render loop starved on catch-up sim steps (the low framerate).
+       The in-arena exit-to-HQ path (entered_game stays True) never pauses STATUS, so
+       it was never affected - only the lobby/arena-list round-trip.
+       FIX: in the _hb STATUS block, when the gap since the last STATUS exceeds
+       STATUS_RESUME_MAX_S (10.0s) the keeper was paused (HQ/idle), so RE-ANCHOR
+       instead of crediting the gap - _status_last/_ntp_epoch=now, _credited_ms=0, so A
+       restarts near 0 coherent with a base that advances from here (the connect-time
+       model) and no multi-minute step ever reaches the client's regression; the next
+       tick credits a normal ~2s interval. Also covers mid-flight stalls (lag spike,
+       sleep, alt-tab). Logs one NETTIME line when it acts. Single-site; reverts by
+       deleting the elif. Constant: STATUS_RESUME_MAX_S=10.0.
+       FIELD-VERIFIED 2026-08-28: leave-arena -> 145s on the arena list -> re-join+fly
+       logged "[NETTIME] AC2E_Bigalon: STATUS resume after 145s idle/HQ gap" and the
+       client clock held 1x across the re-fly (StartTime 999/s, world-Seconds 1/s, tick
+       49.5/s) vs the 13-30x pre-fix gallop, with NO 'CRAP' backward-NET blip (so the
+       v205 own-clock-high-order model held; the settle-window fallback is unneeded).
+       In-arena HQ bounce re-confirmed unaffected (no regression).
+
 v492f5 [GAME - LANDED-TAB FLAG WIPE FIX (Taurus session-46: silent repair denial +
       'lost all other players')] Field report cross-analysis (Taurus messages46/47 -
       SAME evening, back-to-back sessions - + online run_20260827_130422): msg-119
