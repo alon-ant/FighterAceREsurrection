@@ -319,6 +319,34 @@
 //     saved quota page not offering a fresh download on next start.
 //     Revert by: delete the L-FIX-11 blocks (probe loop back to plain
 //     ++g_mirrorIndex; drop the three IsIsoFileValid call sites).
+// 2026-08-28: launcher v5.4 - L-FIX-12: Mega.nz mirror support. Mega files
+//     are end-to-end encrypted (the '#' fragment of a share link is the
+//     32-byte AES file key), so a Mega mirror needs its own pipeline:
+//     ResolveMirror routes mega.nz/mega.co.nz entries to ResolveMegaLink,
+//     which POSTs {"a":"g","g":1,"p":<handle>} to g.api.mega.co.nz and gets
+//     a temporary direct ciphertext URL (plain HTTPS, range-resumable);
+//     aria2 downloads that to <iso>.megaenc; on completion a worker thread
+//     streams it through AES-128-CTR via CNG (key = raw[0..15]^raw[16..31],
+//     nonce = raw[16..23], big-endian block counter; CNG has no CTR mode so
+//     the counter blocks are ECB-encrypted and XORed) into <iso>.megadec,
+//     verifies the ISO9660 'CD001' signature at 0x8000 (wrong-key catch;
+//     Mega's chunked CBC-MAC is deliberately NOT verified - the signature
+//     check + L-FIX-11 validation cover the corruption cases), then swaps
+//     .megadec in as the ISO and removes the ciphertext. The .megadec size
+//     doubles as the decrypt resume marker (ciphertext is never modified,
+//     so truncate-to-chunk-and-continue is always safe); .megaenc resumes
+//     over aria2 by size like any mirror; both temps count as a partial
+//     download at startup. Progress page shows a 'Decrypting the disc
+//     image... N%' phase. Decrypt failure = wipe temps + next mirror. An
+//     unresolvable entry (bad link, over quota: the API answers a bare
+//     error code, no 'g' URL) is skipped by the pick loop like any
+//     rejected mirror. Old dead pre-escape addUri body build dropped while
+//     touching that code. Links -lbcrypt now.
+//     Falsify by: a Mega mirror yielding an .iso that fails IsIsoFileValid
+//     or CD001, a decrypt resume after kill producing a corrupt image, or
+//     an over-quota Mega link not being skipped.
+//     Revert by: delete the L-FIX-12 block + the ResolveMirror route + the
+//     PollDownload decrypt phase + outName; restore out=isoName.
 // ============================================================================
 
 #ifndef UNICODE
@@ -355,6 +383,10 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <bcrypt.h>       // L-FIX-12: AES-128-CTR for Mega downloads
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(s) (((NTSTATUS)(s)) >= 0)
+#endif
 
 // ----------------------------------------------------------------------------
 //  Config (launcher.ini)
@@ -1358,9 +1390,264 @@ static std::string WinInetGet(const std::wstring& url, DWORD maxBytes,
     return out;
 }
 
+// ----------------------------------------------------------------------------
+//  L-FIX-12: Mega.nz mirror support. Mega files are end-to-end encrypted:
+//  the fragment after '#' in a share link is the 32-byte file key (base64url)
+//  and the server only ever serves AES-128-CTR ciphertext. Pipeline:
+//    1. ResolveMegaLink: POST {"a":"g","g":1,"p":<handle>} to the Mega API,
+//       which answers a temporary direct URL to the ciphertext (plain HTTPS,
+//       range-resumable - aria2 handles it like any mirror).
+//    2. aria2 downloads to <iso>.megaenc (ciphertext == plaintext size).
+//    3. MegaDecryptThread streams .megaenc -> <iso>.megadec with AES-CTR
+//       (key = raw[0..15] XOR raw[16..31], nonce = raw[16..23], counter =
+//       big-endian block index), verifies the ISO9660 'CD001' signature at
+//       0x8000, then swaps .megadec into place as the ISO and deletes the
+//       ciphertext. The .megadec size doubles as the resume marker: after a
+//       crash, decryption truncates to a chunk boundary and continues -
+//       the ciphertext is never modified, so resume is always safe.
+// ----------------------------------------------------------------------------
+static bool               g_megaActive = false;   // current mirror is a Mega link
+static std::vector<BYTE>  g_megaKey;              // raw 32-byte decoded key
+enum { DEC_NONE = 0, DEC_RUNNING, DEC_DONE, DEC_FAIL };
+static volatile LONG      g_decState = DEC_NONE;
+static volatile LONGLONG  g_decDone  = 0;
+static volatile LONGLONG  g_decTotal = 0;
+static std::wstring       g_decErr;               // set by thread before DEC_FAIL
+
+static std::wstring MegaEncPath() { return g_cfg.downloadDir + L"\\" + g_cfg.isoName + L".megaenc"; }
+static std::wstring MegaDecPath() { return g_cfg.downloadDir + L"\\" + g_cfg.isoName + L".megadec"; }
+
+// POST a JSON body over HTTPS (Mega API). Empty string on any failure.
+static std::string WinInetPostJson(const std::wstring& host, const std::wstring& path,
+                                   const std::string& body, DWORD maxBytes) {
+    std::string out;
+    HINTERNET hNet = InternetOpenW(L"FALauncher", INTERNET_OPEN_TYPE_PRECONFIG,
+                                   nullptr, nullptr, 0);
+    if (!hNet) return out;
+    DWORD to = 15000;
+    InternetSetOptionW(hNet, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof to);
+    InternetSetOptionW(hNet, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof to);
+    HINTERNET hCon = InternetConnectW(hNet, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT,
+                                      nullptr, nullptr, INTERNET_SERVICE_HTTP, 0, 0);
+    if (hCon) {
+        HINTERNET hReq = HttpOpenRequestW(hCon, L"POST", path.c_str(), nullptr, nullptr,
+                                          nullptr, INTERNET_FLAG_SECURE |
+                                          INTERNET_FLAG_RELOAD |
+                                          INTERNET_FLAG_NO_CACHE_WRITE, 0);
+        if (hReq) {
+            const wchar_t* hdr = L"Content-Type: application/json\r\n";
+            if (HttpSendRequestW(hReq, hdr, (DWORD)-1L,
+                                 (LPVOID)body.data(), (DWORD)body.size())) {
+                char b[4096]; DWORD got = 0;
+                while (out.size() < maxBytes &&
+                       InternetReadFile(hReq, b, sizeof b, &got) && got > 0)
+                    out.append(b, got);
+            }
+            InternetCloseHandle(hReq);
+        }
+        InternetCloseHandle(hCon);
+    }
+    InternetCloseHandle(hNet);
+    return out;
+}
+
+static std::vector<BYTE> B64UrlDecode(const std::string& in) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+' || c == '-') return 62;
+        if (c == '/' || c == '_') return 63;
+        return -1;                                   // padding / junk: skipped
+    };
+    std::vector<BYTE> out; int acc = 0, bits = 0;
+    for (char c : in) {
+        int v = val(c);
+        if (v < 0) continue;
+        acc = (acc << 6) | v; bits += 6;
+        if (bits >= 8) { bits -= 8; out.push_back((BYTE)((acc >> bits) & 0xFF)); }
+    }
+    return out;
+}
+
+// AES-128 in CTR mode via CNG (CNG has no native CTR: ECB-encrypt the
+// counter blocks, XOR the keystream into the data). offset must be
+// 16-byte aligned (all our chunks are).
+struct AesCtx {
+    BCRYPT_ALG_HANDLE alg = nullptr;
+    BCRYPT_KEY_HANDLE key = nullptr;
+    bool Init(const BYTE k[16]) {
+        if (!NT_SUCCESS(BCryptOpenAlgorithmProvider(&alg, BCRYPT_AES_ALGORITHM,
+                                                    nullptr, 0))) return false;
+        if (!NT_SUCCESS(BCryptSetProperty(alg, BCRYPT_CHAINING_MODE,
+                                          (PUCHAR)BCRYPT_CHAIN_MODE_ECB,
+                                          sizeof(BCRYPT_CHAIN_MODE_ECB), 0))) return false;
+        return NT_SUCCESS(BCryptGenerateSymmetricKey(alg, &key, nullptr, 0,
+                                                     (PUCHAR)k, 16, 0));
+    }
+    ~AesCtx() {
+        if (key) BCryptDestroyKey(key);
+        if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    }
+};
+
+static bool CtrApply(AesCtx& ctx, const BYTE nonce[8],
+                     unsigned long long offset, BYTE* data, size_t len,
+                     std::vector<BYTE>& ks /* scratch, reused per chunk */) {
+    size_t blocks = (len + 15) / 16;
+    ks.resize(blocks * 16);
+    unsigned long long ctr = offset / 16;
+    for (size_t i = 0; i < blocks; ++i) {           // counter block: nonce || be64(ctr)
+        BYTE* c = &ks[i * 16];
+        memcpy(c, nonce, 8);
+        unsigned long long n = ctr + i;
+        for (int b = 0; b < 8; ++b) c[8 + b] = (BYTE)(n >> (56 - 8 * b));
+    }
+    ULONG res = 0;                                   // in-place ECB -> keystream
+    if (!NT_SUCCESS(BCryptEncrypt(ctx.key, ks.data(), (ULONG)ks.size(), nullptr,
+                                  nullptr, 0, ks.data(), (ULONG)ks.size(), &res, 0)))
+        return false;
+    for (size_t i = 0; i < len; ++i) data[i] ^= ks[i];
+    return true;
+}
+
+// Turn a Mega share link into a temporary direct ciphertext URL and arm the
+// decryption state. Supports mega.nz/file/<handle>#<key> and the legacy
+// mega.nz/#!<handle>!<key>. Empty string = unusable (bad link, over quota,
+// API error) - the mirror pick loop then just moves on.
+static std::string ResolveMegaLink(const std::string& raw) {
+    g_megaActive = false;
+    std::string h, k;
+    size_t p = raw.find("/file/");
+    if (p != std::string::npos) {
+        size_t s = p + 6, e = raw.find('#', s);
+        if (e == std::string::npos) return "";
+        h = raw.substr(s, e - s); k = raw.substr(e + 1);
+    } else if ((p = raw.find("#!")) != std::string::npos) {
+        size_t s = p + 2, e = raw.find('!', s);
+        if (e == std::string::npos) return "";
+        h = raw.substr(s, e - s); k = raw.substr(e + 1);
+    } else return "";
+    size_t stop = k.find_first_not_of(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_");
+    if (stop != std::string::npos) k = k.substr(0, stop);
+    std::vector<BYTE> key = B64UrlDecode(k);
+    if (key.size() != 32) return "";                 // file keys are 32 bytes
+    std::string body = "[{\"a\":\"g\",\"g\":1,\"p\":\"" + h + "\"}]";
+    std::string rsp = WinInetPostJson(L"g.api.mega.co.nz",
+        L"/cs?id=" + std::to_wstring(GetTickCount()) + L"&lang=en", body, 65536);
+    std::string g = JStr(rsp, "g");
+    {   // JSON may escape slashes
+        std::string u; u.reserve(g.size());
+        for (size_t i = 0; i < g.size(); ++i) {
+            if (g[i] == '\\' && i + 1 < g.size() && g[i + 1] == '/') continue;
+            u += g[i];
+        }
+        g = u;
+    }
+    if (g.rfind("http", 0) != 0) return "";          // over quota / error code
+    g_megaKey    = key;
+    g_megaActive = true;
+    return g;
+}
+
+static DWORD WINAPI MegaDecryptThread(LPVOID) {
+    const std::wstring enc = MegaEncPath(), dec = MegaDecPath();
+    const std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
+    const DWORD CHUNK = 4 * 1024 * 1024;
+    std::wstring err;
+    do {
+        // Derive the AES key + CTR nonce from the raw 32-byte file key.
+        if (g_megaKey.size() != 32) { err = L"no key"; break; }
+        BYTE k[16], nonce[8];
+        for (int i = 0; i < 16; ++i) k[i] = g_megaKey[i] ^ g_megaKey[i + 16];
+        memcpy(nonce, &g_megaKey[16], 8);
+        AesCtx ctx;
+        if (!ctx.Init(k)) { err = L"crypto init failed"; break; }
+
+        HANDLE hEnc = CreateFileW(enc.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hEnc == INVALID_HANDLE_VALUE) { err = L"cannot open ciphertext"; break; }
+        LARGE_INTEGER total; total.QuadPart = 0;
+        GetFileSizeEx(hEnc, &total);
+        g_decTotal = total.QuadPart;
+
+        HANDLE hDec = CreateFileW(dec.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
+                                  nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hDec == INVALID_HANDLE_VALUE) {
+            CloseHandle(hEnc); err = L"cannot create output"; break;
+        }
+        // Resume: the plaintext size IS the progress marker. Truncate any
+        // partial trailing chunk and continue from the boundary.
+        LARGE_INTEGER have; have.QuadPart = 0;
+        GetFileSizeEx(hDec, &have);
+        unsigned long long off = ((unsigned long long)have.QuadPart / CHUNK) * CHUNK;
+        LARGE_INTEGER li; li.QuadPart = (LONGLONG)off;
+        SetFilePointerEx(hDec, li, nullptr, FILE_BEGIN); SetEndOfFile(hDec);
+        SetFilePointerEx(hEnc, li, nullptr, FILE_BEGIN);
+        g_decDone = (LONGLONG)off;
+
+        std::vector<BYTE> buf(CHUNK), ks;
+        bool ok = true;
+        while (off < (unsigned long long)total.QuadPart) {
+            DWORD got = 0;
+            if (!ReadFile(hEnc, buf.data(), CHUNK, &got, nullptr) || got == 0) {
+                err = L"read failed"; ok = false; break;
+            }
+            if (!CtrApply(ctx, nonce, off, buf.data(), got, ks)) {
+                err = L"decrypt failed"; ok = false; break;
+            }
+            DWORD wr = 0;
+            if (!WriteFile(hDec, buf.data(), got, &wr, nullptr) || wr != got) {
+                err = L"write failed (disk full?)"; ok = false; break;
+            }
+            off += got;
+            g_decDone = (LONGLONG)off;
+        }
+        // ISO9660 sanity: sector 16 (0x8000) must open with 0x01 'CD001'.
+        if (ok && total.QuadPart > 0x8008) {
+            BYTE sig[6] = {0};
+            li.QuadPart = 0x8000; DWORD got = 0;
+            SetFilePointerEx(hDec, li, nullptr, FILE_BEGIN);
+            ReadFile(hDec, sig, 6, &got, nullptr);
+            if (got != 6 || sig[0] != 0x01 || memcmp(sig + 1, "CD001", 5) != 0) {
+                err = L"decrypted data is not an ISO image (wrong key?)";
+                ok = false;
+            }
+        }
+        CloseHandle(hEnc); CloseHandle(hDec);
+        if (!ok) break;
+        // Swap into place; the ciphertext and any stale ISO artifacts go.
+        DeleteFileW(iso.c_str());
+        DeleteFileW((iso + L".aria2").c_str());
+        if (!MoveFileW(dec.c_str(), iso.c_str())) { err = L"rename failed"; break; }
+        DeleteFileW(enc.c_str());
+        DeleteFileW((enc + L".aria2").c_str());
+        InterlockedExchange(&g_decState, DEC_DONE);
+        return 0;
+    } while (false);
+    g_decErr = err;
+    InterlockedExchange(&g_decState, DEC_FAIL);
+    return 0;
+}
+
+static void StartMegaDecrypt() {
+    if (InterlockedCompareExchange(&g_decState, DEC_RUNNING, DEC_NONE) != DEC_NONE)
+        return;                                      // already running/done
+    g_decErr.clear();
+    HANDLE t = CreateThread(nullptr, 0, MegaDecryptThread, nullptr, 0, nullptr);
+    if (t) CloseHandle(t);
+    else   InterlockedExchange(&g_decState, DEC_FAIL);
+}
+
 // Resolve a mirrors.txt entry to a URL aria2 can download directly.
 // Google Drive links get the large-file confirm interstitial resolved.
 static std::string ResolveMirror(const std::string& raw) {
+    // L-FIX-12: Mega share links go through the API + decryption pipeline.
+    if (raw.find("mega.nz") != std::string::npos ||
+        raw.find("mega.co.nz") != std::string::npos)
+        return ResolveMegaLink(raw);
+    g_megaActive = false;                            // plain / Drive mirror
     if (raw.find("drive.google.com") == std::string::npos &&
         raw.find("drive.usercontent.google.com") == std::string::npos)
         return raw;
@@ -1451,10 +1738,21 @@ static void SwitchToNextMirror(bool firstStart) {
             return;
         }
         url = ResolveMirror(g_mirrors[g_mirrorIndex]);
+        if (url.empty()) {
+            Stage((L"M!: mirror #" + std::to_wstring(g_mirrorIndex) +
+                   L" rejected - unresolvable (bad link / over quota)").c_str());
+            continue;
+        }
         std::wstring why;
         if (ProbeMirrorUrl(url, why)) break;
         Stage((L"M!: mirror #" + std::to_wstring(g_mirrorIndex) +
                L" rejected - " + why).c_str());
+    }
+    // L-FIX-12: fresh source, fresh decrypt state (never while a decrypt
+    // thread owns the files - rotation can't happen then anyway).
+    if (g_decState != DEC_RUNNING) {
+        InterlockedExchange(&g_decState, DEC_NONE);
+        g_decDone = g_decTotal = 0;
     }
 
     // Drop any current transfer and its control file (fresh source next).
@@ -1465,7 +1763,12 @@ static void SwitchToNextMirror(bool firstStart) {
                 "\"params\":[\"token:" + WideToUtf8(g_rpcSecret) + "\",\"" + gid + "\"]}");
     std::wstring iso = g_cfg.downloadDir + L"\\" + g_cfg.isoName;
     DeleteFileW((iso + L".aria2").c_str());
-    if (firstStart) DeleteFileW(iso.c_str());   // clear any stale 0-byte stub
+    DeleteFileW((MegaEncPath() + L".aria2").c_str());   // L-FIX-12: same rule
+    if (firstStart) {
+        DeleteFileW(iso.c_str());   // clear any stale 0-byte stub
+        DeleteFileW(MegaEncPath().c_str());             // L-FIX-12: stale temps
+        DeleteFileW(MegaDecPath().c_str());
+    }
 
     // host for the UI
     {
@@ -1475,27 +1778,23 @@ static void SwitchToNextMirror(bool firstStart) {
         if (he != std::string::npos) host = host.substr(0, he);
         g_mirrorHost = Utf8ToWide(host);
     }
-    std::string body =
-        "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.addUri\",\"params\":[\"token:" +
-        WideToUtf8(g_rpcSecret) + "\",[\"" + url + "\"],{" +
-        "\"dir\":\"" + WideToUtf8(g_cfg.downloadDir) + "\"," +
-        "\"out\":\"" + WideToUtf8(g_cfg.isoName) + "\"," +
-        "\"continue\":\"true\",\"split\":\"8\",\"max-connection-per-server\":\"8\"," +
-        "\"max-tries\":\"3\"}]}";
+    // L-FIX-12: Mega serves ciphertext - it downloads under a temp name and
+    // only becomes the ISO after decryption.
+    std::wstring outName = g_cfg.isoName + (g_megaActive ? L".megaenc" : L"");
     // JSON: backslashes in dir must be escaped
-    // (WideToUtf8 of a Windows path contains single backslashes)
-    // - handled below by escaping before send.
+    // (WideToUtf8 of a Windows path contains single backslashes).
     auto esc = [](std::string in) {
         std::string o; for (char c : in) { if (c == '\\') o += "\\\\"; else o += c; } return o; };
-    body =
+    std::string body =
         "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"aria2.addUri\",\"params\":[\"token:" +
         WideToUtf8(g_rpcSecret) + "\",[\"" + esc(url) + "\"],{" +
         "\"dir\":\"" + esc(WideToUtf8(g_cfg.downloadDir)) + "\"," +
-        "\"out\":\"" + esc(WideToUtf8(g_cfg.isoName)) + "\"," +
+        "\"out\":\"" + esc(WideToUtf8(outName)) + "\"," +
         "\"continue\":\"true\",\"split\":\"8\",\"max-connection-per-server\":\"8\"," +
         "\"max-tries\":\"3\"}]}";
     RpcCall(body);
-    Stage((L"M1: mirror #" + std::to_wstring(g_mirrorIndex) + L" " + g_mirrorHost).c_str());
+    Stage((L"M1: mirror #" + std::to_wstring(g_mirrorIndex) + L" " + g_mirrorHost +
+           (g_megaActive ? L" (mega, encrypted)" : L"")).c_str());
 }
 
 // 2 s timer tick while in download mode: read status over RPC, repaint the
@@ -1537,6 +1836,31 @@ static void PollDownload() {
 
     double pct = total ? (100.0 * (double)done / (double)total) : 0.0;
     bool finished = (total > 0 && done >= total) || status == "complete";
+    // L-FIX-12: a finished Mega transfer is the ENCRYPTED image. Decrypt it
+    // before anything downstream may treat it as the disc.
+    std::wstring decNote;
+    if (finished && g_megaActive) {
+        LONG ds = g_decState;
+        if (ds == DEC_DONE) {
+            g_megaActive = false;          // ISO swapped in - validate below
+        } else if (ds == DEC_FAIL) {
+            Stage((L"M!: mega decrypt failed - " + g_decErr + L"; next mirror").c_str());
+            DeleteFileW(MegaEncPath().c_str());
+            DeleteFileW(MegaDecPath().c_str());
+            InterlockedExchange(&g_decState, DEC_NONE);
+            SwitchToNextMirror(false);
+            finished = false; done = total = 0; pct = 0.0; status.clear();
+        } else {
+            if (ds == DEC_NONE) StartMegaDecrypt();
+            finished = false;              // not a disc yet
+            LONGLONG dd = g_decDone, dt = g_decTotal;
+            double dp = dt ? (100.0 * (double)dd / (double)dt) : 0.0;
+            wchar_t dpb[16]; swprintf(dpb, 16, L"%.1f", dp);
+            decNote = L"Decrypting the disc image... <b>" + std::wstring(dpb) +
+                      L"%</b> (" + FmtGB((unsigned long long)dd) + L" / " +
+                      FmtGB((unsigned long long)dt) + L")";
+        }
+    }
     // L-FIX-11: a "complete" download that is actually a saved HTML error
     // page (the mirror went over quota) is garbage - drop it and move to
     // the next mirror instead of offering to install it.
@@ -1596,9 +1920,12 @@ static void PollDownload() {
                 break;
             }
         } else {
-            h += L"<p>Source: <b>" + (g_mirrorHost.empty() ? std::wstring(L"...")
-                                                            : g_mirrorHost) +
-                 L"</b> &nbsp; Down: <b>" + FmtSpeed(dspd) + L"</b></p>";
+            if (!decNote.empty())          // L-FIX-12: decrypt phase
+                h += L"<p>" + decNote + L"</p>";
+            else
+                h += L"<p>Source: <b>" + (g_mirrorHost.empty() ? std::wstring(L"...")
+                                                                : g_mirrorHost) +
+                     L"</b> &nbsp; Down: <b>" + FmtSpeed(dspd) + L"</b></p>";
             if (g_mirrorsExhausted)
                 h += L"<p style='color:#a00'><b>No download sources are available "
                      L"right now.</b> Please try again later - the mirror list is "
@@ -2363,7 +2690,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
             DeleteFileW(iso.c_str());
             isoComplete = false;
         }
-        bool isoPartial      = FileExists(iso + L".aria2");
+        bool isoPartial      = FileExists(iso + L".aria2") ||
+                               FileExists(MegaEncPath()) ||     // L-FIX-12:
+                               FileExists(MegaDecPath());       // resume mega
         bool engineAvailable = FileExists(g_cfg.aria2Exe);   // L-FIX-10
         bool gameMissing     = !GameExeExistsIn(g_cfg.gameDir);   // L-FIX-5f
 
