@@ -8050,6 +8050,10 @@ KILL_CREDIT_WINDOW  = 30.0   # s: LAST-RESORT fallback only - credit the most-re
 #   consumed: when the delete-notify for that object number arrives
 #   dropped : when the object number is reused by a new spawn (numbers are recycled)
 PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
+REPAIR_PEER_RESET_88 = True # v494f5 [VISUAL REPAIR NOT SEEN BY PEERS]: on a damaged->repaired
+                            #   plane, re-broadcast ACE88 so peers run their 'Repair PlnID' handler
+                            #   and refresh it (peers otherwise keep the msg-28 damage until the
+                            #   object is destroyed+recreated). See send_supply_grant_60.
 REPAIR_CLEARS_DAMAGE_LATCH = True  # v433f5 [KILL/SCORE]: a msg-60 repair grant clears took_damage
                              #   + PENDING_KILL for the serviced plane, so a plane that is hit,
                              #   lands, repairs, then EXITS normally is not booked as a damaged
@@ -11183,6 +11187,24 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
         elif _was:
             log('KILL', f'{getattr(sess, "current_pilot", "?")} REPAIRED -> took_damage '
                         f'cleared (no pending kill latch)')
+        if REPAIR_PEER_RESET_88 and _was:
+            # v494f5 [VISUAL REPAIR NOT SEEN BY PEERS] (Starfighter test 2026-08-28: AC2E_Bigalon
+            # saw Starfighter's external damage but NOT his ground repair - it cleared only when
+            # Bigalon himself respawned). Damage reaches peers via the relayed msg-28 frames they
+            # accumulate on the object; the msg-60 repair grant goes to the OWNER only (a msg-60
+            # BROADCAST rebuilds+freezes airborne peers - see docstring), and we don't send the
+            # 2009 msg-40'38/73'39 SendRepairInfo peer broadcast (banked gap). So a repaired plane
+            # stays visibly damaged to everyone until its object is destroyed+recreated. ACE88 is
+            # the modern peer-state broadcast that makes peers run their 'Repair PlnID' handler
+            # (in 88'7 -> Repair PlnID Full=1); re-send it for this now-repaired plane so peers
+            # refresh it. PROBE: if the client's 88 handler also resets the external DAMAGE
+            # geometry this fixes the visual; if it only resets fuel/load, the real fix is a
+            # server-authored msg-40'38 / 73'39 peer broadcast (format partially pinned in
+            # msg73_decode_notes). Reversible: REPAIR_PEER_RESET_88.
+            try:
+                send_ace_rank_88(sess, reason='(post-repair peer visual-damage reset)')
+            except Exception:
+                pass
     threading.Thread(
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
