@@ -961,7 +961,7 @@ def db_next_slot(acct):
     conn.close(); return (row[0] or 0) + 1
 
 def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, lost_to_ai=False,
-                   mode=None):
+                   mode=None, count_pilot_death=True):
     """Accumulate a combat result into persistent pilot stats (global scoring).
 
     v240: also maintains the columns the HQ Scores screen renders, so they stay consistent with
@@ -995,15 +995,38 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
         args.append(killer_name)
         conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", args)
     if victim_name:
-        sets = ['deaths=deaths+1']
+        # v497f5: count_pilot_death=False -> the PLANE is lost but the PILOT survived (bail or
+        # crash-land on friendly ground). Count planes_lost only; do NOT touch deaths or the streak.
+        # The pilot's death, if he is captured, is settled later at his landing (db_credit_capture).
+        sets = []
+        if count_pilot_death:
+            sets.append('deaths=deaths+1')
         _lcol = 'planes_lost_ai' if lost_to_ai else 'planes_lost'
         if _lcol in have:
             sets.append(f'{_lcol}={_lcol}+1')
-        if 'kills_in_a_row' in have:
-            sets.append('kills_in_a_row=0')          # dying breaks the streak
-        if _msuf and f'deaths_{_msuf}' in have:
+        if count_pilot_death and 'kills_in_a_row' in have:
+            sets.append('kills_in_a_row=0')          # dying breaks the streak (a survivor keeps it)
+        if count_pilot_death and _msuf and f'deaths_{_msuf}' in have:
             sets.append(f'deaths_{_msuf}=deaths_{_msuf}+1')    # v407f5 per-mode board
-        conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
+        if sets:
+            conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
+    conn.commit(); conn.close()
+
+def db_credit_capture(victim_name, mode=None):
+    """v497f5: the DEFERRED pilot death for a bail/crash-land that ended in CAPTURE (parachuter
+    or plane exit ScoreEvent=12 - enemy ground). The PLANE was already counted when it came down,
+    so this settles the PILOT only: deaths +1 and the streak breaks. Aces are wiped by the caller."""
+    if not victim_name:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
+    _msuf = mode if mode in ('ffa', 'tc', 'events') else None
+    sets = ['deaths=deaths+1']
+    if 'kills_in_a_row' in have:
+        sets.append('kills_in_a_row=0')
+    if _msuf and f'deaths_{_msuf}' in have:
+        sets.append(f'deaths_{_msuf}=deaths_{_msuf}+1')
+    conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
     conn.commit(); conn.close()
 
 def db_set_pilot_aces(name, aces):
@@ -8086,6 +8109,14 @@ REPAIR_CLEARS_DAMAGE_LATCH = True  # v433f5 [KILL/SCORE]: a msg-60 repair grant 
 # Adding 0x1 routes crashes into the is_death branch, which still applies the
 # "exited UNDAMAGED and PARKED -> clean exit" test, so a land-and-swap reporting 0x11 stays out.
 DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6, 0x1}   # MEC & 0xf values that mean the pilot actually died
+PILOT_FATE_SCORING = True   # v497f5 [PILOT SAFE/CAPTURED] master switch. OFF -> scoring unchanged.
+                             # ON -> a downed plane ALWAYS counts the plane and credits the shooter,
+                             # but the PILOT death is settled by WHERE HE LANDS: parachuter/plane
+                             # exit ScoreEvent=12 (exit 0x2c, captured on enemy ground) = pilot lost
+                             # (death + aces wipe); any other landing (bail/crash-land on friendly
+                             # ground) = pilot safe, streak/aces intact. Wire-pinned: capture=0x2c
+                             # (MEC=2 SE=12), friendly bail=0x20 (SE=0), crash-land=0x22 (SE=2),
+                             # bail plane down=0x50 (MEC=5). Test locally before enabling live.
                                       #   0x1 = deliberate CRASH (exit 0x11) - confirmed in v345
                                       #   0xa = MissExitCode 26  -> EXIT TO MENU (was: "CRASH")
                                       #   0x5 = SHOT DOWN by a player (exit byte 0x53).
@@ -8763,7 +8794,7 @@ def _vs_victim_rank(victim):
         pass
     return 0
 
-def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
+def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilot_lost=True):
     """Persist a death into the DB and apply the LIVE ace rule (server-authoritative).
 
     KILLER ATTRIBUTION (v233 - now EXACT):
@@ -8803,6 +8834,9 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
     # costs a further 100.
     _vo0 = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
     _bailed = bool((PENDING_KILL.get(_vo0) or {}).get('why') == 'bail') if _vo0 is not None else False
+    # v497f5: PILOT SURVIVED -> plane + shooter credit only, no pilot death, no aces wipe. True for a
+    # legacy bail (flag off) OR any pilot_lost=False call under PILOT_FATE_SCORING (friendly landing).
+    _pilot_survives = _bailed or (PILOT_FATE_SCORING and not pilot_lost)
 
     # 1) EXACT: the victim's exit entry named its killer (long form only).
     if hunter_obj is not None and hunter_obj > 0 and hunter_obj != 0xffff:
@@ -8898,9 +8932,11 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
         killer.k_kills = getattr(killer, 'k_kills', 0) + 1
         killer.k_score = getattr(killer, 'k_score', 0) + KILL_SCORE_POINTS
         db_credit_kill(killer.current_pilot, victim.current_pilot, 0,
-                       victim_is_bomber=_victim_bomber, mode=_smode)   # counters only (+mode board)
+                       victim_is_bomber=_victim_bomber, mode=_smode,
+                       count_pilot_death=not _pilot_survives)   # counters only (+mode board)
     else:
-        db_credit_kill(None, victim.current_pilot, 0, lost_to_ai=_lost_to_ai, mode=_smode)
+        db_credit_kill(None, victim.current_pilot, 0, lost_to_ai=_lost_to_ai, mode=_smode,
+                       count_pilot_death=not _pilot_survives)
         log('DEATH', f'{victim.current_pilot} lost a plane to '
                      f'{"AA/AI ground fire" if _lost_to_ai else "no creditable shooter"} '
                      f'(exit=0x{_exitb:02x}, MEC&0xf={_mec}) -> '
@@ -8958,7 +8994,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
             # rank/scoring table is the only rank effect now (no level differences).
             _rmod = rank_loss_modifier_2004(_vs_victim_rank(victim))
             _plane_cost = int(round(_base_cost * _rmod))
-            _pilot_pen = 0 if _bailed else PILOT_LOSS_PENALTY_2004
+            _pilot_pen = 0 if _pilot_survives else PILOT_LOSS_PENALTY_2004
             _loss = _plane_cost + _pilot_pen
             _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss,
                                                   bomber=_victim_bomber, mode=_smode)
@@ -8967,7 +9003,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
                          f'{"" if _bailed else f" + {_pilot_pen} (pilot loss)"}'
                          f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
         else:
-            _loss = _base_cost + (0 if _bailed else PILOT_DEATH_PENALTY)
+            _loss = _base_cost + (0 if _pilot_survives else PILOT_DEATH_PENALTY)
             _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss,
                                                   bomber=_victim_bomber, mode=_smode)
             log('SCORE', f'{victim.current_pilot} -{_loss} = {_base_cost} (plane)'
@@ -8978,8 +9014,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None):
             log('RANK', f'{victim.current_pilot} DEMOTED rank {_old} -> {_rk} ({_nm}) '
                         f'at score {_sc}')
 
-    # DYING WIPES THE VICTIM'S ACES (live rule, server-authoritative).
-    if LIVE_ACE_TRACKING and victim.current_pilot:
+    # DYING WIPES THE VICTIM'S ACES (live rule, server-authoritative). v497f5: a survivor keeps them.
+    if not _pilot_survives and LIVE_ACE_TRACKING and victim.current_pilot:
         _prev = db_get_pilot_career(victim.current_pilot)[4]
         db_set_pilot_aces(victim.current_pilot, 0)
         if _prev:
@@ -11920,6 +11956,41 @@ def _ingame_own_object_removed(s, tb, stored):
     ~2s later, so cancelling on respawn would erase every genuine death).
     A SHOT-DOWN (the long >=14B scored form) is never ambiguous and is credited immediately.
     """
+    # v498f5: the PARACHUTER must be resolved BEFORE the _left_world guard below. A bail sets
+    # _left_world=True when the empty plane comes down (v498f5), so the pilot's LATER canopy landing
+    # would otherwise be swallowed by that guard and the CAPTURE (SE=12) never scored
+    # (run_20260829_160000: the 0x2c chute delete hit 'swallow, no echo (guarded)' and deaths never
+    # moved). Handle the chute here regardless of _left_world: score the capture, relay the delete
+    # so peers drop the canopy, clear the tracker, and return. Supersedes the in-guard v248/v497f5
+    # copy below (now unreachable for the chute, since we return first).
+    if s.entered_game:
+        _ponum = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
+        if _ponum is not None and _ponum == getattr(s, 'para_obj_number', None):
+            _pexit0 = stored[7] if len(stored) > 7 else 0
+            log('PARA', f'{s.current_pilot} parachuter 0x{_ponum:04x} removed (exit=0x{_pexit0:02x}) '
+                        f'-> relaying delete to peers; settling pilot fate [pre-guard]')
+            if PILOT_FATE_SCORING and (_pexit0 & 0xf) == 12 and s.current_pilot:
+                _smode0 = scoring_mode_for_room(s.current_room)
+                if _smode0 is not None:
+                    db_credit_capture(s.current_pilot, mode=_smode0)
+                    if LIVE_ACE_TRACKING:
+                        db_set_pilot_aces(s.current_pilot, 0)
+                    log('CAPTURE', f'{s.current_pilot} CAPTURED under canopy (parachuter '
+                                   f'0x{_ponum:04x} exit=0x{_pexit0:02x} SE=12) -> death +1, streak '
+                                   f'broken, aces wiped')
+                    if SEND_ACE_RANK_88:
+                        try:
+                            send_ace_rank_88(s, reason='(captured - pilot lost)')
+                        except Exception:
+                            pass
+            _pdel0 = build_delete_object_3(onumber=_ponum, client_number=None)
+            for _peer0 in get_sessions_in_room(s.current_room):
+                if _peer0 is not s:
+                    _submit_send(send_rel, _peer0, _pdel0,
+                                 f'<- delete PARACHUTER 0x{_ponum:04x} ({s.current_pilot})', to=3.0)
+            s.para_obj_number = None
+            return
+
     if (s.entered_game and not getattr(s, '_left_world', False)
             and s.my_obj_number is not None):
         # *** v235: WHICH OBJECT IS THIS DELETE ACTUALLY ABOUT? ***
@@ -11940,6 +12011,24 @@ def _ingame_own_object_removed(s, tb, stored):
             log('PARA', f'{s.current_pilot} parachuter 0x{_onum:04x} removed (landed or killed) '
                         f'-> relaying the delete to peers; the plane (0x{s.my_obj_number:04x}) is '
                         f'unaffected')
+            # v497f5: the parachuter's exit byte says how the pilot came down. SE=12 (exit 0x2c) =
+            # CAPTURED on enemy ground -> the DEFERRED pilot death (the plane was already counted when
+            # it came down at the bail). Any other landing = pilot safe, streak/aces intact.
+            _pexit = stored[7] if len(stored) > 7 else 0
+            if PILOT_FATE_SCORING and (_pexit & 0xf) == 12 and s.current_pilot:
+                _smode2 = scoring_mode_for_room(s.current_room)
+                if _smode2 is not None:
+                    db_credit_capture(s.current_pilot, mode=_smode2)
+                    if LIVE_ACE_TRACKING:
+                        db_set_pilot_aces(s.current_pilot, 0)
+                    log('CAPTURE', f'{s.current_pilot} CAPTURED under canopy (parachuter '
+                                   f'0x{_onum:04x} exit=0x{_pexit:02x} SE=12) -> death +1, streak '
+                                   f'broken, aces wiped')
+                    if SEND_ACE_RANK_88:
+                        try:
+                            send_ace_rank_88(s, reason='(captured - pilot lost)')
+                        except Exception:
+                            pass
             _pdel = build_delete_object_3(onumber=_onum, client_number=None)
             for _peer in get_sessions_in_room(s.current_room):
                 if _peer is not s:
@@ -11991,7 +12080,39 @@ def _ingame_own_object_removed(s, tb, stored):
                          + ') -> drop plane, stay in arena, re-arm confirm')
 
         _killer = None; _kbailed = False
-        if scored:
+        if PILOT_FATE_SCORING:
+            # v497f5: plane is lost on any DESTROY (bail plane MEC=5 / crash-land MEC=2 / crash MEC=1
+            # / shot-down); the shooter is always credited. Pilot is lost only on a cockpit death
+            # (flying MEC=1), a shot-down, or CAPTURE (SE=12). Exit-to-HQ (MEC=0xa, parked) = clean.
+            _move2 = plane_movement(s); _flying2 = _move2 >= CRASH_MOVEMENT_MIN
+            _on_chute = getattr(s, 'para_obj_number', None) is not None
+            if _on_chute:
+                # v498f5: the pilot has BAILED and is under the canopy, so THIS delete is the empty
+                # plane coming down - it reports MEC=1 flying exactly like a cockpit crash, but the
+                # cockpit is empty. Plane lost + shooter credited; the pilot's fate is settled only
+                # at the parachuter's landing (SE). Without this a friendly/solo bail booked a
+                # phantom cockpit death (run_20260829_153730: empty plane MEC=1 -> aces wiped). A
+                # solo bail leaves NO PENDING_KILL 'bail' marker, so score_on_death's own _bailed
+                # can't catch it - the on-chute check is what does.
+                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
+                                                   victim_obj=_onum, pilot_lost=False)
+                log('DEATH', f'{s.current_pilot} bailed plane down (MEC&0xf={mec_nib}) -> plane '
+                             f'counted + shooter credited; pilot on chute, fate pending [PILOT_FATE]')
+            elif scored or (mec_nib == 1 and _flying2):
+                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
+                                                   victim_obj=_onum, pilot_lost=True)
+            elif mec_nib in (5, 2):
+                _cap = (se == 12)
+                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
+                                                   victim_obj=_onum, pilot_lost=_cap)
+                log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) -> plane '
+                             f'counted + shooter credited; pilot '
+                             f'{"CAPTURED" if _cap else "pending (bail) / safe (crash-land)"} '
+                             f'[PILOT_FATE]')
+            else:
+                log('DEATH', f'{s.current_pilot} clean exit (MEC&0xf={mec_nib} SE={se}) -> no loss '
+                             f'[PILOT_FATE]')
+        elif scored:
             # Shot down - unambiguous (the entry names the HUNTER). Always a death.
             _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
         elif is_death:
