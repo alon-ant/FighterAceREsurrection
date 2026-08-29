@@ -8050,10 +8050,11 @@ KILL_CREDIT_WINDOW  = 30.0   # s: LAST-RESORT fallback only - credit the most-re
 #   consumed: when the delete-notify for that object number arrives
 #   dropped : when the object number is reused by a new spawn (numbers are recycled)
 PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
-REPAIR_PEER_RESET_88 = True # v494f5 [VISUAL REPAIR NOT SEEN BY PEERS]: on a damaged->repaired
-                            #   plane, re-broadcast ACE88 so peers run their 'Repair PlnID' handler
-                            #   and refresh it (peers otherwise keep the msg-28 damage until the
-                            #   object is destroyed+recreated). See send_supply_grant_60.
+REPAIR_REFRESH_PEERS = True # v495f5 [VISUAL REPAIR NOT SEEN BY PEERS]: on a damaged->repaired
+                            #   plane, re-issue its object to peers (atomic predel+create) so they
+                            #   reset the NetPlane damage model. Supersedes the v494f5 ACE88 probe,
+                            #   which proved msg-88 only refreshes peer fuel/load, not the external
+                            #   damage geometry. See send_supply_grant_60.
 REPAIR_CLEARS_DAMAGE_LATCH = True  # v433f5 [KILL/SCORE]: a msg-60 repair grant clears took_damage
                              #   + PENDING_KILL for the serviced plane, so a plane that is hit,
                              #   lands, repairs, then EXITS normally is not booked as a damaged
@@ -11187,24 +11188,33 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
         elif _was:
             log('KILL', f'{getattr(sess, "current_pilot", "?")} REPAIRED -> took_damage '
                         f'cleared (no pending kill latch)')
-        if REPAIR_PEER_RESET_88 and _was:
-            # v494f5 [VISUAL REPAIR NOT SEEN BY PEERS] (Starfighter test 2026-08-28: AC2E_Bigalon
-            # saw Starfighter's external damage but NOT his ground repair - it cleared only when
-            # Bigalon himself respawned). Damage reaches peers via the relayed msg-28 frames they
-            # accumulate on the object; the msg-60 repair grant goes to the OWNER only (a msg-60
-            # BROADCAST rebuilds+freezes airborne peers - see docstring), and we don't send the
-            # 2009 msg-40'38/73'39 SendRepairInfo peer broadcast (banked gap). So a repaired plane
-            # stays visibly damaged to everyone until its object is destroyed+recreated. ACE88 is
-            # the modern peer-state broadcast that makes peers run their 'Repair PlnID' handler
-            # (in 88'7 -> Repair PlnID Full=1); re-send it for this now-repaired plane so peers
-            # refresh it. PROBE: if the client's 88 handler also resets the external DAMAGE
-            # geometry this fixes the visual; if it only resets fuel/load, the real fix is a
-            # server-authored msg-40'38 / 73'39 peer broadcast (format partially pinned in
-            # msg73_decode_notes). Reversible: REPAIR_PEER_RESET_88.
-            try:
-                send_ace_rank_88(sess, reason='(post-repair peer visual-damage reset)')
-            except Exception:
-                pass
+        if REPAIR_REFRESH_PEERS and _was and getattr(sess, 'my_obj_number', None) is not None:
+            # v495f5 [VISUAL REPAIR NOT SEEN BY PEERS - real fix] The v494f5 ACE88 probe fired on
+            # this exact path (online run_20260828_202811: Starfighter repair -> ACE88 to Bigalon)
+            # and the damage still did NOT clear -> msg-88 refreshes peer FUEL/LOAD only, not the
+            # external damage model (dwDamageMode @ plane+0x298, FA.exe FUN_004bd880). Peers apply a
+            # plane's damage from the relayed msg-28 frames and clear it ONLY when the object is
+            # (re)created - which is why the damage cleared for AC2E_Bigalon only when HE respawned.
+            # So on a damaged->repaired plane, re-issue its object to each peer that has it, using
+            # the SAME v474f5 ATOMIC predel+create the respawn path uses (one reliable msg-13: slot
+            # cleared then refilled, loss/reorder/dupe-safe). Object-only (with_client=False) - the
+            # station persists; a client record would 'Client already exist' CTD. Off the RX thread
+            # via _submit_send (an inline 3s reliable wait freezes the server). Repairs only fire
+            # PARKED, and a parked plane still streams position telemetry (ground-stop reads it), so
+            # the object snaps back from its (0,0,0) create within a frame - the same brief blip as a
+            # respawn create, the only cosmetic risk (watch the test). Reversible: REPAIR_REFRESH_PEERS.
+            _cp = sess.__dict__.get('_created_peers') or set()
+            _room = getattr(sess, 'current_room', None)
+            _n = 0
+            if _room is not None:
+                for _p in get_sessions_in_room(_room):
+                    if _p is sess or getattr(_p, 'addr', None) not in _cp:
+                        continue
+                    _submit_send(send_create_object_for, sess, _p, with_client=False)
+                    _n += 1
+            if _n:
+                log('REPAIR-VIS', f'{getattr(sess, "current_pilot", "?")} repaired -> re-created '
+                                  f'object on {_n} peer(s) to clear the damage visual')
     threading.Thread(
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
