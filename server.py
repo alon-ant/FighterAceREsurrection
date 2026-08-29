@@ -6708,6 +6708,14 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
     while True:
         if getattr(s, 'closing', False):
             outcome = 'session closed'; break
+        # v502f5 [BAIL-EXIT LOBBY CTD]: this keeper's packet was queued IN-GAME (t0 = keeper start).
+        # If the client has since left the arena (msg-64), stop retransmitting it - a stale in-game
+        # reliable delivered into the client's ~GAME_DEF teardown CTDs it (run_20260829_194148 ->
+        # messages89: 'in 3'4 -> delete object 120' -> Length=-11). Post-leave lobby sends have a
+        # later t0 and are untouched. A DESKTOP exit never hit this (it sets s.closing, socket shut).
+        _left = getattr(s, '_arena_left_at', 0.0)
+        if _left and _left > t0:
+            outcome = 'arena left - stale in-game reliable dropped [v502f5]'; break
         if e.wait(timeout=REL_KEEPER_INTERVAL_S):
             outcome = f'ACKed after {time.time()-t0:.1f}s'; break
         if time.time() - t0 > REL_KEEPER_MAX_S:
@@ -6870,6 +6878,13 @@ def send_rel(s, payload, label='', to=5.0):
         ok=e.wait(timeout=min(REL_RETX_INTERVAL_S,rem))
         if ok: break
         if deadline-time.time()<=0: break
+        # v502f5 [BAIL-EXIT LOBBY CTD]: stop retransmitting a stale in-game reliable once the client
+        # has left the arena (msg-64) - it would land in the client's ~GAME_DEF teardown and CTD it
+        # (messages89). Matches the keeper guard; a packet queued after the leave has a later
+        # deadline-to and is untouched.
+        _left = getattr(s, '_arena_left_at', 0.0)
+        if _left and _left > deadline - to:
+            break
         try:
             sock.sendto(pkt,s.addr)
             _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5 (retx)
@@ -7790,6 +7805,13 @@ def send_score_event_to_killer(killer, mec=None, eec=None):
                    f'(MEC={mec},EEC={eec} -> type byte 0x{((mec & 0xf) << 4) | (eec & 0xf):02x})')
 
 CREDIT_BAIL_HUSK = True      # v370f5: single-flag revert for the husk-teardown kill credit below.
+BAIL_EXIT_HUSK_DESPAWN = True # v501f5: when a bailer EXITS to the menu while still under canopy
+                             #   (parachuter removed with exit-to-HQ), despawn the still-airborne
+                             #   empty bail plane RIGHT THEN, before the leave, instead of leaving it
+                             #   to be torn down late during the client's ~GAME_DEF (which lands a
+                             #   delete on the half-gone client -> 'Length=-8' Network.cpp CTD,
+                             #   run_20260829_190523/messages87). Closes the v370f5 'quits mid-
+                             #   descent' STILL-OPEN gap. False = pre-v501f5 (husk orphaned on exit).
                              #   False restores the v349-v369 behaviour (latch orphaned at despawn).
 
 def credit_bail_husk_kill(s, husk_obj, how):
@@ -8069,6 +8091,9 @@ KILL_CREDIT_WINDOW  = 30.0   # s: LAST-RESORT fallback only - credit the most-re
 #   consumed: when the delete-notify for that object number arrives
 #   dropped : when the object number is reused by a new spawn (numbers are recycled)
 PENDING_KILL = {}            # ONumber -> {'killer': ONumber, 'at': ts, 'why': 'damage'|'bail'}
+REPAIR_REFRESH_DELAY_S = 3.0 # v499f5: hold the peer re-create ~5s after repair (2009-style
+                             #   RepairTime delay) so peers actually SEE the damaged plane on the
+                             #   ground before it resets. 0 = fire instantly (pre-v499f5).
 REPAIR_REFRESH_PEERS = True # v495f5 [VISUAL REPAIR NOT SEEN BY PEERS]: on a damaged->repaired
                             #   plane, re-issue its object to peers (atomic predel+create) so they
                             #   reset the NetPlane damage model. Supersedes the v494f5 ACE88 probe,
@@ -10061,6 +10086,21 @@ def handle_leave_arena(s):
     takes over (it will then re-request news/arena list itself)."""
     log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
+    # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
+    # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
+    # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
+    # exit sets _left_world when the plane comes down IN-ARENA. But after a BAIL the plane is still
+    # airborne at the leave: its ExitEvent only fires inside the client's ~GAME_DEF, arriving with
+    # entered_game=False AND _left_world=False -> the router misses it -> the teardown's out 3'4 /
+    # out 3'3 fall through to the DEFAULT ECHO -> the client re-ingests its own delete mid-teardown
+    # -> 'in 3'4 / Server require delete object N' (N garbage: 0/1/120) -> Length=-8/-11 CTD
+    # (messages87/89/91; v501f5+v502f5 didn't stop it because the echo is a FRESH post-leave send).
+    # Setting the flag here guarantees every post-leave msg-3 is routed to the guarded swallow,
+    # however this life ended. A fresh spawn re-arms it False (the spawn site).
+    s._left_world = True
+    # v502f5 [BAIL-EXIT LOBBY CTD]: stamp the arena-leave instant so _rel_keeper stops retransmitting
+    # the stale in-game reliable backlog into the client's ~GAME_DEF teardown (see the keeper).
+    s._arena_left_at = time.time()
     _retire_room_slot(s, '(msg-64 leave)')   # v441f5: hold the slot for this pilot
     s._presence_advertised = False   # v355: this path does its own teardown just below
     # v182: tell peers to drop this player's REMOTE_PLAYER object (msg 63 op=REMOVE)
@@ -11217,18 +11257,39 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
             # PARKED, and a parked plane still streams position telemetry (ground-stop reads it), so
             # the object snaps back from its (0,0,0) create within a frame - the same brief blip as a
             # respawn create, the only cosmetic risk (watch the test). Reversible: REPAIR_REFRESH_PEERS.
-            _cp = sess.__dict__.get('_created_peers') or set()
-            _room = getattr(sess, 'current_room', None)
-            _n = 0
-            if _room is not None:
-                for _p in get_sessions_in_room(_room):
-                    if _p is sess or getattr(_p, 'addr', None) not in _cp:
-                        continue
-                    _submit_send(send_create_object_for, sess, _p, with_client=False)
-                    _n += 1
-            if _n:
-                log('REPAIR-VIS', f'{getattr(sess, "current_pilot", "?")} repaired -> re-created '
-                                  f'object on {_n} peer(s) to clear the damage visual')
+            # v499f5 [2009 REPAIR DELAY]: the real 2009 host held the visual repair ~2s so peers
+            # actually SEE the damaged plane on the ground before it resets. Firing the re-create
+            # inline (same ms as the repair - run_20260829_142512) never let the damage show.
+            # Schedule it on a timer, and DEBOUNCE: a grounded plane under fire re-repairs
+            # repeatedly (SeanTB1 0x0105 repaired 6x that run), so cancel any pending refresh and
+            # keep only the latest -> one re-create ~2s after the LAST repair.
+            _refresh_onum = sess.my_obj_number
+            _old_rt = sess.__dict__.get('_repair_refresh_timer')
+            if _old_rt is not None:
+                try:
+                    _old_rt.cancel()
+                except Exception:
+                    pass
+            def _do_repair_refresh(_sess=sess, _onum=_refresh_onum):
+                _sess.__dict__.pop('_repair_refresh_timer', None)
+                if getattr(_sess, 'my_obj_number', None) != _onum:
+                    return
+                _cp = _sess.__dict__.get('_created_peers') or set()
+                _room = getattr(_sess, 'current_room', None)
+                _n = 0
+                if _room is not None:
+                    for _p in get_sessions_in_room(_room):
+                        if _p is _sess or getattr(_p, 'addr', None) not in _cp:
+                            continue
+                        _submit_send(send_create_object_for, _sess, _p, with_client=False)
+                        _n += 1
+                if _n:
+                    log('REPAIR-VIS', f'{getattr(_sess, "current_pilot", "?")} repaired -> re-created '
+                                      f'object on {_n} peer(s) after {REPAIR_REFRESH_DELAY_S:.1f}s '
+                                      f'(2009 repair delay) to clear the damage visual')
+            _rt = threading.Timer(REPAIR_REFRESH_DELAY_S, _do_repair_refresh)
+            sess.__dict__['_repair_refresh_timer'] = _rt
+            _rt.start()
     threading.Thread(
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
@@ -11983,6 +12044,37 @@ def _ingame_own_object_removed(s, tb, stored):
                             send_ace_rank_88(s, reason='(captured - pilot lost)')
                         except Exception:
                             pass
+            # v501f5 [BAIL-EXIT HUSK CTD]: the pilot exited to the menu while still under canopy
+            # (parachuter removed with exit-to-HQ, MEC nibble 10). The empty bail plane is still
+            # airborne; left alone it is torn down LATE during the client's ~GAME_DEF and a queued
+            # delete then lands on the half-gone client -> 'Length=-8' Network.cpp CTD
+            # (run_20260829_190523 -> messages87). This is the 'bailer who QUITS mid-descent' gap the
+            # v370f5 docstring flagged STILL OPEN. Despawn the husk NOW (well before the leave),
+            # crediting any held kill through the SAME path the respawn-despawn uses.
+            _bp2 = getattr(s, 'bailed_plane_obj', None)
+            if BAIL_EXIT_HUSK_DESPAWN and (_pexit0 >> 4) == 10 and _bp2 is not None:
+                # v501f5.1: the bailed husk is normally STILL this session's my_obj_number here (no
+                # respawn happened - the pilot went straight to HQ), so the earlier `_bp2 != my_obj`
+                # guard (copied from the respawn path, where they DO differ) wrongly skipped every
+                # case and v501f5 never fired (run_20260829_192959: exit=0xa0 but no [v501f5] line).
+                # Despawn the husk, and CLEAR my_obj_number so the later msg-64 leave won't re-delete
+                # a plane that is already gone - that late delete is what CTDs the client on the
+                # lobby transition (desktop exit closes the socket first, so it never sees it).
+                _saved2 = s.my_obj_number
+                try:
+                    s.my_obj_number = _bp2
+                    broadcast_object_delete_3(s, reason='(abandoned bail husk, exit-to-HQ)',
+                                              clear_peer_created=False)
+                    log('PARA', f'{s.current_pilot} exited to HQ under canopy -> despawned the '
+                                f'still-airborne bail husk 0x{_bp2:04x} now, before the leave '
+                                f'(avoids the late-teardown delete CTD) [v501f5]')
+                except Exception as _e2:
+                    log('PARA', f'[warn] could not despawn bail husk 0x{_bp2:04x} for '
+                                f'{s.current_pilot}: {_e2}')
+                finally:
+                    s.my_obj_number = None if _saved2 == _bp2 else _saved2
+                credit_bail_husk_kill(s, _bp2, how='(exit-to-HQ despawn)')
+                s.bailed_plane_obj = None
             _pdel0 = build_delete_object_3(onumber=_ponum, client_number=None)
             for _peer0 in get_sessions_in_room(s.current_room):
                 if _peer0 is not s:
@@ -12325,6 +12417,12 @@ SUPPLY_WATCH_SUBS = None       # None = log everything (in-arena); or a set to f
 # no evidence => NOT eligible.
 AUTO_RESUPPLY = True
 AUTO_RESUPPLY_DEBOUNCE = 5.0   # seconds; fire at most once per this window per player
+# v500f5 [2009 SERVICE DELAY]: gate the EXPLICIT msg-119 repair/resupply request on the SAME
+# ground-stop settle the background poll uses, so a plane must actually settle (~AUTO_RESUPPLY_SETTLE
+# seconds) before it is serviced - not the instant mid-rollout grant of pre-v500f5
+# (run_20260829_183819: 119 grants at movement=261238/249897, still moving). False = old
+# grant-on-request behaviour (v454f5).
+SERVICE_REQUIRES_GROUND_STOP = True
 AUTO_RESUPPLY_SETTLE = 2.0     # min seconds of identical-position samples before a grant. NOTE the
                                #   movement==0 test additionally spans the full retained _pos_hist
                                #   window (CRASH_MOVEMENT_WINDOW_S=3.0), so in practice a plane is
@@ -13983,6 +14081,17 @@ def _handle_repair_request_119(s, pl):
         log('RESUPPLY', f'{s.current_pilot} msg-119 DEBOUNCED - {round(_since, 2)}s since '
                         f'last grant (< {AUTO_RESUPPLY_DEBOUNCE}s burst window)')
         return
+    # v500f5 [2009 SERVICE DELAY]: gate the explicit 119 on the SAME ground-stop settle the poll
+    # uses, so a request during landing rollout waits until the plane has actually settled
+    # (~AUTO_RESUPPLY_SETTLE) instead of servicing instantly (run_20260829_183819: 119 grants at
+    # movement=261238/249897). Deferred requests are re-asked by the client, and the poll services
+    # the plane once it settles either way.
+    if SERVICE_REQUIRES_GROUND_STOP:
+        _ok119, _why119, _ = ground_stop_eligible(s, now)
+        if not _ok119:
+            log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - not settled yet '
+                            f'({_why119}) - waiting for ground settle before servicing [v500f5]')
+            return
     _pos = None
     try:
         _hist = getattr(s, '_pos_hist', None)

@@ -7,10 +7,21 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
 ==============================================================================
-*** BANKED 2026-08-24: v472f5 is the STABLE BANKING POINT (user-approved). ***
-    Snapshot server.py -> 'old files\server_v472f5.py' at next convenience.
-    (Previous banked point: v444f5, 2026-08-15. v463f5 was banked mid-weekend
-    and superseded the same day by the v465-v472 chain, all field-verified.)
+*** BANKED 2026-08-29: v503f5 is the STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v503f5.py' at next convenience.
+    (Previous banked point: v472f5, 2026-08-24; before that v444f5, 2026-08-15.)
+    Verified in this bank: v497f5/v498f5 pilot-fate scoring (capture matrix 4/4,
+    PILOT_FATE_SCORING left ON per user), v500f5 2009 service settle (user set
+    3.0s, "worked well"), v501f5 bail-husk despawn+credit, v502f5 stale-reliable
+    stop on leave, v503f5 lobby-exit-after-bail CTD ROOT FIX (user: "looks
+    clean").
+    NOT yet certified: v495f5 repair-visual peer refresh (broadcast proven in
+    the 2-pilot run_142512 but the observer-delay question is unresolved -
+    v499f5's delay was reverted as wrong-layer); v496f5 clock keeper (user:
+    "looks ok, don't mark as fixed yet").
+    OPEN: parked BOMBER cannot repair - its bombsight trips the v446f5
+    special-form guard so msg-119 is REFUSED on the ground (needs a
+    parked-bombsight vs bomb-run discriminator, delicate).
     DEFERRED (user, 2026-08-15, still open): initial scene loadout + storage
     capacity feel LOW. Constants live in the scene profiles + v284 GAME_DEF
     patches (InitialStorage / GetFuelWhenLimFuel / GetAmmoWhenLimAmmo).
@@ -76,6 +87,114 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v503f5 [NETWORK/CTD - LOBBY-EXIT-AFTER-BAIL CTD: THE ROOT FIX] Bail -> exit to HQ
+      under canopy -> back to lobby CTD'd the client every time ('generic error,
+      Length=-8/-11, Network.cpp:249'; messages87/89/91) while exit-to-desktop was
+      clean. Root: the msg-3 router runs `(entered_game or _left_world) and
+      sub==0x03`. A normal exit brings the plane down IN-ARENA, which sets
+      _left_world, so the teardown's trailing deletes are swallowed. After a BAIL
+      the plane is still airborne at the leave - its ExitEvent fires INSIDE the
+      client's ~GAME_DEF, arriving with entered_game=False (msg-64 cleared it)
+      AND _left_world=False -> router miss -> DEFAULT ECHO -> the client
+      re-ingests its own 'out 3'4' mid-teardown ('in 3'4 / Server require delete
+      object N', N garbage 0/1/120) -> negative-length CTD. Desktop exits closed
+      the socket before the echo landed, which is why only the lobby path died.
+      Fix: s._left_world = True at the top of the msg-64 leave handler - every
+      post-leave msg-3 now routes to the guarded swallow, however the life ended.
+      Fresh spawn re-arms it. USER-VERIFIED clean. (v501f5/v502f5 below were
+      chased first and stay in as correct behavior, but the echo was a FRESH
+      post-leave send neither could touch.)
+v502f5 [NETWORK - STALE IN-GAME RELIABLE STOP ON LEAVE] Defence layer found while
+      chasing the CTD: the un-ACKed reliable backlog (RELBUDGET 32-56 at a
+      bail-leave) kept being retransmitted into the client's ~GAME_DEF by BOTH
+      the send_rel blocking window and _rel_keeper. New s._arena_left_at stamp at
+      the msg-64 leave; both retransmit loops now drop any packet whose window
+      predates the stamp ('arena left - stale in-game reliable dropped').
+      Post-leave lobby sends have a later t0 and are untouched. Not the CTD root
+      (the crash was an echo, a fresh send) but stops a real hazard class -
+      kept. A DESKTOP exit never needed it (s.closing already stops the keeper).
+v501f5 [SCORE/CTD - BAIL-EXIT HUSK DESPAWN (the v370f5 'quits mid-descent' gap)]
+      A bailer who exits to HQ while still under canopy left the empty bail
+      plane flying with nothing to tear it down - the exact STILL-OPEN route the
+      credit_bail_husk_kill docstring documented (husk orphaned on peers, held
+      bail kill lost). Now: when the parachuter is removed with exit-to-HQ
+      (MEC nibble 10) and bailed_plane_obj is live, despawn the husk RIGHT THEN
+      (broadcast_object_delete_3, peers only) and consume the held kill through
+      the same credit_bail_husk_kill path the respawn-despawn uses; then CLEAR
+      my_obj_number so the leave cannot re-delete a plane that is already gone.
+      v501f5.1: the first cut never fired - the `_bp2 != my_obj_number` guard was
+      copied from the respawn path where they differ, but at exit-to-HQ there is
+      no respawn so they are EQUAL; guard dropped (run_192959 proved the miss).
+      Flag: BAIL_EXIT_HUSK_DESPAWN. Verified firing (run_195611).
+v500f5 [RESUPPLY - 2009 SERVICE DELAY: EXPLICIT 119 GATED ON GROUND-STOP SETTLE]
+      USER-VERIFIED ("worked well", settle raised 2.0 -> 3.0s). The explicit
+      msg-119 repair request was serviced the instant it arrived - even
+      mid-landing-rollout (run_183819: grants at movement=261238/249897) - while
+      the background poll already waited AUTO_RESUPPLY_SETTLE. The 2009 host
+      made you sit ~2s before service. Fix: the 119 now requires the SAME
+      ground_stop_eligible settle as the poll (flag SERVICE_REQUIRES_GROUND_STOP;
+      not-settled requests log 'msg-119 request DEFERRED' - client re-asks, poll
+      is the fallback). Accepted trade: partially re-opens the v454f5
+      grant-on-request rationale; watch for a genuinely parked plane deferring.
+      KNOWN OPEN (separate): a parked BOMBER's 119 is refused by the v446f5
+      bombsight/special-form guard ('special telemetry form seen 0.1s ago') -
+      the bombsight runs on the ground, so bombers cannot repair at all. Needs a
+      parked-vs-bombrun discriminator; not attempted (delicate).
+v499f5 [RESUPPLY - REVERTED SAME DAY: PEER-REFRESH DELAY WAS THE WRONG LAYER]
+      First cut at the 2009 delay put a debounced threading.Timer on the v495f5
+      REPAIR-VIS peer re-create. Wrong layer twice over: it only delays what the
+      OBSERVER sees (needs took_damage, i.e. player-inflicted damage - solo tests
+      can never trigger it), and the thing the user was timing was the service
+      grant itself. Cleanly reverted (constant + delayed block removed); the
+      correct fix is v500f5.
+v498f5 [SCORE - PILOT-FATE FIX PAIR: ON-CHUTE BAIL + PRE-GUARD PARACHUTER HOIST]
+      (1) An empty bail plane comes down MEC=1, not 5, and was booked as a
+      cockpit death - new _on_chute first-branch defers the fate to the canopy.
+      (2) THE capture bug: the parachuter-delete handler lived inside the
+      `entered_game and not _left_world` guard, but the bail sets _left_world
+      when the empty plane comes down, so the canopy's later SE=12 delete was
+      swallowed and CAPTURED never scored (run_160000). Hoisted a pre-guard
+      parachuter block ahead of the guard: read stored[7], SE=12 ->
+      db_credit_capture + aces wipe + ACE88, relay the chute delete, clear the
+      tracker, return. VERIFIED: full 4/4 matrix in run_163649 (enemy chute ->
+      CAPTURED death+1; friendly bail / crash-lands -> pilot safe, plane only;
+      cockpit crash -> death). PILOT_FATE_SCORING left ON per user.
+v497f5 [SCORE - PILOT SAFE/CAPTURED: FATE BY WHERE THE PILOT LANDS] 13-edit
+      feature behind PILOT_FATE_SCORING. Bail = +1 plane lost always; the PILOT
+      is lost only where FA itself says so - the parachuter's delete exit byte
+      ((MEC<<4)|ScoreEvent at stored[7]): SE=12 (0x2c) = came down on enemy
+      ground = CAPTURED (death +1, aces wiped, streak broken via new
+      db_credit_capture); SE=0 (0x20) = friendly = safe (aces/streak kept).
+      Crash-lands are always survivable - FA.exe FUN_00478640 computes the
+      0xc-(territory-match) capture code for the PILOT/parachuter path only,
+      proven behaviorally (same enemy field, bail=captured vs crash-land=safe,
+      run_163649). Kill credit to the shooter is independent of pilot fate
+      (db_credit_kill count_pilot_death param; score_on_death pilot_lost gate).
+      Enemy crash-land=death was considered and DROPPED per user - TC territory
+      flips at CapturePercent=50 make any server-side ownership map go stale.
+v496f5 [NETWORK - CLOCK: STATUS KEEPER RUNS THROUGH LOBBY/HQ] Re-fix of the
+      galloping-clock after the v493f5 revert, per the user's preferred
+      direction: stop gating the 2s STATUS time-keeper on entered_game so the
+      base credit never freezes during a lobby/HQ stay - no gap, no lump, no
+      re-anchor needed under either clock model. STATUS: user says "looks ok,
+      don't mark as fixed yet" - certification needs a long-idle re-fly with
+      peers present (the v493f5 failure mode).
+v495f5 [MULTIPLAYER - VISUAL REPAIR NOT SEEN BY PEERS: OBJECT RE-CREATE] Peers
+      hold a damaged NetPlane's state until the object is (re)created - msg-88
+      refreshes fuel/load only (v494f5 probe disproved it live). On a
+      damaged->repaired transition the plane is now re-issued to every peer that
+      has it, via the v474f5 ATOMIC predel+create (object-only,
+      with_client=False). Broadcast PROVEN in the 2-pilot session (run_142512:
+      're-created object on 2 peer(s)' on every repair). Behind
+      REPAIR_REFRESH_PEERS. Known cosmetic: the re-create blips at (0,0,0)
+      before telemetry snaps it back ('breaks in half'); fixing that means
+      creating at the live position - open. The observer-delay question (2009
+      showed damage for ~2s) is unresolved after the v499f5 revert - needs a
+      shooter+target+observer pass to decide.
+v494f5 [SCORE/DIAG - ACE88 REPAIR PROBE (superseded)] Test probe: fire msg-88 at
+      peers on a repair to see if it clears their damage view. Field answer
+      (run_20260828_202811): it does not - 88 is fuel/load only. Kept as the
+      evidence trail for v495f5's re-create approach.
 v493f5 [NETWORK - NET-TIME RUNAWAY on re-fly after a long lobby/idle stay (Taurus
        "low framerate + plane flies super fast across the terrain", messages51 /
        online run_20260828_121752)] ROOT CAUSE: the v215 STATUS time-keeper computes
