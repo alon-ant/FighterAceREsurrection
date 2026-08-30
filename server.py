@@ -12450,6 +12450,14 @@ AUTO_RESUPPLY_SETTLE = 2.0     # min seconds of identical-position samples befor
                                #   window (CRASH_MOVEMENT_WINDOW_S=3.0), so in practice a plane is
                                #   granted once its whole recent history is still
 AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval
+REPAIR_119_PENDING_WINDOW_S = 10.0 # v505f5: how long a DEFERRED explicit msg-119 stays honorable.
+                               #   In an AIR-START arena the poll grant is suppressed, so a 119 that
+                               #   deferred (plane not settled yet) had NOTHING to retry it - the
+                               #   client fires 119 once on engine-off and drops it, so a settled
+                               #   plane never got repaired until the pilot toggled the engine to
+                               #   re-fire (online run_20260830_032805). Now a deferred 119 is
+                               #   remembered for this window and the 0.5s poll services it the
+                               #   instant the plane settles, even in an air-start arena.
 AUTO_RESUPPLY_FRESH = 1.5      # newest PLANE sample older than this (its OWN timestamp, never the
                                #   any-object last_telem_time) => cannot judge => NOT eligible
 AUTO_RESUPPLY_MIN_SAMPLES = 3  # min onum-matched samples in the identical-position run
@@ -14115,8 +14123,9 @@ def _handle_repair_request_119(s, pl):
     if SERVICE_REQUIRES_GROUND_STOP:
         _ok119, _why119, _ = ground_stop_eligible(s, now)
         if not _ok119:
+            s._repair_119_pending = now   # v505f5: remember it so the poll services it once settled
             log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - not settled yet '
-                            f'({_why119}) - waiting for ground settle before servicing [v500f5]')
+                            f'({_why119}) - poll will service once settled [v500f5/v505f5]')
             return
     _pos = None
     try:
@@ -14128,6 +14137,7 @@ def _handle_repair_request_119(s, pl):
     s.resupplied_this_stop = True
     s._grant_pos = _pos
     s.last_resupply_at = now
+    s._repair_119_pending = 0.0   # v505f5: serviced directly, clear any pending retry
     log('RESUPPLY', f'{s.current_pilot} msg-119 repair REQUEST -> granting '
                     f'(movement={_mv}, pos={_pos})')
     _grant_auto_resupply(s, _pos, explicit=True)
@@ -14386,7 +14396,16 @@ def _resupply_poll_loop():
                 s.resupplied_this_stop = True
                 s._grant_pos = pos
                 s.last_resupply_at = now
-                _grant_auto_resupply(s, pos)
+                # v505f5: honor a DEFERRED explicit 119 so it is serviced even in an air-start arena
+                # (where a plain poll grant is suppressed). The 0.5s poll IS the retry the deferred
+                # request never had; without this a settled plane waited on the pilot re-firing 119.
+                _p119 = getattr(s, '_repair_119_pending', 0.0)
+                _honor119 = bool(_p119) and (now - _p119) <= REPAIR_119_PENDING_WINDOW_S
+                if _honor119:
+                    s._repair_119_pending = 0.0
+                    log('RESUPPLY', f'{s.current_pilot} poll servicing a DEFERRED msg-119 now that '
+                                    f'the plane has settled (explicit request honored) [v505f5]')
+                _grant_auto_resupply(s, pos, explicit=_honor119)
             except Exception:
                 logx('RESUPPLY', f'poll error for {getattr(s, "current_pilot", "?")}')
 
