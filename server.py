@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v523f5'
+VERSION = 'v525f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7946,6 +7946,10 @@ SERVER_CHUTE_KILL   = True   # v519f5 [2009 ARCHITECTURE]: the 2009 host was AUT
                              #   killer, pilot loss to the victim, all at the live moment.
 PARA_KILL_HITS      = 3      # v519f5: hit RECORDS (8B each; one msg-29 frame carries several) that
                              #   kill the pilot. Tune to taste - 2009 pilots died fast.
+ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's pilot' ch4 broadcast
+                             #   (deferred pre-guard path) is not true to the original game's format
+                             #   (user request). Scoring/pilot-loss unaffected; the native cyan from
+                             #   the server-authoritative chute kill is separate and still fires.
 SERVER_CHUTE_KILL_TO_OWNER = True  # v523f5: send the server kill delete to the VICTIM too. The 2009
                              #   lifecycle is explicit - the owner's client free-falls the canopy
                              #   and WAITS for the server's delete - and without it the victim rides
@@ -12091,6 +12095,14 @@ def _fire_server_confirm(s, via='', ident=None):
     PENDING_KILL.pop(getattr(s, 'my_obj_number', None), None)
     # v248: a fresh plane means the previous life's parachuter (if any) is history.
     s.para_obj_number = None
+    # v524f5 [STALE TALLY BUG]: _para_hits (server-authoritative chute-kill counter) and its
+    # _para_server_killed re-fire guard are PER-LIFE, but were only reset at the kill itself - so
+    # under-threshold hits from a prior chute carried into the next life, and 2 old + 2 new crossed
+    # the threshold, 'killing' a freshly-respawned pilot on leftover damage (user report v523f5:
+    # 'my chute got hit twice ... concluded my pilot is dead ... my world tore down'). Clear both
+    # at every fresh plane, as we do para_obj_number.
+    s._para_hits = 0
+    s._para_server_killed = None
     if SEND_ACE_RANK_88:
         def _send88(_s=s):
             time.sleep(0.5)
@@ -12215,21 +12227,21 @@ def _ingame_own_object_removed(s, tb, stored):
                     if _pkname:
                         db_apply_score_delta(_pkname, PILOT_KILL_SCORE, mode=_pksmode)  # limited, NO kill
                 _pkline = f"{_pkname or 'A pilot'} killed {s.current_pilot}'s pilot"
-                # v514f5: the v513f5 announce used build_chat_broadcast (0xcd) - a LOBBY-only packet
-                # that renders nothing in-arena (run_20260830_080731: PILOTKILL fired + scored, but
-                # no line on any screen). Use the channel-4 in-arena announce instead - the same path
-                # the `say` command uses (broadcast_everyone), which draws an on-screen line to every
-                # in-game player with no sender prefix. Scoped to the victim's room.
-                for _pkpeer in get_sessions_in_room(s.current_room):
-                    if not getattr(_pkpeer, 'entered_game', False):
-                        continue
-                    try:
-                        _pki = getattr(_pkpeer, 'player_index', 0) or 0
-                        _submit_send(send_rel, _pkpeer,
-                                     build_chat_display_20(4, _pkline, player_index=_pki),
-                                     f'<- pilot-kill announce ch4: {_pkline}', to=2.0)
-                    except Exception:
-                        pass
+                # v525f5: the sysop-style broadcast line is DISABLED by default - its wording/format
+                # is not true to the original game (user request). Scoring and the victim's pilot-
+                # loss above are unaffected, and the native cyan from the server-authoritative chute
+                # kill (SERVER_CHUTE_KILL) is a separate path and still fires. Set True to restore.
+                if ANNOUNCE_PILOT_KILL_LINE:
+                    for _pkpeer in get_sessions_in_room(s.current_room):
+                        if not getattr(_pkpeer, 'entered_game', False):
+                            continue
+                        try:
+                            _pki = getattr(_pkpeer, 'player_index', 0) or 0
+                            _submit_send(send_rel, _pkpeer,
+                                         build_chat_display_20(4, _pkline, player_index=_pki),
+                                         f'<- pilot-kill announce ch4: {_pkline}', to=2.0)
+                        except Exception:
+                            pass
                 if _pkkill is not None and SEND_ACE_RANK_88:
                     try:
                         send_ace_rank_88(_pkkill, reason='(pilot kill score)')
@@ -16127,6 +16139,8 @@ def handle_post_auth(s, cmd, pl):
             # The parachuter gets its OWN slot.
             if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None:
                 s.para_obj_number = _pn
+                s._para_hits = 0                 # v524f5: fresh canopy - clear stale hit tally
+                s._para_server_killed = None     #   and the re-fire guard (see below)
                 s._para_ident = _pi          # v511f5: identity for duplicate-bail detection
                 # v456f5: parachuter Numbers enter the session history too, so the allocator's
                 # grace window protects them after landing (para_obj_number clears the moment
