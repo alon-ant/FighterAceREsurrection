@@ -7,9 +7,91 @@ Inline '# vNNN:' comments in the code body were deliberately NOT moved -
 they explain why a specific line is the way it is and must stay with it.
 
 ==============================================================================
-*** BANKED 2026-08-29: v503f5 is the STABLE BANKING POINT (user-approved). ***
-    Snapshot server.py -> 'old files\server_v503f5.py' at next convenience.
-    (Previous banked point: v472f5, 2026-08-24; before that v444f5, 2026-08-15.)
+*** BANKED 2026-08-30 (late): v528f5 is the STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v528f5.py' at next convenience.
+    (Previous banked point: v508f5, 2026-08-30; v503f5, 2026-08-29; v472f5, 2026-08-24.)
+    v509f5-v528f5: THE PARACHUTE / PILOT-KILL CHAPTER, user-verified live tonight
+    ("Works! Killing a chute no longer tears down the world. Cyan messages appear
+    correctly for killing a pilot under a chute. Exploding a plane now registers
+    a cyan kill message correctly."). Highlights, newest-first below; the one OPEN
+    item is the COCKPIT-KILL killer-side cyan (diagnosis complete: needs the 2009
+    host's killer-directed 'in 33'14' msg-33 - see the v528f5 entry's NEXT note).
+
+v528f5 [NATIVE VICTIM KILL AT THE CHUTE VERDICT] - at the server's chute-kill
+    decision the VICTIM receives the native killp relay (v527f5 mechanism): their
+    own client executes the pilot death at the live moment - real death flow,
+    real respawn - and its later report is absorbed by the swallow guard. Peers
+    keep the immediate 0x55+hunter canopy delete (= the killer's live cyan).
+    VERIFIED: no world teardown, correct cyan, single scoring.
+    NEXT (open): cockpit-kill killer-side cyan. Two-gate model PROVEN from
+    messages21: (1) third-party viewers draw iff ExitDataArrive resolves the
+    victim to a PILOT NAME (player-bound; lazily-created object-only peers show
+    a plane-type string and draw nothing); (2) the KILLER's own client also
+    needs the 2009 killer-directed 14-byte msg-33 (seen in the 2009 capture
+    messages04 as 'in 33'14') - without it, name-bound synthesised kills draw
+    nothing for the killer (cockpit kill 20:41:48 run_20260830_200618). Plan:
+    RE FUN_004f9b0f's 14B payload layout, then send a populated TYPE-0x53
+    msg-33 to the killer on every synthesised kill; watch for double HUD credit.
+v527f5 [NATIVE MODERATOR RELAY] - killp/ejectp/crumblep now FORWARD the action
+    to the TARGET's client ([7f][target player_index u16][sub], appspace T=0x42,
+    the exact shape the client emits as 'out 127'4') and send nothing else: the
+    target's FA.exe executes its own death natively and its report drives the
+    normal kill chain. Replaces the server-side delete of the target's own
+    object, which tore the victim's world down (a client NEVER receives an
+    outside delete of its own live object in normal play). ##killp self-test:
+    "All worked as expected for the first time". crumblep now draws the native
+    "X has Exploded Y" cyan (MEC=6).
+v526f5 - server chute-kill broadcast is peers-only for good (owner-inclusion
+    retested on a live victim: client froze its conductor tick, tore the world
+    down, no death flow - run_120053 19:02). Superseded by v528f5's native path.
+v525f5 - the sysop-style ch4 'X killed Y's pilot' broadcast OFF (not true to
+    the original game's format; scoring/pilot-loss unaffected).
+v524f5 [STALE TALLY] - _para_hits/_para_server_killed now reset at every fresh
+    canopy AND fresh plane; leftover hits from a prior chute were 'killing'
+    freshly-respawned pilots (2 old + 2 new crossed the threshold).
+v522f5 - the server chute kill no longer clears para_obj_number (it is the
+    victim's ticket through the v510f5 telemetry gate; clearing it blanked their
+    world mid-descent); re-fire guard added; PARAHIT lines now log recs=/tally=.
+v521f5 [ENTRY TAIL DECODED] - exit-entry +5 (u16) and +7 (u32) are the HUNTER'S
+    PLAYER-INDEX; the banner resolves the killer's NAME through them (hardcoded
+    literals had produced 'X destroyed X' / 'unknown pilot'). Proven from two
+    captures; +11 is the PPT class (0x02 plane, 0x42 canopy - v515f5).
+v519f5/v520f5 [SERVER-AUTHORITATIVE CHUTE KILL - THE 2009 ARCHITECTURE] - the
+    host, not the victim's client, decides the pilot kill: count the relayed
+    msg-29 hit records per canopy; at PARA_KILL_HITS (3) broadcast the native
+    0x55+hunter canopy delete to peers at the live moment (+50 killer score,
+    victim pilot-loss). Root insight: the victim's client defers its chute-death
+    report until RESPAWN (flightrec-proven: the delete arrives bundled with the
+    StartPlace request), so victim-driven kills can never be live; the canopy
+    has no telemetry and the client waits for the server to end it - the server
+    was always meant to be the authority. v516f5's verbatim-tail relay remains
+    the deferred fallback for under-threshold kills and collisions.
+v513f5 [PILOT-KILL SCORING] - a pilot killed under canopy is NOT a second plane
+    kill: limited PILOT_KILL_SCORE (+50, points only, no kill notch) to the
+    killer, pilot-loss to the victim (design decision: one kill per victim).
+v512f5/v515f5 [KILL BANNER FOR SYNTHESISED TAILS] - a credited kill arriving on
+    a hunter-less tail (bail-husk, delayed crash, 0x50 short form) is rewritten
+    to a full 0x53+hunter 12-byte exit-delete (byte-parity with a real victim
+    report, incl. the +11 PPT byte) and the redundant msg-33 announce is
+    suppressed. Draws for third-party viewers (subject to the player-binding
+    gate above); the killer's own view needs the v528f5 NEXT item.
+v511f5 [DOUBLE-PARACHUTER DEDUP] - a reliable retransmit of the bail out-4 was
+    minting a second phantom canopy (two ServerConfirms, owner-match failures,
+    dead hit relay). Same ident within 5s = swallowed; one bail = one canopy.
+v510f5 [PARACHUTE TELEMETRY] - relay_telemetry recipient gate is now flying OR
+    para_obj_number: a pilot under canopy keeps receiving peer telemetry through
+    the husk death (was: world blanked ~28s after the husk delete).
+v509f5 [PARACHUTER DAMAGE RELAY] - msg-29 (0x1d) HitToParachuter handled:
+    validated, relayed to the owner + flying peers, PENDING_KILL latched, never
+    echoed (was: echoed back to the shooter -> screen flood + reliable backlog,
+    owner took no damage and landed safe).
+
+==============================================================================
+*** BANKED 2026-08-30: v508f5 is the STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v508f5.py' at next convenience.
+    (Previous banked point: v503f5, 2026-08-29; v472f5, 2026-08-24; v444f5, 2026-08-15.)
+    v504f5-v508f5 (the FFA/air-start repair-reliability chain) are USER-VERIFIED
+    online with real players ("bank works as expected") - entries below.
     Verified in this bank: v497f5/v498f5 pilot-fate scoring (capture matrix 4/4,
     PILOT_FATE_SCORING left ON per user), v500f5 2009 service settle (user set
     3.0s, "worked well"), v501f5 bail-husk despawn+credit, v502f5 stale-reliable
@@ -87,6 +169,45 @@ NEXT-SESSION PROMPT (paste this to start the new thread):
    server.py ~15950 lines, v479f5 deployed (v472f5 banked)."
 ------------------------------------------------------------------------------
 
+v508f5 [RESUPPLY - REPAIR REQUIRES ENGINE-OFF] The client sends msg-119 ONLY with
+      the engine off (user-confirmed), so the server tracks it: a 119 latches
+      s._engine_off=True; ANY movement clears it (poll re-arm). The poll's damaged-
+      repair trigger (v506f5) now requires _engine_off, so a plane on the ground with
+      the engine ON is NOT auto-repaired even under fire - the pilot must cut the
+      engine (fires a fresh 119) to ask for service. USER-VERIFIED. Edge (noted, not
+      fixed): engine off->on while perfectly braked (no movement, no message) still
+      reads engine-off to the server; closing it needs the engine-toggle message
+      mapped (RE task).
+v507f5 [RESUPPLY - NO REPAIR WHILE UNDER FIRE] A damaged plane waits until incoming
+      fire has stopped for REPAIR_UNDER_FIRE_HOLDOFF_S (5.0s, from last_damaged_at)
+      before it repairs, so a parked plane can't out-repair a sustained strafing run
+      (each repair also clears the attacker's held kill). Enforced in the poll (holds
+      off, one-shot NOT set, services the instant the hold-off elapses) and the
+      explicit 119 (defers to the poll). Non-damaged loadout grants unaffected. 0
+      disables. USER-VERIFIED.
+v506f5 [RESUPPLY - PARKED-AND-HIT REPAIR] A plane already parked engine-off when hit
+      never fires a fresh 119 (no engine-off transition), so nothing requested the
+      repair and it sat damaged until the pilot toggled the engine
+      (run_20260830_032805). Fix: a new hit (msg-28) re-arms the resupply one-shot,
+      and the poll honors took_damage as a repair trigger (like a pending 119) even
+      in an air-start arena. [v508f5 later gated this on engine-off.] USER-VERIFIED.
+v505f5 [RESUPPLY - DEFERRED-119 RETRY IN AIR-START ARENAS] Root of the online 'repair
+      only after an engine toggle': the FFA arena is AIR-START (StartGround=no), which
+      SUPPRESSES the background poll grant, so the explicit 119 was the ONLY repair
+      path - and a deferred 119 (plane not settled that instant) had NOTHING to retry
+      it (the client fires 119 once and drops it). Now a deferred 119 is remembered
+      (s._repair_119_pending) and the 0.5s poll services it the instant the plane
+      settles, honored with explicit=True to bypass the air-start suppression.
+      REPAIR_119_PENDING_WINDOW_S=10s. USER-VERIFIED (defer -> poll-service handoff).
+v504f5 [RESUPPLY - SETTLE GATE JUDGES RECENT MOTION] ground_stop_eligible required
+      plane_movement()==0 over the FULL CRASH_MOVEMENT_WINDOW_S (3s), so a plane that
+      had just rolled to a stop kept non-zero movement (the roll-out lingering in the
+      3s history, e.g. movement=25729) and false-negatived as 'not settled' for ~3s
+      after it was actually still (online run_181723: granted at 0, DEFERRED at
+      25729). New plane_movement_recent(s, GROUND_STOP_MOVE_LOOKBACK_S=1.0) judges
+      only the last ~1s; the full-window plane_movement is UNTOUCHED for the crash
+      classifier (deaths unchanged), and the poll's movement= re-arm still fires for a
+      flying plane. USER-VERIFIED (landing repair, small tunable delay).
 v503f5 [NETWORK/CTD - LOBBY-EXIT-AFTER-BAIL CTD: THE ROOT FIX] Bail -> exit to HQ
       under canopy -> back to lobby CTD'd the client every time ('generic error,
       Length=-8/-11, Network.cpp:249'; messages87/89/91) while exit-to-desktop was

@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v528f5'
+VERSION = 'v529f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7858,6 +7858,76 @@ def send_score_event_to_killer(killer, mec=None, eec=None):
     log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} '
                    f'(MEC={mec},EEC={eec} -> type byte 0x{((mec & 0xf) << 4) | (eec & 0xf):02x})')
 
+def build_kill_banner_33(victim_pi, hunter_pi, ppt=0x02, mec=5, eec=3):
+    """v529f5: msg-33 Type 0x53 with a POPULATED tail - the killer-side cyan banner.
+
+    FULL RE MAP (FUN_004f9b0f handler -> FUN_004f8d10 unpacker -> FUN_00478640 PPTWork display):
+
+    WIRE (14B, gse = wire+2 inside the handler):
+        [0]    0x21 msg id
+        [1]    not read by the unpacker (keep 0)
+        [2:4]  u16 VICTIM PlayerIndex -> dispatcher resolves ESI = the banner's SUBJECT: the
+               display prints ESI's plane (+0x11c), plane name (FUN_00428360) and pilot name
+               (FUN_004269a0). The legacy 0x13 credit puts the KILLER here (ticks his stats);
+               the 0x53 banner MUST name the VICTIM here.
+        [4]    TYPE 0x53: high nib MEC=5 -> event 0x25 (PLAYER_KILLED, no +0x2fc flag),
+               low nib EEC=3 (any !=1 avoids the aggregate/announce branch).
+        [5:7]  u16 -> struct[2]: FUN_004f2530(idx) game-player-by-PI fallback lookup.
+        [7:9]  u16 -> struct[3]: FUN_004f2560(idx) = ARR<NET::CLIENT*,512>[PI]; entry must have
+               +0x24 == struct[4]; its NAME at +0x20 is the last-resort hunter-string source.
+        [9:13] u32 -> struct[4]: compared against plane_object+0x24 (= OWNER PLAYER INDEX,
+               empirically proven by the v521f5 exit-entry captures). THE CYAN GATE - see below.
+        [13]   PPT class byte, LOW 5 BITS index ARR<PPT_TYPE_BASE*,16> @0xc7ed48 (0x1f = -1
+               sentinel -> handler skips the display entirely; that IS the 'in_stack_00000018<0'
+               check - it is the PPT class, NOT a hunter index). Top 3 bits -> struct[1]
+               (canopy sub-flag: 0x42 = class 2 | top3 2; plane 0x02 = class 2 | top3 0).
+               A class whose PPT method0()==0 falls into a plain resource-0x4a line - never cyan.
+
+    THE CYAN GATE (FUN_00478640, PPTWork.cpp): after building the banner text it STRING-COMPARES
+    the event's hunter-name string (event+0x14) against MY OWN pilot name (FUN_004269a0 on
+    DAT_00c6eb98). Match -> colour 0xb/0xc (camp check FUN_0046bba0) FUN_00469cf0 print + kill
+    sound (res 0x3d1) + FUN_004beec0(victim). No match -> plain colour-0 line (what 3rd parties
+    see). The hunter-name string is written by the UNPACKER, first branch that matches:
+      (a) my player's plane (DAT_00c6eb98+0x128) has +0x24 == [9:13]  -> MY name  <- the killer
+      (b) game-player[[5:7]]'s plane +0x24 == [9:13]                  -> their name
+      (c) NET::CLIENT[[7:9]] +0x24 == [9:13]                         -> name from +0x20
+    So hunter PI in ALL THREE tail slots lights the killer branch whether he is still in his
+    plane (a) or already back at HQ (c). A ZEROED tail matches nothing -> empty string -> the
+    strcmp can never pass -> invisible. That is mechanically why every pre-v529 msg-33 drew
+    nothing for the killer.
+
+    SIDE EFFECT (harmless, already handled): on accepting the my-plane branch the client calls
+    FUN_004fca60 -> emits 'out 25'7' ([0x19][u32][u16]) back at us. msg-25 has been consumed
+    server-side since v220 (NO_ECHO_SUBS + compound tuple) - do not un-swallow it.
+    """
+    body = bytearray([MSG_SCORE_EVENT_33])
+    body += bytes([0x00])                                  # [1] not read on this path
+    body += struct.pack('<H', victim_pi & 0xFFFF)          # [2:4] VICTIM PI -> banner subject
+    body += bytes([((mec & 0xf) << 4) | (eec & 0xf)])      # [4] 0x53 PLAYER_KILLED
+    body += struct.pack('<H', hunter_pi & 0xFFFF)          # [5:7] hunter PI (branch b)
+    body += struct.pack('<H', hunter_pi & 0xFFFF)          # [7:9] hunter PI (branch c, NET::CLIENT)
+    body += struct.pack('<I', hunter_pi & 0xFFFF)          # [9:13] hunter PI (branch a - CYAN gate)
+    body += bytes([ppt & 0xFF])                            # [13] PPT class (0x02 plane, 0x42 canopy)
+    return build_ingame_pkt(bytes(body))
+
+def send_kill_banner_33(killer, victim, ppt=0x02, why=''):
+    """v529f5: fire the killer-directed cyan kill banner (msg-33 Type 0x53, populated tail).
+    `victim` is the session whose death is being announced. Reliable, killer only."""
+    if not KILLER_BANNER_33 or killer is None or victim is None:
+        return
+    _kpi = getattr(killer, 'player_index', None)
+    _vpi = getattr(victim, 'player_index', None)
+    if _kpi is None or _vpi is None:
+        log('KILLBANNER33', f'[skip] missing PI (killer={_kpi} victim={_vpi}) {why}')
+        return
+    pkt = build_kill_banner_33(_vpi, _kpi, ppt=ppt)
+    threading.Thread(target=lambda: send_rel(killer, pkt,
+                     f'<- KILL_BANNER 33 type 0x53 ({victim.current_pilot} PI={_vpi} killed by '
+                     f'{killer.current_pilot} PI={_kpi}, ppt=0x{ppt:02x}) {why}', to=3.0),
+                     daemon=True).start()
+    log('KILLBANNER33', f'banner-33 -> killer {killer.current_pilot} (PI={_kpi}): victim '
+                        f'{victim.current_pilot} (PI={_vpi}) ppt=0x{ppt:02x} {why} [v529f5]')
+
 CREDIT_BAIL_HUSK = True      # v370f5: single-flag revert for the husk-teardown kill credit below.
 BAIL_EXIT_HUSK_DESPAWN = True # v501f5: when a bailer EXITS to the menu while still under canopy
                              #   (parachuter removed with exit-to-HQ), despawn the still-airborne
@@ -7991,6 +8061,18 @@ SERVER_CHUTE_KILL_NATIVE_VICTIM = True  # v528f5: at the server's chute-kill ver
                              #   pilot death AT THE LIVE MOMENT - real death flow, real respawn -
                              #   and its subsequent chute-death report is absorbed by the v519f5
                              #   swallow guard. Peers keep the immediate canopy delete + cyan.
+KILLER_BANNER_33    = True   # v529f5 [THE KILLER-SIDE CYAN BANNER]: on every synthesised kill
+                             #   (plane synth-tail 0x53 AND server chute kill), send the KILLER a
+                             #   fully-populated msg-33 Type 0x53 via send_kill_banner_33. Gate 2 of
+                             #   the two-gate model: peers draw from the exit-delete, the killer
+                             #   additionally needs the 2009 host's killer-directed 14B msg-33
+                             #   ('in 33'14', messages04). Every past msg-33 attempt zeroed the 9B
+                             #   tail - FUN_004f8d10 then matched no branch, left the hunter-name
+                             #   string EMPTY, and FUN_00478640's strcmp(hunter-string, my-name)
+                             #   cyan gate could never pass (see build_kill_banner_33 for the full
+                             #   RE map). WATCH: the killer's client ALSO runs FUN_00478640 off the
+                             #   tailed exit-delete (silently, v517f5) - if the HUD kill counter
+                             #   ever double-ticks, this flag is the revert.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -9275,6 +9357,11 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                       + struct.pack('<I', _kpi512 & 0xffff) + bytes([0x02]))   # 12B: id|53|hunter|PI|PI|PPT
         log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
                           f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
+        # v529f5 [GATE 2]: the exit-delete lights third-party viewers only; the KILLER's own
+        # client additionally needs the 2009 host's killer-directed msg-33 (proven:
+        # run_20260830_200618 20:41:48 server-perfect vs messages21 ~5285 ExitDataArrive
+        # name-bound, no EVENT). Populated tail = the fix; see build_kill_banner_33.
+        send_kill_banner_33(killer, s, ppt=0x02, why='(synth plane kill)')
         # v518f5 [EEC=1 PROBE]: fire BOTH legal announce-only msg-33 variants at the killer so we
         # learn what each native message says (and what colour it draws in). See the flag comment.
         if ANNOUNCE33_EEC1_PROBE:
@@ -15545,6 +15632,11 @@ def handle_post_auth(s, cmd, pl):
                         # it); _para_server_killed blocks any re-fire meanwhile.
                         _powner._para_hits = 0
                         _powner._para_server_killed = _pvic
+                        # v529f5 [GATE 2, cockpit kill]: the 0x55 delete draws for peers; the
+                        # killer needs the populated msg-33 (v517f5 proved the byte-perfect
+                        # tailed delete alone draws NOTHING on him). PPT 0x42 = parachuter
+                        # class, matching the native chute-kill tail byte.
+                        send_kill_banner_33(s, _powner, ppt=0x42, why='(chute/pilot kill)')
                         # v528f5: kill the VICTIM the proven graceful way - the native killp relay
                         # (v527f5). Their client runs its own death at the live moment; the report
                         # it sends afterwards hits the swallow guard above.
