@@ -5657,6 +5657,28 @@ def plane_movement(s):
         total += sum(abs(b[k] - a[k]) for k in range(3))
     return total
 
+def plane_movement_recent(s, window_s):
+    """v504f5: like plane_movement but summed over ONLY the last window_s seconds of _pos_hist.
+    A plane that has just rolled to a stop keeps non-zero FULL-window movement (the roll-out
+    lingers in the CRASH_MOVEMENT_WINDOW_S history) for ~3s after it is actually still, which
+    made ground_stop_eligible's exact-0 gate false-negative settled planes (online run_181723:
+    granted at movement=0, DEFERRED at movement=25729 - the lingering roll-out). Judging only the
+    RECENT window answers 'is it moving NOW'. Used ONLY by the ground-stop settle gate; the crash
+    classifier keeps the full-window plane_movement (deaths must not change). Still returns N for a
+    genuinely flying plane, so the poll's movement= one-shot re-arm is unchanged."""
+    hist = getattr(s, '_pos_hist', None)
+    if not hist or len(hist) < 2:
+        return 0
+    t_ref = hist[-1][0]
+    recent = [e for e in hist if (t_ref - e[0]) <= window_s]
+    if len(recent) < 2:
+        return 0
+    total = 0
+    for i in range(1, len(recent)):
+        a, b = recent[i - 1][1], recent[i][1]
+        total += sum(abs(b[k] - a[k]) for k in range(3))
+    return total
+
 def plane_movement_xz(s):
     """v484f5: movement over axes 0 and 2 ONLY (X + altitude), EXCLUDING the middle axis (1).
     RE finding (v483f5, two air-start captures + the raw frame at server.log 22:42:22): in the
@@ -12431,6 +12453,10 @@ AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval
 AUTO_RESUPPLY_FRESH = 1.5      # newest PLANE sample older than this (its OWN timestamp, never the
                                #   any-object last_telem_time) => cannot judge => NOT eligible
 AUTO_RESUPPLY_MIN_SAMPLES = 3  # min onum-matched samples in the identical-position run
+GROUND_STOP_MOVE_LOOKBACK_S = 1.0 # v504f5: the ground-stop settle gate judges movement over only
+                               #   the last ~1s (not CRASH_MOVEMENT_WINDOW_S=3s), so a plane that has
+                               #   just rolled to a stop is detected as settled ~1s after it is still
+                               #   instead of waiting the whole 3s history to clear of the roll-out.
 # v279: after a spawn/respawn the CLIENT is still building the plane object. A msg-60 that lands in
 # that window corrupts it: run 05.50.26 shows 'Create NetPlane ... ONumber=258' followed 4ms later by
 # our 'Repair PlnID:5 ... Load:0' and then an 8.5-MINUTE flood of
@@ -13771,7 +13797,7 @@ def ground_stop_eligible(s, now):
     if (now - t_new) > AUTO_RESUPPLY_FRESH:
         return False, 'stale', None
     try:
-        _pm = plane_movement(s)
+        _pm = plane_movement_recent(s, GROUND_STOP_MOVE_LOOKBACK_S)   # v504f5: recent window, not full 3s
     except Exception:
         return False, 'movement-error', None
     if _pm != 0:
