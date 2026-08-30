@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v518f5'
+VERSION = 'v519f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7929,16 +7929,23 @@ ANNOUNCE_SYNTH_KILL_LINE = False # v517f5: a credited synthesised-tail PLANE kil
                              #   UPPERCASED in style 0xd (the white sysop style) + a 10s banner:
                              #   mechanically a sysop broadcast, not the kill line (user report
                              #   confirmed). Superseded by the ANNOUNCE33_EEC1_PROBE below.
-ANNOUNCE33_EEC1_PROBE = True # v518f5 [DIAGNOSTIC]: the msg-33 handler's EEC=1 branch is a pure
-                             #   ANNOUNCE path - it prints through FUN_00469cf0 (the REAL event/
-                             #   kill display surface, same family as the cyan banner) and jumps
-                             #   past all scoring. Its assert allows MEC=2 or MEC=3, each picking a
-                             #   different built-in message; v368 only ever saw ONE of them
-                             #   ('Player crashed into ...'). Send BOTH legal variants to the
-                             #   killer on a synthesised kill so one test reveals the wording (and
-                             #   colour) of each. If either is the kill announce, it becomes the
-                             #   native replacement for the ch4 line. Cannot double-count (the
-                             #   EEC=1 branch never reaches the scoring code).
+ANNOUNCE33_EEC1_PROBE = False # v518f5 [DIAGNOSTIC]: both legal EEC=1 announce variants (0x21/0x31)
+                             #   drew NOTHING on the killer across two client launches -> the
+                             #   built-in EEC=1 message path is a dead end. Probe closed, OFF.
+SERVER_CHUTE_KILL   = True   # v519f5 [2009 ARCHITECTURE]: the 2009 host was AUTHORITATIVE over the
+                             #   canopy (no telemetry; the client free-falls it and waits for the
+                             #   server's delete). It decided the pilot kill from the hit stream AT
+                             #   THE MOMENT and broadcast the kill to everyone - victim included -
+                             #   which is why the killer's banner was identical to a normal kill:
+                             #   the kill delete landed while the canopy was live on his screen and
+                             #   he was engaging it. Our server waited for the victim's client,
+                             #   which only reports at RESPAWN (flightrec-proven) - unfixably late.
+                             #   So: count relayed msg-29 hit records per canopy; at PARA_KILL_HITS
+                             #   the SERVER kills the pilot - native 0x55+hunter delete (the exact
+                             #   byte-form a real client emits at a chute death) to ALL, +50 to the
+                             #   killer, pilot loss to the victim, all at the live moment.
+PARA_KILL_HITS      = 3      # v519f5: hit RECORDS (8B each; one msg-29 frame carries several) that
+                             #   kill the pilot. Tune to taste - 2009 pilots died fast.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -12151,6 +12158,13 @@ def _ingame_own_object_removed(s, tb, stored):
     # copy below (now unreachable for the chute, since we return first).
     if s.entered_game:
         _ponum = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
+        # v519f5: the victim's own (respawn-deferred) delete for a canopy the SERVER already
+        # killed and broadcast - swallow it, everything was done at the kill moment.
+        if _ponum is not None and _ponum == getattr(s, '_para_server_killed', None):
+            s._para_server_killed = None
+            log('PILOTKILL', f'{s.current_pilot} late own-delete for server-killed canopy '
+                             f'0x{_ponum:04x} -> swallowed (kill already broadcast live) [v519f5]')
+            return
         if _ponum is not None and _ponum == getattr(s, 'para_obj_number', None):
             _pexit0 = stored[7] if len(stored) > 7 else 0
             log('PARA', f'{s.current_pilot} parachuter 0x{_ponum:04x} removed (exit=0x{_pexit0:02x}) '
@@ -15425,6 +15439,45 @@ def handle_post_auth(s, cmd, pl):
             log('PARAHIT', f'{s.current_pilot} hit parachuter 0x{_pvic:04x} (owner '
                            f'{_powner.current_pilot if _powner else "?"}) by 0x{_phun:04x} -> '
                            f'relayed to {len(_peers29)} peer(s) [v509f5; was echoed -> flood]')
+            # v519f5 [SERVER-AUTHORITATIVE CHUTE KILL]: see SERVER_CHUTE_KILL. Count the hit
+            # records; at the threshold the SERVER decides the pilot kill NOW - while the canopy
+            # is live on every screen and the shooter is engaging it - and broadcasts the exact
+            # native kill delete a real client emits at a chute death (0x55 + hunter, tail from
+            # the run_085507 capture). Victim included: their client is told its pilot died.
+            if SERVER_CHUTE_KILL and _powner is not None:
+                _nrec519 = max(1, (len(_p29) - 5) // 8)
+                _powner._para_hits = getattr(_powner, '_para_hits', 0) + _nrec519
+                if (_powner._para_hits >= PARA_KILL_HITS
+                        and getattr(_powner, 'para_obj_number', None) == _pvic):
+                    _e519 = (struct.pack('<H', _pvic & 0x7fff) + bytes([0x55])
+                             + struct.pack('<H', _phun & 0xffff)
+                             + struct.pack('<H', 1) + struct.pack('<I', 1) + bytes([0x42]))
+                    _dk519 = build_exit_delete_object_3(_pvic, 0x55, entry=_e519)
+                    if _dk519 is not None:
+                        for _q519 in get_sessions_in_room(s.current_room):
+                            _submit_send(send_rel, _q519, _dk519,
+                                         f'<- SERVER chute-kill delete 0x{_pvic:04x} '
+                                         f'({_powner.current_pilot} pilot killed by '
+                                         f'{s.current_pilot})', to=3.0)
+                        _smode519 = scoring_mode_for_room(s.current_room)
+                        if _smode519 is not None and _powner.current_pilot:
+                            db_credit_capture(_powner.current_pilot, mode=_smode519)
+                            if LIVE_ACE_TRACKING:
+                                db_set_pilot_aces(_powner.current_pilot, 0)
+                            db_apply_score_delta(s.current_pilot, PILOT_KILL_SCORE, mode=_smode519)
+                        _powner.para_obj_number = None
+                        _powner._para_hits = 0
+                        _powner._para_server_killed = _pvic
+                        if SEND_ACE_RANK_88:
+                            try:
+                                send_ace_rank_88(s, reason='(pilot kill score)')
+                            except Exception:
+                                pass
+                        log('PILOTKILL', f'{s.current_pilot} killed {_powner.current_pilot} pilot: '
+                                         f'SERVER-DECIDED at {_powner._para_hits or PARA_KILL_HITS} '
+                                         f'hit record(s) -> native 0x55 kill delete to ALL (victim '
+                                         f'included) at the live moment; +{PILOT_KILL_SCORE} to '
+                                         f'killer, pilot loss +1 [v519f5]')
             return
 
         # --- msg 125 / sub=0x7d: CollInfoToPlane (AIR-TO-AIR COLLISION) ---------------
