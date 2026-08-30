@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v516f5'
+VERSION = 'v518f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7918,6 +7918,27 @@ RELAY_CHUTE_KILL_TAIL = True # v516f5 [EXPERIMENT]: a KILLED canopy's delete arr
                              #   draws whatever the real client draws for a chute kill. WATCH for a
                              #   client-side HUD tick doubling our +50-only rule; False reverts to
                              #   the bare delete.
+                             #   v517f5 verdict (flightrec dumps 20260830_093210): the killer
+                             #   RECEIVED the byte-perfect tailed delete and drew NOTHING. The
+                             #   native banner needs live-engagement client state that cannot be
+                             #   injected. Kept on (harmless, native-faithful), but the visible
+                             #   line comes from the ch4 announces.
+ANNOUNCE_SYNTH_KILL_LINE = False # v517f5: a credited synthesised-tail PLANE kill (bail-husk /
+                             #   delayed crash) gets a ch4 on-screen line 'X destroyed Y'.
+                             #   v518f5: OFF - FUN_004f6030 machine code shows ch4 renders
+                             #   UPPERCASED in style 0xd (the white sysop style) + a 10s banner:
+                             #   mechanically a sysop broadcast, not the kill line (user report
+                             #   confirmed). Superseded by the ANNOUNCE33_EEC1_PROBE below.
+ANNOUNCE33_EEC1_PROBE = True # v518f5 [DIAGNOSTIC]: the msg-33 handler's EEC=1 branch is a pure
+                             #   ANNOUNCE path - it prints through FUN_00469cf0 (the REAL event/
+                             #   kill display surface, same family as the cyan banner) and jumps
+                             #   past all scoring. Its assert allows MEC=2 or MEC=3, each picking a
+                             #   different built-in message; v368 only ever saw ONE of them
+                             #   ('Player crashed into ...'). Send BOTH legal variants to the
+                             #   killer on a synthesised kill so one test reveals the wording (and
+                             #   colour) of each. If either is the kill announce, it becomes the
+                             #   native replacement for the ch4 line. Cannot double-count (the
+                             #   EEC=1 branch never reaches the scoring code).
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -9201,6 +9222,29 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                       + struct.pack('<I', 0) + bytes([0x02]))   # 12B: id|53|hunter|0|0|PPT=2
         log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
                           f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
+        # v518f5 [EEC=1 PROBE]: fire BOTH legal announce-only msg-33 variants at the killer so we
+        # learn what each native message says (and what colour it draws in). See the flag comment.
+        if ANNOUNCE33_EEC1_PROBE:
+            try:
+                send_score_event_to_killer(killer, mec=2, eec=1)
+                send_score_event_to_killer(killer, mec=3, eec=1)
+                log('KILLBANNER', f'EEC=1 probe -> {killer.current_pilot}: sent announce-33 type '
+                                  f'0x21 (MEC=2) and 0x31 (MEC=3) - report the two lines\' wording '
+                                  f'+ colour [v518f5]')
+            except Exception:
+                pass
+        if ANNOUNCE_SYNTH_KILL_LINE:
+            _kline512 = f'{killer.current_pilot} destroyed {s.current_pilot}'
+            for _kp512 in get_sessions_in_room(s.current_room):
+                if not getattr(_kp512, 'entered_game', False):
+                    continue
+                try:
+                    _kpi512 = getattr(_kp512, 'player_index', 0) or 0
+                    _submit_send(send_rel, _kp512,
+                                 build_chat_display_20(4, _kline512, player_index=_kpi512),
+                                 f'<- synth-kill announce ch4: {_kline512}', to=2.0)
+                except Exception:
+                    pass
     epkt = None
     if EXIT_TAIL_DELETE_TO_PEERS and exit_byte is not None:
         epkt = build_exit_delete_object_3(s.my_obj_number, exit_byte, entry=exit_entry)
