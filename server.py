@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v521f5'
+VERSION = 'v522f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12163,6 +12163,7 @@ def _ingame_own_object_removed(s, tb, stored):
         # killed and broadcast - swallow it, everything was done at the kill moment.
         if _ponum is not None and _ponum == getattr(s, '_para_server_killed', None):
             s._para_server_killed = None
+            s.para_obj_number = None   # v522f5: canopy lifecycle ends here (see the v519f5 block)
             log('PILOTKILL', f'{s.current_pilot} late own-delete for server-killed canopy '
                              f'0x{_ponum:04x} -> swallowed (kill already broadcast live) [v519f5]')
             return
@@ -15437,19 +15438,23 @@ def handle_post_auth(s, cmd, pl):
             for _q in _peers29:
                 _submit_send(send_rel, _q, _p29,
                              f'<- HITPARA 29 relay ({s.current_pilot}->{_q.current_pilot})', to=3.0)
+            _nrec519 = max(1, (len(_p29) - 5) // 8)
+            if SERVER_CHUTE_KILL and _powner is not None:
+                _powner._para_hits = getattr(_powner, '_para_hits', 0) + _nrec519
             log('PARAHIT', f'{s.current_pilot} hit parachuter 0x{_pvic:04x} (owner '
                            f'{_powner.current_pilot if _powner else "?"}) by 0x{_phun:04x} -> '
-                           f'relayed to {len(_peers29)} peer(s) [v509f5; was echoed -> flood]')
+                           f'relayed to {len(_peers29)} peer(s), recs={_nrec519} '
+                           f'tally={getattr(_powner, "_para_hits", "?") if _powner else "?"}'
+                           f'/{PARA_KILL_HITS} [v509f5/v522f5]')
             # v519f5 [SERVER-AUTHORITATIVE CHUTE KILL]: see SERVER_CHUTE_KILL. Count the hit
             # records; at the threshold the SERVER decides the pilot kill NOW - while the canopy
             # is live on every screen and the shooter is engaging it - and broadcasts the exact
             # native kill delete a real client emits at a chute death (0x55 + hunter, tail from
-            # the run_085507 capture). Victim included: their client is told its pilot died.
+            # the run_085507 capture) to the PEERS (v520f5: never the owner).
             if SERVER_CHUTE_KILL and _powner is not None:
-                _nrec519 = max(1, (len(_p29) - 5) // 8)
-                _powner._para_hits = getattr(_powner, '_para_hits', 0) + _nrec519
                 if (_powner._para_hits >= PARA_KILL_HITS
-                        and getattr(_powner, 'para_obj_number', None) == _pvic):
+                        and getattr(_powner, 'para_obj_number', None) == _pvic
+                        and getattr(_powner, '_para_server_killed', None) != _pvic):
                     # v521f5: +5 (u16) and +7 (u32) are the HUNTER'S PLAYER-INDEX/station - the
                     # banner resolves the killer's NAME through them. Proven by the two captures:
                     # plane kill (killer PI 0) carried 0/0, chute kill (killer PI 1) carried 1/1.
@@ -15480,7 +15485,11 @@ def handle_post_auth(s, cmd, pl):
                             if LIVE_ACE_TRACKING:
                                 db_set_pilot_aces(_powner.current_pilot, 0)
                             db_apply_score_delta(s.current_pilot, PILOT_KILL_SCORE, mode=_smode519)
-                        _powner.para_obj_number = None
+                        # v522f5: do NOT clear para_obj_number here - it is the victim's ticket
+                        # through the v510f5 telemetry gate, and clearing it at the server kill
+                        # blanked their world mid-descent (run_102527 10:38:51). The canopy
+                        # lifecycle now ends when THEIR client reports (the swallow guard clears
+                        # it); _para_server_killed blocks any re-fire meanwhile.
                         _powner._para_hits = 0
                         _powner._para_server_killed = _pvic
                         if SEND_ACE_RANK_88:
