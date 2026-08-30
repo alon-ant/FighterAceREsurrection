@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v515f5'
+VERSION = 'v516f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7910,6 +7910,14 @@ PILOT_KILL_SCORING  = True   # v513f5: a pilot shot/collided dead UNDER CANOPY (
                              #   silent and uncounted).
 PILOT_KILL_SCORE    = 50     # v513f5: points a pilot kill is worth - deliberately LIMITED (a plane
                              #   kill is far more: the Destroy Plane Bonus). Tune freely.
+RELAY_CHUTE_KILL_TAIL = True # v516f5 [EXPERIMENT]: a KILLED canopy's delete arrives with a full
+                             #   12-byte tail (hunter at +3, parachuter PPT 0x42 at +11). Relay it
+                             #   VERBATIM instead of stripping to a bare delete, so the killer's
+                             #   client - actively engaging that canopy, live object, fresh damage
+                             #   list - runs its NATIVE MEC=5 kill processing (ExitDataArrive) and
+                             #   draws whatever the real client draws for a chute kill. WATCH for a
+                             #   client-side HUD tick doubling our +50-only rule; False reverts to
+                             #   the bare delete.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -12193,7 +12201,26 @@ def _ingame_own_object_removed(s, tb, stored):
                     s.my_obj_number = None if _saved2 == _bp2 else _saved2
                 credit_bail_husk_kill(s, _bp2, how='(exit-to-HQ despawn)')
                 s.bailed_plane_obj = None
-            _pdel0 = build_delete_object_3(onumber=_ponum, client_number=None)
+            _pdel0 = None
+            # v516f5 [NATIVE CHUTE-KILL RELAY - EXPERIMENT]: a KILLED canopy (MEC=5) arrives with a
+            # full 12-byte tail (run_20260830_085507 09:01: 0a01|55|0901|0100|01000000|42 - hunter
+            # at +3, parachuter PPT 0x42 at +11). We used to strip it to a bare delete, so the
+            # killer's client - actively engaging that canopy (live object, fresh damage list, the
+            # exact state the banner machinery wants) - got a silent removal. Relay the delete WITH
+            # the victim's verbatim tail so every peer runs ExitDataArrive MEC=5/EEC=5 on the canopy
+            # and does whatever the native client does with a chute kill. Size-checked against the
+            # handler's own EEC table; any mismatch falls back to the bare delete (peer CTD guard).
+            if RELAY_CHUTE_KILL_TAIL and (_pexit0 >> 4) == 5:
+                _psz0 = EXIT_EEC_ENTRY_SIZE.get(_pexit0 & 0xf)
+                if _psz0 and len(stored) >= 5 + _psz0:
+                    _pdel0 = build_exit_delete_object_3(_ponum, _pexit0,
+                                                        entry=bytes(stored[5:5 + _psz0]))
+                    if _pdel0 is not None:
+                        log('PILOTKILL', f'{s.current_pilot} chute delete relayed WITH its verbatim '
+                                         f'{_psz0}B tail (exit=0x{_pexit0:02x}) -> native client '
+                                         f'kill processing on every peer [v516f5 experiment]')
+            if _pdel0 is None:
+                _pdel0 = build_delete_object_3(onumber=_ponum, client_number=None)
             for _peer0 in get_sessions_in_room(s.current_room):
                 if _peer0 is not s:
                     _submit_send(send_rel, _peer0, _pdel0,
