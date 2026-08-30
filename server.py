@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v525f5'
+VERSION = 'v526f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7950,15 +7950,19 @@ ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's 
                              #   (deferred pre-guard path) is not true to the original game's format
                              #   (user request). Scoring/pilot-loss unaffected; the native cyan from
                              #   the server-authoritative chute kill is separate and still fires.
-SERVER_CHUTE_KILL_TO_OWNER = True  # v523f5: send the server kill delete to the VICTIM too. The 2009
-                             #   lifecycle is explicit - the owner's client free-falls the canopy
-                             #   and WAITS for the server's delete - and without it the victim rides
-                             #   the canopy down alive while peers saw them die (run_102527 kill B:
-                             #   'the client didn't get the kill on my end, only after landing').
-                             #   v519f5 tried this and blanked the victim's world, but that was the
-                             #   para_obj_number/telemetry-gate bug v522f5 fixed - not the inclusion
-                             #   itself. If the blank world ever recurs, set False (restores the
-                             #   v520f5 peers-only behaviour) and report.
+SERVER_CHUTE_KILL_TO_OWNER = False # v526f5: OFF for good. The v523f5 experiment (owner included)
+                             #   was tested on a live victim (run_120053 19:02:06, FG_BoogDog):
+                             #   his client FROZE its conductor tick 3s after receiving the kill
+                             #   of its own canopy, tore the world down with NO death flow, never
+                             #   produced the native chute-death report, and had to click back in
+                             #   manually. The 2009 'client waits for the server delete' applies to
+                             #   the LANDING delete, not a MEC=5 kill of its own object. Peers-only
+                             #   (v520f5) is the architecture: the server verdict drives every
+                             #   OTHER screen + the scoring at the live moment; the victim's own
+                             #   client kills its pilot natively from the relayed hits per its own
+                             #   damage model (which may lag the server's 3-record verdict - an
+                             #   honest artifact of the lossy shooter uplink; tune PARA_KILL_HITS
+                             #   toward the client's real lethal threshold to minimise the gap).
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
