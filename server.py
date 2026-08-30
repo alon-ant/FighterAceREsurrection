@@ -9627,8 +9627,16 @@ def relay_telemetry(src, data):
                 src.last_plane_telem = bytes(pl)
         except struct.error:
             pass
+    # v510f5 [PARACHUTE TELEMETRY BLACKOUT]: a bailed pilot under canopy has flying=False, so the
+    # old flying-only recipient gate dropped ALL peer telemetry to them the instant their husk was
+    # deleted (run_20260830_055922 / messages02: husk 256 deleted 06:02:46 -> no telemetry -> at
+    # 06:03:14 the client timed out every peer object, 'Check discon. and del ... dif=28040', and
+    # the world went blank). A pilot on a chute (para_obj_number set) must keep RECEIVING peer
+    # telemetry so they can watch the fight during the descent. They still don't SEND any (the
+    # sender gate at the relay entry point requires flying, and the canopy free-falls locally).
     peers = [x for x in get_sessions_in_room(src.current_room)
-             if x is not src and getattr(x, 'flying', False)]
+             if x is not src and (getattr(x, 'flying', False)
+                                  or getattr(x, 'para_obj_number', None) is not None)]
     if not peers:
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
