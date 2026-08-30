@@ -14396,16 +14396,22 @@ def _resupply_poll_loop():
                 s.resupplied_this_stop = True
                 s._grant_pos = pos
                 s.last_resupply_at = now
-                # v505f5: honor a DEFERRED explicit 119 so it is serviced even in an air-start arena
-                # (where a plain poll grant is suppressed). The 0.5s poll IS the retry the deferred
-                # request never had; without this a settled plane waited on the pilot re-firing 119.
+                # v505f5/v506f5: honor an explicit repair need even in an air-start arena (where a
+                # plain poll grant is suppressed). Two triggers: a DEFERRED msg-119 (the 0.5s poll is
+                # the retry it never had), OR the plane is DAMAGED (took_damage) - a plane already
+                # parked engine-off when hit never fires a fresh 119, so the damage itself is the
+                # request (the msg-28 handler re-armed the one-shot above so this isn't skipped).
                 _p119 = getattr(s, '_repair_119_pending', 0.0)
                 _honor119 = bool(_p119) and (now - _p119) <= REPAIR_119_PENDING_WINDOW_S
-                if _honor119:
-                    s._repair_119_pending = 0.0
-                    log('RESUPPLY', f'{s.current_pilot} poll servicing a DEFERRED msg-119 now that '
-                                    f'the plane has settled (explicit request honored) [v505f5]')
-                _grant_auto_resupply(s, pos, explicit=_honor119)
+                _dmg = bool(getattr(s, 'took_damage', False))
+                _honor = _honor119 or _dmg
+                if _honor:
+                    if _honor119:
+                        s._repair_119_pending = 0.0
+                    log('RESUPPLY', f'{s.current_pilot} poll servicing settled plane '
+                                    f'({"deferred 119" if _honor119 else "damaged, no fresh 119"}) '
+                                    f'[v505f5/v506f5]')
+                _grant_auto_resupply(s, pos, explicit=_honor)
             except Exception:
                 logx('RESUPPLY', f'poll error for {getattr(s, "current_pilot", "?")}')
 
@@ -15051,6 +15057,13 @@ def handle_post_auth(s, cmd, pl):
                     if getattr(_p, 'my_obj_number', None) == _victim_num:
                         _p.took_damage = True
                         _p.last_damaged_at = time.time()
+                        # v506f5: a NEW hit re-opens repair even if this plane was already serviced
+                        # at this exact parked spot (else the poll's one-shot skips it). A victim
+                        # already parked engine-off when hit never fires a fresh 119 (no engine-off
+                        # transition), so the poll honoring took_damage is the only path back to
+                        # repaired - and it must not be blocked by an earlier grant at this stop.
+                        _p.resupplied_this_stop = False
+                        _p._grant_pos = None
                         if _hunter_num and _hunter_num > 0 and _hunter_num != _victim_num:
                             # v247: LATCH THE KILL AGAINST THE OBJECT, with no expiry. The victim's
                             # own client has just told us who hit it - that is a FACT, and it stays
