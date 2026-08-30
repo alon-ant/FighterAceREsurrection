@@ -12461,6 +12461,12 @@ REPAIR_119_PENDING_WINDOW_S = 10.0 # v505f5: how long a DEFERRED explicit msg-11
 AUTO_RESUPPLY_FRESH = 1.5      # newest PLANE sample older than this (its OWN timestamp, never the
                                #   any-object last_telem_time) => cannot judge => NOT eligible
 AUTO_RESUPPLY_MIN_SAMPLES = 3  # min onum-matched samples in the identical-position run
+REPAIR_UNDER_FIRE_HOLDOFF_S = 5.0 # v507f5: no repair while ACTIVELY under fire - a damaged plane
+                               #   waits until incoming fire has stopped for this long before it
+                               #   repairs, so a parked plane can't out-repair a sustained strafing
+                               #   run (each repair also clears the attacker's held kill). Measured
+                               #   from last_damaged_at (last msg-28 hit). Non-damaged loadout grants
+                               #   are unaffected. 0 disables the hold-off (repair as soon as settled).
 GROUND_STOP_MOVE_LOOKBACK_S = 1.0 # v504f5: the ground-stop settle gate judges movement over only
                                #   the last ~1s (not CRASH_MOVEMENT_WINDOW_S=3s), so a plane that has
                                #   just rolled to a stop is detected as settled ~1s after it is still
@@ -14127,6 +14133,15 @@ def _handle_repair_request_119(s, pl):
             log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - not settled yet '
                             f'({_why119}) - poll will service once settled [v500f5/v505f5]')
             return
+    # v507f5: no repair while ACTIVELY under fire - defer to the poll, which services once the
+    # incoming fire has stopped for REPAIR_UNDER_FIRE_HOLDOFF_S.
+    _ld119 = getattr(s, 'last_damaged_at', 0.0)
+    if (REPAIR_UNDER_FIRE_HOLDOFF_S and getattr(s, 'took_damage', False)
+            and _ld119 and (now - _ld119) < REPAIR_UNDER_FIRE_HOLDOFF_S):
+        s._repair_119_pending = now
+        log('RESUPPLY', f'{s.current_pilot} msg-119 repair held off - under fire '
+                        f'({now - _ld119:.1f}s since last hit) - poll services once fire stops [v507f5]')
+        return
     _pos = None
     try:
         _hist = getattr(s, '_pos_hist', None)
@@ -14392,6 +14407,20 @@ def _resupply_poll_loop():
                         continue                       # same stop, already granted
                     s.resupplied_this_stop = False     # parked at a NEW spot -> a new stop
                 if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
+                    continue
+                # v507f5: no repair while ACTIVELY under fire. A damaged plane holds until the
+                # incoming fire has stopped for REPAIR_UNDER_FIRE_HOLDOFF_S; this ticks every poll
+                # (0.5s) and services the instant the hold-off elapses. One-shot is NOT set here, so
+                # the plane stays eligible for the retry. Non-damaged loadout grants skip this.
+                _ld = getattr(s, 'last_damaged_at', 0.0)
+                if (REPAIR_UNDER_FIRE_HOLDOFF_S and getattr(s, 'took_damage', False)
+                        and _ld and (now - _ld) < REPAIR_UNDER_FIRE_HOLDOFF_S):
+                    _luf = getattr(s, '_last_uf_log', 0.0)
+                    if (now - _luf) >= 3.0:
+                        s._last_uf_log = now
+                        log('RESUPPLY', f'{s.current_pilot} repair held off - under fire '
+                                        f'({now - _ld:.1f}s since last hit < '
+                                        f'{REPAIR_UNDER_FIRE_HOLDOFF_S:.0f}s) [v507f5]')
                     continue
                 s.resupplied_this_stop = True
                 s._grant_pos = pos
