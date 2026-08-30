@@ -14027,6 +14027,11 @@ def _handle_repair_request_119(s, pl):
     _rfl = pl[7] if len(pl) > 7 else -1
     _rtag = ' *** RETRY - previous ask went unanswered ***' if _rfl == 4 else ''
     log('RESUPPLY', f'{s.current_pilot} msg-119 arrived ctr={_ctr} fl={_rfl}{_rtag}')
+    # v508f5: the client sends msg-119 ONLY with the engine OFF (it is the engine-off/repair-request
+    # signal). Latch that here; movement clears it (see the poll re-arm). The poll's damaged-repair
+    # trigger requires this, so a plane on the ground with the engine ON is NOT auto-repaired even
+    # under fire - the pilot has to cut the engine (which fires a fresh 119) to ask for service.
+    s._engine_off = True
     if not AUTO_RESUPPLY:
         log('RESUPPLY', f'{s.current_pilot} msg-119 DROPPED - AUTO_RESUPPLY disabled')
         return
@@ -14398,9 +14403,11 @@ def _resupply_poll_loop():
                     # before the next grant. Only movement re-arms - staleness or thin evidence
                     # must NOT, or a lossy link would re-grant a plane that never moved (the
                     # v276 '168 grants in one session' failure, resurrected via packet loss).
-                    if why.startswith('movement=') and getattr(s, 'resupplied_this_stop', False):
-                        s.resupplied_this_stop = False
-                        s._grant_pos = None
+                    if why.startswith('movement='):
+                        s._engine_off = False   # v508f5: it moved -> engine on / not parked engine-off
+                        if getattr(s, 'resupplied_this_stop', False):
+                            s.resupplied_this_stop = False
+                            s._grant_pos = None
                     continue
                 if getattr(s, 'resupplied_this_stop', False):
                     if pos == getattr(s, '_grant_pos', None):
@@ -14432,7 +14439,7 @@ def _resupply_poll_loop():
                 # request (the msg-28 handler re-armed the one-shot above so this isn't skipped).
                 _p119 = getattr(s, '_repair_119_pending', 0.0)
                 _honor119 = bool(_p119) and (now - _p119) <= REPAIR_119_PENDING_WINDOW_S
-                _dmg = bool(getattr(s, 'took_damage', False))
+                _dmg = bool(getattr(s, 'took_damage', False)) and bool(getattr(s, '_engine_off', False))  # v508f5: engine off only
                 _honor = _honor119 or _dmg
                 if _honor:
                     if _honor119:
