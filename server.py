@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v513f5'
+VERSION = 'v515f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9182,9 +9182,15 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                  or struct.unpack_from('<H', exit_entry, 3)[0] in (0, 0xffff))):
         _kobj512 = killer.my_obj_number & 0xffff
         exit_byte = 0x53
+        # v515f5: the +11 PPT-type byte MUST be non-zero. A real shot-down that DREW the banner
+        # (run_20260830_080731 08:18: ...53|0f01|0000|00000000|02) carries 0x02 there; the v512f5
+        # synth left it 0x00 and the client ran ExitDataArrive MEC=5/EEC=3 but drew nothing (08:23).
+        # The banner reads the plane NAME from the object (+0x11c), so this byte is effectively a
+        # 'real combatant' flag - 0x02 (the observed value) is enough. Everything else already
+        # matched a real entry byte-for-byte.
         exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
                       + struct.pack('<H', _kobj512) + struct.pack('<H', 0)
-                      + struct.pack('<I', 0) + bytes([0x00]))   # 12B: id|53|hunter|0|0|ppt
+                      + struct.pack('<I', 0) + bytes([0x02]))   # 12B: id|53|hunter|0|0|PPT=2
         log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
                           f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
     epkt = None
@@ -12132,10 +12138,19 @@ def _ingame_own_object_removed(s, tb, stored):
                     if _pkname:
                         db_apply_score_delta(_pkname, PILOT_KILL_SCORE, mode=_pksmode)  # limited, NO kill
                 _pkline = f"{_pkname or 'A pilot'} killed {s.current_pilot}'s pilot"
+                # v514f5: the v513f5 announce used build_chat_broadcast (0xcd) - a LOBBY-only packet
+                # that renders nothing in-arena (run_20260830_080731: PILOTKILL fired + scored, but
+                # no line on any screen). Use the channel-4 in-arena announce instead - the same path
+                # the `say` command uses (broadcast_everyone), which draws an on-screen line to every
+                # in-game player with no sender prefix. Scoped to the victim's room.
                 for _pkpeer in get_sessions_in_room(s.current_room):
+                    if not getattr(_pkpeer, 'entered_game', False):
+                        continue
                     try:
-                        _submit_send(send_rel, _pkpeer, build_chat_broadcast('', _pkline),
-                                     f'<- pilot-kill: {_pkline}', to=2.0)
+                        _pki = getattr(_pkpeer, 'player_index', 0) or 0
+                        _submit_send(send_rel, _pkpeer,
+                                     build_chat_display_20(4, _pkline, player_index=_pki),
+                                     f'<- pilot-kill announce ch4: {_pkline}', to=2.0)
                     except Exception:
                         pass
                 if _pkkill is not None and SEND_ACE_RANK_88:
