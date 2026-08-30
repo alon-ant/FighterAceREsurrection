@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v526f5'
+VERSION = 'v528f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -788,6 +788,19 @@ MOD_DESTROY_SUBS = {0x01: 'crumblep', 0x02: 'nofuelp', 0x03: 'ejectp', 0x04: 'ki
 # risk). Death effects can be switched on once the basic relay is confirmed live.
 MOD_DESTROY_USE_EFFECT = True           # v311: silent delete proven clean -> enable explosion/bail exit
 MOD_DESTROY_EXIT = {0x01: 0x53, 0x04: 0x53, 0x03: 0x50, 0x02: None}
+MOD_DESTROY_RELAY_NATIVE = True  # v527f5: the server-side delete of the TARGET'S OWN object tears
+                             #   the victim's world down with no death flow (##killp self-test +
+                             #   the identical BoogDog chute-kill failure) - the client has no
+                             #   graceful handler for its own live object being deleted from
+                             #   outside; it is ALWAYS the initiator of its own death. The 2009
+                             #   design was RELAY: the host forwarded the mod action to the
+                             #   TARGET'S client, whose FA.exe executes the death NATIVELY (local
+                             #   death sequence -> its own report -> the normal kill chain to
+                             #   peers). This mode sends the target the native 0x7f form
+                             #   [7f][target_index u16][sub] appspace-framed (T=0x42, the exact
+                             #   shape the client itself emits as 'out 127'4') and sends NOTHING
+                             #   else - if the client executes it, everything downstream is the
+                             #   untouched native path. False restores the server-delete mode.
 
 def _session_by_player_index(room, idx):
     """Resolve a target session by the PlayerIndex carried in the 0x7f destroy packet, scoped to
@@ -857,6 +870,25 @@ def enact_plane_destroy(s, body, by_index=True):
         return
     exit_byte = MOD_DESTROY_EXIT.get(sub)
     _self = (target is s)
+    # v527f5 [NATIVE RELAY]: see MOD_DESTROY_RELAY_NATIVE. Forward the action to the TARGET's own
+    # client in the exact wire shape it emits itself ('out 127'4' = [7f][idx u16][sub], appspace
+    # T=0x42 bc=0) and let FA.exe run the death natively. Nothing else is sent: if the client
+    # honours it, its own death report drives the normal kill chain to every peer.
+    if MOD_DESTROY_RELAY_NATIVE and sub in (0x01, 0x03, 0x04):
+        _tpi = getattr(target, 'player_index', None)
+        if _tpi is None:
+            log('MODERATOR', f'{cmd} native-relay: target "{target.current_pilot}" has no '
+                             f'player_index -> falling back to the server-delete path')
+        else:
+            _npkt = (bytes([0x00, 0x42, 0x00, 0x00, 0x7f])
+                     + struct.pack('<H', _tpi & 0xffff) + bytes([sub]))
+            send_rel(target, _npkt,
+                     f'<- MOD {cmd} NATIVE relay to "{target.current_pilot}" '
+                     f'(idx={_tpi} sub=0x{sub:02x})', to=3.0)
+            log('MODERATOR', f'{cmd} by {by}: native 0x7f relayed to "{target.current_pilot}" '
+                             f'(idx={_tpi}) - client executes the death itself; no server delete '
+                             f'sent [v527f5]')
+            return
     recipients = [x for x in get_sessions_in_room(room) if getattr(x, 'flying', False) or x is target]
     if target not in recipients:
         recipients.append(target)
@@ -7950,19 +7982,15 @@ ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's 
                              #   (deferred pre-guard path) is not true to the original game's format
                              #   (user request). Scoring/pilot-loss unaffected; the native cyan from
                              #   the server-authoritative chute kill is separate and still fires.
-SERVER_CHUTE_KILL_TO_OWNER = False # v526f5: OFF for good. The v523f5 experiment (owner included)
-                             #   was tested on a live victim (run_120053 19:02:06, FG_BoogDog):
-                             #   his client FROZE its conductor tick 3s after receiving the kill
-                             #   of its own canopy, tore the world down with NO death flow, never
-                             #   produced the native chute-death report, and had to click back in
-                             #   manually. The 2009 'client waits for the server delete' applies to
-                             #   the LANDING delete, not a MEC=5 kill of its own object. Peers-only
-                             #   (v520f5) is the architecture: the server verdict drives every
-                             #   OTHER screen + the scoring at the live moment; the victim's own
-                             #   client kills its pilot natively from the relayed hits per its own
-                             #   damage model (which may lag the server's 3-record verdict - an
-                             #   honest artifact of the lossy shooter uplink; tune PARA_KILL_HITS
-                             #   toward the client's real lethal threshold to minimise the gap).
+SERVER_CHUTE_KILL_TO_OWNER = False # v526f5: OFF for good. (superseded detail: see v528f5 below -
+                             #   the owner now gets the NATIVE killp relay instead of any delete.)
+SERVER_CHUTE_KILL_NATIVE_VICTIM = True  # v528f5: at the server's chute-kill verdict, the VICTIM
+                             #   gets the NATIVE killp relay ([7f][their index][04], the v527f5
+                             #   mechanism proven graceful by the ##killp self-test: 'All worked
+                             #   as expected for the first time'). Their own client executes the
+                             #   pilot death AT THE LIVE MOMENT - real death flow, real respawn -
+                             #   and its subsequent chute-death report is absorbed by the v519f5
+                             #   swallow guard. Peers keep the immediate canopy delete + cyan.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -15517,6 +15545,17 @@ def handle_post_auth(s, cmd, pl):
                         # it); _para_server_killed blocks any re-fire meanwhile.
                         _powner._para_hits = 0
                         _powner._para_server_killed = _pvic
+                        # v528f5: kill the VICTIM the proven graceful way - the native killp relay
+                        # (v527f5). Their client runs its own death at the live moment; the report
+                        # it sends afterwards hits the swallow guard above.
+                        if SERVER_CHUTE_KILL_NATIVE_VICTIM:
+                            _vpi519 = getattr(_powner, 'player_index', None)
+                            if _vpi519 is not None:
+                                _nk519 = (bytes([0x00, 0x42, 0x00, 0x00, 0x7f])
+                                          + struct.pack('<H', _vpi519 & 0xffff) + bytes([0x04]))
+                                _submit_send(send_rel, _powner, _nk519,
+                                             f'<- native killp to chute victim '
+                                             f'{_powner.current_pilot} (idx={_vpi519})', to=3.0)
                         if SEND_ACE_RANK_88:
                             try:
                                 send_ace_rank_88(s, reason='(pilot kill score)')
