@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v522f5'
+VERSION = 'v523f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7946,6 +7946,15 @@ SERVER_CHUTE_KILL   = True   # v519f5 [2009 ARCHITECTURE]: the 2009 host was AUT
                              #   killer, pilot loss to the victim, all at the live moment.
 PARA_KILL_HITS      = 3      # v519f5: hit RECORDS (8B each; one msg-29 frame carries several) that
                              #   kill the pilot. Tune to taste - 2009 pilots died fast.
+SERVER_CHUTE_KILL_TO_OWNER = True  # v523f5: send the server kill delete to the VICTIM too. The 2009
+                             #   lifecycle is explicit - the owner's client free-falls the canopy
+                             #   and WAITS for the server's delete - and without it the victim rides
+                             #   the canopy down alive while peers saw them die (run_102527 kill B:
+                             #   'the client didn't get the kill on my end, only after landing').
+                             #   v519f5 tried this and blanked the victim's world, but that was the
+                             #   para_obj_number/telemetry-gate bug v522f5 fixed - not the inclusion
+                             #   itself. If the blank world ever recurs, set False (restores the
+                             #   v520f5 peers-only behaviour) and report.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -15468,12 +15477,12 @@ def handle_post_auth(s, cmd, pl):
                     _dk519 = build_exit_delete_object_3(_pvic, 0x55, entry=_e519)
                     if _dk519 is not None:
                         for _q519 in get_sessions_in_room(s.current_room):
-                            # v520f5: NEVER to the owner. Their client kills its own pilot natively
-                            # from the hits (KillParachuter=yes): death screen, 'X has killed You',
-                            # respawn flow - all proven working. Sending them the server kill of
-                            # their own canopy DESTROYED their game world with no respawn (user
-                            # report on v519f5). Peers are the only ones missing the event.
-                            if _q519 is _powner:
+                            # v520f5 excluded the owner after v519f5 blanked their world; v522f5
+                            # proved that was the telemetry-gate clearing, and v523f5 re-includes
+                            # them (2009 lifecycle: the owner's client WAITS for the server's
+                            # delete to end the canopy). SERVER_CHUTE_KILL_TO_OWNER=False restores
+                            # the exclusion.
+                            if _q519 is _powner and not SERVER_CHUTE_KILL_TO_OWNER:
                                 continue
                             _submit_send(send_rel, _q519, _dk519,
                                          f'<- SERVER chute-kill delete 0x{_pvic:04x} '
