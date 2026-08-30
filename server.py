@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v519f5'
+VERSION = 'v521f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9217,6 +9217,7 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
             and (exit_entry is None or len(exit_entry) < 5
                  or struct.unpack_from('<H', exit_entry, 3)[0] in (0, 0xffff))):
         _kobj512 = killer.my_obj_number & 0xffff
+        _kpi512 = getattr(killer, 'player_index', 0) or 0   # v521f5: +5/+7 = hunter's player-index
         exit_byte = 0x53
         # v515f5: the +11 PPT-type byte MUST be non-zero. A real shot-down that DREW the banner
         # (run_20260830_080731 08:18: ...53|0f01|0000|00000000|02) carries 0x02 there; the v512f5
@@ -9225,8 +9226,8 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # 'real combatant' flag - 0x02 (the observed value) is enough. Everything else already
         # matched a real entry byte-for-byte.
         exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
-                      + struct.pack('<H', _kobj512) + struct.pack('<H', 0)
-                      + struct.pack('<I', 0) + bytes([0x02]))   # 12B: id|53|hunter|0|0|PPT=2
+                      + struct.pack('<H', _kobj512) + struct.pack('<H', _kpi512 & 0xffff)
+                      + struct.pack('<I', _kpi512 & 0xffff) + bytes([0x02]))   # 12B: id|53|hunter|PI|PI|PPT
         log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
                           f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
         # v518f5 [EEC=1 PROBE]: fire BOTH legal announce-only msg-33 variants at the killer so we
@@ -15449,12 +15450,26 @@ def handle_post_auth(s, cmd, pl):
                 _powner._para_hits = getattr(_powner, '_para_hits', 0) + _nrec519
                 if (_powner._para_hits >= PARA_KILL_HITS
                         and getattr(_powner, 'para_obj_number', None) == _pvic):
+                    # v521f5: +5 (u16) and +7 (u32) are the HUNTER'S PLAYER-INDEX/station - the
+                    # banner resolves the killer's NAME through them. Proven by the two captures:
+                    # plane kill (killer PI 0) carried 0/0, chute kill (killer PI 1) carried 1/1.
+                    # v519f5 hardcoded the literal 1 -> 'Alon@HQ destroyed Alon@HQ' on the victim
+                    # (station 1 = himself) and 'unknown pilot' on the killer (station 1 unbound).
+                    _kpi519 = getattr(s, 'player_index', 0) or 0
                     _e519 = (struct.pack('<H', _pvic & 0x7fff) + bytes([0x55])
                              + struct.pack('<H', _phun & 0xffff)
-                             + struct.pack('<H', 1) + struct.pack('<I', 1) + bytes([0x42]))
+                             + struct.pack('<H', _kpi519 & 0xffff)
+                             + struct.pack('<I', _kpi519 & 0xffff) + bytes([0x42]))
                     _dk519 = build_exit_delete_object_3(_pvic, 0x55, entry=_e519)
                     if _dk519 is not None:
                         for _q519 in get_sessions_in_room(s.current_room):
+                            # v520f5: NEVER to the owner. Their client kills its own pilot natively
+                            # from the hits (KillParachuter=yes): death screen, 'X has killed You',
+                            # respawn flow - all proven working. Sending them the server kill of
+                            # their own canopy DESTROYED their game world with no respawn (user
+                            # report on v519f5). Peers are the only ones missing the event.
+                            if _q519 is _powner:
+                                continue
                             _submit_send(send_rel, _q519, _dk519,
                                          f'<- SERVER chute-kill delete 0x{_pvic:04x} '
                                          f'({_powner.current_pilot} pilot killed by '
