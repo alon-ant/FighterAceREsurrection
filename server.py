@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v479f5'
+VERSION = 'v511f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7946,6 +7946,9 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
+BAIL_DEDUP_WINDOW_S = 5.0    # v511f5: a repeat bail out-4 carrying the SAME ident within this
+                             #   window is a reliable-retransmit the RX dedup missed, not a
+                             #   second bail - swallow it so one bail makes exactly one canopy.
 PARA_DESCENT_SECONDS = 300   # v370f5: 45 -> 300, DEMOTED TO A FAILSAFE. The 19:03 bail in
                              #   run_20260729_184930 (Lufty, ~92s high-altitude descent) falsified
                              #   TWO v369 claims: (1) the client DOES report its own landing - its
@@ -15823,6 +15826,24 @@ def handle_post_auth(s, cmd, pl):
         # out-4 as type=0xf2 sub=0x04, which lands here - swallow it, never echo. (messages04:
         # bail -> 'in 4'15' -> 'Unsupported message 4' -> respawn 260 'not found in list'.)
         if sub == 0x04:
+            # v511f5 [DOUBLE-PARACHUTER DEDUP]: the bail out-4 (type 0xf2 sub 0x04) can arrive TWICE
+            # (a reliable retransmit the RX dedup missed - run_20260830_063538: ONE client 'out 4' at
+            # 06:40:21.066 but TWO server receives 0.2s apart -> parachuters 0x0106 AND 0x0107, two
+            # ServerConfirms; the client kept the first (262=0x0106) and REJECTED the second ('Confirm
+            # object 263 not found in list, send delete') while peers were told to create BOTH -> two
+            # overlapping canopies, and a hit on 0x0106 fails the owner-match against para_obj_number
+            # 0x0107 so no damage ever relays). A bail is idempotent - one canopy per plane. If a canopy
+            # is already active and the SAME ident re-arrives inside the window, swallow it: do NOT
+            # consume a second Number (the client allocated ONE, and 0x0106 already matches it - a
+            # second consume desyncs the Number counter), do NOT confirm, do NOT create.
+            _pi_dup = struct.unpack_from('<H', pl, 5)[0] if len(pl) >= 7 else None
+            if (getattr(s, 'para_obj_number', None) is not None
+                    and _pi_dup is not None and _pi_dup == getattr(s, '_para_ident', None)
+                    and (time.time() - getattr(s, 'bailed_plane_at', 0.0)) < BAIL_DEDUP_WINDOW_S):
+                log('PARA', f'{s.current_pilot} duplicate bail out-4 (ident {_pi_dup}) - canopy '
+                            f'0x{s.para_obj_number:04x} already active for plane '
+                            f'0x{s.my_obj_number:04x} -> swallowed, no phantom parachuter [v511f5]')
+                return
             # msg-4 is the client's OWN object state - NEVER echo it (an echoed msg-4 is rejected as
             # 'Unsupported message 4' and corrupts the object list). The plane spawn out-4 (type=0x12)
             # is ServerConfirmed earlier. A BAIL-OUT sends the PARACHUTE's out-4 as type=0xf2 sub=0x04:
@@ -15862,6 +15883,7 @@ def handle_post_auth(s, cmd, pl):
             # The parachuter gets its OWN slot.
             if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None:
                 s.para_obj_number = _pn
+                s._para_ident = _pi          # v511f5: identity for duplicate-bail detection
                 # v456f5: parachuter Numbers enter the session history too, so the allocator's
                 # grace window protects them after landing (para_obj_number clears the moment
                 # the canopy lands - without this the id was instantly re-issuable while peers
