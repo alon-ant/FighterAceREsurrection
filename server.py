@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v529f5'
+VERSION = 'v530f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7928,6 +7928,43 @@ def send_kill_banner_33(killer, victim, ppt=0x02, why=''):
     log('KILLBANNER33', f'banner-33 -> killer {killer.current_pilot} (PI={_kpi}): victim '
                         f'{victim.current_pilot} (PI={_vpi}) ppt=0x{ppt:02x} {why} [v529f5]')
 
+MSG_KILL_BANNER_76 = 0x4c
+
+def build_kill_banner_76(victim_pi):
+    """v530f5: the 2009 host's killer-directed kill banner - msg-76, 5 bytes.
+
+    WIRE (pinned from msg76_KillerKillBanner @0x4fbac0 + dispatcher FUN_004f18a0 + the 2009
+    capture 'in 76'5'):
+        [0]   0x4c msg id (the dispatcher passes the RAW message ptr; handlers index from it)
+        [1:3] never read by the handler -> 0
+        [3:5] u16 LE VICTIM PlayerIndex (MOVSX - 0xffff reads as -1 and the lookup no-ops)
+    The handler supplies the killer itself: it IS the recipient (DAT_00c6eb98, the local
+    player) - that is why this message only works DIRECTED at the killer, and why no msg-33
+    variant could ever draw this line. Send exactly 5 bytes: the handler does not re-check
+    length before the u16 read at +3.
+    """
+    body = bytes([MSG_KILL_BANNER_76, 0x00, 0x00]) + struct.pack('<H', victim_pi & 0xFFFF)
+    return build_ingame_pkt(body)
+
+def send_kill_banner_76(killer, victim, why=''):
+    """v530f5: fire the killer's native cyan kill line (msg-76). Reliable, killer only.
+    The client-side gates (handler @0x4fbac0): the killer must still be IN A PLANE and the
+    victim must still be in the recipient's game-player table - both true at the live kill
+    moment, both fail-soft (silent no-op) otherwise."""
+    if not KILLER_BANNER_76 or killer is None or victim is None:
+        return
+    _vpi = getattr(victim, 'player_index', None)
+    if _vpi is None:
+        log('KILLBANNER76', f'[skip] victim has no PI {why}')
+        return
+    pkt = build_kill_banner_76(_vpi)
+    threading.Thread(target=lambda: send_rel(killer, pkt,
+                     f'<- KILL_BANNER 76 (cyan: {killer.current_pilot} destroyed plane of '
+                     f'{victim.current_pilot} PI={_vpi}) {why}', to=3.0),
+                     daemon=True).start()
+    log('KILLBANNER76', f'banner-76 -> killer {killer.current_pilot}: victim '
+                        f'{victim.current_pilot} (PI={_vpi}) {why} [v530f5]')
+
 CREDIT_BAIL_HUSK = True      # v370f5: single-flag revert for the husk-teardown kill credit below.
 BAIL_EXIT_HUSK_DESPAWN = True # v501f5: when a bailer EXITS to the menu while still under canopy
                              #   (parachuter removed with exit-to-HQ), despawn the still-airborne
@@ -8061,18 +8098,27 @@ SERVER_CHUTE_KILL_NATIVE_VICTIM = True  # v528f5: at the server's chute-kill ver
                              #   pilot death AT THE LIVE MOMENT - real death flow, real respawn -
                              #   and its subsequent chute-death report is absorbed by the v519f5
                              #   swallow guard. Peers keep the immediate canopy delete + cyan.
-KILLER_BANNER_33    = True   # v529f5 [THE KILLER-SIDE CYAN BANNER]: on every synthesised kill
-                             #   (plane synth-tail 0x53 AND server chute kill), send the KILLER a
-                             #   fully-populated msg-33 Type 0x53 via send_kill_banner_33. Gate 2 of
-                             #   the two-gate model: peers draw from the exit-delete, the killer
-                             #   additionally needs the 2009 host's killer-directed 14B msg-33
-                             #   ('in 33'14', messages04). Every past msg-33 attempt zeroed the 9B
-                             #   tail - FUN_004f8d10 then matched no branch, left the hunter-name
-                             #   string EMPTY, and FUN_00478640's strcmp(hunter-string, my-name)
-                             #   cyan gate could never pass (see build_kill_banner_33 for the full
-                             #   RE map). WATCH: the killer's client ALSO runs FUN_00478640 off the
-                             #   tailed exit-delete (silently, v517f5) - if the HUD kill counter
-                             #   ever double-ticks, this flag is the revert.
+KILLER_BANNER_33    = False  # v529f5 -> v530f5 VERDICT: OFF, dead end. The fully-populated Type-0x53
+                             #   msg-33 was delivered+ACKed (run_211228 21:18:44) and the killer's
+                             #   client still drew NOTHING - third proof the 0x53/PLAYER_KILLED
+                             #   display path never renders on the killer. The 2009 capture shows
+                             #   the real architecture: the killer's cyan line is a DEDICATED msg-76
+                             #   (messages04 8138-8143: in 33'14 Type 0x13 credit -> out 25'7 ->
+                             #   in 76'5 -> EVENT 'AC2E_Bigalon has destroyed plane of GER 1Lt gone'
+                             #   -> out 25'7). See KILLER_BANNER_76. Code kept for A/B.
+KILLER_BANNER_76    = True   # v530f5 [THE REAL KILLER CYAN - msg-76]: on every synthesised kill
+                             #   (plane synth-tail 0x53 AND server chute/cockpit kill), send the
+                             #   KILLER the 2009 host's dedicated 5-byte msg-76. Binary-pinned
+                             #   handler msg76_KillerKillBanner @0x4fbac0 (VNet_Rcv.cpp:0x64a):
+                             #   reads ONLY movsx word[payload+3] = VICTIM PI -> FUN_004f2530
+                             #   lookup; killer is hardcoded = the LOCAL player; requires my plane
+                             #   (+0x128) non-null (no banner if the killer already exited - native
+                             #   behaviour); draws resource-0xc6 'X has destroyed plane of Y' via
+                             #   FUN_00469cf0(0xb same-camp / 0xc enemy), plays kill sound 0x3d1,
+                             #   calls FUN_004beec0(victim) kill marker, then replies out 25'7
+                             #   carrying my_plane+0x24 (server already swallows msg-25, v220).
+                             #   WATCH: FUN_004beec0 also runs on the killer via other credit paths
+                             #   - if the HUD kill counter double-ticks, this flag is the revert.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -9362,6 +9408,8 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # run_20260830_200618 20:41:48 server-perfect vs messages21 ~5285 ExitDataArrive
         # name-bound, no EVENT). Populated tail = the fix; see build_kill_banner_33.
         send_kill_banner_33(killer, s, ppt=0x02, why='(synth plane kill)')
+        # v530f5: the REAL killer cyan - the dedicated msg-76 (see KILLER_BANNER_76).
+        send_kill_banner_76(killer, s, why='(synth plane kill)')
         # v518f5 [EEC=1 PROBE]: fire BOTH legal announce-only msg-33 variants at the killer so we
         # learn what each native message says (and what colour it draws in). See the flag comment.
         if ANNOUNCE33_EEC1_PROBE:
@@ -15637,6 +15685,8 @@ def handle_post_auth(s, cmd, pl):
                         # tailed delete alone draws NOTHING on him). PPT 0x42 = parachuter
                         # class, matching the native chute-kill tail byte.
                         send_kill_banner_33(s, _powner, ppt=0x42, why='(chute/pilot kill)')
+                        # v530f5: the REAL killer cyan - the dedicated msg-76.
+                        send_kill_banner_76(s, _powner, why='(chute/pilot kill)')
                         # v528f5: kill the VICTIM the proven graceful way - the native killp relay
                         # (v527f5). Their client runs its own death at the live moment; the report
                         # it sends afterwards hits the swallow guard above.
