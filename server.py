@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v511f5'
+VERSION = 'v512f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7895,6 +7895,14 @@ SEND_ACE_RANK_88    = True   # v219: send an authoritative msg-88 (AceOrRankChan
                              # NOTE: a team/room change must NOT zero a pilot's real score - we
                              # RE-READ the career values from the DB and re-push them. Set False to
                              # disable.
+SYNTH_KILL_EXIT_0X53 = True   # v512f5: a credited kill that comes down on a SYNTHESISED tail
+                              #   (bail/husk-down, damage-latched) has no hunter in its entry, so
+                              #   the relayed exit-delete can't light the cyan banner. When the
+                              #   killer is known, rebuild the tail as a real shot-down (0x53 +
+                              #   hunter at +3) so ExitDataArrive -> FUN_00478640 -> FUN_00469cf0
+                              #   fires - the SAME HUD credit the msg-33 gave, now able to name the
+                              #   killer. The msg-33 announce is suppressed when this is on, so the
+                              #   credit never doubles. False restores the msg-33-only behaviour.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -9153,6 +9161,25 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
     # with the entry size EEC demands, so each client runs its stat pipeline. On the MEC 5/6/0xb
     # branch the credit is computed from each client's OWN damage list, so this is broadcast to all
     # peers rather than to a guessed killer.
+    # v512f5 [KILL BANNER for synthesised-tail kills]: see SYNTH_KILL_EXIT_0X53. A bail/husk-down
+    # or damage-latched death reaches here with a hunter-less tail (a 3-byte synth entry, or a
+    # 12-byte one whose +3 hunter is 0/0xffff), so the exit-delete removes the plane but names no
+    # killer and no cyan banner prints (run_20260830_071257: husk exit=0x10 -> HUD ticked via
+    # msg-33 but NO banner). When we KNOW the killer, rewrite the tail to a real shot-down: exit
+    # 0x53 (MEC5/EEC3) with the killer's object at +3 - byte-identical to a victim-reported shot-
+    # down - so every peer runs the proven banner path AND the same FUN_00478640 HUD credit, now
+    # with a hunter to name. The msg-33 announce is then suppressed so the credit can't double.
+    if (SYNTH_KILL_EXIT_0X53 and killer is not None
+            and getattr(killer, 'my_obj_number', None) is not None
+            and (exit_entry is None or len(exit_entry) < 5
+                 or struct.unpack_from('<H', exit_entry, 3)[0] in (0, 0xffff))):
+        _kobj512 = killer.my_obj_number & 0xffff
+        exit_byte = 0x53
+        exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
+                      + struct.pack('<H', _kobj512) + struct.pack('<H', 0)
+                      + struct.pack('<I', 0) + bytes([0x00]))   # 12B: id|53|hunter|0|0|ppt
+        log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
+                          f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
     epkt = None
     if EXIT_TAIL_DELETE_TO_PEERS and exit_byte is not None:
         epkt = build_exit_delete_object_3(s.my_obj_number, exit_byte, entry=exit_entry)
@@ -12318,7 +12345,9 @@ def _ingame_own_object_removed(s, tb, stored):
         # count - and it is SUPPRESSED when a real hunter WAS relayed (_hunter is not None), because
         # then the client self-announces and a second announce would duplicate the banner.
         _synth_tail = (_hunter is None)
-        if (_killer is not None and ANNOUNCE_BAIL_KILL
+        # v512f5: when SYNTH_KILL_EXIT_0X53 rewrote the exit-delete to 0x53+hunter above, it already
+        # carries the banner AND the FUN_00478640 HUD credit - a msg-33 here would double the credit.
+        if (_killer is not None and ANNOUNCE_BAIL_KILL and not SYNTH_KILL_EXIT_0X53
                 and (_kbailed or (ANNOUNCE_SYNTH_KILL and _synth_tail))):
             send_score_event_to_killer(_killer, mec=ANNOUNCE_BAIL_MEC, eec=ANNOUNCE_BAIL_EEC)
             log('BAILKILL', f'{_killer.current_pilot} gets a PLAYER_KILLED ScoreEvent for the '
