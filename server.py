@@ -15211,6 +15211,53 @@ def handle_post_auth(s, cmd, pl):
                             f'in room {s.current_room} ({len(stored)}B)')
             return
 
+        # --- msg 29 / sub=0x1d: HitToParachuter (SHOOTING A CANOPY) -------------------
+        # v509f5. Shooting a parachuter uses msg-29 (0x1d), NOT the msg-28 (0x1c) plane
+        # damage path - and 0x1d was never handled, so it fell through to the generic echo:
+        # the SHOOTER got its own hit report bounced back ('in 29'), the client re-ingested
+        # it as a fresh hit ('You have hit X (parachute)') and re-sent, looping - the screen
+        # flood, and the reliable backlog blew to 136 (run_20260830_045204 / messages01,
+        # 05:00:56+). Meanwhile the canopy's OWNER never heard about it, so it took no damage
+        # and landed safe. Fix mirrors the msg-28 and msg-125 echo fixes: parse the victim
+        # (the parachuter's object number), relay the frame to its OWNER - who is under canopy
+        # and therefore NOT 'flying', so the msg-28 flying-peer set would miss them - plus any
+        # flying observers, and NEVER echo. KillParachuter=yes in the arena, so the owner's
+        # client kills the pilot once the hits land. Wire form (from the capture): 5-byte
+        # header [bc][T][00][00][1d] then N x 8-byte records [victim u16][hunter u16][..][..];
+        # 37B=4 recs, 29B=3 recs. Prefixed form carries the 4-byte VNET prefix (sub at pl[8]).
+        if s.entered_game and (sub == 0x1d or (len(pl) > 8 and pl[8] == 0x1d)):
+            s.last_fired_at = time.time()
+            _p29 = bytes(stored)
+            def _para_ok(b):
+                return len(b) >= 13 and (len(b) - 5) % 8 == 0
+            if not _para_ok(_p29):
+                if len(_p29) > 4 and _para_ok(_p29[4:]):
+                    _p29 = _p29[4:]
+                else:
+                    log('PARAHIT', f'{s.current_pilot} sent an unparseable HitToParachuter '
+                                   f'({len(_p29)}B) with/without a 4B prefix -> NOT relayed. '
+                                   f'head={hx(_p29[:16])}')
+                    return
+            _pvic = int.from_bytes(_p29[5:7], 'little')
+            _phun = int.from_bytes(_p29[7:9], 'little')
+            _powner = None
+            for _q in get_sessions_in_room(s.current_room):
+                if getattr(_q, 'para_obj_number', None) == _pvic:
+                    _powner = _q
+                    break
+            # credit the shooter if the canopy dies (mirrors msg-28's PENDING_KILL latch)
+            if _powner is not None and _phun and _phun > 0 and _phun != _pvic:
+                PENDING_KILL[_pvic] = {'killer': _phun, 'at': time.time(), 'why': 'parachuter-hit'}
+            _peers29 = [x for x in get_sessions_in_room(s.current_room)
+                        if x is not s and (getattr(x, 'flying', False) or x is _powner)]
+            for _q in _peers29:
+                _submit_send(send_rel, _q, _p29,
+                             f'<- HITPARA 29 relay ({s.current_pilot}->{_q.current_pilot})', to=3.0)
+            log('PARAHIT', f'{s.current_pilot} hit parachuter 0x{_pvic:04x} (owner '
+                           f'{_powner.current_pilot if _powner else "?"}) by 0x{_phun:04x} -> '
+                           f'relayed to {len(_peers29)} peer(s) [v509f5; was echoed -> flood]')
+            return
+
         # --- msg 125 / sub=0x7d: CollInfoToPlane (AIR-TO-AIR COLLISION) ---------------
         # v331. This was never handled: it fell through to the generic echo path (which is
         # why it only ever showed up tagged SUPPLY-CAP), so the sender got its own message
