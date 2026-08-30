@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v512f5'
+VERSION = 'v513f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7903,6 +7903,13 @@ SYNTH_KILL_EXIT_0X53 = True   # v512f5: a credited kill that comes down on a SYN
                               #   fires - the SAME HUD credit the msg-33 gave, now able to name the
                               #   killer. The msg-33 announce is suppressed when this is on, so the
                               #   credit never doubles. False restores the msg-33-only behaviour.
+PILOT_KILL_SCORING  = True   # v513f5: a pilot shot/collided dead UNDER CANOPY (chute delete with
+                             #   MEC=5) is NOT a second plane kill. Announce "X killed Y's pilot" to
+                             #   the room, give the killer PILOT_KILL_SCORE points (NO kill notch),
+                             #   and book the victim's lost pilot. False = old behaviour (chute kill
+                             #   silent and uncounted).
+PILOT_KILL_SCORE    = 50     # v513f5: points a pilot kill is worth - deliberately LIMITED (a plane
+                             #   kill is far more: the Destroy Plane Bonus). Tune freely.
 ANNOUNCE_BAIL_KILL  = True   # v369f5 [RE-CORRECTED]: on a BAIL kill, send the shooter a msg-33
                              #   (EEC=1) so the cyan kill banner prints. A normal kill announces
                              #   from the victim's relayed ExitEvent hit-list; a bail plane comes
@@ -12104,6 +12111,42 @@ def _ingame_own_object_removed(s, tb, stored):
                             send_ace_rank_88(s, reason='(captured - pilot lost)')
                         except Exception:
                             pass
+            # v513f5 [PILOT KILL ON CHUTE]: a pilot shot/collided dead under canopy comes in as a
+            # chute delete with MEC=5 (the shot-down form, after the canopy collapses). Per design
+            # this is NOT a second plane kill: announce "X killed Y's pilot" to the whole room, give
+            # the killer a LIMITED pilot-kill score (points only, no kill notch), and book the
+            # victim's lost pilot. The killer is the hunter the client puts in the delete tail at
+            # stored[8:10] (run_20260830_071257: 0x0109 = the shooter). CAPTURE (EEC=0xc) above and
+            # a clean landing/exit (no MEC=5) never reach here.
+            if PILOT_KILL_SCORING and (_pexit0 >> 4) == 5 and s.current_pilot:
+                _phunterK = struct.unpack_from('<H', stored, 8)[0] if len(stored) >= 10 else None
+                _pkkill = None
+                if _phunterK not in (None, 0, 0xffff):
+                    _pkkill, _ = _peer_owning_object(s, _phunterK)
+                _pkname = _pkkill.current_pilot if _pkkill is not None else None
+                _pksmode = scoring_mode_for_room(s.current_room)
+                if _pksmode is not None:
+                    db_credit_capture(s.current_pilot, mode=_pksmode)          # victim: lost pilot +1
+                    if LIVE_ACE_TRACKING:
+                        db_set_pilot_aces(s.current_pilot, 0)
+                    if _pkname:
+                        db_apply_score_delta(_pkname, PILOT_KILL_SCORE, mode=_pksmode)  # limited, NO kill
+                _pkline = f"{_pkname or 'A pilot'} killed {s.current_pilot}'s pilot"
+                for _pkpeer in get_sessions_in_room(s.current_room):
+                    try:
+                        _submit_send(send_rel, _pkpeer, build_chat_broadcast('', _pkline),
+                                     f'<- pilot-kill: {_pkline}', to=2.0)
+                    except Exception:
+                        pass
+                if _pkkill is not None and SEND_ACE_RANK_88:
+                    try:
+                        send_ace_rank_88(_pkkill, reason='(pilot kill score)')
+                    except Exception:
+                        pass
+                log('PILOTKILL', f'{_pkname or "?"} killed {s.current_pilot} pilot under canopy '
+                                 f'(chute 0x{_ponum:04x} exit=0x{_pexit0:02x} '
+                                 f'hunter=0x{(_phunterK or 0):04x}) -> +{PILOT_KILL_SCORE} score to '
+                                 f'killer (NO plane kill), victim lost pilot +1 [v513f5]')
             # v501f5 [BAIL-EXIT HUSK CTD]: the pilot exited to the menu while still under canopy
             # (parachuter removed with exit-to-HQ, MEC nibble 10). The empty bail plane is still
             # airborne; left alone it is torn down LATE during the client's ~GAME_DEF and a queued
