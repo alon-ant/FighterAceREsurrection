@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v536f5'
+VERSION = 'v537f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9450,7 +9450,14 @@ def try_bail_kill_now(s):
               + struct.pack('<I', 0)                      # +7
               + bytes([0x02]))                            # +11 PPT plane
     _stored = bytes([0x00, 0x00, 0x00, 0x00, 0x03]) + _entry
-    _killer, _kbailed = score_on_death(s, _stored, hunter_obj=_hobj,
+    # Credit via the LATCH path (hunter_obj=None): score_on_death path 2 both resolves the killer
+    # from PENDING_KILL[_plane] AND POPS it - which is essential, so the later respawn-despawn
+    # (credit_bail_husk_kill) and the husk-down delete find no latch and cannot re-credit. Passing
+    # hunter_obj here would take the EXACT path, which does NOT pop the latch (that was the v536
+    # double-book: run_080757 08:11:01 booked, 08:12:02 re-credited on respawn). The peer exit-
+    # delete still carries the hunter via exit_entry below - attribution and the wire tail are
+    # separate concerns.
+    _killer, _kbailed = score_on_death(s, _stored, hunter_obj=None,
                                        victim_obj=_plane, pilot_lost=False)
     if _killer is None:
         log('BAILKILL', f'{s.current_pilot} bailed with latch obj 0x{_hobj:04x} but killer '
@@ -9462,7 +9469,8 @@ def try_bail_kill_now(s):
     # banner-76 pre-delete. clear_peer_created=False: this is an in-arena plane removal, the
     # pilot stays (under canopy).
     broadcast_object_delete_3(s, reason='(bail kill @ bail)', clear_peer_created=False,
-                              killer=_killer, exit_byte=0x53, exit_entry=_entry)
+                              killer=_killer, exit_byte=0x53, exit_entry=_entry,
+                              killer_plain_delete=True)
     if _killer is not None and SEND_SCORE_EVENT_33:
         send_score_event_to_killer(_killer)
     log('BAILKILL', f'{s.current_pilot} bailed -> kill booked AT THE BAIL to '
@@ -9473,7 +9481,7 @@ def try_bail_kill_now(s):
 
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                               followup_pkt=None, followup_label='', killer=None,
-                              exit_byte=None, exit_entry=None):
+                              exit_byte=None, exit_entry=None, killer_plain_delete=False):
     """Remove s's NetPlane (object + client station) from every peer in the room.
 
     clear_peer_created: True for exit-to-HQ (we wiped our whole world, so peers must
@@ -9653,7 +9661,20 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # HUNTER object id at +3, which is what a client needs to attribute the kill. Zero-filling
         # that tail (v228 and earlier) is exactly why kills never registered.
         _is_killer = (sess is killer and spkt is not None)
-        if epkt is not None:
+        # v537f5: the killer must NOT get the 0x53 exit-tail when his cyan already comes from his
+        # OWN client's native out-76 (relayed by v533, or the v536 bail path). His client would run
+        # ExitDataArrive on the tail and draw a SECOND kill line that mis-attributes his nation from
+        # the VICTIM's object record ('USA Alon destroyed USA flakmagic' when Alon is GBR -
+        # messages30 08:11:01) AND books a second plane-loss on the victim. The 2009 host sent the
+        # exit-delete to THIRD PARTIES only; the killer's line came solely from his relayed in-76.
+        # So the killer gets a PLAIN delete (husk removed, no kill line). Peers keep the tail.
+        _killer_plain537 = (sess is killer and
+                            (killer_plain_delete
+                             or getattr(s, '_banner76_native_obj', None) == s.my_obj_number))
+        if _killer_plain537:
+            _delpkt = pkt
+            _dl2 = _dlabel + ' [killer: plain delete, native-76 draws his line]'
+        elif epkt is not None:
             _delpkt = epkt
             _dl2 = _dlabel + f' [EXIT-ENTRY 0x{exit_byte:02x}]' + (' [killer]' if sess is killer else '')
         elif _is_killer:
@@ -16651,20 +16672,25 @@ def handle_post_auth(s, cmd, pl):
                 # kill NOW - before the parachuter create clears the plane's score binding on
                 # peers. This makes the killer's cyan name the PILOT and every peer draw the native
                 # 'X destroyed Y' line. Falls through to the v534/v535 paths when there is no latch.
+                # v537f5: capture the latched hunter BEFORE try_bail_kill_now, which pops the latch
+                # (via score_on_death path 2) - the v534 victim-notify below needs it either way.
+                _lat537 = PENDING_KILL.get(s.my_obj_number)
+                _hobj537 = _lat537.get('killer') if isinstance(_lat537, dict) else None
                 _bail_killed_now = False
                 try:
                     _bail_killed_now = try_bail_kill_now(s)
                 except Exception as _eb536:
                     log('BAILKILL', f'[warn] {s.current_pilot}: bail-kill-now failed: {_eb536}')
-                # v534f5: hunter latched on the plane they just left -> native mod-relay to the
-                # bailer (see BAIL_CRUMBLEP_VICTIM). After the confirm dispatch, before the peer
-                # canopy creates. Skipped when v536 already ran the full kill at the bail.
-                if BAIL_CRUMBLEP_VICTIM and not _bail_killed_now:
+                # v534f5/v537f5: the bailer's OWN death notification. v536 handles the killer and
+                # every peer, but the VICTIM's screen still shows only 'Bailed out' with no idea a
+                # kill was scored on them. The native mod-relay ([7f][their index][cmd]) makes their
+                # own client run its plane-destroyed sequence. Runs whether or not v536 fired (they
+                # don't overlap: v536 -> killer+peers, this -> victim), using the hunter captured
+                # above since v536 has already popped the latch.
+                if BAIL_CRUMBLEP_VICTIM and _hobj537:
                     try:
-                        _lat534 = PENDING_KILL.get(s.my_obj_number)
-                        _hobj534 = _lat534.get('killer') if isinstance(_lat534, dict) else None
                         _vpi534 = getattr(s, 'player_index', None)
-                        if _hobj534 and _vpi534 is not None:
+                        if _vpi534 is not None:
                             _mk534 = (bytes([0x00, 0x42, 0x00, 0x00, 0x7f])
                                       + struct.pack('<H', _vpi534 & 0xffff)
                                       + bytes([BAIL_VICTIM_MOD_CMD & 0xff]))
@@ -16672,13 +16698,10 @@ def handle_post_auth(s, cmd, pl):
                                          f'<- native mod-relay cmd=0x{BAIL_VICTIM_MOD_CMD:02x} to '
                                          f'bailed victim {s.current_pilot} (idx={_vpi534})', to=3.0)
                             log('BAILCRUMBLE', f'{s.current_pilot} bailed from 0x{s.my_obj_number:04x} '
-                                               f'with hunter obj 0x{_hobj534:04x} latched -> native '
-                                               f'mod-relay cmd=0x{BAIL_VICTIM_MOD_CMD:02x} sent to the '
-                                               f'victim (idx={_vpi534}); expect their plane-destroyed '
-                                               f'sequence + out-76 + crash delete [v534f5]')
-                        else:
-                            log('BAILCRUMBLE', f'{s.current_pilot} bailed from 0x{s.my_obj_number:04x} '
-                                               f'with no latched hunter (latch={_hobj534}) -> no relay')
+                                               f'with hunter obj 0x{_hobj537:04x} latched -> native '
+                                               f'mod-relay cmd=0x{BAIL_VICTIM_MOD_CMD:02x} to the '
+                                               f'victim for their own death notification (v536 '
+                                               f'booked={_bail_killed_now}) [v537f5]')
                     except Exception as _e534:
                         log('BAILCRUMBLE', f'[warn] {s.current_pilot}: relay failed: {_e534}')
                 if PARA_SEND_CREATE:
