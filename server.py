@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v532f5'
+VERSION = 'v533f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7964,6 +7964,10 @@ def send_kill_banner_76(killer, victim, victim_obj=None, why=''):
     if victim_obj is None:
         log('KILLBANNER76', f'[skip] no live victim object to reference {why}')
         return
+    if getattr(victim, '_banner76_native_obj', None) == victim_obj:
+        log('KILLBANNER76', f'[skip] native out-76 relay already drew the banner for obj '
+                            f'0x{victim_obj:04x} {why} [v533f5]')
+        return
     pkt = build_kill_banner_76(victim_obj)
     threading.Thread(target=lambda: send_rel(killer, pkt,
                      f'<- KILL_BANNER 76 (cyan: {killer.current_pilot} destroyed plane of '
@@ -9426,7 +9430,11 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # takes a LOWER reliable seq than the exit-delete: the handler resolves the object via
         # ARR<NET::OBJECT*,2048> and must find it ALIVE. v530f5 won that race twice by luck
         # (raw thread vs the delete pool); this makes it deterministic.
-        if KILLER_BANNER_76:
+        if KILLER_BANNER_76 and getattr(s, '_banner76_native_obj', None) == s.my_obj_number:
+            log('KILLBANNER76', f'synth banner-76 for {s.current_pilot} obj=0x{s.my_obj_number:04x} '
+                                f'SKIPPED - the native out-76 relay already drew it at the '
+                                f'plane-destroyed moment [v533f5]')
+        elif KILLER_BANNER_76:
             _banner76_pkt = build_kill_banner_76(s.my_obj_number)
             log('KILLBANNER76', f'banner-76 armed for killer {killer.current_pilot}: victim '
                                 f'{s.current_pilot} obj=0x{s.my_obj_number:04x} (rides the '
@@ -12293,6 +12301,7 @@ def _fire_server_confirm(s, via='', ident=None):
     # _ingame_msg_instrument / the crash classifier).
     s.__dict__.pop('_cockpit_kill_t', None)
     s.__dict__.pop('_cockpit_kill_hunter', None)
+    s.__dict__.pop('_banner76_native_obj', None)   # v533f5: per-life native-76 dedupe mark
     # v243: and a fresh plane hasn't moved yet. Drop the old life's position history so the
     # "was it flying?" crash test can't be fooled by the PREVIOUS sortie's movement.
     s.__dict__.pop('_pos_hist', None)
@@ -14158,6 +14167,52 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                                    + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
                                    + ' -> pilot loss armed for this life; booked at the '
                                      'plane-down delete [v532f5]')
+    except Exception:
+        pass
+    # v533f5 [NATIVE msg-76 RELAY - the 2009 plane-destroyed banner path]: the VICTIM's client
+    # emits 'out 76'5' itself the moment it declares its plane destroyed (ExitEvent MEC=1 SE=3,
+    # IsDelete=0, still airborne - NOT for cockpit kills), right after its out-33 hit report.
+    # 2009 bailer-side capture messages04 7435-7440: HitFrom x3 -> out 33'39 -> out 76'5 ->
+    # ExitEvent(303) MEC=1 SE=3; our clients do the same (run_064355 06:53:05 flakmagic
+    # pl=..4c 00 00 01 01 = [4c][0000][own plane 0x0101]). The host routed that 5B message to
+    # the hunter, whose handler (msg76_KillerKillBanner) reads the victim OBJECT at +3 and
+    # draws the cyan 'X has destroyed plane of <pilot>'. Relaying it here beats the v531f5
+    # synth path on two counts: it fires at the DESTRUCTION moment (before any bail), and the
+    # object is still player-bound (after a bail the husk resolves as 'F-86E(0)' on peers -
+    # messages26 06:53:07). Hunter = the msg-28 damage latch; no latch -> nothing to relay,
+    # the synth crash path still covers it. Marks the object so the synth path won't double.
+    try:
+        _pl76 = None
+        if sub == MSG_KILL_BANNER_76 and len(pl) >= 9:
+            _pl76 = bytes(pl[4:9])
+        elif cmd and len(pl) >= 13 and pl[8] == MSG_KILL_BANNER_76:
+            _pl76 = bytes(pl[8:13])
+        if _pl76 is not None and KILLER_BANNER_76 and getattr(s, 'current_room', None) is not None:
+            _vobj76 = int.from_bytes(_pl76[3:5], 'little')
+            if _vobj76 == getattr(s, 'my_obj_number', None):
+                _lat76 = PENDING_KILL.get(_vobj76)
+                _hobj76 = _lat76.get('killer') if isinstance(_lat76, dict) else None
+                _hs76 = None
+                if _hobj76:
+                    for _q76 in get_sessions_in_room(s.current_room):
+                        if _q76 is not s and getattr(_q76, 'my_obj_number', None) == _hobj76:
+                            _hs76 = _q76
+                            break
+                if _hs76 is not None:
+                    s._banner76_native_obj = _vobj76
+                    _pkt76 = build_kill_banner_76(_vobj76)
+                    threading.Thread(target=lambda: send_rel(_hs76, _pkt76,
+                                     f'<- KILL_BANNER 76 native relay ({_hs76.current_pilot} destroyed '
+                                     f'plane of {s.current_pilot} obj=0x{_vobj76:04x})', to=3.0),
+                                     daemon=True).start()
+                    log('KILLBANNER76', f'NATIVE: {s.current_pilot} declared plane 0x{_vobj76:04x} '
+                                        f'destroyed (out-76) -> relayed to latched hunter '
+                                        f'{_hs76.current_pilot} (obj 0x{_hobj76:04x}); synth banner '
+                                        f'for this object suppressed [v533f5]')
+                else:
+                    log('KILLBANNER76', f'NATIVE: {s.current_pilot} declared plane 0x{_vobj76:04x} '
+                                        f'destroyed (out-76) but no latched hunter in room '
+                                        f'(latch={_hobj76}) -> not relayed; synth path stays armed')
     except Exception:
         pass
     if not SUPPLY_MSG_INSTRUMENT:
