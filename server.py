@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v539f5'
+VERSION = 'v540f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1415,6 +1415,69 @@ def apply_game_type(d, val):
         return None
     d[off] = v
     return off, old
+
+# -- ARENA PASSWORD (client-side gate; the 3rd GAME_DEF cstring) -----------------
+# Password-protected arenas are enforced ENTIRELY CLIENT-SIDE: the client reads the
+# PASSWORD cstring out of the 212 GAME_DEF it receives and prompts/validates the join
+# locally - server.py has no password logic of its own. The field is the 3rd null-
+# terminated cstring (NAME\0 COMMENT\0 PASSWORD\0), stored as PLAINTEXT ASCII (verified
+# 2026-08-31: a room with client-set password '1234' stores hex 31 32 33 34; an
+# unprotected room stores an empty field). So detecting protection = 'is the cstring
+# non-empty', and changing/clearing it = rewrite that cstring in the SERVED blob (the
+# client then requires the new value). Same NAME/COMMENT/PASSWORD walk as the readers above.
+def gamedef_password_span(d):
+    """(start, end) byte offsets of the PASSWORD cstring CONTENT within a DECOMPRESSED
+    GAME_DEF (end is the terminating NUL, exclusive), or None on any parse failure."""
+    try:
+        if not d or len(d) < 14:
+            return None
+        p = 20 + d[13]                       # NAME start (ver+3dw+blen+camps+3ushort)
+        name_end = d.index(0, p)             # NAME\0
+        comment_end = d.index(0, name_end + 1)  # COMMENT\0
+        pw_start = comment_end + 1
+        pw_end = d.index(0, pw_start)         # PASSWORD\0
+        return pw_start, pw_end
+    except (ValueError, IndexError):
+        return None
+
+def arena_password_read(blob):
+    """Plaintext arena password from a stored (compressed) GAME_DEF blob, or '' if the
+    arena has none / the blob can't be parsed. Read-only. Also injected into the web
+    server (SRV['password_read']) so the arena editor can show the current password."""
+    d = decompress_gamedef(blob)
+    if not d:
+        return ''
+    span = gamedef_password_span(bytearray(d))
+    if span is None:
+        return ''
+    s, e = span
+    try:
+        return bytes(d[s:e]).decode('ascii', 'replace')
+    except Exception:
+        return ''
+
+def gamedef_is_password_protected(blob):
+    """True iff the stored GAME_DEF carries a non-empty PASSWORD cstring."""
+    return bool(arena_password_read(blob))
+
+def apply_arena_password(d, password):
+    """In-place set the PASSWORD cstring of a DECOMPRESSED GAME_DEF bytearray `d`.
+    `password` == '' (or None) CLEARS protection. LENGTH-CHANGING - the caller MUST
+    recompress after (build_lz_gamedef always does, and re-walks every later field, so a
+    length change here is safe; the PASSWORD cstring also sits AFTER the COMMENT, so the
+    212 comment-pad alignment walk is undisturbed). Returns (offset, old_str, new_str) on
+    write, or None on no-op / parse failure."""
+    span = gamedef_password_span(d)
+    if span is None:
+        return None
+    s, e = span
+    new = str(password if password is not None else '').encode('ascii', 'replace')
+    new = new.split(b'\x00')[0]              # an embedded NUL would truncate the field early
+    old = bytes(d[s:e])
+    if new == old:
+        return None
+    d[s:e] = new                             # trailing NUL at `e` stays; struct is recompressed
+    return s, old.decode('latin1'), new.decode('latin1')
 
 # -- Per-team AIRCRAFT assignment (which nation flies each plane) ----------------
 # WHY: every stored GAME_DEF leaves all 121 planes with record BYTE 0 = 0x1f. That byte is
@@ -2773,6 +2836,19 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                                       f'(lobby list shows the new name; logged once)')
         except Exception:
             pass
+    # ARENA PASSWORD (web override): if settings_json carries a 'password' key, stamp it into the
+    # GAME_DEF's PASSWORD cstring so the CLIENT enforces it (protection is client-side - see
+    # apply_arena_password). '' clears protection; a non-empty value sets/changes it. Absent key
+    # -> the arena keeps whatever password it was CREATED with (the stored blob's own cstring).
+    # Runs early (before every walk-based patch below) and is length-changing, but the whole
+    # struct is recompressed at the end and the PASSWORD field is after COMMENT, so nothing downstream
+    # or the pad alignment is disturbed.
+    if arena_settings is not None and 'password' in arena_settings:
+        _pwr = apply_arena_password(d, arena_settings.get('password'))
+        if _pwr is not None:
+            _pwo, _pwold, _pwnew = _pwr
+            log('GAMEDEF212', f'arena password @+{_pwo}: {_pwold!r} -> {_pwnew!r} '
+                              f'({"protected" if _pwnew else "cleared"})')
     # FFA neutral-team guard: for Free-For-All rooms, rewrite the camps block to a 2-column
     # all-Neutral set (one flyable camp + forced Neutral, both labeled "Neutral") so the
     # side picker / 213 Nations box / roster show Neutral AND the player can still fly
@@ -3208,6 +3284,24 @@ def init_rooms_db():
         log('DB', 'Migration: added settings_json column to rooms table')
     except Exception:
         pass  # column already exists - expected on every normal startup
+    # Migration: add password_protected - a DENORMALISED display flag (1/0) for the web arena
+    # list's lock icon, so the list doesn't decompress every blob on every page load. The
+    # AUTHORITATIVE gate is still the PASSWORD cstring in the served GAME_DEF (client-side); this
+    # column just mirrors it. Backfilled from each stored blob; kept in sync by db_create_room and
+    # the web arena editor.
+    try:
+        conn.execute("ALTER TABLE rooms ADD COLUMN password_protected INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        log('DB', 'Migration: added password_protected column to rooms table')
+        _npw = 0
+        for rid, gdef in conn.execute("SELECT room_id, game_def_raw FROM rooms").fetchall():
+            if gamedef_is_password_protected(gdef):
+                conn.execute("UPDATE rooms SET password_protected=1 WHERE room_id=?", (rid,))
+                _npw += 1
+        conn.commit()
+        log('DB', f'Migration: backfilled password_protected from stored GAME_DEFs ({_npw} protected)')
+    except Exception:
+        pass  # column already exists - expected on every normal startup
     # v473f5 [ARENA RENAME - STOP THE BOOT CLOBBER]: re-derive ONLY when the column is empty
     # or the 'Unnamed' placeholder. This migration's original job was correcting rooms created
     # before binary name extraction existed - but running unconditionally it OVERWROTE every
@@ -3234,11 +3328,12 @@ def db_create_room(creator_pilot, account, game_def_raw, room_slot=35, terrain=N
     if terrain is None:
         terrain = extract_terrain_from_gamedef(game_def_raw)
     room_name = extract_name_from_gamedef(game_def_raw) or 'Unnamed'
+    pw_protected = 1 if gamedef_is_password_protected(game_def_raw) else 0
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "INSERT INTO rooms(room_name, creator_pilot, account_name, game_def_raw, room_slot, terrain) "
-        "VALUES(?,?,?,?,?,?)",
-        (room_name, creator_pilot, account, game_def_raw, room_slot, terrain))
+        "INSERT INTO rooms(room_name, creator_pilot, account_name, game_def_raw, room_slot, terrain, password_protected) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (room_name, creator_pilot, account, game_def_raw, room_slot, terrain, pw_protected))
     room_id = cur.lastrowid
     conn.commit(); conn.close()
     return room_id
@@ -3261,7 +3356,7 @@ def db_get_open_rooms():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         "SELECT room_id, room_name, creator_pilot, account_name, created_at, room_slot, "
-        "game_def_raw, terrain, category "
+        "game_def_raw, terrain, category, COALESCE(password_protected,0) "
         "FROM rooms WHERE status='open' ORDER BY created_at DESC").fetchall()
     conn.close(); return rows
 
@@ -4756,6 +4851,30 @@ def build_gamelist(rooms):
 # creation). ARENA_TRN_NUMBER is only the fallback when a row somehow lacks one.
 ARENA_TRN_NUMBER = DEFAULT_TERRAIN
 
+# --- ARENA-LIST STATUS ICONS (0xd2 header byte +8 flag bits) --------------------
+# RE 2026-08-31: the 0xd2 record's 12-byte header byte +8 is a FLAG byte whose low bits
+# each light one arena-list ROW ICON - the client blits GUI_\DisableArena.bmp /
+# GUI_\Valuta.bmp / GUI_\Lock.bmp per row (all three live next to ARENA_LIST_BOX in
+# Arenas_dlg.cpp). Prior disassembly of the 0xd2 parser FUN_004efda0 mapped the header:
+#   byte+8  bit0 -> desc+0x10,  bit1 -> desc+0x14,  bit2 -> desc+0x20
+# and those three descriptor booleans drive the three row icons. We were sending +8=0,
+# so NO icon (including the password LOCK) ever showed for our arenas - even though
+# password ENFORCEMENT works, because that reads the GAME_DEF PASSWORD cstring, a wholly
+# SEPARATE path from this list flag. Setting the lock bit here makes the padlock appear.
+#
+# EMPIRICAL BIT MAP (confirmed on the client, 2026-08-31):
+#   bit0  0x01 (desc+0x10) = LOCK (padlock) = PASSWORD PROTECTED. Joinable (password prompt).
+#   bit1  0x02 (desc+0x14) = Valuta (coin/currency) icon - and it DISABLES the Join button
+#                            (a pay/premium-arena gate). Do NOT use for password rooms.
+#   bit2  0x04 (desc+0x20) = RED X "disabled arena" icon. Cosmetic - does NOT block joining.
+#                            Reserved as a future open/closed room indicator.
+# Bits are independent, so an arena can carry more than one icon if ever needed.
+ARENA_LIST_PASSWORD_FLAG = 0x01   # bit0 -> desc+0x10 = padlock (password protected)
+# Diagnostic ONE-SHOT bit map: when True, ignore password state and stamp a DISTINCT bit
+# on the first three listed arenas (row0=0x01, row1=0x02, row2=0x04) so a single arena-tab
+# screenshot maps all three bits -> icons at once. MUST be False in normal operation.
+ARENA_LIST_ICON_BIT_PROBE = False
+
 def build_arenalist(rooms):
     """Build the 0xd2 arena/room list response (the Arenas tab's list)."""
     data = bytearray([0xd2])
@@ -4764,10 +4883,11 @@ def build_arenalist(rooms):
         return build_appspace_pkt(bytes([0xd2]))
     listed = []
     records = []
-    for r in rooms:
+    for idx, r in enumerate(rooms):
         room_name = (r[1] or 'Arena')
         creator   = (r[2] or room_name)          # pilot who created the room
         gamedef = bytes(r[6]) if len(r) > 6 and r[6] else b''
+        pw_protected = bool(r[9]) if len(r) > 9 else False       # effective password state (DB flag)
         trn      = extract_terrain_from_gamedef(gamedef) & 0xFF    # param[0x39]; 1..99
         planeset = 0                                              # desc+0x04; 0 = default Planes.txt
         # 12-byte record header - field->descriptor map PROVEN from FUN_004efda0
@@ -4780,7 +4900,9 @@ def build_arenalist(rooms):
         hdr = bytearray(12)
         hdr[0:4]  = (planeset & 0xFFFFFFFF).to_bytes(4, 'little')  # plane-set (default)
         hdr[4:8]  = _arena_gameindex(creator, r[0])                     # [00 ff ff creator[0]]
-        hdr[8]    = 0                                             # flag bits (none)
+        hdr[8]    = ARENA_LIST_PASSWORD_FLAG if pw_protected else 0   # +8 flag: password LOCK icon
+        if ARENA_LIST_ICON_BIT_PROBE:                            # diagnostic: map bits->icons
+            hdr[8] = (0x01, 0x02, 0x04)[idx] if idx < 3 else 0
         hdr[9:11] = (0).to_bytes(2, 'little')                     # desc+0x18 (unused)
         hdr[11]   = trn                                           # TERRAIN -> desc+0x1c *
         # Name slots (empirically, from v167 live test): the FIRST name is the
@@ -4788,7 +4910,7 @@ def build_arenalist(rooms):
         # the arena's own row label. So name1 = category, name2 = the room's name.
         category = (r[8] if len(r) > 8 and r[8] else 'Custom Arenas')   # name1 section header (web-editable)
         records.append((bytes(hdr), category.encode()[:31], room_name.encode()[:31]))
-        listed.append((room_name, trn))
+        listed.append((room_name, trn, pw_protected))
     # Assemble. The 0xd2 parser (FUN_004efda0) is length-driven - it keeps starting
     # new records until consumed >= len, with NO bounds check, so leftover zero pad
     # would spawn a phantom record and read past the buffer -> crash. build_appspace_pkt
@@ -4815,7 +4937,7 @@ def build_arenalist(rooms):
     pad = size - L
     data = _assemble(pad)
     pkt = build_appspace_pkt(bytes(data)); bc = pkt[0]
-    desc = [f'{n}(trn{t}:{TERRAIN_NAMES.get(t, "?")})' for n, t in listed]
+    desc = [f'{n}(trn{t}:{TERRAIN_NAMES.get(t, "?")}{" LOCK" if pw else ""})' for n, t, pw in listed]
     log('ARENALIST', f'0xd2 -> {len(rooms)} arena(s) payload={len(data)}B '
                      f'bc={bc}(p3={bc*16+1}) pad={pad}: {desc}')
     log('ARENALIST', f'0xd2 payload hex: {bytes(data).hex()}')
@@ -8079,7 +8201,7 @@ ANNOUNCE_SYNTH_KILL_LINE = False # v517f5: a credited synthesised-tail PLANE kil
                              #   UPPERCASED in style 0xd (the white sysop style) + a 10s banner:
                              #   mechanically a sysop broadcast, not the kill line (user report
                              #   confirmed). Superseded by the ANNOUNCE33_EEC1_PROBE below.
-ANNOUNCE_BAIL_KILL_CH3 = True # v535f5 [WORKAROUND - the room-wide line for a BAIL-HUSK kill]: when a
+ANNOUNCE_BAIL_KILL_CH3 = False # v535f5 [WORKAROUND - the room-wide line for a BAIL-HUSK kill]: when a
                              #   pilot bails, every peer's client re-binds the station to the canopy
                              #   and the husk resolves as 'P-51D(0)' (messages27 07:24:41), so the
                              #   native ExitDataArrive line (gate 1: player-bound object) never
@@ -8094,6 +8216,12 @@ ANNOUNCE_BAIL_KILL_CH3 = True # v535f5 [WORKAROUND - the room-wide line for a BA
                              #   ch3, sender = the killer's player index (must resolve on every
                              #   recipient - it does, he's in the room), text below. Fires only
                              #   for bail-husk kills; ordinary kills keep the native line.
+                             #   v540f5: OFF. v536 books latched bail kills AT THE BAIL while the
+                             #   plane is still bound, so every peer gets the native 'destroyed'
+                             #   line and this ch3 line only DOUBLED it (run9 09:28:27: '<killer>:
+                             #   destroyed the plane of X' alongside the native 'destroyed X').
+                             #   Only an unbound-husk kill with no v536 booking would need it, and
+                             #   that path no longer occurs for latched kills.
 ANNOUNCE_BAIL_KILL_TEXT = 'destroyed the plane of {victim}'   # renders as '<killer>: <text>'
 ANNOUNCE33_EEC1_PROBE = False # v518f5 [DIAGNOSTIC]: both legal EEC=1 announce variants (0x21/0x31)
                              #   drew NOTHING on the killer across two client launches -> the
@@ -9248,7 +9376,17 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     #    a fact - so it only runs when the first two find nothing.
     #    v244: no longer gated on `scored`. That gate meant a SHORT-form death (i.e. a bailout) could
     #    never be attributed at all, which is exactly how Bigalon lost his 3rd kill.
-    if killer is None:
+    #    v540f5: do NOT let the fallback credit a CLEAN BAIL. When the pilot bailed and the plane
+    #    itself never took damage (took_damage False, no plane-targeted latch), the husk crashing
+    #    on its own is not a kill - but last_fired_at gets bumped by shooting the descending
+    #    PARACHUTE (msg-29), so the 30s window wrongly credited the shooter and fired a phantom
+    #    'destroyed' banner on a voluntary bail (run9 09:28:27: clean bail husk 0x010d, FALLBACK ->
+    #    Alon, two cyans). The parachute-hit belongs to the CANOPY's own latch/chute-kill path, not
+    #    to the husk. So skip the fallback for an undamaged bail husk; a genuinely shot-down plane
+    #    still has took_damage set and is caught by the latch (path 2) anyway.
+    _clean_bail_husk = (getattr(victim, 'para_obj_number', None) is not None
+                        and not bool(getattr(victim, 'took_damage', False)))
+    if killer is None and not _clean_bail_husk:
         now = time.time(); best = 0.0
         for p in get_sessions_in_room(victim.current_room):
             if p is victim:
@@ -14363,15 +14501,16 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                                    + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
                                    + ' -> pilot loss armed for this life; booked at the '
                                      'plane-down delete [v532f5]')
-                # v539f5 [INSTANT COCKPIT-KILL CYAN]: fire the killer's msg-76 NOW, at the MEC=4
-                # moment (08:37:40), not 10-25s later when the dead-stick finally crashes
-                # (run8 08:37:55). The victim's plane 0x{_num33} is STILL FLYING and BOUND on the
-                # killer's client at this instant, so the banner-76 resolves the PILOT name. The
-                # victim sends NO out-76 for a cockpit kill (only bailers do - messages40 08:37:40
-                # shows out-33 but no out-76), so nothing else lights the killer's cyan until the
-                # crash. Mark the object so the crash-time banner-76 (broadcast_object_delete_3)
-                # is suppressed -> exactly one cyan, at the live moment. Killer resolved from the
-                # hunter object the victim just named.
+                # v539f5/v540f5 [INSTANT COCKPIT-KILL CYAN, correct wording]: at the MEC=4 moment
+                # (not 10-25s later at the dead-stick crash), send the killer a 0x43 exit-delete
+                # for the still-flying BOUND plane. RE of the ExitDataArrive handler FUN_004f8f20:
+                # the kill wording is chosen by the MEC nibble - MEC=4 (case 4) draws 'X KILLED Y'
+                # (kill-string + sound 0x3d0), MEC=5 draws 'X destroyed plane of Y' via FUN_00478640
+                # (sound 0x3d1). v539 used msg-76 -> the 'destroyed plane' wording (user report).
+                # A 0x43 tail (MEC=4/EEC=3) is the native cockpit-kill form and self-attributes the
+                # killer's nation correctly (the case-4 strcmp vs the local pilot name). X/Z=0 keeps
+                # it a silent removal, but the plane stays flying on the killer's client (we send it
+                # ONLY to the killer). Mark the object so the crash-time banner is suppressed.
                 if COCKPIT_KILL_INSTANT_76 and _h33 and getattr(s, 'current_room', None) is not None:
                     _ck_killer = None
                     for _q in get_sessions_in_room(s.current_room):
@@ -14379,13 +14518,23 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                             _ck_killer = _q
                             break
                     if _ck_killer is not None:
-                        send_kill_banner_76(_ck_killer, s, victim_obj=_num33,
-                                            why='(cockpit kill, instant)')
-                        s._cockpit_banner76_sent = _num33
-                        log('COCKPITKILL', f'instant banner-76 -> killer {_ck_killer.current_pilot} '
-                                           f'for cockpit kill of {s.current_pilot} obj 0x{_num33:04x} '
-                                           f'(still flying+bound); crash-time banner suppressed '
-                                           f'[v539f5]')
+                        _kpi540 = getattr(_ck_killer, 'player_index', 0) or 0
+                        # 12B entry: [victim id][0x43][hunter obj][hunter PI][hunter PI u32][PPT 0x02]
+                        _e540 = (struct.pack('<H', _num33 & 0x7fff) + bytes([0x43])
+                                 + struct.pack('<H', _h33 & 0xffff)
+                                 + struct.pack('<H', _kpi540 & 0xffff)
+                                 + struct.pack('<I', _kpi540 & 0xffff) + bytes([0x02]))
+                        _dk540 = build_exit_delete_object_3(_num33, 0x43, entry=_e540)
+                        if _dk540 is not None:
+                            _submit_send(send_rel, _ck_killer, _dk540,
+                                         f'<- INSTANT cockpit-kill 0x43 ({_ck_killer.current_pilot} '
+                                         f'killed {s.current_pilot} obj 0x{_num33:04x})', to=3.0)
+                            s._cockpit_banner76_sent = _num33
+                            log('COCKPITKILL', f'instant 0x43 kill-cyan -> killer '
+                                               f'{_ck_killer.current_pilot} for cockpit kill of '
+                                               f'{s.current_pilot} obj 0x{_num33:04x} (still '
+                                               f'flying+bound, MEC=4 -> "killed" wording); crash-time '
+                                               f'banner suppressed [v540f5]')
     except Exception:
         pass
     # v533f5 [NATIVE msg-76 RELAY - the 2009 plane-destroyed banner path]: the VICTIM's client
@@ -17432,7 +17581,8 @@ threading.Thread(
           ARENA_TAIL_FIELDS, _falog.get_recent_logs, queue_console_command, LOG_DIR,
           extract_date_from_gamedef),
     kwargs={'scoring_ref_fn': web_scoring_reference,    # v404f5: /scoring page + ladder ranks
-            'player_counts_fn': web_player_counts},     # v418f5: console player counter
+            'player_counts_fn': web_player_counts,      # v418f5: console player counter
+            'password_read_fn': arena_password_read},   # arena editor: current arena password
     daemon=True
 ).start()
 

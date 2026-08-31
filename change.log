@@ -17,6 +17,42 @@ they explain why a specific line is the way it is and must stay with it.
     item is the COCKPIT-KILL killer-side cyan (diagnosis complete: needs the 2009
     host's killer-directed 'in 33'14' msg-33 - see the v528f5 entry's NEXT note).
 
+v540f5 [PASSWORD-PROTECTED ARENAS - END TO END] - password protection now works
+      across all three surfaces: enforcement, web control, and the in-game padlock.
+      The arena password is the 3rd null-terminated cstring in the decompressed
+      GAME_DEF (NAME\0 COMMENT\0 PASSWORD\0), stored PLAINTEXT and enforced entirely
+      CLIENT-SIDE (the server has no password logic - the client reads the cstring
+      from the served 212 and gates the join). Verified against two test arenas: a
+      client-set password '1234' stores as hex 31 32 33 34; an unprotected room's
+      PASSWORD field is empty.
+      * server.py: new helpers gamedef_password_span / arena_password_read /
+        gamedef_is_password_protected / apply_arena_password. A per-arena override
+        (settings_json 'password') is stamped into the served GAME_DEF at 212-serve
+        time in build_lz_gamedef ('' clears protection; a value sets/changes it) -
+        length-changing but safe, since PASSWORD sits after COMMENT and the whole
+        struct is recompressed (comment-pad alignment undisturbed). Original blob is
+        never mutated, same as every other web-edited setting.
+      * DB: new rooms.password_protected flag (ALTER + backfill from every stored
+        blob in init_rooms_db; set in db_create_room; kept in sync by the web editor;
+        exposed via db_get_open_rooms as r[9]). Denormalised so the arena list needn't
+        decompress every blob per build.
+      * Web (web_server.py): the /admin/arena_settings editor gained a 'Password
+        protected' toggle + a change-password field pre-filled with the current
+        password; a padlock badge shows next to protected arenas on the /admin and
+        /my_arenas lists; bridge SRV['password_read']=arena_password_read. The
+        password is redacted in the web log.
+      * IN-GAME PADLOCK (new RE): the 0xd2 arena-list record's 12-byte header byte +8
+        is a FLAG byte - each low bit lights one ARENA_LIST_BOX row icon (Arenas_dlg.
+        cpp). We were sending +8=0, so no icon ever showed - which is WHY enforcement
+        worked while the padlock was missing (the two are separate code paths). Bit
+        map confirmed live: bit0 0x01 (desc+0x10) = LOCK padlock = password protected
+        (joinable via prompt); bit1 0x02 (desc+0x14) = Valuta coin AND disables the
+        Join button (pay gate); bit2 0x04 (desc+0x20) = red X 'disabled arena'
+        (cosmetic, join still allowed). build_arenalist now sets +8 =
+        ARENA_LIST_PASSWORD_FLAG (0x01) when password_protected. Coin/red-X bits are
+        reserved for future pay-arena and open/closed indicators
+        (ARENA_LIST_ICON_BIT_PROBE stamps 0x01/0x02/0x04 on the first 3 rows for a
+        one-shot re-map).
 v528f5 [NATIVE VICTIM KILL AT THE CHUTE VERDICT] - at the server's chute-kill
     decision the VICTIM receives the native killp relay (v527f5 mechanism): their
     own client executes the pilot death at the live moment - real death flow,

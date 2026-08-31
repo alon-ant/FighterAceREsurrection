@@ -190,6 +190,7 @@ SRV = {
     'log_dir': None,
     'date_read': None,
     'scoring_ref': None,
+    'password_read': None,
     'log': print
 }
 
@@ -581,6 +582,11 @@ def migrate_web_db():
             # v475: cleanup-exemption flag, set from the arena-management checkbox. The game
             # server's init_rooms_db adds this too; harmless if already present.
             c.execute("ALTER TABLE rooms ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0")
+        if rcols and 'password_protected' not in rcols:
+            # Denormalised lock-icon flag for the arena list. The game server's init_rooms_db
+            # adds AND backfills this from the stored blobs; here we only ensure the column
+            # exists (default 0) in case the web server reaches the DB first. Harmless if present.
+            c.execute("ALTER TABLE rooms ADD COLUMN password_protected INTEGER NOT NULL DEFAULT 0")
     except Exception:
         pass
 
@@ -1111,25 +1117,28 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
                 cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
                 pers_sel = "COALESCE(persistent,0)" if 'persistent' in rcols else "0"
+                pw_sel   = "COALESCE(password_protected,0)" if 'password_protected' in rcols else "0"
                 arena_rows = conn.execute(
                     "SELECT room_id, COALESCE(room_name,''), COALESCE(creator_pilot,''), "
                     "COALESCE(status,'open'), COALESCE(terrain,1), " + cat_sel + ", "
                     "(SELECT COUNT(*) FROM room_players rp WHERE rp.room_id=rooms.room_id), "
-                    + pers_sel + " FROM rooms ORDER BY created_at DESC").fetchall()
+                    + pers_sel + ", " + pw_sel + " FROM rooms ORDER BY created_at DESC").fetchall()
                 if not arena_rows:
                     arena_html = "<tr><td>No arenas in the database.</td><td></td></tr>"
-                for rid, rname, creator, status, terrain, category, pcount, pers in arena_rows:
+                for rid, rname, creator, status, terrain, category, pcount, pers, pwp in arena_rows:
                     sel_open   = 'selected' if status == 'open' else ''
                     sel_closed = 'selected' if status != 'open' else ''
                     row_bg = '' if status == 'open' else 'background:#f3f3f3;'
                     pers_chk = 'checked' if pers else ''
+                    lock_badge = (' <span title="Password protected" style="color:#b8860b;">&#128274;</span>'
+                                  if pwp else '')
                     arena_html += f"""
                     <tr style="{row_bg}">
                         <td>
                             <form method="POST" action="/admin/edit_arena" style="margin:0;">
                                 <input type="hidden" name="room_id" value="{rid}">
                                 <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end;">
-                                    <label style="font-size:0.8em; color:#666;">Name<br>
+                                    <label style="font-size:0.8em; color:#666;">Name{lock_badge}<br>
                                         <input type="text" name="room_name" value="{hesc(str(rname), quote=True)}" style="width:190px; padding:6px; margin:2px 0;">
                                     </label>
                                     <label style="font-size:0.8em; color:#666;">Title (section header)<br>
@@ -1633,6 +1642,29 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _sm_opt('events', 'Force Events board')
                 + _sm_opt('none', 'Force NO global scoring')
                 + '</select></label>')
+            # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
+            # been set, else the password the arena was CREATED with (read from the blob via the
+            # game-server bridge). The field is pre-filled with that value so an unchanged save
+            # round-trips it; clearing it (or unticking the box) removes protection.
+            if 'password' in overrides:
+                cur_pw = str(overrides.get('password') or '')
+            else:
+                cur_pw = ''
+                try:
+                    if SRV.get('password_read') and gdef:
+                        cur_pw = SRV['password_read'](bytes(gdef)) or ''
+                except Exception:
+                    cur_pw = ''
+            pw_on = bool(cur_pw)
+            pw_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'password' in overrides else ''
+            password_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_password_protected" value="1"'
+                + (' checked' if pw_on else '') + '> Password protected'
+                + pw_edited + '</label>'
+                '<label style="display:block; margin:8px 0; font-size:0.9em; color:#333;">Arena password<br>'
+                '<input type="text" name="s_password" value="' + hesc(str(cur_pw), quote=True) + '" '
+                'autocomplete="off" style="width:240px; padding:6px;"></label>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -1648,6 +1680,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                         <input type="text" name="category" value="{hesc(str(category), quote=True)}" style="width:280px; padding:6px;"></label>
                     <label style="display:block; margin:10px 0;">Status<br>
                         <select name="status" style="padding:7px;"><option value="open" {sel_open}>open</option><option value="closed" {sel_closed}>closed</option></select></label>
+                    <h3>Password protection</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to require a password to join this arena, and set it below (the client prompts for it &mdash; enforcement is client-side, exactly as when the arena was created). Untick, or clear the field, to remove protection. The password shown is the current one; change it and Save to change what players must type. Takes effect the next time the arena is entered.</p>
+                    {password_html}
                     <h3>Arena settings</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">All values in <strong>feet</strong>. Leave a field blank to keep the value the arena was created with. Changes are written into the arena's GAME_DEF and take effect the next time the arena is entered (they are served fresh on entry).</p>
                     {fields_html}
@@ -1686,21 +1721,24 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(SRV['db_path'])
             rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
             cat_sel = "COALESCE(category,'Custom Arenas')" if 'category' in rcols else "'Custom Arenas'"
+            pw_sel  = "COALESCE(password_protected,0)" if 'password_protected' in rcols else "0"
             rows = []
             if 'account_name' in rcols:
                 rows = conn.execute(
                     "SELECT room_id, COALESCE(room_name,''), COALESCE(status,'open'), "
-                    "COALESCE(terrain,1), " + cat_sel + " FROM rooms WHERE account_name=? "
+                    "COALESCE(terrain,1), " + cat_sel + ", " + pw_sel + " FROM rooms WHERE account_name=? "
                     "ORDER BY created_at DESC", (user,)).fetchall()
             conn.close()
             if rows:
                 items = ""
-                for rid, rname, status, terrain, category in rows:
+                for rid, rname, status, terrain, category, pwp in rows:
+                    lock_badge = (' <span title="Password protected" style="color:#b8860b;">&#128274;</span>'
+                                  if pwp else '')
                     items += (
                         '<div class="card" style="margin:10px 0;">'
                         '<div style="display:flex; justify-content:space-between; align-items:center;">'
-                        '<div><strong>' + hesc(str(rname) or 'Unnamed') + '</strong>'
-                        '<br><small style="color:#888;">' + hesc(str(category))
+                        '<div><strong>' + hesc(str(rname) or 'Unnamed') + '</strong>' + lock_badge
+                        + '<br><small style="color:#888;">' + hesc(str(category))
                         + ' &middot; ' + hesc(str(status)) + ' &middot; terrain ' + str(terrain)
                         + ' &middot; id ' + str(rid) + '</small></div>'
                         '<a href="/admin/arena_settings?room=' + str(rid) + '" class="btn-green" '
@@ -2517,15 +2555,62 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             if rid:
                 conn = sqlite3.connect(SRV['db_path'])
                 rcols = [r[1] for r in conn.execute("PRAGMA table_info(rooms)").fetchall()]
-                if 'settings_json' in rcols:
+                # ARENA PASSWORD (client-side gate): fold the toggle + field into settings_json's
+                # 'password' key and keep the denormalised password_protected column in sync. The
+                # editor pre-fills the field with the current password, so an unchanged save round-
+                # trips it. Semantics: box off -> '' (removed); box on + field -> that password;
+                # box on + blank field -> fall back to the existing override / the arena's created-
+                # with password; none available -> treated as off.
+                pw_req   = bool(qs.get('s_password_protected', [''])[0].strip())
+                pw_typed = qs.get('s_password', [''])[0].strip()
+                prev_over = {}; blob_pw = ''
+                try:
+                    _pr = conn.execute("SELECT game_def_raw, COALESCE(settings_json,'{}') "
+                                       "FROM rooms WHERE room_id=?", (rid,)).fetchone()
+                    if _pr:
+                        _blob, _sj = _pr
+                        try:
+                            _po = json.loads(_sj) if _sj else {}
+                            if isinstance(_po, dict): prev_over = _po
+                        except Exception:
+                            prev_over = {}
+                        try:
+                            if SRV.get('password_read') and _blob:
+                                blob_pw = SRV['password_read'](bytes(_blob)) or ''
+                        except Exception:
+                            blob_pw = ''
+                except Exception:
+                    pass
+                if not pw_req:
+                    desired_pw = ''
+                elif pw_typed != '':
+                    desired_pw = pw_typed
+                else:
+                    desired_pw = str(prev_over.get('password') or '') if 'password' in prev_over else blob_pw
+                # store the key only when it changes something: a real password, OR an explicit
+                # clear of an arena that IS currently protected (created-with or prior override).
+                if desired_pw:
+                    settings['password'] = desired_pw
+                elif blob_pw or ('password' in prev_over):
+                    settings['password'] = ''
+                pw_col = 1 if desired_pw else 0
+                has_pw_col = 'password_protected' in rcols
+                if 'settings_json' in rcols and has_pw_col:
+                    conn.execute("UPDATE rooms SET room_name=?, category=?, status=?, settings_json=?, "
+                                 "password_protected=? WHERE room_id=?",
+                                 (room_name, category, status, json.dumps(settings), pw_col, rid))
+                elif 'settings_json' in rcols:
                     conn.execute("UPDATE rooms SET room_name=?, category=?, status=?, settings_json=? WHERE room_id=?",
                                  (room_name, category, status, json.dumps(settings), rid))
                 else:
                     conn.execute("UPDATE rooms SET room_name=?, category=?, status=? WHERE room_id=?",
                                  (room_name, category, status, rid))
                 conn.commit(); conn.close()
+                _log_settings = dict(settings)
+                if 'password' in _log_settings:      # don't write the arena password to the log
+                    _log_settings['password'] = '***' if _log_settings['password'] else ''
                 SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} "
-                                  f"status={status} settings={settings}")
+                                  f"status={status} password_protected={pw_col} settings={_log_settings}")
             self.send_response(302)
             self.send_header('Location', '/admin' if is_user_admin(user) else '/my_arenas')
             self.end_headers()
@@ -2790,7 +2875,8 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
-                     date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None):
+                     date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
+                     password_read_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -2803,6 +2889,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['date_read'] = date_read_fn                  # v383: extract_date_from_gamedef(blob)->(d,m,y)
     SRV['scoring_ref'] = scoring_ref_fn              # v404f5: web_scoring_reference() -> dict
     SRV['player_counts'] = player_counts_fn          # v418f5: web_player_counts() -> dict
+    SRV['password_read'] = password_read_fn          # arena_password_read(blob) -> plaintext pw / ''
 
     migrate_web_db()
     _start_httpd_thread()
