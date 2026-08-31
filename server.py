@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v535f5'
+VERSION = 'v536f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8098,6 +8098,22 @@ ANNOUNCE_BAIL_KILL_TEXT = 'destroyed the plane of {victim}'   # renders as '<kil
 ANNOUNCE33_EEC1_PROBE = False # v518f5 [DIAGNOSTIC]: both legal EEC=1 announce variants (0x21/0x31)
                              #   drew NOTHING on the killer across two client launches -> the
                              #   built-in EEC=1 message path is a dead end. Probe closed, OFF.
+BAIL_KILL_AT_BAIL   = True   # v536f5 [THE 2009 BAIL ORDERING - the real fix]: when a pilot bails
+                             #   from a plane with a hunter latched (msg-28 damage / parachuter-hit),
+                             #   credit the kill and broadcast the plane's 0x53+hunter delete NOW,
+                             #   at the msg-4 bail, BEFORE the parachuter create - exactly the 2009
+                             #   host order (messages04: ExitDataArrive 0x53 -> EVENT 'X destroyed
+                             #   Y' -> LOAD parachuter). RE of FUN_004f26b0 case 2 proved the husk
+                             #   'P-51D(0)' is NOT a create bug: the parachuter create legitimately
+                             #   clears the plane's +0x128 score binding and migrates it to the
+                             #   canopy. So gate 1 (player-bound object) can ONLY be satisfied by
+                             #   deleting the plane while it is still bound - i.e. before the create.
+                             #   Killer's banner-76 rides the delete thread (object still bound ->
+                             #   names the PILOT); every peer draws the native ExitDataArrive line;
+                             #   the room needs no ch3 workaround. The husk keeps flying locally but
+                             #   is already deleted on peers; its later MEC=5 delete is swallowed
+                             #   as an already-booked kill (see _bail_kill_booked). OFF -> the
+                             #   v535 late-husk path + ch3 line, unchanged.
 SERVER_CHUTE_KILL   = True   # v519f5 [2009 ARCHITECTURE]: the 2009 host was AUTHORITATIVE over the
                              #   canopy (no telemetry; the client free-falls it and waits for the
                              #   server's delete). It decided the pilot kill from the hit stream AT
@@ -9395,6 +9411,66 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     return killer, _bailed   # v368f5: also report bail so the caller can fire the announce-only
                              # msg-33 (the bail path never self-announces on the shooter's client)
 
+# v536f5: object numbers for which the bail-moment kill flow already ran. The husk's later MEC=5
+# delete-notify (or the eventual crash) must then be swallowed on peers - it was already deleted
+# there at the bail, and re-crediting would double the kill. Bounded; entries are consumed by the
+# swallow and expire on the plane's Number recycling. Value = (killer_pilot, at).
+_BAIL_KILL_BOOKED = {}
+
+def try_bail_kill_now(s):
+    """v536f5: called at the msg-4 bail, BEFORE the parachuter create. If a hunter is latched on
+    the plane the pilot just left, run the full kill NOW - 2009 host order (delete the bound plane
+    on peers, credit, banner), so gate 1 (player-bound object) is satisfied. Returns True if it
+    fired (the caller then relies on the husk-down swallow). No latch -> False, legacy path stays.
+
+    The plane object (s.my_obj_number) is STILL BOUND at this instant on every peer - the
+    parachuter create that clears +0x128 hasn't been sent yet. We build a synthetic 'shot-down'
+    delete-notify in the exact client wire shape score_on_death/broadcast_object_delete_3 expect
+    ([00 00 00][03][id u16][0x53][hunter u16][0000][00000000][02]) so all the proven v512/v531
+    machinery (0x53 exit rewrite to peers + banner-76 pre-delete + score-33) runs unchanged."""
+    if not BAIL_KILL_AT_BAIL:
+        return False
+    _plane = getattr(s, 'my_obj_number', None)
+    if _plane is None or getattr(s, 'current_room', None) is None:
+        return False
+    _lat = PENDING_KILL.get(_plane)
+    _hobj = _lat.get('killer') if isinstance(_lat, dict) else None
+    if not _hobj:
+        return False
+    # Mark it a BAIL in the latch so score_on_death charges plane-only (pilot walked away).
+    _lat['why'] = 'bail'
+    # Build the synthetic delete-notify. The real client frame is [cmd:4][0x03][id u16][exit]
+    # [tail...] (v235: '[00 32 00 00 | 03 01 01 ...]'): sub 0x03 at stored[4], id at stored[5:7],
+    # exit at stored[7], and exit_entry = stored[5:5+size]. So the 0x03 sub sits at index 4 (a
+    # 4-byte cmd prefix) and _entry (id..ppt, 12B for EEC=3) begins at index 5.
+    _entry = (struct.pack('<H', _plane & 0xffff)          # +0 id
+              + bytes([0x53])                             # +2 exit = MEC5|EEC3 (shot down)
+              + struct.pack('<H', _hobj & 0xffff)         # +3 HUNTER object
+              + struct.pack('<H', 0)                      # +5
+              + struct.pack('<I', 0)                      # +7
+              + bytes([0x02]))                            # +11 PPT plane
+    _stored = bytes([0x00, 0x00, 0x00, 0x00, 0x03]) + _entry
+    _killer, _kbailed = score_on_death(s, _stored, hunter_obj=_hobj,
+                                       victim_obj=_plane, pilot_lost=False)
+    if _killer is None:
+        log('BAILKILL', f'{s.current_pilot} bailed with latch obj 0x{_hobj:04x} but killer '
+                        f'unresolved at bail -> fall back to husk-down path [v536f5]')
+        return False
+    _BAIL_KILL_BOOKED[_plane] = (getattr(_killer, 'current_pilot', '?'), time.time())
+    # Broadcast the plane's 0x53+hunter delete to peers NOW (object still bound -> ExitDataArrive
+    # resolves the PILOT name, native 'X destroyed Y' line for everyone) and arm the killer's
+    # banner-76 pre-delete. clear_peer_created=False: this is an in-arena plane removal, the
+    # pilot stays (under canopy).
+    broadcast_object_delete_3(s, reason='(bail kill @ bail)', clear_peer_created=False,
+                              killer=_killer, exit_byte=0x53, exit_entry=_entry)
+    if _killer is not None and SEND_SCORE_EVENT_33:
+        send_score_event_to_killer(_killer)
+    log('BAILKILL', f'{s.current_pilot} bailed -> kill booked AT THE BAIL to '
+                    f'{_killer.current_pilot} (plane 0x{_plane:04x}, hunter 0x{_hobj:04x}): '
+                    f'0x53+hunter delete + banner-76 sent while the object was still bound; '
+                    f'husk-down delete will be swallowed [v536f5]')
+    return True
+
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                               followup_pkt=None, followup_label='', killer=None,
                               exit_byte=None, exit_entry=None):
@@ -9486,7 +9562,12 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # Restricted to the husk case: bailed_plane_obj is set at the bail and still equals the
         # object coming down here; any other synth kill has a player-bound object and the
         # native ExitDataArrive line draws for everyone.
+        # v536f5: suppressed when BAIL_KILL_AT_BAIL already ran the kill for this object - that path
+        # deletes the plane WHILE BOUND, so every peer gets the native 'X destroyed Y' line and the
+        # ch3 fallback would just duplicate it. The mark is still present here (this IS the v536
+        # broadcast; the husk-down swallow pops it later).
         if (ANNOUNCE_BAIL_KILL_CH3 and getattr(s, 'bailed_plane_obj', None) == s.my_obj_number
+                and s.my_obj_number not in _BAIL_KILL_BOOKED
                 and getattr(killer, 'player_index', None) is not None):
             _bk535 = ANNOUNCE_BAIL_KILL_TEXT.format(victim=s.current_pilot,
                                                     killer=killer.current_pilot)
@@ -12646,6 +12727,24 @@ def _ingame_own_object_removed(s, tb, stored):
             return
 
         s._left_world = True
+        # v536f5: if this object's kill was already booked AT THE BAIL (BAIL_KILL_AT_BAIL), the
+        # plane was deleted on peers then and the killer already credited. This is the husk
+        # finally coming down - relay a plain delete so any peer that somehow still holds it drops
+        # it, but do NOT run score_on_death / broadcast the 0x53 tail again (double credit) and do
+        # NOT re-banner. Consume the mark so a recycled Number can't inherit it.
+        _booked536 = _BAIL_KILL_BOOKED.pop(_onum, None) if _onum is not None else None
+        if _booked536 is not None:
+            _pd536 = build_delete_object_3(onumber=_onum, client_number=None)
+            for _peer536 in get_sessions_in_room(s.current_room):
+                if _peer536 is not s:
+                    _submit_send(send_rel, _peer536, _pd536,
+                                 f'<- husk delete 0x{_onum:04x} ({s.current_pilot}, kill already '
+                                 f'booked at bail)', to=3.0)
+            log('BAILKILL', f'{s.current_pilot} husk 0x{_onum:04x} down (exit=0x'
+                            f'{(stored[7] if len(stored) > 7 else 0):02x}) -> plain delete to peers; '
+                            f'kill was already booked at the bail to {_booked536[0]} -> no re-credit '
+                            f'[v536f5]')
+            return
         exitb = stored[7] if len(stored) > 7 else 0
         mec_nib = (exitb >> 4) & 0xf     # MissExitCode & 0xf  (Msn_Exit: (MEC << 4) | ScoreEvent)
         se      = exitb & 0xf            # ScoreEvent / exit form (0..5)
@@ -16548,10 +16647,19 @@ def handle_post_auth(s, cmd, pl):
                     threading.Thread(target=lambda nn=_pn, ii=_pi: send_reply(
                         s, build_server_confirm_5(nn, ii),
                         f'<- ServerConfirm 5 (PARACHUTER Number={nn} ident={ii})'), daemon=True).start()
+                # v536f5: THE 2009 ORDER. If a hunter is latched on the plane, book+broadcast the
+                # kill NOW - before the parachuter create clears the plane's score binding on
+                # peers. This makes the killer's cyan name the PILOT and every peer draw the native
+                # 'X destroyed Y' line. Falls through to the v534/v535 paths when there is no latch.
+                _bail_killed_now = False
+                try:
+                    _bail_killed_now = try_bail_kill_now(s)
+                except Exception as _eb536:
+                    log('BAILKILL', f'[warn] {s.current_pilot}: bail-kill-now failed: {_eb536}')
                 # v534f5: hunter latched on the plane they just left -> native mod-relay to the
                 # bailer (see BAIL_CRUMBLEP_VICTIM). After the confirm dispatch, before the peer
-                # canopy creates.
-                if BAIL_CRUMBLEP_VICTIM:
+                # canopy creates. Skipped when v536 already ran the full kill at the bail.
+                if BAIL_CRUMBLEP_VICTIM and not _bail_killed_now:
                     try:
                         _lat534 = PENDING_KILL.get(s.my_obj_number)
                         _hobj534 = _lat534.get('killer') if isinstance(_lat534, dict) else None
