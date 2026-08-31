@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v531f5'
+VERSION = 'v532f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9670,7 +9670,14 @@ TELEM_MAX_BC = 5
 # Confirmed live sizes: 84/86/88 (TELEM-SIZE 'normal' set). Anything else (the 122B canopy
 # multi-record form, the 99B bc=5 bombsight-run form, ...) shares only the HEADER (tick[5:7],
 # ONumber[7:9]) - its bytes at [9:15] are NOT a position and must never feed _pos_hist.
-TELEM_POS_EVIDENCE_SIZES = (84, 86, 88)
+# v532f5: + 90 = the B-17G's NATIVE opcode-0x07 frame (run_20260831_045330 04:59:43 TELEM-SIZE:
+# 'Alon@HQ relaying a 90B msg-7 appspace (normal [84,86,88])'; TELEM8-TRANS 05:17:21 shows its
+# [9:15] sweeping like a real position). With 90 excluded the bomber NEVER produced a position
+# sample -> plane_movement()==0 for its whole life -> all three B-17 ground crashes that run
+# ('Player crashed into ground', exit 0x11) classified as 'clean exit -> no loss' (05:15:02,
+# 05:20:13, 05:24:50) - no plane/pilot loss, aces kept. The v446 bombsight guard is preserved
+# by gating on the NATIVE opcode at the evidence site (converted 0x08 frames are also 90B).
+TELEM_POS_EVIDENCE_SIZES = (84, 86, 88, 90)
 # How long a special-form sighting disqualifies the ground-stop judgement (the bombsight run
 # emits them for its whole duration; a couple of windows of margin after the last one).
 ODD_TELEM_HOLDOFF_S = 20.0
@@ -9915,7 +9922,10 @@ def relay_telemetry(src, data):
                 #   * non-standard sizes contribute NO samples, and
                 #   * their SIGHTING is timestamped - ground_stop_eligible refuses while one
                 #     was seen inside the judgement window (see 'special-form').
-                if len(pl) not in TELEM_POS_EVIDENCE_SIZES:
+                if len(pl) not in TELEM_POS_EVIDENCE_SIZES or _opc != 0x07:
+                    # v532f5: the size list now admits the B-17's 90B native form; a CONVERTED
+                    # 0x08 frame (bombsight run) is 90B too by the time it gets here, so the
+                    # native-opcode test is what keeps v446's special-form sighting alive.
                     src._odd_telem_time = time.time()
                 else:
                     _p = struct.unpack_from('<HHH', pl, 9)
@@ -12279,6 +12289,10 @@ def _fire_server_confirm(s, via='', ident=None):
     # inside the SEND_ACE_RANK_88 block, so turning that flag off would silently leave took_damage
     # latched and make every clean exit count as a death again.)
     s.took_damage = False
+    # v532f5: and nobody has killed this life's pilot yet (cockpit-kill record, see
+    # _ingame_msg_instrument / the crash classifier).
+    s.__dict__.pop('_cockpit_kill_t', None)
+    s.__dict__.pop('_cockpit_kill_hunter', None)
     # v243: and a fresh plane hasn't moved yet. Drop the old life's position history so the
     # "was it flying?" crash test can't be fooled by the PREVIOUS sortie's movement.
     s.__dict__.pop('_pos_hist', None)
@@ -12613,6 +12627,19 @@ def _ingame_own_object_removed(s, tb, stored):
             elif scored or (mec_nib == 1 and _flying2):
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
                                                    victim_obj=_onum, pilot_lost=True)
+            elif s.__dict__.pop('_cockpit_kill_t', None) is not None:
+                # v532f5: this life's pilot was already killed in the cockpit (recorded from the
+                # victim's own MEC=4 report, see _ingame_msg_instrument) - the plane coming down
+                # now is a dead-stick crash. Plane AND pilot lost. The recorded hunter object is
+                # the attribution backstop if the exit tail carries none.
+                _ckh = s.__dict__.pop('_cockpit_kill_hunter', None)
+                _killer, _kbailed = score_on_death(s, stored,
+                                                   hunter_obj=(_hunter if _hunter is not None else _ckh),
+                                                   victim_obj=_onum, pilot_lost=True)
+                log('DEATH', f'{s.current_pilot} COCKPIT KILL - plane down (MEC&0xf={mec_nib} '
+                             f'SE={se}) -> plane AND pilot lost; shooter credited'
+                             + (f' (cockpit-kill hunter obj 0x{_ckh:04x})' if _ckh is not None else '')
+                             + ' [PILOT_FATE/v532f5]')
             elif mec_nib in (5, 2):
                 _cap = (se == 12)
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
@@ -14102,6 +14129,35 @@ def _supply_msg_instrument(s, sub, cmd, pl):
     try:
         if sub == 0x18 or (cmd and len(pl) > 8 and pl[8] == 0x18):
             s._hangar_msg_t = time.time()
+    except Exception:
+        pass
+    # v532f5 [COCKPIT KILL = PILOT LOST]: the victim's OWN ExitEvent report at the moment the
+    # pilot dies in the cockpit - out-33 with MissExitCode=4, ScoreEvent=3 (type byte 0x43),
+    # IsDelete=0, the plane still flying (Taurus messages78 21:18:29 'ExitEvent(258). IsDelete=0,
+    # MissExitCode=4, ScoreEvent=3'; wire run_045330 05:23:22 pl=..21 01 1801 43 1901 0100..:
+    # [21][AddData][Number u16][0x43][hunter OBJ u16][hunter PI u16][hunter PI u32][PPT][hits]).
+    # Until now it was only PROTOWATCH'd; the death got booked 10-25s later off the crash delete
+    # (MEC=5), which counts the PLANE only ('pilot pending (bail) / safe') - the victim's HUD
+    # never registered a lost pilot. Record it per life (cleared on spawn + on booking) so the
+    # crash classifier books plane + PILOT, and keep the hunter object as attribution backstop
+    # for a long dead-stick glide that outlives the damage latch. Both direct and prefixed forms.
+    try:
+        _pl33 = None
+        if sub == 0x21 and len(pl) >= 9:
+            _pl33 = bytes(pl[4:])
+        elif cmd and len(pl) > 12 and pl[8] == 0x21:
+            _pl33 = bytes(pl[8:])
+        if _pl33 is not None and len(_pl33) >= 5 and ((_pl33[4] >> 4) & 0xf) == 4:
+            _num33 = int.from_bytes(_pl33[2:4], 'little')
+            if _num33 == getattr(s, 'my_obj_number', None):
+                _h33 = int.from_bytes(_pl33[5:7], 'little') if len(_pl33) >= 7 else None
+                s._cockpit_kill_t = time.time()
+                s._cockpit_kill_hunter = _h33
+                log('COCKPITKILL', f'{s.current_pilot} reports PILOT KILLED in the cockpit of obj '
+                                   f'0x{_num33:04x} (MEC=4 SE={_pl33[4] & 0xf})'
+                                   + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
+                                   + ' -> pilot loss armed for this life; booked at the '
+                                     'plane-down delete [v532f5]')
     except Exception:
         pass
     if not SUPPLY_MSG_INSTRUMENT:
