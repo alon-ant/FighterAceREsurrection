@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v537f5'
+VERSION = 'v539f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8132,8 +8132,23 @@ ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's 
                              #   (deferred pre-guard path) is not true to the original game's format
                              #   (user request). Scoring/pilot-loss unaffected; the native cyan from
                              #   the server-authoritative chute kill is separate and still fires.
+SERVER_CHUTE_KILL_TO_KILLER = False  # v538f5: whether the 0x55 chute-kill delete ALSO goes to the
+                             #   killer. OFF: the killer's ExitDataArrive on that delete drew a kill
+                             #   line that mis-attributed HIS nation from the CANOPY/victim object's
+                             #   camp ('SU Alon killed USA flakmagic' when Alon is GBR - messages31
+                             #   08:34:58) - the same class of bug v537 fixed for plane kills. The
+                             #   killer's correct cyan comes from his msg-76 instead (now pointed at
+                             #   the player-bound CANOPY, see the chute-kill site). Peers still get
+                             #   the 0x55 delete for their native line.
 SERVER_CHUTE_KILL_TO_OWNER = False # v526f5: OFF for good. (superseded detail: see v528f5 below -
                              #   the owner now gets the NATIVE killp relay instead of any delete.)
+COCKPIT_KILL_INSTANT_76 = True  # v539f5 [INSTANT COCKPIT-KILL CYAN]: on the victim's MEC=4 cockpit-
+                             #   death report (out-33, plane still flying), fire the killer's msg-76
+                             #   immediately instead of waiting 10-25s for the dead-stick to crash.
+                             #   The plane is still bound on the killer's client at that instant, so
+                             #   the banner names the PILOT. The crash-time banner-76 is then
+                             #   suppressed (_cockpit_banner76_sent) so the killer sees exactly ONE
+                             #   cyan, at the live moment. OFF -> crash-time banner only (v538).
 BAIL_CRUMBLEP_VICTIM = True  # v534f5 [BAIL -> NATIVE MOD-RELAY TO THE VICTIM]: when a pilot BAILS
                              #   from a plane a hunter is latched on (msg-28 damage), fire the
                              #   v527f5 moderator relay ([7f][their index][cmd]) at the BAILER at
@@ -9550,6 +9565,12 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
             log('KILLBANNER76', f'synth banner-76 for {s.current_pilot} obj=0x{s.my_obj_number:04x} '
                                 f'SKIPPED - the native out-76 relay already drew it at the '
                                 f'plane-destroyed moment [v533f5]')
+        elif KILLER_BANNER_76 and getattr(s, '_cockpit_banner76_sent', None) == s.my_obj_number:
+            # v539f5: the instant cockpit-kill banner already fired at the MEC=4 moment - don't
+            # draw a second cyan now that the dead-stick has crashed.
+            log('KILLBANNER76', f'synth banner-76 for {s.current_pilot} obj=0x{s.my_obj_number:04x} '
+                                f'SKIPPED - the instant cockpit-kill banner already drew it at the '
+                                f'MEC=4 moment [v539f5]')
         elif KILLER_BANNER_76:
             _banner76_pkt = build_kill_banner_76(s.my_obj_number)
             log('KILLBANNER76', f'banner-76 armed for killer {killer.current_pilot}: victim '
@@ -9670,7 +9691,8 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # So the killer gets a PLAIN delete (husk removed, no kill line). Peers keep the tail.
         _killer_plain537 = (sess is killer and
                             (killer_plain_delete
-                             or getattr(s, '_banner76_native_obj', None) == s.my_obj_number))
+                             or getattr(s, '_banner76_native_obj', None) == s.my_obj_number
+                             or getattr(s, '_cockpit_banner76_sent', None) == s.my_obj_number))
         if _killer_plain537:
             _delpkt = pkt
             _dl2 = _dlabel + ' [killer: plain delete, native-76 draws his line]'
@@ -12456,6 +12478,7 @@ def _fire_server_confirm(s, via='', ident=None):
     # _ingame_msg_instrument / the crash classifier).
     s.__dict__.pop('_cockpit_kill_t', None)
     s.__dict__.pop('_cockpit_kill_hunter', None)
+    s.__dict__.pop('_cockpit_banner76_sent', None)   # v539f5: per-life instant-cockpit-cyan mark
     s.__dict__.pop('_banner76_native_obj', None)   # v533f5: per-life native-76 dedupe mark
     # v243: and a fresh plane hasn't moved yet. Drop the old life's position history so the
     # "was it flying?" crash test can't be fooled by the PREVIOUS sortie's movement.
@@ -14340,6 +14363,29 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                                    + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
                                    + ' -> pilot loss armed for this life; booked at the '
                                      'plane-down delete [v532f5]')
+                # v539f5 [INSTANT COCKPIT-KILL CYAN]: fire the killer's msg-76 NOW, at the MEC=4
+                # moment (08:37:40), not 10-25s later when the dead-stick finally crashes
+                # (run8 08:37:55). The victim's plane 0x{_num33} is STILL FLYING and BOUND on the
+                # killer's client at this instant, so the banner-76 resolves the PILOT name. The
+                # victim sends NO out-76 for a cockpit kill (only bailers do - messages40 08:37:40
+                # shows out-33 but no out-76), so nothing else lights the killer's cyan until the
+                # crash. Mark the object so the crash-time banner-76 (broadcast_object_delete_3)
+                # is suppressed -> exactly one cyan, at the live moment. Killer resolved from the
+                # hunter object the victim just named.
+                if COCKPIT_KILL_INSTANT_76 and _h33 and getattr(s, 'current_room', None) is not None:
+                    _ck_killer = None
+                    for _q in get_sessions_in_room(s.current_room):
+                        if _q is not s and getattr(_q, 'my_obj_number', None) == _h33:
+                            _ck_killer = _q
+                            break
+                    if _ck_killer is not None:
+                        send_kill_banner_76(_ck_killer, s, victim_obj=_num33,
+                                            why='(cockpit kill, instant)')
+                        s._cockpit_banner76_sent = _num33
+                        log('COCKPITKILL', f'instant banner-76 -> killer {_ck_killer.current_pilot} '
+                                           f'for cockpit kill of {s.current_pilot} obj 0x{_num33:04x} '
+                                           f'(still flying+bound); crash-time banner suppressed '
+                                           f'[v539f5]')
     except Exception:
         pass
     # v533f5 [NATIVE msg-76 RELAY - the 2009 plane-destroyed banner path]: the VICTIM's client
@@ -15974,6 +16020,13 @@ def handle_post_auth(s, cmd, pl):
                             # the exclusion.
                             if _q519 is _powner and not SERVER_CHUTE_KILL_TO_OWNER:
                                 continue
+                            # v538f5: the KILLER must NOT run ExitDataArrive on this 0x55 delete -
+                            # it draws a kill line that takes HIS nation from the canopy/victim
+                            # object's camp ('SU Alon killed USA flakmagic' when Alon is GBR). His
+                            # correct cyan comes from the msg-76 below (pointed at the bound canopy).
+                            # Peers keep the 0x55 delete for their own native line.
+                            if _q519 is s and not SERVER_CHUTE_KILL_TO_KILLER:
+                                continue
                             _submit_send(send_rel, _q519, _dk519,
                                          f'<- SERVER chute-kill delete 0x{_pvic:04x} '
                                          f'({_powner.current_pilot} pilot killed by '
@@ -15996,13 +16049,13 @@ def handle_post_auth(s, cmd, pl):
                         # tailed delete alone draws NOTHING on him). PPT 0x42 = parachuter
                         # class, matching the native chute-kill tail byte.
                         send_kill_banner_33(s, _powner, ppt=0x42, why='(chute/pilot kill)')
-                        # v531f5: the REAL killer cyan - msg-76 referencing the victim's STILL-
-                        # FLYING bail husk (the canopy delete above doesn't touch it, so no
-                        # ordering constraint; this is exactly the 2009 'destroyed plane of
-                        # gone' shape). No husk on record -> skip, logged.
-                        send_kill_banner_76(s, _powner,
-                                            victim_obj=getattr(_powner, 'bailed_plane_obj', None),
-                                            why='(chute/pilot kill)')
+                        # v531f5/v538f5: the REAL killer cyan - msg-76 pointed at the CANOPY object
+                        # (_pvic), which after the parachuter-create is BOUND to the pilot's name on
+                        # the killer's client (unlike the husk 'P-38L(4)', which is unbound and drew
+                        # no EVENT - messages31 08:34:58 in-76 with no line). This is the object the
+                        # killer is engaging; the banner names the PILOT and this is now his ONLY
+                        # chute-kill line (the 0x55 delete no longer reaches him, v538f5).
+                        send_kill_banner_76(s, _powner, victim_obj=_pvic, why='(chute/pilot kill)')
                         # v528f5: kill the VICTIM the proven graceful way - the native killp relay
                         # (v527f5). Their client runs its own death at the live moment; the report
                         # it sends afterwards hits the swallow guard above.
