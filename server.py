@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v534f5'
+VERSION = 'v535f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8079,6 +8079,22 @@ ANNOUNCE_SYNTH_KILL_LINE = False # v517f5: a credited synthesised-tail PLANE kil
                              #   UPPERCASED in style 0xd (the white sysop style) + a 10s banner:
                              #   mechanically a sysop broadcast, not the kill line (user report
                              #   confirmed). Superseded by the ANNOUNCE33_EEC1_PROBE below.
+ANNOUNCE_BAIL_KILL_CH3 = True # v535f5 [WORKAROUND - the room-wide line for a BAIL-HUSK kill]: when a
+                             #   pilot bails, every peer's client re-binds the station to the canopy
+                             #   and the husk resolves as 'P-51D(0)' (messages27 07:24:41), so the
+                             #   native ExitDataArrive line (gate 1: player-bound object) never
+                             #   draws for anyone. Requested: a plain white room-wide line like the
+                             #   join/leave announces. RE verdict (FUN_004f6030 + xrefs of the
+                             #   event printer FUN_00469cf0): NO network message carries free text
+                             #   into the plain EVENT printer - join/leave/kill lines are resource
+                             #   strings keyed by a code. The only free-text carrier is msg-20 chat
+                             #   display, always '<sender>: <text>'. Channels: ch4 = sysop white +
+                             #   strupr + 10s banner (v518 rejection); ch3 = the SAME white sysop
+                             #   style with NO uppercasing and NO banner; others camp-coloured. So:
+                             #   ch3, sender = the killer's player index (must resolve on every
+                             #   recipient - it does, he's in the room), text below. Fires only
+                             #   for bail-husk kills; ordinary kills keep the native line.
+ANNOUNCE_BAIL_KILL_TEXT = 'destroyed the plane of {victim}'   # renders as '<killer>: <text>'
 ANNOUNCE33_EEC1_PROBE = False # v518f5 [DIAGNOSTIC]: both legal EEC=1 announce variants (0x21/0x31)
                              #   drew NOTHING on the killer across two client launches -> the
                              #   built-in EEC=1 message path is a dead end. Probe closed, OFF.
@@ -9466,6 +9482,27 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                                   f'+ colour [v518f5]')
             except Exception:
                 pass
+        # v535f5: room-wide ch3 white line for a BAIL-HUSK kill (see ANNOUNCE_BAIL_KILL_CH3).
+        # Restricted to the husk case: bailed_plane_obj is set at the bail and still equals the
+        # object coming down here; any other synth kill has a player-bound object and the
+        # native ExitDataArrive line draws for everyone.
+        if (ANNOUNCE_BAIL_KILL_CH3 and getattr(s, 'bailed_plane_obj', None) == s.my_obj_number
+                and getattr(killer, 'player_index', None) is not None):
+            _bk535 = ANNOUNCE_BAIL_KILL_TEXT.format(victim=s.current_pilot,
+                                                    killer=killer.current_pilot)
+            _n535 = 0
+            for _kp535 in get_sessions_in_room(s.current_room):
+                if not getattr(_kp535, 'entered_game', False):
+                    continue
+                try:
+                    _submit_send(send_rel, _kp535,
+                                 build_chat_display_20(3, _bk535, player_index=killer.player_index),
+                                 f'<- bail-kill announce ch3: {killer.current_pilot}: {_bk535}', to=2.0)
+                    _n535 += 1
+                except Exception:
+                    pass
+            log('KILLBANNER', f'bail-husk kill -> ch3 white line "{killer.current_pilot}: {_bk535}" '
+                              f'to {_n535} session(s) in room {s.current_room} [v535f5]')
         if ANNOUNCE_SYNTH_KILL_LINE:
             _kline512 = f'{killer.current_pilot} destroyed {s.current_pilot}'
             for _kp512 in get_sessions_in_room(s.current_room):
