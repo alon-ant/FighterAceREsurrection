@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v541f5'
+VERSION = 'v542f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14567,19 +14567,16 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                                    + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
                                    + ' -> pilot loss armed for this life; booked at the '
                                      'plane-down delete [v532f5]')
-                # v539f5/v540f5/v541f5 [INSTANT COCKPIT-KILL CYAN]: at the MEC=4 moment (not 10-25s
-                # later at the dead-stick crash), send the killer an exit-delete for the still-
-                # flying BOUND plane so the cyan fires live. *** v541f5 WORDING FIX ***: the delete
-                # now carries 0x53 (MEC=5), NOT 0x43. RE re-verified against the ExitDataArrive
-                # handler FUN_004f8f20 AND live wire (run_115542 12:52:47 -> messages45 1469):
-                # MEC=4 is the COLLISION line ('X has collided with Y') and it mis-pulls the
-                # KILLER's nation from the victim object ('USA Alon' when Alon is GBR) - that was
-                # the false-collision cyan. There is NO 'killed' string in FA; kills read
-                # 'X has destroyed Y', which is the MEC=5 (0x53) branch via FUN_00478640, and that
-                # branch self-attributes the killer's nation correctly. So 0x53 gives the right
-                # wording AND the right nation. X/Z=0 keeps it a silent removal; we send it ONLY to
-                # the killer so the plane keeps flying on his screen. Mark the object to suppress
-                # the crash-time banner.
+                # v539f5..v542f5 [INSTANT COCKPIT-KILL CYAN]: at the MEC=4 moment (not 10-25s later
+                # at the dead-stick crash), give the killer his cyan live. *** v542f5: back to
+                # msg-76, NOT an exit-delete. *** An exit-delete (any exit byte) IS a delete: the
+                # 0x53 form in v541 drew the correct 'destroyed' line but also DelObject'd the
+                # victim on the killer's screen (messages48 13:28:40 -> 'DelObject 257' + endless
+                # 'Get coord for missing object 257'); the plane must keep flying until it actually
+                # crashes. msg-76 (build_kill_banner_76) draws the cyan WITHOUT deleting - the
+                # trade-off is its fixed wording 'has destroyed plane of X' rather than 'destroyed
+                # X' (user accepted). It resolves the PILOT name from the still-flying bound plane
+                # object. Mark the object so the crash-time banner-76 is suppressed -> one cyan.
                 if COCKPIT_KILL_INSTANT_76 and _h33 and getattr(s, 'current_room', None) is not None:
                     _ck_killer = None
                     for _q in get_sessions_in_room(s.current_room):
@@ -14587,23 +14584,13 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                             _ck_killer = _q
                             break
                     if _ck_killer is not None:
-                        _kpi540 = getattr(_ck_killer, 'player_index', 0) or 0
-                        # 12B entry: [victim id][0x53][hunter obj][hunter PI][hunter PI u32][PPT 0x02]
-                        _e540 = (struct.pack('<H', _num33 & 0x7fff) + bytes([0x53])
-                                 + struct.pack('<H', _h33 & 0xffff)
-                                 + struct.pack('<H', _kpi540 & 0xffff)
-                                 + struct.pack('<I', _kpi540 & 0xffff) + bytes([0x02]))
-                        _dk540 = build_exit_delete_object_3(_num33, 0x53, entry=_e540)
-                        if _dk540 is not None:
-                            _submit_send(send_rel, _ck_killer, _dk540,
-                                         f'<- INSTANT cockpit-kill 0x53 ({_ck_killer.current_pilot} '
-                                         f'destroyed {s.current_pilot} obj 0x{_num33:04x})', to=3.0)
-                            s._cockpit_banner76_sent = _num33
-                            log('COCKPITKILL', f'instant 0x53 kill-cyan -> killer '
-                                               f'{_ck_killer.current_pilot} for cockpit kill of '
-                                               f'{s.current_pilot} obj 0x{_num33:04x} (still '
-                                               f'flying+bound, MEC=5 -> "destroyed", correct nation); '
-                                               f'crash-time banner suppressed [v541f5]')
+                        send_kill_banner_76(_ck_killer, s, victim_obj=_num33,
+                                            why='(cockpit kill, instant)')
+                        s._cockpit_banner76_sent = _num33
+                        log('COCKPITKILL', f'instant banner-76 -> killer {_ck_killer.current_pilot} '
+                                           f'for cockpit kill of {s.current_pilot} obj 0x{_num33:04x} '
+                                           f'(still flying+bound, no despawn); crash-time banner '
+                                           f'suppressed [v542f5]')
     except Exception:
         pass
     # v533f5 [NATIVE msg-76 RELAY - the 2009 plane-destroyed banner path]: the VICTIM's client
