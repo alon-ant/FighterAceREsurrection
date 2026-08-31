@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v540f5'
+VERSION = 'v541f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4721,6 +4721,72 @@ def build_ce_room_list(rooms):
                     RECEIVER<EVENT_LOBBY_CREATE_ONE_GAME_ARENAS_INFO> at 0x00bf9c98.
     """
     return build_appspace_pkt(bytes([0xce]))  # empty = 0 lobby players
+
+# --- 0xce SQUADRON LIST (RE 2026-08-31) ---------------------------------------
+# msg 0xce (206) populates the SQUADRONS tab's ACTIVE_SQUADRONS_LIST_BOX. Handler
+# msg206_SquadronList_handler (FA.exe FUN_004efc10) parses a length-driven stream of
+# records into USQUADRON_STRUCT (24B):
+#   wire per squadron: [u32 A][u32 B][cstr NAME]\0[cstr STR2]\0[flag byte]
+#   +0   NAME  = squadron name; DISPLAYED as the list row label (confirmed). Also the
+#               name lookup key (find_squadron_by_name).
+#   +4   STR2  = tag/prefix - NOT shown in the squadron list (confirmed); it's the tag
+#               that shows on plane tags in flight (SQUADRON_PREFIX). Confirm at tag stage.
+#   +8   u32 A = not shown in the list (member count / founder? - TBD, needs members)
+#   +0xc u32 B = squadron ID = id lookup key (find_squadron_by_id); internal, not shown
+#   +0x10 flag&1 = PASSWORD PROTECTED (CONFIRMED 2026-08-31: draws the padlock next to the
+#               squadron in the list, and the JOIN button prompts for / enforces a password)
+# The parser has NO bounds guard on leftover bytes (same as the 0xd2 arena list), and
+# build_appspace_pkt zero-pads to bc*16+1 - so the payload MUST be pre-aligned to
+# bc*16+1 with the pad absorbed INSIDE the last record's STR2 (trailing spaces), or the
+# trailing zeros spawn a phantom record / over-read.
+#
+# FIELD-SEMANTICS PROBE (temporary): two hard-coded squadrons with DISTINCT values so a
+# single screenshot of the Squadrons tab maps NAME / STR2 / A / flag. Flip
+# SQUADRON_LIST_PROBE off (or feed real DB rows) once the fields are pinned.
+SQUADRON_LIST_PROBE = True
+_SQUADRON_PROBE_ROWS = [
+    # (name,        str2,    A,   B=id, flag)
+    ("SQN_ALPHA",  "PFX_A", 111, 901, 0),
+    ("SQN_BRAVO",  "PFX_B", 222, 902, 1),
+]
+
+def build_squadronlist(squadrons):
+    """Build the 0xce squadron-list response. `squadrons` = iterable of
+    (name, str2, a, b_id, flag). Empty -> bare [0xce]. Payload is pre-aligned to
+    bc*16+1 with the pad absorbed inside the last record's STR2."""
+    recs = []
+    for name, str2, a, b_id, flag in squadrons:
+        recs.append((int(a) & 0xFFFFFFFF, int(b_id) & 0xFFFFFFFF,
+                     str(name).encode('ascii', 'replace')[:31],
+                     str(str2).encode('ascii', 'replace')[:31],
+                     int(flag) & 0xFF))
+    if not recs:
+        return build_appspace_pkt(bytes([0xce]))
+    def _assemble(extra_pad):
+        d = bytearray([0xce])
+        last = len(recs) - 1
+        for i, (a, b, nm, s2, fl) in enumerate(recs):
+            d += a.to_bytes(4, 'little')
+            d += b.to_bytes(4, 'little')
+            d += nm + b'\x00'
+            if i == last and extra_pad > 0:
+                d += s2 + (b'\x20' * extra_pad) + b'\x00'   # pad the LAST STR2 (absorbs alignment)
+            else:
+                d += s2 + b'\x00'
+            d.append(fl)
+        return d
+    d0 = _assemble(0)
+    L = len(d0)
+    bc = 0 if L <= 1 else (L - 1 + 15) // 16
+    pad = bc * 16 + 1 - L
+    data = _assemble(pad)
+    pkt = build_appspace_pkt(bytes(data)); bc = pkt[0]
+    log('SQUADRON', f'0xce -> {len(recs)} squadron(s) payload={len(data)}B '
+                    f'bc={bc}(p3={bc*16+1}) pad={pad}: '
+                    + ', '.join(f'{r[2].decode()}(str2={r[3].decode()!r} A={r[0]} '
+                                f'id={r[1]} flag={r[4]})' for r in recs))
+    log('SQUADRON', f'0xce payload hex: {bytes(data).hex()}')
+    return pkt
 
 # --- 0xcb GameList (ARENA LIST) - experimental, switchable --------------------
 #
@@ -14501,16 +14567,19 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                                    + (f' by obj 0x{_h33:04x}' if _h33 is not None else '')
                                    + ' -> pilot loss armed for this life; booked at the '
                                      'plane-down delete [v532f5]')
-                # v539f5/v540f5 [INSTANT COCKPIT-KILL CYAN, correct wording]: at the MEC=4 moment
-                # (not 10-25s later at the dead-stick crash), send the killer a 0x43 exit-delete
-                # for the still-flying BOUND plane. RE of the ExitDataArrive handler FUN_004f8f20:
-                # the kill wording is chosen by the MEC nibble - MEC=4 (case 4) draws 'X KILLED Y'
-                # (kill-string + sound 0x3d0), MEC=5 draws 'X destroyed plane of Y' via FUN_00478640
-                # (sound 0x3d1). v539 used msg-76 -> the 'destroyed plane' wording (user report).
-                # A 0x43 tail (MEC=4/EEC=3) is the native cockpit-kill form and self-attributes the
-                # killer's nation correctly (the case-4 strcmp vs the local pilot name). X/Z=0 keeps
-                # it a silent removal, but the plane stays flying on the killer's client (we send it
-                # ONLY to the killer). Mark the object so the crash-time banner is suppressed.
+                # v539f5/v540f5/v541f5 [INSTANT COCKPIT-KILL CYAN]: at the MEC=4 moment (not 10-25s
+                # later at the dead-stick crash), send the killer an exit-delete for the still-
+                # flying BOUND plane so the cyan fires live. *** v541f5 WORDING FIX ***: the delete
+                # now carries 0x53 (MEC=5), NOT 0x43. RE re-verified against the ExitDataArrive
+                # handler FUN_004f8f20 AND live wire (run_115542 12:52:47 -> messages45 1469):
+                # MEC=4 is the COLLISION line ('X has collided with Y') and it mis-pulls the
+                # KILLER's nation from the victim object ('USA Alon' when Alon is GBR) - that was
+                # the false-collision cyan. There is NO 'killed' string in FA; kills read
+                # 'X has destroyed Y', which is the MEC=5 (0x53) branch via FUN_00478640, and that
+                # branch self-attributes the killer's nation correctly. So 0x53 gives the right
+                # wording AND the right nation. X/Z=0 keeps it a silent removal; we send it ONLY to
+                # the killer so the plane keeps flying on his screen. Mark the object to suppress
+                # the crash-time banner.
                 if COCKPIT_KILL_INSTANT_76 and _h33 and getattr(s, 'current_room', None) is not None:
                     _ck_killer = None
                     for _q in get_sessions_in_room(s.current_room):
@@ -14519,22 +14588,22 @@ def _supply_msg_instrument(s, sub, cmd, pl):
                             break
                     if _ck_killer is not None:
                         _kpi540 = getattr(_ck_killer, 'player_index', 0) or 0
-                        # 12B entry: [victim id][0x43][hunter obj][hunter PI][hunter PI u32][PPT 0x02]
-                        _e540 = (struct.pack('<H', _num33 & 0x7fff) + bytes([0x43])
+                        # 12B entry: [victim id][0x53][hunter obj][hunter PI][hunter PI u32][PPT 0x02]
+                        _e540 = (struct.pack('<H', _num33 & 0x7fff) + bytes([0x53])
                                  + struct.pack('<H', _h33 & 0xffff)
                                  + struct.pack('<H', _kpi540 & 0xffff)
                                  + struct.pack('<I', _kpi540 & 0xffff) + bytes([0x02]))
-                        _dk540 = build_exit_delete_object_3(_num33, 0x43, entry=_e540)
+                        _dk540 = build_exit_delete_object_3(_num33, 0x53, entry=_e540)
                         if _dk540 is not None:
                             _submit_send(send_rel, _ck_killer, _dk540,
-                                         f'<- INSTANT cockpit-kill 0x43 ({_ck_killer.current_pilot} '
-                                         f'killed {s.current_pilot} obj 0x{_num33:04x})', to=3.0)
+                                         f'<- INSTANT cockpit-kill 0x53 ({_ck_killer.current_pilot} '
+                                         f'destroyed {s.current_pilot} obj 0x{_num33:04x})', to=3.0)
                             s._cockpit_banner76_sent = _num33
-                            log('COCKPITKILL', f'instant 0x43 kill-cyan -> killer '
+                            log('COCKPITKILL', f'instant 0x53 kill-cyan -> killer '
                                                f'{_ck_killer.current_pilot} for cockpit kill of '
                                                f'{s.current_pilot} obj 0x{_num33:04x} (still '
-                                               f'flying+bound, MEC=4 -> "killed" wording); crash-time '
-                                               f'banner suppressed [v540f5]')
+                                               f'flying+bound, MEC=5 -> "destroyed", correct nation); '
+                                               f'crash-time banner suppressed [v541f5]')
     except Exception:
         pass
     # v533f5 [NATIVE msg-76 RELAY - the 2009 plane-destroyed banner path]: the VICTIM's client
@@ -15484,6 +15553,8 @@ def handle_post_auth(s, cmd, pl):
         bc = pl[0]; tb = pl[1]; sub = pl[4]
     log('POST-AUTH',f'cmd={cmd}(0x{cmd:04x}) type=0x{tb:02x} sub=0x{sub:02x} bc={bc}(p3={bc*16+1}) sz={len(pl)}')
     stored=bytes(pl)
+    if sub in (0xd1, 0xcf, 0xd5, 0xd7, 0xd4):   # TEMP squadron-join capture (remove once decoded)
+        log('SQNCAP', f'{s.current_pilot} sub=0x{sub:02x} len={len(stored)} hex={stored.hex()}', level='INFO')
     _h4=hx(stored[:4]) if len(stored)>=4 else hx(stored)
     _d4=hx(stored[4:8]) if len(stored)>=8 else (hx(stored[4:]) if len(stored)>4 else '')
     log('RX/REL/PL', f'  [{_h4}|{_d4}] +{hx(stored[8:8+80]) if len(stored)>8 else ""}')
@@ -15741,11 +15812,17 @@ def handle_post_auth(s, cmd, pl):
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
             if sub in (0xce, 0xca, 0xcb):
                 if sub == 0xce:
-                    active_rooms = db_get_open_rooms()
-                    resp = build_ce_room_list(active_rooms)
-                    raw_len = len(resp) - 4  # payload after vcncNet header
-                    log('CE', f'AppSpaceList: {len(active_rooms)} room(s) -> {raw_len} bytes raw')
-                    label = f'<- AppSpaceList ({len(active_rooms)} rooms, {raw_len}B)'
+                    if SQUADRON_LIST_PROBE:
+                        resp = build_squadronlist(_SQUADRON_PROBE_ROWS)
+                        raw_len = len(resp) - 4
+                        log('CE', f'SquadronList PROBE: {len(_SQUADRON_PROBE_ROWS)} squadron(s) -> {raw_len} bytes raw')
+                        label = f'<- SquadronList probe ({len(_SQUADRON_PROBE_ROWS)} sqn, {raw_len}B)'
+                    else:
+                        active_rooms = db_get_open_rooms()
+                        resp = build_ce_room_list(active_rooms)
+                        raw_len = len(resp) - 4  # payload after vcncNet header
+                        log('CE', f'AppSpaceList: {len(active_rooms)} room(s) -> {raw_len} bytes raw')
+                        label = f'<- AppSpaceList ({len(active_rooms)} rooms, {raw_len}B)'
                 elif sub == 0xcb:
                     # GameList = THE ARENA LIST (confirmed via FUN_004f03b0).
                     # Respond with open rooms as arena records instead of empty.
