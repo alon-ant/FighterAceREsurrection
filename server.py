@@ -260,7 +260,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v533f5'
+VERSION = 'v534f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8102,6 +8102,22 @@ ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's 
                              #   the server-authoritative chute kill is separate and still fires.
 SERVER_CHUTE_KILL_TO_OWNER = False # v526f5: OFF for good. (superseded detail: see v528f5 below -
                              #   the owner now gets the NATIVE killp relay instead of any delete.)
+BAIL_CRUMBLEP_VICTIM = True  # v534f5 [BAIL -> NATIVE MOD-RELAY TO THE VICTIM]: when a pilot BAILS
+                             #   from a plane a hunter is latched on (msg-28 damage), fire the
+                             #   v527f5 moderator relay ([7f][their index][cmd]) at the BAILER at
+                             #   the bail moment - the same mechanism as ##killp / the v528f5 chute
+                             #   kill. Their own client still holds the husk (run_072245: flakmagic's
+                             #   client kept obj 256 until it crashed 25s after his voluntary bail,
+                             #   MEC=0 SE=3, no out-76), so it should run its NATIVE plane-destroyed
+                             #   sequence: the death line on the victim's screen (the 'unlike a
+                             #   regular death' gap), an out 76'5 (-> v533f5 native relay -> the
+                             #   killer's cyan naming the PILOT, before the canopy re-binds the
+                             #   station on peers) and an immediate crash delete (kill credited at
+                             #   the bail, not 25s later). Voluntary bails from a merely-damaged
+                             #   plane are the case the native out-76 never covers.
+BAIL_VICTIM_MOD_CMD  = 0x01  # crumblep ('will be exploded' / disintegrates plane). 0x04 killp would
+                             #   also book the pilot loss - wrong for a survived bail. UNTESTED
+                             #   against a client already under canopy: ##crumblep self-test first.
 SERVER_CHUTE_KILL_NATIVE_VICTIM = True  # v528f5: at the server's chute-kill verdict, the VICTIM
                              #   gets the NATIVE killp relay ([7f][their index][04], the v527f5
                              #   mechanism proven graceful by the ##killp self-test: 'All worked
@@ -16495,6 +16511,31 @@ def handle_post_auth(s, cmd, pl):
                     threading.Thread(target=lambda nn=_pn, ii=_pi: send_reply(
                         s, build_server_confirm_5(nn, ii),
                         f'<- ServerConfirm 5 (PARACHUTER Number={nn} ident={ii})'), daemon=True).start()
+                # v534f5: hunter latched on the plane they just left -> native mod-relay to the
+                # bailer (see BAIL_CRUMBLEP_VICTIM). After the confirm dispatch, before the peer
+                # canopy creates.
+                if BAIL_CRUMBLEP_VICTIM:
+                    try:
+                        _lat534 = PENDING_KILL.get(s.my_obj_number)
+                        _hobj534 = _lat534.get('killer') if isinstance(_lat534, dict) else None
+                        _vpi534 = getattr(s, 'player_index', None)
+                        if _hobj534 and _vpi534 is not None:
+                            _mk534 = (bytes([0x00, 0x42, 0x00, 0x00, 0x7f])
+                                      + struct.pack('<H', _vpi534 & 0xffff)
+                                      + bytes([BAIL_VICTIM_MOD_CMD & 0xff]))
+                            _submit_send(send_rel, s, _mk534,
+                                         f'<- native mod-relay cmd=0x{BAIL_VICTIM_MOD_CMD:02x} to '
+                                         f'bailed victim {s.current_pilot} (idx={_vpi534})', to=3.0)
+                            log('BAILCRUMBLE', f'{s.current_pilot} bailed from 0x{s.my_obj_number:04x} '
+                                               f'with hunter obj 0x{_hobj534:04x} latched -> native '
+                                               f'mod-relay cmd=0x{BAIL_VICTIM_MOD_CMD:02x} sent to the '
+                                               f'victim (idx={_vpi534}); expect their plane-destroyed '
+                                               f'sequence + out-76 + crash delete [v534f5]')
+                        else:
+                            log('BAILCRUMBLE', f'{s.current_pilot} bailed from 0x{s.my_obj_number:04x} '
+                                               f'with no latched hunter (latch={_hobj534}) -> no relay')
+                    except Exception as _e534:
+                        log('BAILCRUMBLE', f'[warn] {s.current_pilot}: relay failed: {_e534}')
                 if PARA_SEND_CREATE:
                     for _peer in get_sessions_in_room(s.current_room):
                         if _peer is not s and getattr(_peer, 'flying', False):
