@@ -932,6 +932,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     Logged in as <strong>{user}</strong> | 
                     <a href="/ladder" style="color:#17a2b8;">Ladder Board</a> |
                     <a href="/scoring" style="color:#fd7e14;">Scoring</a> |
+                    <a href="/squadrons" style="color:#20c997;">Squadrons</a> |
                     <a href="/my_arenas" style="color:#6f42c1;">My Arenas</a> |
                     {admin_link} 
                     <a href="/logout" style="color:#dc3545;">Logout</a>
@@ -1223,6 +1224,104 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     </td>
                 </tr>"""
 
+            # Squadron management: every squadron (pending + approved) with approve / edit / delete
+            # and its roster (grant role, remove) + pending join requests. Squadrons live in the game DB.
+            squadron_html = ""
+            _pt0 = time.time()
+            try:
+                scols = [r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()]
+                if 'squadron_id' in scols:
+                    sq_rows = conn.execute(
+                        "SELECT squadron_id, name, COALESCE(tag,''), COALESCE(motto,''), "
+                        "COALESCE(password,''), COALESCE(status,'pending'), COALESCE(commander,'') "
+                        "FROM squadrons ORDER BY (status='approved'), name").fetchall()
+                    if not sq_rows:
+                        squadron_html = "<p style='color:#666;'>No squadrons yet.</p>"
+                    for (sid, sname, stag, smotto, spw, sstatus, scmdr) in sq_rows:
+                        _sid = hesc(str(sid), quote=True)
+                        members = conn.execute(
+                            "SELECT account_name, COALESCE(role,'member') FROM squadron_members "
+                            "WHERE squadron_id=? AND status='approved' ORDER BY "
+                            "CASE role WHEN 'commander' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, account_name",
+                            (sid,)).fetchall()
+                        pend = conn.execute(
+                            "SELECT account_name FROM squadron_members WHERE squadron_id=? AND status='pending' "
+                            "ORDER BY account_name", (sid,)).fetchall()
+                        badge = ("<span style='color:#28a745;'>approved</span>" if sstatus == 'approved'
+                                 else "<span style='color:#e0a800;'>pending</span>")
+                        lock = ' &#128274;' if spw else ''
+                        mem_html = ""
+                        for (macct, mrole) in members:
+                            _m = hesc(str(macct), quote=True)
+                            opts = "".join(
+                                f"<option value='{r}'{' selected' if r == mrole else ''}>{r}</option>"
+                                for r in ('member', 'officer', 'commander'))
+                            mem_html += f"""
+                              <tr><td>{hesc(str(macct))}</td><td style="text-align:right;">
+                                <form method="POST" action="/admin/squadron_member" style="display:inline;">
+                                  <input type="hidden" name="squadron_id" value="{_sid}">
+                                  <input type="hidden" name="member" value="{_m}">
+                                  <select name="role" style="padding:4px;">{opts}</select>
+                                  <button type="submit" name="op" value="setrole" class="btn-yellow" style="width:auto;padding:5px 10px;margin:0;">Set role</button>
+                                  <button type="submit" name="op" value="remove" class="btn-red" style="width:auto;padding:5px 10px;margin:0;" onclick="return confirm('Remove this member?');">Remove</button>
+                                </form></td></tr>"""
+                        if not mem_html:
+                            mem_html = "<tr><td colspan='2' style='color:#666;'>No members.</td></tr>"
+                        pend_block = ""
+                        if pend:
+                            pr = ""
+                            for (pacct,) in pend:
+                                _p = hesc(str(pacct), quote=True)
+                                pr += f"""
+                                  <tr><td>{hesc(str(pacct))}</td><td style="text-align:right;">
+                                    <form method="POST" action="/admin/squadron_member" style="display:inline;">
+                                      <input type="hidden" name="squadron_id" value="{_sid}">
+                                      <input type="hidden" name="member" value="{_p}">
+                                      <button type="submit" name="op" value="approve" class="btn-green" style="width:auto;padding:5px 10px;margin:0;">Approve</button>
+                                      <button type="submit" name="op" value="reject" class="btn-red" style="width:auto;padding:5px 10px;margin:0;">Reject</button>
+                                    </form></td></tr>"""
+                            pend_block = f'<h4 style="margin:12px 0 4px;">Pending join requests</h4><table>{pr}</table>'
+                        approve_block = ""
+                        if sstatus != 'approved':
+                            approve_block = f"""
+                              <form method="POST" action="/admin/squadron_approve" style="display:inline-block; margin-right:8px;">
+                                <input type="hidden" name="squadron_id" value="{_sid}">
+                                <button type="submit" class="btn-green" style="width:auto;padding:8px 14px;margin:0;">Approve squadron</button>
+                              </form>"""
+                        squadron_html += f"""
+                        <div class="card" style="margin:10px 0;">
+                          <h3 style="margin:0 0 6px;">{hesc(str(sname))}{lock} &nbsp;<small>[{badge}]</small>
+                              <small style="color:#666;">&middot; {len(members)} member(s) &middot; id {sid}</small></h3>
+                          {approve_block}
+                          <form method="POST" action="/admin/squadron_delete" style="display:inline-block;"
+                                onsubmit="return confirm('Delete this squadron and all memberships? Cannot be undone.');">
+                            <input type="hidden" name="squadron_id" value="{_sid}">
+                            <button type="submit" class="btn-red" style="width:auto;padding:8px 14px;margin:0;">Delete</button>
+                          </form>
+                          <form method="POST" action="/admin/squadron_edit" style="margin-top:10px;">
+                            <input type="hidden" name="squadron_id" value="{_sid}">
+                            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                              <label style="font-size:0.8em; color:#666;">Name<br>
+                                <input type="text" name="name" value="{hesc(str(sname), quote=True)}" maxlength="31" style="width:200px; padding:6px;"></label>
+                              <label style="font-size:0.8em; color:#666;">Tag<br>
+                                <input type="text" name="tag" value="{hesc(str(stag), quote=True)}" maxlength="31" style="width:110px; padding:6px;"></label>
+                              <label style="font-size:0.8em; color:#666;">Password (blank = open)<br>
+                                <input type="text" name="password" value="{hesc(str(spw), quote=True)}" maxlength="31" autocomplete="off" style="width:150px; padding:6px;"></label>
+                            </div>
+                            <label style="font-size:0.8em; color:#666; display:block; margin-top:6px;">Notes / motto<br>
+                              <textarea name="motto" rows="2" style="width:100%; max-width:500px; padding:6px;">{hesc(str(smotto))}</textarea></label>
+                            <button type="submit" class="btn-green" style="width:auto; padding:8px 14px; margin-top:6px;">Save changes</button>
+                          </form>
+                          <h4 style="margin:12px 0 4px;">Members</h4>
+                          <table>{mem_html}</table>
+                          {pend_block}
+                        </div>"""
+                else:
+                    squadron_html = "<p style='color:#666;'>Squadrons table not found (start the game server once).</p>"
+            except Exception as e:
+                squadron_html = f"<p style='color:red;'>Error loading squadrons: {hesc(str(e))}</p>"
+            _ps['squadrons'] = time.time() - _pt0
+
             conn.close()
             try:
                 SRV['log']('WEBPERF', 'admin sections: '
@@ -1242,6 +1341,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             onclick="faShow('main','p-users')">User Management</button>
                     <button data-btngroup="main" data-target="p-arenas"
                             onclick="faShow('main','p-arenas')">Arenas</button>
+                    <button data-btngroup="main" data-target="p-squadrons"
+                            onclick="faShow('main','p-squadrons')">Squadrons</button>
                     <button data-btngroup="main" data-target="p-logs"
                             onclick="faShow('main','p-logs')">Logs</button>
                     <button data-btngroup="main" data-target="p-stalls"
@@ -1320,6 +1421,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             <span class="filtercount" id="arenasCount"></span>
                         </div>
                         <table id="arenasTable">{arena_html}</table>
+                    </div>
+                </div>
+
+                <div class="panel" data-group="main" data-panel="p-squadrons">
+                    <div class="card">
+                        <h2 style="margin-top:0;">Squadron Management</h2>
+                        <p style="color:#666; margin-top:0; font-size:0.9em;">Approve pending squadrons, edit
+                        name/tag/notes/password, grant roles (member &harr; officer &harr; commander), approve
+                        join requests, remove members, or delete a squadron. Backed by the game DB.</p>
+                        {squadron_html}
                     </div>
                 </div>
 
@@ -1755,6 +1866,85 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <p style="color:#666;">Arenas you created. Edit each one's settings, including enemy AA/Flak strength.</p>
                 {admin_extra}
                 {items}
+            """
+            self.send_html(content)
+
+        elif self.path == '/squadrons':
+            if not user:
+                self.send_response(302); self.send_header('Location', '/login'); self.end_headers(); return
+            conn = sqlite3.connect(SRV['db_path'])
+            try:
+                sqns = conn.execute(
+                    "SELECT squadron_id, name, tag, motto, "
+                    "CASE WHEN COALESCE(password,'')<>'' THEN 1 ELSE 0 END, "
+                    "(SELECT COUNT(*) FROM squadron_members m WHERE m.squadron_id=squadrons.squadron_id "
+                    " AND m.status='approved') "
+                    "FROM squadrons WHERE status='approved' ORDER BY name").fetchall()
+                mine = conn.execute(
+                    "SELECT s.name, s.status FROM squadrons s WHERE s.commander IN "
+                    "(SELECT pilot_name FROM pilots WHERE account_name=?) OR s.commander=? "
+                    "ORDER BY s.status, s.name", (user, user)).fetchall()
+                pilots = conn.execute("SELECT pilot_name FROM pilots WHERE account_name=? "
+                                      "ORDER BY pilot_name", (user,)).fetchall()
+            except Exception:
+                sqns, mine, pilots = [], [], []
+            conn.close()
+            if sqns:
+                rows = ""
+                for sid, name, tag, motto, locked, cnt in sqns:
+                    lock = ' <span title="Password protected">&#128274;</span>' if locked else ''
+                    rows += (f"<tr><td><strong>{hesc(str(name))}</strong>{lock}</td>"
+                             f"<td>{hesc(str(tag or ''))}</td>"
+                             f"<td>{hesc(str(motto or ''))}</td>"
+                             f"<td style='text-align:center;'>{cnt}</td></tr>")
+                table = ("<table><tr><th>Squadron</th><th>Tag</th><th>Notes</th>"
+                         f"<th>Members</th></tr>{rows}</table>")
+            else:
+                table = ("<p style='color:#666;'>No active squadrons yet. Create one below - it appears "
+                         "here once an admin approves it.</p>")
+            mine_html = ""
+            if mine:
+                items = "".join(f"<li>{hesc(str(n))} &mdash; <em>{hesc(str(st))}</em></li>" for n, st in mine)
+                mine_html = (f"<div class='card'><h2 style='margin-top:0;'>Squadrons you created</h2>"
+                             f"<ul style='margin:0;'>{items}</ul></div>")
+            pilot_opts = "".join(f"<option>{hesc(str(p))}</option>" for (p,) in pilots)
+            if pilot_opts:
+                create_card = f"""
+                <div class="card">
+                    <h2 style="margin-top:0;">Create a Squadron</h2>
+                    <p style="color:#666; margin-top:0; font-size:0.9em;">New squadrons start as
+                    <em>pending</em> and become visible &amp; joinable once an admin approves them.
+                    The pilot you choose becomes its commander.</p>
+                    <form method="POST" action="/squadrons/create">
+                        <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+                            <label style="font-size:0.8em; color:#666;">Commander (your pilot)<br>
+                                <select name="commander" required style="padding:8px;">{pilot_opts}</select></label>
+                            <label style="font-size:0.8em; color:#666;">Name (max 31)<br>
+                                <input type="text" name="name" required maxlength="31" style="width:220px; padding:8px;"></label>
+                            <label style="font-size:0.8em; color:#666;">Tag / prefix (max 31)<br>
+                                <input type="text" name="tag" maxlength="31" style="width:130px; padding:8px;"></label>
+                            <label style="font-size:0.8em; color:#666;">Password (optional)<br>
+                                <input type="text" name="password" maxlength="31" autocomplete="off" style="width:150px; padding:8px;"></label>
+                        </div>
+                        <label style="font-size:0.8em; color:#666; display:block; margin-top:8px;">Notes / motto<br>
+                            <textarea name="motto" rows="2" style="width:100%; max-width:520px; padding:8px;"></textarea></label>
+                        <button type="submit" class="btn-green" style="margin-top:8px;">Create (pending approval)</button>
+                    </form>
+                </div>"""
+            else:
+                create_card = ("<div class='card'><h2 style='margin-top:0;'>Create a Squadron</h2>"
+                               "<p style='color:#666;'>You need a pilot first &mdash; launch the game and create "
+                               "a pilot, then come back here to found a squadron.</p></div>")
+            content = f"""
+                <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
+                    Logged in as <strong>{hesc(str(user))}</strong></div>
+                <h1>Squadrons</h1>
+                <div class="card">
+                    <h2 style="margin-top:0;">Active Squadrons</h2>
+                    {table}
+                </div>
+                {mine_html}
+                {create_card}
             """
             self.send_html(content)
 
@@ -2214,6 +2404,36 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_html(f"<h2 style='color:red;'>Launch Error</h2><p>{str(e)}</p><a href='/'>Back</a>")
                 
+        elif self.path == '/squadrons/create':
+            if not user: return self.send_error(401)
+            name = qs.get('name', [''])[0].strip()[:31]
+            tag = qs.get('tag', [''])[0].strip()[:31]
+            motto = qs.get('motto', [''])[0].strip()
+            password = qs.get('password', [''])[0].strip()[:31]
+            commander = qs.get('commander', [''])[0].strip()
+            if name and commander:
+                try:
+                    conn = sqlite3.connect(SRV['db_path'])
+                    # the commander must be one of THIS account's pilots (squadrons are per-pilot,
+                    # keyed by pilot name to match in-game membership)
+                    owns = conn.execute("SELECT 1 FROM pilots WHERE account_name=? AND pilot_name=?",
+                                        (user, commander)).fetchone()
+                    if owns:
+                        _now = time.strftime('%Y-%m-%d %H:%M:%S')
+                        cur = conn.execute(
+                            "INSERT INTO squadrons(name, tag, password, motto, status, commander, created_at) "
+                            "VALUES(?,?,?,?, 'pending', ?, ?)", (name, tag, password, motto, commander, _now))
+                        sid = cur.lastrowid
+                        conn.execute(
+                            "INSERT INTO squadron_members(squadron_id, account_name, role, status, joined_at) "
+                            "VALUES(?,?, 'commander', 'approved', ?)", (sid, commander, _now))
+                        conn.commit()
+                        SRV['log']('WEB', f'{user} created squadron {name!r} cmdr={commander!r} (pending, id={sid})')
+                    conn.close()
+                except Exception as e:
+                    SRV['log']('WEB', f'{user} create squadron failed: {e}')
+            self.send_response(302); self.send_header('Location', '/squadrons'); self.end_headers()
+
         elif self.path == '/admin/delete_user':
             if not is_user_admin(user): return self.send_error(403)
             target_user = qs.get('account_name', [''])[0].strip()
@@ -2265,6 +2485,67 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header('Location', '/admin')
             self.end_headers()
+
+        elif self.path == '/admin/squadron_approve':
+            if not is_user_admin(user): return self.send_error(403)
+            sid = qs.get('squadron_id', [''])[0].strip()
+            if sid.isdigit():
+                conn = sqlite3.connect(SRV['db_path'])
+                conn.execute("UPDATE squadrons SET status='approved' WHERE squadron_id=?", (int(sid),))
+                conn.commit(); conn.close()
+                SRV['log']('WEB', f'Admin {user} approved squadron id={sid}')
+            self.send_response(302); self.send_header('Location', '/admin'); self.end_headers()
+
+        elif self.path == '/admin/squadron_edit':
+            if not is_user_admin(user): return self.send_error(403)
+            sid = qs.get('squadron_id', [''])[0].strip()
+            if sid.isdigit():
+                name = qs.get('name', [''])[0].strip()[:31]
+                tag = qs.get('tag', [''])[0].strip()[:31]
+                motto = qs.get('motto', [''])[0].strip()
+                password = qs.get('password', [''])[0].strip()[:31]
+                if name:
+                    conn = sqlite3.connect(SRV['db_path'])
+                    conn.execute("UPDATE squadrons SET name=?, tag=?, motto=?, password=? WHERE squadron_id=?",
+                                 (name, tag, motto, password, int(sid)))
+                    conn.commit(); conn.close()
+                    SRV['log']('WEB', f'Admin {user} edited squadron id={sid} name={name!r}')
+            self.send_response(302); self.send_header('Location', '/admin'); self.end_headers()
+
+        elif self.path == '/admin/squadron_delete':
+            if not is_user_admin(user): return self.send_error(403)
+            sid = qs.get('squadron_id', [''])[0].strip()
+            if sid.isdigit():
+                conn = sqlite3.connect(SRV['db_path'])
+                conn.execute("DELETE FROM squadron_members WHERE squadron_id=?", (int(sid),))
+                conn.execute("DELETE FROM squadrons WHERE squadron_id=?", (int(sid),))
+                conn.commit(); conn.close()
+                SRV['log']('WEB', f'Admin {user} deleted squadron id={sid}')
+            self.send_response(302); self.send_header('Location', '/admin'); self.end_headers()
+
+        elif self.path == '/admin/squadron_member':
+            if not is_user_admin(user): return self.send_error(403)
+            sid = qs.get('squadron_id', [''])[0].strip()
+            member = qs.get('member', [''])[0].strip()
+            op = qs.get('op', [''])[0].strip()
+            if sid.isdigit() and member:
+                conn = sqlite3.connect(SRV['db_path'])
+                if op == 'setrole':
+                    role = qs.get('role', ['member'])[0].strip()
+                    if role in ('member', 'officer', 'commander'):
+                        conn.execute("UPDATE squadron_members SET role=? WHERE squadron_id=? AND account_name=?",
+                                     (role, int(sid), member))
+                        if role == 'commander':
+                            conn.execute("UPDATE squadrons SET commander=? WHERE squadron_id=?", (member, int(sid)))
+                elif op in ('remove', 'reject'):
+                    conn.execute("DELETE FROM squadron_members WHERE squadron_id=? AND account_name=?",
+                                 (int(sid), member))
+                elif op == 'approve':
+                    conn.execute("UPDATE squadron_members SET status='approved' "
+                                 "WHERE squadron_id=? AND account_name=?", (int(sid), member))
+                conn.commit(); conn.close()
+                SRV['log']('WEB', f'Admin {user} squadron id={sid} member {member!r} op={op}')
+            self.send_response(302); self.send_header('Location', '/admin'); self.end_headers()
 
         elif self.path == '/admin/edit_arena':
             if not is_user_admin(user): return self.send_error(403)

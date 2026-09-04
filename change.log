@@ -17,6 +17,183 @@ they explain why a specific line is the way it is and must stay with it.
     item is the COCKPIT-KILL killer-side cyan (diagnosis complete: needs the 2009
     host's killer-directed 'in 33'14' msg-33 - see the v528f5 entry's NEXT note).
 
+==============================================================================
+*** BANKED 2026-08-31: v542f5 is the STABLE BANKING POINT (user-approved). ***
+    Snapshot server.py -> 'old files\server_v542f5.py' at next convenience.
+    (Previous banked point: v528f5, 2026-08-30; v508f5, 2026-08-30.)
+    v529f5-v542f5: THE KILLER/VICTIM CYAN + BAIL-ORDERING CHAPTER, user-verified
+    live 2026-08-31 ("good job, as expected"). Every kill class now shows the
+    killer exactly ONE correct cyan (right nation, right victim), and the cockpit-
+    kill victim is no longer wrongly despawned on the killer's client. This closes
+    the COCKPIT-KILL killer-side cyan that was the lone open item at the v528f5 bank.
+    KEY RE OUTCOME: the killer's cyan is a DEDICATED msg-76 (handler
+    msg76_KillerKillBanner @0x4fbac0), NOT any msg-33 form; and the ExitDataArrive
+    kill wording is set by the MEC nibble (MEC=4=collision, MEC=5="destroyed"; there
+    is no "killed" string). Open items rolled to server.py TODO: 3rd-party kill line
+    (object-only-peer create-bind fix), chute-hit delivery under canopy + chute life
+    limit, husk telemetry relay, canopy cull/collision polish.
+
+==============================================================================
+*** BANKED 2026-09-04: v543f5 is the STABLE BANKING POINT (user-approved "Looks stable. lets bank!"). ***
+    Snapshot server.py -> 'old files\server_v543f5.py' and web_server.py ->
+    'old files\web_server_v543f5.py' at next convenience.
+    (Previous banked point: v542f5, 2026-08-31; v528f5, 2026-08-30.)
+    v543f5: THE SQUADRON CHAPTER (2026-08-31 .. 2026-09-04). NOTE: some inline code
+    comments from this chapter say v541f5/v542f5 (numbers already used by the cyan
+    chapter) - they belong HERE. Everything below user-verified live.
+
+v543f5 [SQUADRONS: FULL SYSTEM - web + in-game + tag + notes + chat] - the complete
+    squadron feature, DB-backed (squadrons + squadron_members tables, roles
+    commander/officer/member, status pending/approved).
+    WEB (web_server.py): public 'Squadrons' tab - active list w/ padlocks, create
+    form with a COMMANDER PILOT dropdown (squadrons are pilot-keyed; creator's
+    pilot validated against the account) -> pending; admin 'Squadrons' tab between
+    Arenas and Logs - approve, edit name/tag/notes/password, grant roles, approve
+    join requests, remove members, delete.
+    IN-GAME protocol (all RE'd from FA.exe + the 2009 reference logs in C:\games\FA):
+    - 0xce list: [A][B][NAME][STR2][flag]; A=B=squadron_id. STR2 is the TAG/PREFIX
+      drawn as the in-world PLANE-TAG squadron field (NOT the motto - proven live).
+    - 0xd7 = squadron NOTES request/response [0xd7][id][cstr] (was mis-mapped as
+      remove-member; FUN_004ed3c0 -> FUN_0076bcc0 fills the Notes box). Pushed with
+      the list + answered per select.
+    - 0xd1 join (server-side password check, founding-commander rule) + inverted
+      confirm ([0xd1][sid]=OK, [0]=deny); SELECTOR 0 = QUIT (drops membership,
+      clears commander if the leaver held it).
+    - 0xd9 members roster (pilot names, commanders first), 0xdb remove-member,
+      0xd8/0xdf change-password/notes: commander/officer ONLY, denials drive the
+      CANT_CHANGE dialogs (result conventions inverted: non-zero = success).
+    - Every plane record now carries the pilot's live SquadronId
+      (send_create_object_for -> build_client_record rec[1:3]).
+    OWN TAG + 'Your squadron' PERSISTENCE (the hard one): the client stamps its OWN
+    plane's squadron from DAT_00cb06dc at the 201 grant (FUN_004f88f0 ->
+    FUN_00441110 5th arg -> player+0x28), and DAT_00cb06dc is set by the u32 at
+    [6:10] of the 0xe4 pilot-select REPLY (FUN_004ee120). We now stamp it in BOTH
+    0xe4 framings (appspace 0x62 AND compound-wrapped - the compound gap was the
+    'select the pilot repeatedly' bug). Dead ends proven and documented: 0xd1
+    confirm is modal-gated (ENTER_PASSWORD_DIALOG dynamic_cast), 0xcf flag is the
+    padlock, 0xd0 is the CREATE_SQUADRON_DIALOG result, msg 25 is pure stats.
+    ADMIN BUTTON GATE (change-pw/notes/remove enable): FUN_00764dd0 enables iff
+    YOUR squadron's id == DAT_00bfedc0 (= u32 at 0xDA payload +1). 0xDA now carries
+    db_pilot_admin_squadron_id (commander/officer only), topped up at pilot select
+    for EVERYONE (push_myrights no longer moderator-gated); fallback is
+    DA_NO_SQUADRON_SENTINEL=1000000 because the value must stay >0 (Choose-Pilot
+    dialog FUN_006b85f0 hangs 10s on <=0 - the 'empty pilot list + FIN' regression)
+    yet must never collide with a real squadron id (fallback 1 == ALPHA's id gave
+    members command over ALPHA - the long-running ALPHA ghost, finally explained).
+    0xce flag is per-viewer: sid if that pilot admins it, 0 for plain members,
+    password-bit for non-members.
+    SQUAD CHAT: ch=2 now routed to live same-squadron players in the room (was a
+    sender-only stub) with the sender's SquadronId stamped at msg+6 (squad colour).
+    KNOWN CLIENT LIMITS (documented, not fixable server-side): lobby force-enables
+    the three admin buttons when DAT_00c822d8==0 regardless of role (server
+    enforces); squadron/role state latches at pilot select - promote/demote/quit
+    need a pilot re-select or relog to repaint. OPEN/TODO: squad stats
+    (kills/deaths/points per member - user-flagged, not started); consider dropping
+    the in-game founding-commander rule now that the web assigns commanders;
+    remove the temp SQNCAP capture once 0xd2..0xd6 are identified.
+
+v542f5 [COCKPIT-KILL INSTANT CYAN: NO DESPAWN] - the instant cockpit-kill cyan is
+      back to msg-76, NOT an exit-delete. An exit-delete (any exit byte) IS a delete:
+      the v541 0x53 form drew the correct "destroyed" line but also DelObject'd the
+      victim on the killer's screen (messages48 13:28:40: DelObject 257 + endless
+      "Get coord for missing object 257"); the plane must keep flying until it really
+      crashes. msg-76 (build_kill_banner_76) draws the cyan WITHOUT deleting - the
+      trade-off is its fixed wording "has destroyed plane of X" rather than
+      "destroyed X" (user accepted). Marks _cockpit_banner76_sent to suppress the
+      crash-time banner -> one cyan; peers still get the crash 0x53 tail.
+
+v541f5 [COCKPIT-KILL WORDING FIX] - the v540 instant cyan carried 0x43 (MEC=4),
+      which is the COLLISION line ("X has collided with Y") and mis-attributes the
+      killer's nation from the victim object ("USA Alon" when Alon is GBR) - the
+      false-collision report. RE re-verified against ExitDataArrive FUN_004f8f20 and
+      live wire (run_115542 12:52:47 -> messages45 1469): there is NO "killed"
+      string; kills read "destroyed", which is the MEC=5 branch via FUN_00478640 and
+      self-attributes the killer's nation correctly. [The despawn was fixed in v542;
+      this RE stands: outer switch = EEC, inner = MEC; MEC 4=collision, 5=destroyed.]
+
+v540f5 [CLEAN-BAIL PHANTOM KILL + INSTANT COCKPIT CYAN, first cut] - shooting the
+      descending PARACHUTE on a CLEAN bail bumped last_fired_at, so the 30s "most
+      recent shooter" fallback wrongly credited the shooter when the husk crashed on
+      its own -> a phantom "destroyed" cyan plus a duplicate ch3 line (run9 09:28:27).
+      Fix: the fallback now SKIPS an undamaged bail husk (pilot under canopy +
+      took_damage False; the parachute-hit belongs to the canopy's own chute-kill
+      path). ANNOUNCE_BAIL_KILL_CH3 turned OFF - v536 already gives every peer the
+      native line while the plane is bound, so the ch3 workaround only doubled it.
+      (This is the kill-chapter v540f5; the password-arena work also shipped under
+      v540f5 - see its separate entry below.)
+
+v539f5 [INSTANT COCKPIT-KILL CYAN] - fire the killer's banner at the victim's MEC=4
+      cockpit-death report (out-33, plane still flying+bound), instead of waiting
+      10-25s for the dead-stick to crash. Killer resolved from the hunter object the
+      victim named; crash-time banner suppressed via _cockpit_banner76_sent so the
+      killer sees exactly one cyan at the live moment.
+
+v538f5 [CHUTE-KILL WRONG-TEAM CYAN] - the 0x55 chute-kill delete no longer goes to
+      the KILLER (his own ExitDataArrive on it mis-pulled his nation from the canopy/
+      victim object's camp: "SU Alon killed USA flakmagic" when Alon is GBR). His
+      cyan comes from msg-76 pointed at the player-bound CANOPY (_pvic) instead of the
+      unbound husk. SERVER_CHUTE_KILL_TO_KILLER=False; peers keep the 0x55 delete.
+
+v537f5 [DOUBLE CYAN + WRONG NATION + DOUBLE PLANE-LOSS] - the killer no longer
+      receives the 0x53 exit-tail when his cyan already comes from a native out-76
+      (relayed by v533, or the v536 bail path). His client was running ExitDataArrive
+      on the tail and drawing a SECOND kill line that mis-attributed his nation from
+      the victim's object record AND booked a second plane-loss on the victim
+      (messages30 08:11:01). Killer now gets a PLAIN delete; peers keep the tail.
+      New killer_plain_delete flag / _killer_plain537 selection.
+
+v536f5 [THE 2009 BAIL ORDERING - the real fix] - on a bail with a latched hunter,
+      credit and broadcast the plane's 0x53+hunter delete AT THE BAIL, BEFORE the
+      parachuter create clears the plane's +0x128 score binding on peers (RE of
+      FUN_004f26b0 case 2 proved the husk "P-51D(0)" is NATIVE - the create legitimately
+      unbinds the plane and migrates the binding to the canopy). So gate 1 (player-
+      bound object) can only be satisfied by deleting the plane while still bound, i.e.
+      before the create. Killer cyan names the PILOT; every peer draws the native line.
+      Husk-down delete swallowed as already-booked (_BAIL_KILL_BOOKED). Fixed the v536
+      double-credit: passing hunter_obj took the EXACT attribution path which does NOT
+      pop the latch (run_080757 08:11:01 booked, 08:12:02 re-credited on respawn); now
+      credits via the LATCH path (hunter_obj=None) which pops it.
+
+v535f5 [ch3 WORKAROUND, later retired in v540] - room-wide ch3 white chat line for a
+      bail-husk kill, as a stand-in when the native line wouldn't draw for an unbound
+      husk. Superseded by v536 (native line while bound) / v540 (turned off).
+
+v533f5 [NATIVE msg-76 RELAY] - relay the VICTIM's own out-76 (which its client emits
+      at the plane-destroyed moment) to the msg-28-latched hunter -> the killer's
+      correct-nation "has destroyed plane of X" cyan, before the canopy re-binds the
+      station on peers. Marks _banner76_native_obj to suppress the synth crash banner.
+
+v532f5 [COCKPIT KILL = PILOT LOST + B-17 CRASH BOOKING] - the victim's MEC=4 cockpit-
+      death report (out-33, IsDelete=0, plane still flying) now arms a per-life record
+      so the crash classifier books plane AND pilot (previously only PROTOWATCH'd, so
+      the death booked 10-25s later off the crash delete as plane-only -> "plane lost
+      but no pilot lost in HUD"). Also: the B-17G's 90-byte native telemetry frame added
+      to TELEM_POS_EVIDENCE_SIZES (gated on the native 0x07 opcode to preserve the v446
+      bombsight guard) - without it the bomber produced zero position samples, so every
+      ground crash classified as a clean exit and booked no loss.
+
+v531f5 [msg-76 = VICTIM OBJECT NUMBER] - the killer banner msg-76 [3:5] is the victim's
+      PLANE OBJECT NUMBER (resolved via ARR<NET::OBJECT*,2048>[objnum]-0xa8 =
+      objnum_to_entity/FUN_004f2530), NOT the player index. v530 sent the PI -> object
+      0/2 didn't exist -> silent no-op (messages23). This also retro-explains the 2009
+      "ScoreEvent Number=" values (object numbers) and the victim out-33 hunter-at-+5.
+      Plane-kill delivery rides the killer delete thread pre-delete so the object is
+      alive when the handler resolves it.
+
+v530f5 [msg-76 = THE REAL KILLER CYAN] - binary-pinned the killer-directed banner to
+      msg-76 (dedicated 5-byte message, handler msg76_KillerKillBanner @0x4fbac0,
+      dispatch table write @0x4f13ba). The killer is hardcoded as the recipient
+      (DAT_00c6eb98), which is why no msg-33 variant could ever draw this line.
+      KILLER_BANNER_33 set False.
+
+v529f5 [msg-33 0x53 DEAD END, proven] - a fully-populated Type-0x53 msg-33 (full RE of
+      FUN_004f9b0f -> FUN_004f8d10 -> FUN_00478640, the PPTWork cyan gate) was delivered
+      AND ACKed and STILL drew nothing on the killer (run_211228 21:18:44) - the third
+      independent proof that the 0x53/PLAYER_KILLED display path never renders on the
+      killer. The 2009 capture (messages04 8138-8143) showed the real architecture:
+      in 33'14 (Type 0x13 credit) -> out 25'7 -> in 76'5 -> EVENT "X has destroyed
+      plane of Y". Pivoted to msg-76 (see v530f5+).
+
 v540f5 [PASSWORD-PROTECTED ARENAS - END TO END] - password protection now works
       across all three surfaces: enforcement, web control, and the in-game padlock.
       The arena password is the 3rd null-terminated cstring in the decompressed
