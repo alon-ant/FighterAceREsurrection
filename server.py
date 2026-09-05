@@ -483,11 +483,24 @@ def init_db():
             log('DB', 'squadrons: one-time membership reset (pilot-name migration) - rejoin to re-establish commander')
     except Exception:
         pass
-    # MIGRATION: CREATE TABLE IF NOT EXISTS won't add a column to a pre-existing pilots table,
-    # so add `aces` explicitly if it's missing. Stored ace status is the value msg 88 puts in the
-    # score object's aces field (+0x50, a u8). NOTE: the CLIENT also awards ace status live during
-    # a session by its own rule (5 kills without dying, reset on death) - that's session state we
-    # neither compute nor persist. This column is the pilot's PERSISTENT/career ace standing that
+    # MIGRATION (v545f5 SQUADRON SCORES): per-squadron career tallies. Points earned while flying
+    # under a squadron accumulate on the squadron - positive AND negative, kills, deaths - mirrored
+    # 1:1 from the pilot writers (db_record_kill_death / db_credit_capture / db_apply_score_delta),
+    # so a squadron's totals stay consistent with what its members were credited AT THE TIME; a
+    # pilot who later quits takes nothing away. Feeds the web ladder's Squadrons board.
+    try:
+        _shave = {r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()}
+        for _c in ('score', 'kills', 'deaths'):
+            if _c not in _shave:
+                conn.execute(f"ALTER TABLE squadrons ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
+                log('DB', f'squadrons: added career column {_c}')
+        conn.commit()
+    except Exception as _e:
+        log('DB', f'squadron score migration failed: {_e}')
+    # MIGRATION: CREATE TABLE IF NOT EXISTS won't add a column to a pre-existing pilots table, so
+    # add `aces` explicitly if missing. Stored ace status is what msg 88 puts in the score object
+    # (+0x50 u8); the client also awards aces live in-session (5 kills w/o dying, reset on death) -
+    # this column is the pilot's PERSISTENT/career ace standing that
     # the server states authoritatively at spawn/transition.
     pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
     if 'aces' not in pcols:
@@ -1124,6 +1137,11 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
         if sets:
             conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
     conn.commit(); conn.close()
+    # v545f5: mirror onto the squadrons each party is flying under (1:1 with the pilot credits)
+    if killer_name:
+        db_squadron_score_add(killer_name, dscore=points, dkills=1)
+    if victim_name and count_pilot_death:
+        db_squadron_score_add(victim_name, ddeaths=1)
 
 def db_credit_capture(victim_name, mode=None):
     """v497f5: the DEFERRED pilot death for a bail/crash-land that ended in CAPTURE (parachuter
@@ -1141,6 +1159,7 @@ def db_credit_capture(victim_name, mode=None):
         sets.append(f'deaths_{_msuf}=deaths_{_msuf}+1')
     conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
     conn.commit(); conn.close()
+    db_squadron_score_add(victim_name, ddeaths=1)   # v545f5: the deferred death counts for the squad too
 
 def db_set_pilot_aces(name, aces):
     """v222: SET the pilot's ace status to an absolute value (not additive).
@@ -4946,6 +4965,39 @@ def db_pilot_squadron_id(pilot_name):
         return int(r[0]) if r else 0
     except Exception:
         return 0
+
+def db_squadron_score_add(pilot_name, dscore=0, dkills=0, ddeaths=0):
+    """v545f5 SQUADRON SCORES: mirror a pilot's scoring event onto the squadron they are flying
+    under RIGHT NOW (approved membership at credit time - a later quit takes nothing away).
+    Called 1:1 from the three pilot writers with exactly the deltas the pilot received:
+      db_record_kill_death  -> killer: dscore=points, dkills=1; victim: ddeaths=1
+      db_credit_capture     -> ddeaths=1 (the deferred bail/capture death)
+      db_apply_score_delta  -> dscore=delta (ALL other point flow, positive AND negative:
+                               plane losses, structure damage, mode modifiers, admin edits...)
+    Squadron score is clamped at 0 like the pilot columns. Best-effort: a missing column
+    (un-migrated DB) or any error is swallowed - squad tallies must never break pilot scoring."""
+    if not pilot_name or (not dscore and not dkills and not ddeaths):
+        return
+    try:
+        sid = db_pilot_squadron_id(pilot_name)
+        if not sid:
+            return
+        conn = sqlite3.connect(DB_PATH)
+        have = {r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()}
+        sets, args = [], []
+        if dscore and 'score' in have:
+            sets.append("score = MAX(0, COALESCE(score,0) + ?)"); args.append(int(dscore))
+        if dkills and 'kills' in have:
+            sets.append("kills = COALESCE(kills,0) + ?"); args.append(int(dkills))
+        if ddeaths and 'deaths' in have:
+            sets.append("deaths = COALESCE(deaths,0) + ?"); args.append(int(ddeaths))
+        if sets:
+            args.append(int(sid))
+            conn.execute(f"UPDATE squadrons SET {', '.join(sets)} WHERE squadron_id=?", args)
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        log('SQNSCORE', f'squadron score mirror failed for {pilot_name}: {e}')
 
 def _sqn_change_fields(inner):
     """Parse an in-game squadron CHANGE record (0xd8 password / 0xdf motto):
@@ -9872,6 +9924,7 @@ def db_apply_score_delta(name, delta, bomber=False, mode=None):
             conn.execute(f"UPDATE pilots SET {_mcol} = MAX(0, COALESCE({_mcol},0) + ?) "
                          f"WHERE pilot_name=?", (int(delta), name))
     conn.commit(); conn.close()
+    db_squadron_score_add(name, dscore=int(delta))   # v545f5: every point delta mirrors to the squad
     return (new_total, new_rank, old_rank)
 
 def _vs_victim_rank(victim):

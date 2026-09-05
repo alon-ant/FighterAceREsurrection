@@ -479,12 +479,15 @@ LADDER_TABS_ASSETS = """
                 </style>
                 <script>
                 function lshow(tid){
-                  var ids=['lcareer','lffa','ltc','levents'];
-                  for(var i=0;i<ids.length;i++){
-                    var p=document.getElementById('pan-'+ids[i]);
-                    if(p) p.style.display=(ids[i]===tid)?'block':'none';
-                    var b=document.getElementById('btn-'+ids[i]);
-                    if(b) b.classList.toggle('lon', ids[i]===tid);
+                  /* v545f5: panels discovered from the DOM (was a hardcoded id list, which left any
+                     newer tab - e.g. Squadrons - permanently hidden: lshow hid all listed panels
+                     and never showed the unlisted one -> blank page). */
+                  var ps=document.querySelectorAll('.lpanel');
+                  for(var i=0;i<ps.length;i++){
+                    var id=ps[i].id.substring(4);   /* strip 'pan-' */
+                    ps[i].style.display=(id===tid)?'block':'none';
+                    var b=document.getElementById('btn-'+id);
+                    if(b) b.classList.toggle('lon', id===tid);
                   }
                   try{localStorage.setItem('fa_ladder_tab',tid);}catch(e){}
                   var s=document.getElementById('searchInput');
@@ -1021,12 +1024,49 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                             + h + ' &#x21D5;</th>')
                 ladder_boards.append((tid, prefix, ths, body))
 
+            # v545f5 SQUADRONS board: per-squadron career tallies accumulated by the game server
+            # (db_squadron_score_add mirrors every member point delta / kill / death onto the
+            # squadron they were flying under at credit time). Approved squadrons only.
+            try:
+                conn = sqlite3.connect(SRV['db_path'])
+                scols = [r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()]
+                def _sc(col):
+                    return ("COALESCE(s." + col + ",0)") if col in scols else "0"
+                sq = conn.execute(
+                    "SELECT s.name, COALESCE(s.tag,''), " + _sc('score') + ", " + _sc('kills')
+                    + ", " + _sc('deaths') + ", "
+                    "(SELECT COUNT(*) FROM squadron_members m WHERE m.squadron_id=s.squadron_id "
+                    " AND m.status='approved') "
+                    "FROM squadrons s WHERE s.status='approved'").fetchall()
+                conn.close()
+                srows = sorted(({'name': n, 'tag': t, 'score': sc, 'kills': k, 'deaths': d,
+                                 'members': m, 'kd': _kd(k, d)}
+                                for n, t, sc, k, d, m in sq),
+                               key=lambda x: (x['score'], x['kd']), reverse=True)
+                sbody = ""
+                for pos, q in enumerate(srows, 1):
+                    sbody += ("<tr><td>" + str(pos) + "</td>"
+                              "<td><strong>" + hesc(str(q['name'])) + "</strong></td>"
+                              "<td>" + hesc(str(q['tag'])) + "</td>"
+                              "<td>" + str(q['members']) + "</td>"
+                              "<td><strong>" + str(q['score']) + "</strong></td>"
+                              "<td>" + str(q['kills']) + "</td><td>" + str(q['deaths']) + "</td>"
+                              "<td>" + str(q['kd']) + "</td></tr>")
+                sths = ""
+                for i, h in enumerate(('#', 'Squadron', 'Tag', 'Members', 'Score',
+                                       'Kills', 'Deaths', 'K/D Ratio')):
+                    sths += ('<th onclick="sortLadder(' + "'lsqn'," + str(i) + ')">'
+                             + h + ' &#x21D5;</th>')
+                ladder_boards.append(('lsqn', 'sqn', sths, sbody))
+            except Exception as _e:
+                SRV['log']('WEB', f'squadron ladder board failed: {_e}')
+
             tabs_html = ""
             panels_html = ""
             for i, (tid, prefix, ths, body) in enumerate(ladder_boards):
                 on = ' lon' if i == 0 else ''
                 tab_lbl = {'lcareer': 'Career', 'lffa': 'FFA', 'ltc': 'TC',
-                           'levents': 'Events'}.get(tid, prefix)
+                           'levents': 'Events', 'lsqn': 'Squadrons'}.get(tid, prefix)
                 tabs_html += ('<button type="button" class="ltab' + on + '" id="btn-' + tid + '" '
                               'onclick="lshow(' + "'" + tid + "'" + ')">' + tab_lbl + '</button>')
                 panels_html += ('<div class="lpanel" id="pan-' + tid + '" style="display:'
