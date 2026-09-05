@@ -92,6 +92,18 @@ v543f5 [SQUADRONS: FULL SYSTEM - web + in-game + tag + notes + chat] - the compl
     the in-game founding-commander rule now that the web assigns commanders;
     remove the temp SQNCAP capture once 0xd2..0xd6 are identified.
 
+v544f5 [ONLINE TAG WHITESPACE - 0xce pad moved off STR2] - the in-world squad tag of
+    the LAST-listed squadron rendered with a trail of blanks (reported live by
+    Taurus / squad TSC on the online server, 2026-09-04). Cause: the 0xce list must
+    align to bc*16+1 and the pad was absorbed as trailing SPACES in the last
+    record's STR2 - a scheme from before STR2 was identified as the plane-tag
+    string, so the pad (up to 15 spaces; only 2 locally, hence unseen) drew
+    verbatim on the plane. build_squadronlist now absorbs the pad in the last
+    record's NAME instead: invisible in the list box, consistent for name lookups
+    (every compare uses the same stored string; join/notes/quit key by id, and the
+    0xd9 roster remove already rstrips). STR2 is now byte-clean for every record -
+    the SQUADRON log's str2= values are exactly what planes draw.
+
 v542f5 [COCKPIT-KILL INSTANT CYAN: NO DESPAWN] - the instant cockpit-kill cyan is
       back to msg-76, NOT an exit-delete. An exit-delete (any exit byte) IS a delete:
       the v541 0x53 form drew the correct "destroyed" line but also DelObject'd the

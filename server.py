@@ -5099,7 +5099,12 @@ def handle_squadron_remove_member(s, squadron_id, member_name):
 def build_squadronlist(squadrons):
     """Build the 0xce squadron-list response. `squadrons` = iterable of
     (name, str2, a, b_id, flag). Empty -> bare [0xce]. Payload is pre-aligned to
-    bc*16+1 with the pad absorbed inside the last record's STR2."""
+    bc*16+1 with the pad absorbed inside the last record's NAME (trailing spaces -
+    invisible in the list box and consistent for name lookups, which all compare
+    the same stored string). NEVER pad STR2: it is the squadron TAG the client
+    draws verbatim on the in-world plane tag, so pad spaces there render as a
+    trail of blanks after the tag (reported live by Taurus/TSC on the online
+    server, 2026-09-04 - the last-listed squadron's tag grew up to 15 spaces)."""
     recs = []
     for name, str2, a, b_id, flag, *_pw in squadrons:
         recs.append((int(a) & 0xFFFFFFFF, int(b_id) & 0xFFFFFFFF,
@@ -5114,11 +5119,11 @@ def build_squadronlist(squadrons):
         for i, (a, b, nm, s2, fl) in enumerate(recs):
             d += a.to_bytes(4, 'little')
             d += b.to_bytes(4, 'little')
-            d += nm + b'\x00'
             if i == last and extra_pad > 0:
-                d += s2 + (b'\x20' * extra_pad) + b'\x00'   # pad the LAST STR2 (absorbs alignment)
+                d += nm + (b'\x20' * extra_pad) + b'\x00'   # pad the LAST NAME (absorbs alignment)
             else:
-                d += s2 + b'\x00'
+                d += nm + b'\x00'
+            d += s2 + b'\x00'
             d.append(fl)
         return d
     d0 = _assemble(0)
