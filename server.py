@@ -8279,7 +8279,7 @@ def send_parachuter_create_for(src, dst):
         [2:4]    i16 OWNER OBJECT NUMBER -> FUN_004f2530() -> the score object. The ctor
                  (FUN_004a8c20) copies the pilot's name from owner+0x154 and binds the score.
         [9]      model: 0/1 = ParaTrooper, >1 = ParaCargo. The 2009 log always loads
-                 PLANES\PARA\ParaTrooperlod0.Q6, so 1.
+                 PLANES\\PARA\\ParaTrooperlod0.Q6, so 1.
         [10:12]  St (owner ClientNumber, u16)   <- TRAILER starts at HeaderSize, NOT at 28
         [12:14]  ONumber (u16) - the PARACHUTER's own number
         [14:23]  rest of the trailer, zero
@@ -8533,8 +8533,47 @@ def send_score_event_to_killer(killer, mec=None, eec=None):
     log('SCORE33', f'ScoreEvent -> {killer.current_pilot} PI={killer.player_index} '
                    f'(MEC={mec},EEC={eec} -> type byte 0x{((mec & 0xf) << 4) | (eec & 0xf):02x})')
 
-def build_kill_banner_33(victim_pi, hunter_pi, ppt=0x02, mec=5, eec=3):
+# v541f5 [KILL TAIL - decoded from FA.exe, replaces the guessed layout]
+# FUN_004f8d10 is the tail unpacker shared by the msg-3 ExitDataArrive kill branch (EEC 3..9,
+# MEC 5/6/0xb, FUN_004f8f20) and the msg-33 handler (FUN_004f9b0f). Relative to the entry:
+#   +3  u16  hunter OBJECT number      -> objnum_to_entity()
+#   +5  u16  hunter NETWORK CLIENT no. -> ARR<NET::CLIENT*,512>[n]   (= our s.client_number, 'St')
+#   +7  u32  hunter PlayerIndex        -> must == CLIENT+0x24 (NET::CLIENT ctor FUN_00441110 stores
+#                                        the create-client PlayerIndex there; +0x20 = name)
+#   +11 byte low 5 bits = PPT class (2 = plane, 0x1f = none); TOP 3 BITS = hunter NATION.
+#            FUN_00478640 prints the killer as FUN_0044e550(actor+4) - the nation-name lookup - and
+#            actor+4 is exactly tail[+11] >> 5. entity+0x11c is the nation too (victim side reads it).
+# Resolution order: default = resource 0x85 ('unknown plane'); (a) object path: needs the object AND
+# its owner CLIENT.PlayerIndex == +7, else it RETURNS EARLY keeping 'unknown plane'; with no owner
+# bound (our object-only creates) it needs entity.nation == +11>>5 AND owner-station == +5;
+# (b) client path: CLIENT[+5].PlayerIndex == +7 -> name from CLIENT+0x20; (c) object type name.
+# We used to write +5 = PI (right only when St == PI) and +11 = 0x02 (nation 0 = USA).
+def kill_tail_ppt(killer, cls=0x02):
+    return (cls & 0x1f) | (((getattr(killer, 'nation', 0) or 0) & 7) << 5)
+
+def kill_tail_hunter(killer, hunter_obj, cls=0x02):
+    """Bytes +3..+11 of a 12B kill entry / msg-33 tail: obj | client# | PlayerIndex | PPT|nation."""
+    return (struct.pack('<H', (hunter_obj or 0) & 0xffff)
+            + struct.pack('<H', (getattr(killer, 'client_number', 0) or 0) & 0xffff)
+            + struct.pack('<I', (getattr(killer, 'player_index', 0) or 0) & 0xffff)
+            + bytes([kill_tail_ppt(killer, cls)]))
+
+def build_bail_credit_33(victim_obj, killer):
+    """v541f5: the 2009 bail credit - msg-33 type 0x13 (MEC=1, EEC=3), subject = the VICTIM'S PLANE
+    OBJECT, hunter tail = the killer. On the killer's client FUN_004f9b0f MEC=1 draws nothing (subject
+    is not his plane) and flags the victim's owner (+0x1afc=1) so the msg-76 that follows credits
+    'has destroyed plane of'. messages04 8138-8148 is this exact sequence."""
+    body = bytearray([MSG_SCORE_EVENT_33])
+    body += bytes([0x00])
+    body += struct.pack('<H', victim_obj & 0xffff)
+    body += bytes([0x13])
+    body += kill_tail_hunter(killer, getattr(killer, 'my_obj_number', None))
+    return build_ingame_pkt(bytes(body))
+
+def build_kill_banner_33(victim_pi, hunter_pi, ppt=0x02, mec=5, eec=3, killer=None, hunter_obj=None):
     """v529f5: msg-33 Type 0x53 with a POPULATED tail - the killer-side cyan banner.
+    v541f5: when `killer` is given the tail is packed by kill_tail_hunter() (decoded layout);
+    the [5:7]/[7:9] notes below were a misread - +3 is the hunter OBJECT, +5 the CLIENT number.
 
     FULL RE MAP (FUN_004f9b0f handler -> FUN_004f8d10 unpacker -> FUN_00478640 PPTWork display):
 
@@ -8579,10 +8618,13 @@ def build_kill_banner_33(victim_pi, hunter_pi, ppt=0x02, mec=5, eec=3):
     body += bytes([0x00])                                  # [1] not read on this path
     body += struct.pack('<H', victim_pi & 0xFFFF)          # [2:4] VICTIM PI -> banner subject
     body += bytes([((mec & 0xf) << 4) | (eec & 0xf)])      # [4] 0x53 PLAYER_KILLED
-    body += struct.pack('<H', hunter_pi & 0xFFFF)          # [5:7] hunter PI (branch b)
-    body += struct.pack('<H', hunter_pi & 0xFFFF)          # [7:9] hunter PI (branch c, NET::CLIENT)
-    body += struct.pack('<I', hunter_pi & 0xFFFF)          # [9:13] hunter PI (branch a - CYAN gate)
-    body += bytes([ppt & 0xFF])                            # [13] PPT class (0x02 plane, 0x42 canopy)
+    if killer is not None:
+        body += kill_tail_hunter(killer, hunter_obj, cls=ppt)   # v541f5: obj | St | PI | PPT|nation
+    else:
+        body += struct.pack('<H', hunter_pi & 0xFFFF)          # [5:7] hunter PI (branch b)
+        body += struct.pack('<H', hunter_pi & 0xFFFF)          # [7:9] hunter PI (branch c, NET::CLIENT)
+        body += struct.pack('<I', hunter_pi & 0xFFFF)          # [9:13] hunter PI (branch a - CYAN gate)
+        body += bytes([ppt & 0xFF])                            # [13] PPT class (0x02 plane, 0x42 canopy)
     return build_ingame_pkt(bytes(body))
 
 def send_kill_banner_33(killer, victim, ppt=0x02, why=''):
@@ -8595,7 +8637,9 @@ def send_kill_banner_33(killer, victim, ppt=0x02, why=''):
     if _kpi is None or _vpi is None:
         log('KILLBANNER33', f'[skip] missing PI (killer={_kpi} victim={_vpi}) {why}')
         return
-    pkt = build_kill_banner_33(_vpi, _kpi, ppt=ppt)
+    pkt = build_kill_banner_33(_vpi, _kpi, ppt=ppt,
+                               killer=(killer if KILL_MODEL_2009 else None),
+                               hunter_obj=getattr(killer, 'my_obj_number', None))
     threading.Thread(target=lambda: send_rel(killer, pkt,
                      f'<- KILL_BANNER 33 type 0x53 ({victim.current_pilot} PI={_vpi} killed by '
                      f'{killer.current_pilot} PI={_kpi}, ppt=0x{ppt:02x}) {why}', to=3.0),
@@ -8779,6 +8823,18 @@ ANNOUNCE_BAIL_KILL_TEXT = 'destroyed the plane of {victim}'   # renders as '<kil
 ANNOUNCE33_EEC1_PROBE = False # v518f5 [DIAGNOSTIC]: both legal EEC=1 announce variants (0x21/0x31)
                              #   drew NOTHING on the killer across two client launches -> the
                              #   built-in EEC=1 message path is a dead end. Probe closed, OFF.
+KILL_MODEL_2009     = True   # v541f5 [KILL ANNOUNCE - the 2009 host contract, from messages04 + FA.exe]:
+#   PLAIN kill  -> ONE msg-3 delete carrying the 12B 0x53+hunter tail (client draws 'X destroyed Y'
+#                  and ticks stats). NO banner-76: the 2009 capture never sends 76 for a plain kill;
+#                  arming it here is what printed the killer a second line.
+#   BAIL kill   -> the delete stays SILENT (3B entry, MEC=10/EEC=0 - the 'in 3'12' deletes all over
+#                  messages04); credit = msg-33 [Number=VICTIM PLANE OBJECT][type 0x13][hunter tail]
+#                  (messages04 8138: 'ScoreEvent. Number=878. MEC=1, EEC=3. (gone)' where 878 is the
+#                  victim's plane) + msg-76 'has destroyed plane of' + msg-25. Rewriting the bail
+#                  delete to 0x53 (v536f5) drew a second, wrong 'destroyed' line for a pilot who lived.
+#   Every tail is packed by kill_tail_hunter() from the FUN_004f8d10 decode (see it) - the old
+#   [+5]=PI / [+11]=0x02 layout is what printed 'USA' for every synth kill and 'unknown plane' for
+#   every non-USA killer seen through an object-only create. False = the v512..v539 stack as before.
 BAIL_KILL_AT_BAIL   = True   # v536f5 [THE 2009 BAIL ORDERING - the real fix]: when a pilot bails
                              #   from a plane with a hunter latched (msg-28 damage / parachuter-hit),
                              #   credit the kill and broadcast the plane's 0x53+hunter delete NOW,
@@ -10174,6 +10230,32 @@ def try_bail_kill_now(s):
     # resolves the PILOT name, native 'X destroyed Y' line for everyone) and arm the killer's
     # banner-76 pre-delete. clear_peer_created=False: this is an in-arena plane removal, the
     # pilot stays (under canopy).
+    if KILL_MODEL_2009:
+        # v541f5 [2009 BAIL CONTRACT, messages04 8137-8148]: credit-33 (subject = the VICTIM PLANE,
+        # type 0x13, hunter tail) -> banner-76 -> the plane delete stays SILENT (3B entry, exit 0xa0 =
+        # MEC10/EEC0, the 'in 3'12' shape). No 0x53 rewrite: a bailed pilot was not 'destroyed', and
+        # the 0x53 line on top of the 76 was the double. Kill numbers come from msg-25 as in 2009.
+        # Both killer-directed sends go out BEFORE the delete so the msg-76 object lookup finds the
+        # plane alive (same ordering the v531f5 delete-thread trick enforced).
+        _submit_send(send_rel, _killer, build_bail_credit_33(_plane, _killer),
+                     f'<- BAIL CREDIT 33 type 0x13 (victim plane 0x{_plane:04x} -> '
+                     f'{_killer.current_pilot}) [v541f5]', to=3.0)
+        if KILLER_BANNER_76 and getattr(s, '_banner76_native_obj', None) != _plane:
+            _submit_send(send_rel, _killer, build_kill_banner_76(_plane),
+                         f'<- synth banner-76 (bail, no native out-76 seen) -> {_killer.current_pilot} '
+                         f'[v541f5]', to=3.0)
+            _b76how = 'synth banner-76'
+        else:
+            _b76how = 'native out-76 relay already drew it'
+        _silent = struct.pack('<H', _plane & 0xffff) + bytes([0xa0])
+        broadcast_object_delete_3(s, reason='(bail kill @ bail, silent 2009 delete)',
+                                  clear_peer_created=False, killer=None,
+                                  exit_byte=0xa0, exit_entry=_silent)
+        log('BAILKILL', f'{s.current_pilot} bailed -> kill booked AT THE BAIL to '
+                        f'{_killer.current_pilot} (plane 0x{_plane:04x}, hunter 0x{_hobj:04x}): '
+                        f'credit-33 0x13 + {_b76how} + SILENT 0xa0 delete; husk-down delete will '
+                        f'be swallowed [v541f5]')
+        return True
     broadcast_object_delete_3(s, reason='(bail kill @ bail)', clear_peer_created=False,
                               killer=_killer, exit_byte=0x53, exit_entry=_entry,
                               killer_plain_delete=True)
@@ -10237,9 +10319,14 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         # The banner reads the plane NAME from the object (+0x11c), so this byte is effectively a
         # 'real combatant' flag - 0x02 (the observed value) is enough. Everything else already
         # matched a real entry byte-for-byte.
-        exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
-                      + struct.pack('<H', _kobj512) + struct.pack('<H', _kpi512 & 0xffff)
-                      + struct.pack('<I', _kpi512 & 0xffff) + bytes([0x02]))   # 12B: id|53|hunter|PI|PI|PPT
+        if KILL_MODEL_2009:
+            # v541f5: decoded layout - obj | CLIENT number | PlayerIndex | PPT|nation (kill_tail_hunter)
+            exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
+                          + kill_tail_hunter(killer, _kobj512))
+        else:
+            exit_entry = (struct.pack('<H', s.my_obj_number & 0x7fff) + bytes([0x53])
+                          + struct.pack('<H', _kobj512) + struct.pack('<H', _kpi512 & 0xffff)
+                          + struct.pack('<I', _kpi512 & 0xffff) + bytes([0x02]))   # 12B: id|53|hunter|PI|PI|PPT
         log('KILLBANNER', f'{s.current_pilot} killed by 0x{_kobj512:04x} on a synthesised tail '
                           f'-> exit rewritten to 0x53+hunter so the cyan banner fires [v512f5]')
         # v529f5 [GATE 2]: the exit-delete lights third-party viewers only; the KILLER's own
@@ -10262,6 +10349,13 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
             log('KILLBANNER76', f'synth banner-76 for {s.current_pilot} obj=0x{s.my_obj_number:04x} '
                                 f'SKIPPED - the instant cockpit-kill banner already drew it at the '
                                 f'MEC=4 moment [v539f5]')
+        elif (KILLER_BANNER_76 and KILL_MODEL_2009
+              and getattr(s, 'bailed_plane_obj', None) != s.my_obj_number):
+            # v541f5: a PLAIN kill announces through the 0x53 tail alone (messages04: every third-
+            # party and own-kill line is one 'in 3'21'; msg-76 appears ONLY at bails). The tail now
+            # resolves name+nation on the killer too, so a banner-76 here is the duplicate line.
+            log('KILLBANNER76', f'synth banner-76 for {s.current_pilot} obj=0x{s.my_obj_number:04x} '
+                                f'SKIPPED - plain kill, the 0x53 tail is the whole announce [v541f5]')
         elif KILLER_BANNER_76:
             _banner76_pkt = build_kill_banner_76(s.my_obj_number)
             log('KILLBANNER76', f'banner-76 armed for killer {killer.current_pilot}: victim '
@@ -16775,10 +16869,17 @@ def handle_post_auth(s, cmd, pl):
                     # v519f5 hardcoded the literal 1 -> 'Alon@HQ destroyed Alon@HQ' on the victim
                     # (station 1 = himself) and 'unknown pilot' on the killer (station 1 unbound).
                     _kpi519 = getattr(s, 'player_index', 0) or 0
-                    _e519 = (struct.pack('<H', _pvic & 0x7fff) + bytes([0x55])
-                             + struct.pack('<H', _phun & 0xffff)
-                             + struct.pack('<H', _kpi519 & 0xffff)
-                             + struct.pack('<I', _kpi519 & 0xffff) + bytes([0x42]))
+                    if KILL_MODEL_2009:
+                        # v541f5: 0x42 was never a 'canopy class' - it is plane class 2 with NATION 2
+                        # in the top 3 bits (the capture's killer happened to be nation 2). Pack the
+                        # shooter's real St / PI / nation.
+                        _e519 = (struct.pack('<H', _pvic & 0x7fff) + bytes([0x55])
+                                 + kill_tail_hunter(s, _phun))
+                    else:
+                        _e519 = (struct.pack('<H', _pvic & 0x7fff) + bytes([0x55])
+                                 + struct.pack('<H', _phun & 0xffff)
+                                 + struct.pack('<H', _kpi519 & 0xffff)
+                                 + struct.pack('<I', _kpi519 & 0xffff) + bytes([0x42]))
                     _dk519 = build_exit_delete_object_3(_pvic, 0x55, entry=_e519)
                     if _dk519 is not None:
                         for _q519 in get_sessions_in_room(s.current_room):
