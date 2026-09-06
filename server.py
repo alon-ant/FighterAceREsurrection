@@ -8273,7 +8273,7 @@ def send_parachuter_telemetry(src):
     log('PARA', f'telemetry for parachuter 0x{pnum:04x} ({src.current_pilot}) cloned from the '
                 f'plane\'s last packet -> room {src.current_room}, {_sent} peer(s) sent')
 
-def send_parachuter_create_for(src, dst):
+def send_parachuter_create_for(src, dst, predel=False):
     """Tell dst to create the NetParachuter for src's bailed-out pilot. The record is the client's own
     out-4 body plus our trailer, so the tag shows the PILOT's name and rank (the body points at the
     pilot's plane, which resolves the score object) rather than an aircraft type.
@@ -8294,8 +8294,20 @@ def send_parachuter_create_for(src, dst):
             log('PARA', f'score-prime skipped: {_e}')
     rec = build_parachuter_record(body, st=src.client_number, onumber=src.para_obj_number,
                                   owner_obj=src.my_obj_number)
-    pkt = build_msg13(bytes([0x02]) + rec)      # -> the client logs  in 2'24
-    send_rel(dst, pkt, f'<- CreateObject 2 (PARACHUTER: {src.current_pilot} '
+    if predel:
+        # v552f5 [ATOMIC PREDEL+CREATE, like the plane path]: a same-arena respawn does NOT rebuild
+        # the peer's world - it DelObject's only its own plane and keeps every peer object, so a
+        # second create for a live canopy number trips 'Assertion failed (!Objects[no->Number()])'
+        # (messages31 20:46:53 Create NetParachuter 258 -> CTD). Delete-then-create in ONE msg-13,
+        # exactly the form the plane re-create has used since v3xx (delete is a no-op if absent).
+        _del_raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) \
+                 + struct.pack('<H', src.para_obj_number & 0xFFFF)
+        pkt = build_msg13(_del_raw, bytes([0x02]) + rec)
+        _how = 'ATOMIC predel+create PARACHUTER'
+    else:
+        pkt = build_msg13(bytes([0x02]) + rec)      # -> the client logs  in 2'24
+        _how = 'CreateObject 2 (PARACHUTER'
+    send_rel(dst, pkt, f'<- {_how}: {src.current_pilot} '
                        f'ONumber=0x{src.para_obj_number:04x} -> {dst.current_pilot})', to=3.0)
     src.__dict__.setdefault('_para_created_peers', {}).setdefault(src.para_obj_number, set()).add(dst.addr)   # v547f5
     log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
@@ -8322,7 +8334,7 @@ def _send_parachuter_create_after(src, dst, delay):
         time.sleep(delay)
     if getattr(src, 'para_obj_number', None) is None:
         return
-    if send_parachuter_create_for(src, dst):
+    if send_parachuter_create_for(src, dst, predel=True):
         log('PARA', f'{src.current_pilot} canopy 0x{src.para_obj_number:04x} re-created onto '
                     f'{dst.current_pilot} (peer rebuilt its world mid-descent) [v550f5]')
     """23-byte PARACHUTER object record (Type 2). *** SIZE PROVEN FROM THE BINARY. ***
