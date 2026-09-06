@@ -11069,10 +11069,13 @@ def relay_telemetry(src, data, _split_obj=None):
     peers = [x for x in get_sessions_in_room(src.current_room)
              if x is not src and (getattr(x, 'flying', False)
                                   or getattr(x, 'para_obj_number', None) is not None)]
-    if _split_obj is not None and _split_obj == getattr(src, 'para_obj_number', None):
+    _gate_obj = _split_obj
+    if _gate_obj is None and len(pl) >= 9:
+        _gate_obj = int.from_bytes(pl[7:9], 'little')     # v548f5: single-record chute frames too
+    if _gate_obj is not None and _gate_obj == getattr(src, 'para_obj_number', None):
         # v547f5: the chute record only goes to peers that have received its create - a peer
         # without the object cannot size the record (see TELEM_SPLIT_MULTI).
-        _pc = (getattr(src, '_para_created_peers', {}) or {}).get(_split_obj, set())
+        _pc = (getattr(src, '_para_created_peers', {}) or {}).get(_gate_obj, set())
         peers = [x for x in peers if x.addr in _pc]
     if not peers:
         return
@@ -18260,7 +18263,14 @@ def on_pkt(data, addr):
                 s._unrel_ts=_now
                 log('RX/UNREL', f'{getattr(s,"current_pilot",None)} sz={sz} hdr={hx(data[:8])} pl={hx(data[8:])}')
         # RELAY the flying client's telemetry to other flying players in the same room.
-        if RELAY_TELEMETRY and getattr(s,'flying',False) and s.current_room is not None:
+        # v548f5: ...or a pilot UNDER CANOPY. The husk-down delete clears s.flying (13896), but the
+        # bailed client keeps sending the chute's 34B record; gating on flying alone silenced it the
+        # moment the empty plane hit the ground -> tick froze (STALE-TICK ~3s later) -> peers
+        # culled the canopy ~28s on (run_20260906_195355 19:57:57 husk 0x0100 down -> 19:58:00
+        # FROZEN). para_obj_number is set for the whole descent and cleared at the landing.
+        if (RELAY_TELEMETRY and s.current_room is not None
+                and (getattr(s, 'flying', False)
+                     or getattr(s, 'para_obj_number', None) is not None)):
             relay_telemetry(s, data)
 
 # --- Web Server Bridge --------------------------------------------------------
