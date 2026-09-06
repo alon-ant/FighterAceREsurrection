@@ -10300,14 +10300,18 @@ def try_bail_kill_now(s):
             _b76how = 'synth banner-76'
         else:
             _b76how = 'native out-76 relay already drew it'
-        _silent = struct.pack('<H', _plane & 0xffff) + bytes([0xa0])
-        broadcast_object_delete_3(s, reason='(bail kill @ bail, silent 2009 delete)',
-                                  clear_peer_created=False, killer=None,
-                                  exit_byte=0xa0, exit_entry=_silent)
+        # v546f5 [NO DELETE AT THE BAIL - messages04 8137-8148]: the 2009 host sends the killer
+        # 88/33/76/25 at the bail and NOTHING removes the plane; the husk stays visible to every
+        # peer until it hits the ground, and only then the silent 'in 3'12' delete arrives. v541f5
+        # kept v536's delete-at-bail (only ever needed so the old 0x53 line could draw while the
+        # object was bound) - that is what despawned the husk for the attacker while the victim
+        # still watched it fall and explode (SpUn/Taurus 2026-09-05). The husk-down path
+        # ('husk ... down -> plain delete to peers, no re-credit') and the respawn/exit-to-HQ
+        # 'abandoned bail husk' deletes already remove it at the right moment.
         log('BAILKILL', f'{s.current_pilot} bailed -> kill booked AT THE BAIL to '
                         f'{_killer.current_pilot} (plane 0x{_plane:04x}, hunter 0x{_hobj:04x}): '
-                        f'credit-33 0x13 + {_b76how} + SILENT 0xa0 delete; husk-down delete will '
-                        f'be swallowed [v541f5]')
+                        f'credit-33 0x13 + {_b76how}; plane NOT deleted (2009: husk falls in view, '
+                        f'the husk-down delete removes it) [v546f5]')
         return True
     broadcast_object_delete_3(s, reason='(bail kill @ bail)', clear_peer_created=False,
                               killer=_killer, exit_byte=0x53, exit_entry=_entry,
