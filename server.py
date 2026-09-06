@@ -8303,6 +8303,18 @@ def send_parachuter_create_for(src, dst):
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
     return True
 
+def _forget_canopies_on(owner, viewer):
+    """v551f5: `viewer` rebuilt its world (respawn from HQ / airfield change / bail-respawn), so
+    it no longer holds `owner`'s canopy - drop it from every created-set so the relay hook
+    re-creates the parachuter on it once. This is the ONLY thing that may mark a peer as not
+    having a canopy; _created_peers is about the PLANE and is also cleared at the owner's own
+    plane death, which is why v550f5 keyed on it and re-sent a live canopy to peers that already
+    had it (run_20260906_203933 20:41:24 -> Alon CTD)."""
+    _pcs = owner.__dict__.get('_para_created_peers')
+    if _pcs:
+        for _set in _pcs.values():
+            _set.discard(viewer.addr)
+
 def _send_parachuter_create_after(src, dst, delay):
     """v550f5: (re)create src's canopy on dst a beat after dst got src's plane create, so the
     record's owner-plane reference and the msg-25 prime both land on an existing station."""
@@ -11124,8 +11136,15 @@ def relay_telemetry(src, data, _split_obj=None):
                     _submit_send(send_create_object_for, src, p, with_client=_wc)
                 _pn550 = getattr(src, 'para_obj_number', None)
                 if _pn550 is not None:
-                    (src.__dict__.get('_para_created_peers') or {}).get(_pn550, set()).discard(p.addr)
-                    if _plane_alive or not _wc:
+                    # v551f5: re-create the canopy ONLY if p is not recorded as holding it. A missing
+                    # _created_peers entry is not that signal (it is also cleared when OUR plane
+                    # dies - the husk-down at 20:41:24 re-sent 0x0102 to peers that had it -> CTD).
+                    # Peers are removed from the canopy set solely by _forget_canopies_on() at their
+                    # own world rebuild.
+                    _pcs550 = (src.__dict__.get('_para_created_peers') or {}).get(_pn550, set())
+                    if p.addr in _pcs550:
+                        pass                                     # they have it - leave it alone
+                    elif _plane_alive or not _wc:
                         _submit_send(_send_parachuter_create_after, src, p,
                                      (RELAY_CREATE_SETTLE_S + 0.2) if _plane_alive else 0.0)
                     else:
@@ -11530,6 +11549,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                 _pcp = _p.__dict__.get('_created_peers')
                 if _pcp is not None:
                     _pcp.discard(s.addr)
+                _forget_canopies_on(_p, s)      # v551f5: their canopy is gone from our world too
         _why = (f'airfield change ({old_af}->{af})' if af_changed else 'HQ re-entry (world rebuilt)')
         log('FLY23', f'{_why} -> peers re-create objects on {s.current_pilot}')
     if s.__dict__.pop('_rejoin_pending', False):     # re-join only (first join did this at enter)
@@ -13435,6 +13455,7 @@ def _fire_server_confirm(s, via='', ident=None):
                 if _pcp is not None and s.addr in _pcp:
                     _pcp.discard(s.addr)
                     _n_readv += 1
+                _forget_canopies_on(_p, s)      # v551f5: GC'd their canopy with everything else
         if _n_readv:
             log('PARA', f'{s.current_pilot} respawned from bail -> re-advertising {_n_readv} '
                         f'peer(s) onto them (client GC-dropped peers during the descent)')
