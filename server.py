@@ -8297,6 +8297,7 @@ def send_parachuter_create_for(src, dst):
     pkt = build_msg13(bytes([0x02]) + rec)      # -> the client logs  in 2'24
     send_rel(dst, pkt, f'<- CreateObject 2 (PARACHUTER: {src.current_pilot} '
                        f'ONumber=0x{src.para_obj_number:04x} -> {dst.current_pilot})', to=3.0)
+    src.__dict__.setdefault('_para_created_peers', {}).setdefault(src.para_obj_number, set()).add(dst.addr)   # v547f5
     log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
                 f'ONumber=0x{src.para_obj_number:04x} rec={len(rec)}B '
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
@@ -10693,6 +10694,61 @@ TELEM_NORMAL_SIZES = {84, 86, 88}
 # telemetry tick is invisible at ~13/s; relaying one of these is a guaranteed CTD for EVERY
 # recipient. See the block in relay_telemetry for the evidence.
 TELEM_MAX_BC = 5
+# v547f5 [MULTI-RECORD TELEMETRY - SPLIT, DON'T DROP - decoded from FA.exe + live frames]:
+# The client packs ONE coordinate message per frame for ALL objects it owns
+# (ConductorInterface.cpp FUN_007e6d00/FUN_007e6c80): [opcode 0x07][tick u16] then N x
+# [ONumber u16][body], NO per-record opcode/tick/length. Body length is per OBJECT CLASS - the
+# receiver resolves each ONumber to its object and lets the object's unpacker consume its own
+# size, so a peer that lacks any one object mis-walks the rest (the 'relay = CTD' finding).
+#   plane (NetPlane, Pln_Net.cpp FUN_004c8930): body 79 (81 on the B-17 family) -> record 81/83
+#   parachuter: body 32 -> record 34 = the kinematic core of the plane layout (+2 pos, +9 DirUp,
+#              +0x12 vel, +0x18 angvel, +0x1e/+0x1f flags, +0x20 10-bit) = exactly 0x22 bytes.
+# Live proof (run_20260905_134848 21:52:08, Tomcat, 122B): 07 62 00 00 | 07 89 a4 |
+# 66 02 + 32B | 64 02 + 79B - two positions a few metres apart (chute beside the plane). Every
+# multi-record size in the logs is 7 + 34k + 81/83. v255's 'Get coord for missing object 0'
+# was the SAME rule: an 81B plane record cloned under the chute's ONumber made the receiver
+# consume 34 and read the next 'object' out of the leftover. So the chute DOES send telemetry
+# (34B/frame) - the v256 'free-falls locally' claim came from a debug log that never records
+# telemetry - and 2009 chutes steered because the host relayed it. We now split the frame into
+# single-record frames and relay each through the normal per-peer path: the plane record as
+# today, the chute record only to peers that received its create, anything else dropped.
+TELEM_SPLIT_MULTI    = True
+TELEM_RECORD_SIZES   = (34, 81, 83, 85)   # candidate record sizes when an ONumber's size is unknown
+TELEM_PARA_RECORD    = 34
+
+def _telem_split_records(src, pl):
+    """v547f5: split a multi-record msg-7 appspace into [(onum, single-record appspace), ...].
+    pl = [bc][T][00][00][0x07][tick u16][records...]. Sizes: the session's known plane/chute
+    numbers first, then an exact-fit search over TELEM_RECORD_SIZES. Returns [] when no exact
+    tiling exists (caller keeps the old drop)."""
+    rest = bytes(pl[7:])
+    known = dict(getattr(src, '_rec_size_by_obj', {}) or {})
+    _pn = getattr(src, 'para_obj_number', None)
+    if _pn is not None:
+        known[_pn] = TELEM_PARA_RECORD
+    def fit(i, acc, depth):
+        if i == len(rest):
+            return acc
+        if i + 2 > len(rest) or depth > 12:
+            return None
+        onum = int.from_bytes(rest[i:i+2], 'little')
+        cands = [known[onum]] if onum in known else list(TELEM_RECORD_SIZES)
+        for sz in cands:
+            if i + sz <= len(rest):
+                r = fit(i + sz, acc + [(onum, rest[i:i+sz])], depth + 1)
+                if r is not None:
+                    return r
+        return None
+    recs = fit(0, [], 0)
+    if not recs or len(recs) < 2:
+        return []
+    out = []
+    for onum, rec in recs:
+        body = bytes([0x07]) + bytes(pl[5:7]) + rec           # opcode + sender tick + record
+        n = len(body)
+        hdr = bytes([n // 16, ((n % 16) << 4) | (pl[1] & 0x0f), 0x00, 0x00])
+        out.append((onum, hdr + body))
+    return out
 # v446f5: the msg-7 appspace sizes whose BODY layout is the standard one (position at [9:15]).
 # Confirmed live sizes: 84/86/88 (TELEM-SIZE 'normal' set). Anything else (the 122B canopy
 # multi-record form, the 99B bc=5 bombsight-run form, ...) shares only the HEADER (tick[5:7],
@@ -10709,7 +10765,7 @@ TELEM_POS_EVIDENCE_SIZES = (84, 86, 88, 90)
 # emits them for its whole duration; a couple of windows of margin after the last one).
 ODD_TELEM_HOLDOFF_S = 20.0
 
-def relay_telemetry(src, data):
+def relay_telemetry(src, data, _split_obj=None):
     """Forward src's flying-state datagram to other flying players in the same room."""
     # v373f5 [IDENTITY/CRITICAL]: DROP a STRAGGLER telemetry frame from a source that has already
     # LEFT the game. run_20260729_210316: AC2E_Bigalon (PI=0) pressed back-to-lobby at 21:34:33 -
@@ -10902,6 +10958,32 @@ def relay_telemetry(src, data):
     # DROP, do not truncate: a record boundary inside the batch is not yet established, and
     # guessing one produces the same crash. A dropped tick is invisible - telemetry runs at
     # ~13/s and the next normal frame re-syncs the peer.
+    if pl[0] > TELEM_MAX_BC and TELEM_SPLIT_MULTI and _opc == 0x07 and _split_obj is None:
+        # v547f5: split into single-record frames and relay each one (see TELEM_SPLIT_MULTI).
+        _subs = _telem_split_records(src, pl)
+        if _subs:
+            src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
+            src.last_telem_time = time.time()
+            _seen = src.__dict__.setdefault('_telem_split_logged', set())
+            _key = tuple(o for o, _ in _subs)
+            if _key not in _seen:
+                _seen.add(_key)
+                log('TELEM-SPLIT', f'{src.current_pilot} {len(pl)}B multi-record frame -> '
+                                   f'{[(f"0x{o:04x}", len(f) - 7) for o, f in _subs]} '
+                                   f'(plane 0x{(src.my_obj_number or 0):04x}, chute '
+                                   f'0x{(getattr(src, "para_obj_number", None) or 0):04x}) [v547f5]')
+            _hdr8 = bytes(data[:8])
+            for _onum, _sub in _subs:
+                if _onum != src.my_obj_number and _onum != getattr(src, 'para_obj_number', None):
+                    _dr = src.__dict__.setdefault('_telem_split_dropped', set())
+                    if _onum not in _dr:
+                        _dr.add(_onum)
+                        log('TELEM-SPLIT', f'{src.current_pilot} record for 0x{_onum:04x} dropped - '
+                                           f'not this session\'s plane or chute (stale object still '
+                                           f'owned by the client?) [v547f5]')
+                    continue
+                relay_telemetry(src, _hdr8 + _sub, _split_obj=_onum)
+            return
     if pl[0] > TELEM_MAX_BC:
         # v362f5: HARVEST THE TICK BEFORE REJECTING THE FRAME. The multi-record form
         # shares the standard header layout - tick at [5:7], ONumber at [7:9] - proven
@@ -10927,6 +11009,9 @@ def relay_telemetry(src, data):
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
     src.last_telem_time = time.time()
+    if _split_obj is None and len(pl) >= 9 and 34 <= len(pl) - 7 <= 90:
+        # v547f5: learn this object's record size from its single-record frames (feeds the splitter)
+        src.__dict__.setdefault('_rec_size_by_obj', {})[int.from_bytes(pl[7:9], 'little')] = len(pl) - 7
     # v243: and the quantised world POSITION (body[0:6] = 3x u16, i.e. pl[9:15]). This is what tells
     # a CRASH apart from a clean parked exit - the two are byte-identical in the exit packet, so the
     # only way to know the plane was flying is to look at whether it was actually moving.
@@ -10984,6 +11069,11 @@ def relay_telemetry(src, data):
     peers = [x for x in get_sessions_in_room(src.current_room)
              if x is not src and (getattr(x, 'flying', False)
                                   or getattr(x, 'para_obj_number', None) is not None)]
+    if _split_obj is not None and _split_obj == getattr(src, 'para_obj_number', None):
+        # v547f5: the chute record only goes to peers that have received its create - a peer
+        # without the object cannot size the record (see TELEM_SPLIT_MULTI).
+        _pc = (getattr(src, '_para_created_peers', {}) or {}).get(_split_obj, set())
+        peers = [x for x in peers if x.addr in _pc]
     if not peers:
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
