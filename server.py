@@ -8904,18 +8904,17 @@ BAIL_KILL_AT_BAIL   = True   # v536f5 [THE 2009 BAIL ORDERING - the real fix]: w
                              #   is already deleted on peers; its later MEC=5 delete is swallowed
                              #   as an already-booked kill (see _bail_kill_booked). OFF -> the
                              #   v535 late-husk path + ch3 line, unchanged.
-SERVER_CHUTE_KILL   = True   # v519f5 [2009 ARCHITECTURE]: the 2009 host was AUTHORITATIVE over the
-                             #   canopy (no telemetry; the client free-falls it and waits for the
-                             #   server's delete). It decided the pilot kill from the hit stream AT
-                             #   THE MOMENT and broadcast the kill to everyone - victim included -
-                             #   which is why the killer's banner was identical to a normal kill:
-                             #   the kill delete landed while the canopy was live on his screen and
-                             #   he was engaging it. Our server waited for the victim's client,
-                             #   which only reports at RESPAWN (flightrec-proven) - unfixably late.
-                             #   So: count relayed msg-29 hit records per canopy; at PARA_KILL_HITS
-                             #   the SERVER kills the pilot - native 0x55+hunter delete (the exact
-                             #   byte-form a real client emits at a chute death) to ALL, +50 to the
-                             #   killer, pilot loss to the victim, all at the live moment.
+SERVER_CHUTE_KILL   = False  # v549f5 [CLIENT-AUTHORITATIVE CHUTE HEALTH - user request 2026-09-06]:
+#   OFF. The parachuter's health/hit registration and the kill verdict now live on the CLIENT,
+#   as in 2009: the server relays every HitToParachuter (msg-29) frame to peers verbatim and the
+#   VICTIM'S OWN client decides whether those hits killed the pilot, then reports the death - the
+#   existing v248/swallow-guard delete path handles that report. Faithful to messages04, where the
+#   host ran no hit-counter and chute deaths came down as ordinary victim-reported ExitDataArrive
+#   deletes. NOTE (revert rationale): v519 went server-authoritative because the victim's client
+#   was seen to report the chute death only AT RESPAWN (flightrec-proven) - so with this OFF a
+#   killed canopy may linger on peers until the victim respawns. If that late-linger returns it is
+#   the report-timing issue, NOT this switch. True = the v519 server-decided kill (counts records,
+#   fires the native 0x55 delete + banners at PARA_KILL_HITS).
 PARA_KILL_HITS      = 3      # v519f5: hit RECORDS (8B each; one msg-29 frame carries several) that
                              #   kill the pilot. Tune to taste - 2009 pilots died fast.
 ANNOUNCE_PILOT_KILL_LINE = False  # v525f5: OFF - the sysop-style 'X killed Y's pilot' ch4 broadcast
@@ -16997,7 +16996,9 @@ def handle_post_auth(s, cmd, pl):
                 _submit_send(send_rel, _q, _p29,
                              f'<- HITPARA 29 relay ({s.current_pilot}->{_q.current_pilot})', to=3.0)
             _nrec519 = max(1, (len(_p29) - 5) // 8)
-            if SERVER_CHUTE_KILL and _powner is not None:
+            if _powner is not None:
+                # v549f5: tally is now LOG-ONLY (SERVER_CHUTE_KILL is off - the client owns the
+                # verdict). Kept so PARAHIT still shows a running hit count for diagnostics.
                 _powner._para_hits = getattr(_powner, '_para_hits', 0) + _nrec519
             log('PARAHIT', f'{s.current_pilot} hit parachuter 0x{_pvic:04x} (owner '
                            f'{_powner.current_pilot if _powner else "?"}) by 0x{_phun:04x} -> '
