@@ -8302,6 +8302,17 @@ def send_parachuter_create_for(src, dst):
                 f'ONumber=0x{src.para_obj_number:04x} rec={len(rec)}B '
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
     return True
+
+def _send_parachuter_create_after(src, dst, delay):
+    """v550f5: (re)create src's canopy on dst a beat after dst got src's plane create, so the
+    record's owner-plane reference and the msg-25 prime both land on an existing station."""
+    if delay > 0:
+        time.sleep(delay)
+    if getattr(src, 'para_obj_number', None) is None:
+        return
+    if send_parachuter_create_for(src, dst):
+        log('PARA', f'{src.current_pilot} canopy 0x{src.para_obj_number:04x} re-created onto '
+                    f'{dst.current_pilot} (peer rebuilt its world mid-descent) [v550f5]')
     """23-byte PARACHUTER object record (Type 2). *** SIZE PROVEN FROM THE BINARY. ***
 
     v248 sent a 41-byte PLANE-shaped record here and it CTD'd the peer. The msg-2 record loop
@@ -11099,7 +11110,35 @@ def relay_telemetry(src, data, _split_obj=None):
                 # server for 3s mid-flight (no beacons/ACKs) -> the peer's keepalive
                 # desynced -> FATALLOSTCONNECTION ~30s later (messages54.log).
                 # v357f5: via the send pool - still off the RX thread, no thread spawn.
-                _submit_send(send_create_object_for, src, p, with_client=_wc)
+                # v550f5 [CANOPY ON A REBUILT PEER]: only create the PLANE while it is alive.
+                # After the husk comes down my_obj_number still names the dead plane and (since
+                # v548f5) the chute-only frames still reach here - firing the plane create then
+                # would raise a ghost husk on the rebuilding peer. If src is under canopy, also
+                # (re)create the parachuter on p: a peer that respawned/re-entered rebuilt its
+                # world and GC'd the canopy (run_20260906_202419 20:34:20 - Alon respawned, got
+                # Bama/Taurus/Starfighter's planes back but not Starfighter's chute 0x010b).
+                # Drop p from the chute's created-set first so its telemetry is withheld until
+                # the new create has gone out.
+                _plane_alive = getattr(src, 'flying', False)
+                if _plane_alive:
+                    _submit_send(send_create_object_for, src, p, with_client=_wc)
+                _pn550 = getattr(src, 'para_obj_number', None)
+                if _pn550 is not None:
+                    (src.__dict__.get('_para_created_peers') or {}).get(_pn550, set()).discard(p.addr)
+                    if _plane_alive or not _wc:
+                        _submit_send(_send_parachuter_create_after, src, p,
+                                     (RELAY_CREATE_SETTLE_S + 0.2) if _plane_alive else 0.0)
+                    else:
+                        _cp.discard(p.addr); _ccp.discard(p.addr)     # nothing was sent - re-arm
+                        log('PARA', f'{src.current_pilot} canopy 0x{_pn550:04x}: peer '
+                                    f'{getattr(p, "current_pilot", "?")} has no station for us and '
+                                    f'the plane is already down - canopy not created on them '
+                                    f'[v550f5 gap]')
+                elif not _plane_alive:
+                    _cp.discard(p.addr)
+                    if _wc:
+                        _ccp.discard(p.addr)
+                    continue
                 # v485f5 [CREATE-BEFORE-TELEMETRY]: the create is now queued (async); do NOT
                 # relay this frame's telemetry to p - it would beat the create and stub the
                 # slot (occupied-slot CTD). Hold p's telemetry for RELAY_CREATE_SETTLE_S so the
