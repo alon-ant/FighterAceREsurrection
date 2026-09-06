@@ -8273,7 +8273,7 @@ def send_parachuter_telemetry(src):
     log('PARA', f'telemetry for parachuter 0x{pnum:04x} ({src.current_pilot}) cloned from the '
                 f'plane\'s last packet -> room {src.current_room}, {_sent} peer(s) sent')
 
-def send_parachuter_create_for(src, dst, predel=False):
+def send_parachuter_create_for(src, dst, predel=False, with_client=False):
     """Tell dst to create the NetParachuter for src's bailed-out pilot. The record is the client's own
     out-4 body plus our trailer, so the tag shows the PILOT's name and rank (the body points at the
     pilot's plane, which resolves the score object) rather than an aircraft type.
@@ -8286,7 +8286,7 @@ def send_parachuter_create_for(src, dst, predel=False):
     body = getattr(src, 'para_body', None)
     if not body or getattr(src, 'para_obj_number', None) is None:
         return False
-    if PARA_PRIME_SCORE:
+    if PARA_PRIME_SCORE and not with_client:
         try:
             send_stat_block_25(src, reason=f'(parachuter prime -> {dst.current_pilot})', dst=dst,
                                force_reliable=True)   # v372f5: create-2 depends on this arriving first
@@ -8304,12 +8304,36 @@ def send_parachuter_create_for(src, dst, predel=False):
                  + struct.pack('<H', src.para_obj_number & 0xFFFF)
         pkt = build_msg13(_del_raw, bytes([0x02]) + rec)
         _how = 'ATOMIC predel+create PARACHUTER'
+    elif with_client:
+        # v554f5 [CLIENT+PARACHUTER - the 2009 'in 2'65']: a pilot who enters the arena while a
+        # bailer's plane is already down has NO station for that bailer, and a canopy create on a
+        # missing station is the GamerClientScore CTD. messages04 13631-13636 shows the host's form
+        # for exactly this: one msg-2 = client record (41) + parachuter record (23) -> 'Create client
+        # 310' then 'Create NetParachuter. St=310'. Same 0x02 skip byte + client record the plane's
+        # first-spawn 'in 2'83' uses, with the canopy in place of the plane.
+        preload_squadron_list(dst, ' peer-create')
+        _sqn = db_pilot_squadron_id(src.current_pilot) or int(getattr(src, 'squadron_id', 0) or 0)
+        pkt = build_msg13(bytes([0x02])
+                          + build_client_record(src.client_number, src.player_index,
+                                                (src.current_pilot or 'Player'), squadron=_sqn)
+                          + rec)
+        dst_ccp = src.__dict__.setdefault('_client_created_peers', set())
+        dst_ccp.add(dst.addr)
+        _how = 'CreateObject 2 (client+PARACHUTER'
     else:
         pkt = build_msg13(bytes([0x02]) + rec)      # -> the client logs  in 2'24
         _how = 'CreateObject 2 (PARACHUTER'
     send_rel(dst, pkt, f'<- {_how}: {src.current_pilot} '
                        f'ONumber=0x{src.para_obj_number:04x} -> {dst.current_pilot})', to=3.0)
     src.__dict__.setdefault('_para_created_peers', {}).setdefault(src.para_obj_number, set()).add(dst.addr)   # v547f5
+    if PARA_PRIME_SCORE and with_client:
+        # v554f5: 2009 order for the client+parachuter form - the msg-25 follows the create
+        # (messages04 13631 in 2'65 ... 13639 in 25'46); the station must exist before the block.
+        try:
+            send_stat_block_25(src, reason=f'(parachuter post-create -> {dst.current_pilot})', dst=dst,
+                               force_reliable=True)
+        except Exception as _e:
+            log('PARA', f'score post-create skipped: {_e}')
     log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
                 f'ONumber=0x{src.para_obj_number:04x} rec={len(rec)}B '
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
@@ -8327,14 +8351,16 @@ def _forget_canopies_on(owner, viewer):
         for _set in _pcs.values():
             _set.discard(viewer.addr)
 
-def _send_parachuter_create_after(src, dst, delay):
+def _send_parachuter_create_after(src, dst, delay, with_client=False):
     """v550f5: (re)create src's canopy on dst a beat after dst got src's plane create, so the
-    record's owner-plane reference and the msg-25 prime both land on an existing station."""
+    record's owner-plane reference and the msg-25 prime both land on an existing station.
+    v554f5: with_client=True = the 2009 'in 2'65' client+parachuter form for a peer that has no
+    station for src (clean arena entry while src is chute-only)."""
     if delay > 0:
         time.sleep(delay)
     if getattr(src, 'para_obj_number', None) is None:
         return
-    if send_parachuter_create_for(src, dst, predel=True):
+    if send_parachuter_create_for(src, dst, predel=(not with_client), with_client=with_client):
         log('PARA', f'{src.current_pilot} canopy 0x{src.para_obj_number:04x} re-created onto '
                     f'{dst.current_pilot} (peer rebuilt its world mid-descent) [v550f5]')
     """23-byte PARACHUTER object record (Type 2). *** SIZE PROVEN FROM THE BINARY. ***
@@ -11106,11 +11132,11 @@ def relay_telemetry(src, data, _split_obj=None):
     _gate_obj = _split_obj
     if _gate_obj is None and len(pl) >= 9:
         _gate_obj = int.from_bytes(pl[7:9], 'little')     # v548f5: single-record chute frames too
-    if _gate_obj is not None and _gate_obj == getattr(src, 'para_obj_number', None):
-        # v547f5: the chute record only goes to peers that have received its create - a peer
-        # without the object cannot size the record (see TELEM_SPLIT_MULTI).
-        _pc = (getattr(src, '_para_created_peers', {}) or {}).get(_gate_obj, set())
-        peers = [x for x in peers if x.addr in _pc]
+    _chute_frame = (_gate_obj is not None and _gate_obj == getattr(src, 'para_obj_number', None))
+    # v553f5: the chute-peer gate is applied PER PEER below, AFTER the create hook - filtering
+    # `peers` up front excluded exactly the peers that still needed the canopy create (a clean
+    # arena entry while the bailer was chute-only: run_20260906_205208 20:59:21, Alon never got
+    # Taurus's 0x010b because the hook never ran for him).
     if not peers:
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
@@ -11160,11 +11186,9 @@ def relay_telemetry(src, data, _split_obj=None):
                         _submit_send(_send_parachuter_create_after, src, p,
                                      (RELAY_CREATE_SETTLE_S + 0.2) if _plane_alive else 0.0)
                     else:
-                        _cp.discard(p.addr); _ccp.discard(p.addr)     # nothing was sent - re-arm
-                        log('PARA', f'{src.current_pilot} canopy 0x{_pn550:04x}: peer '
-                                    f'{getattr(p, "current_pilot", "?")} has no station for us and '
-                                    f'the plane is already down - canopy not created on them '
-                                    f'[v550f5 gap]')
+                        # v554f5: no station on p and the plane is down -> the 2009 client+parachuter
+                        # create ('in 2'65'); the station is registered in the same message.
+                        _submit_send(_send_parachuter_create_after, src, p, 0.0, True)
                 elif not _plane_alive:
                     _cp.discard(p.addr)
                     if _wc:
@@ -11196,6 +11220,13 @@ def relay_telemetry(src, data, _split_obj=None):
                         _ms = int(_dt * 1000)
                         log('CREATE-ORDER', f'{src.current_pilot} -> {_pn}: telemetry released '
                                             f'{_ms}ms after create (CREATE-first OK)')
+        # v547f5/v553f5: a chute record only goes to peers that have received its create - a
+        # peer without the object cannot size the record (see TELEM_SPLIT_MULTI). Checked here,
+        # after the create hook above, so a peer lacking the canopy still gets it created.
+        if _chute_frame:
+            _pc553 = (getattr(src, '_para_created_peers', {}) or {}).get(_gate_obj, set())
+            if p.addr not in _pc553:
+                continue
         # Re-stamp the object tick to the RECIPIENT's own latest tick so their move loop
         # sees a small +delta (object slightly behind -> interpolate) instead of the
         # sender's absolute tick, which is skewed ~tens of cycles vs the receiver and
