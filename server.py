@@ -8339,6 +8339,27 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
     return True
 
+def send_crew_parachuter_create_for(src, dst, onum):
+    """v555f5: create one of src's CREW chutes (bomber bail, tag human-bit clear) on dst. The
+    record is the client's own out-4 body + our trailer, like the pilot's, but there is no score
+    prime (the record tag has no human bit, so the client takes the unbound path - no
+    GamerClientScore lookup) and no bail bookkeeping. Tracked per-onum in _para_created_peers so
+    the telemetry gate and rebuild logic treat it exactly like the pilot's canopy."""
+    _crew = src.__dict__.get('crew_para_objs') or {}
+    _ent = _crew.get(onum)
+    if _ent is None or src.my_obj_number is None:
+        return False
+    rec = build_parachuter_record(_ent['body'], st=src.client_number, onumber=onum,
+                                  owner_obj=src.my_obj_number)
+    _del_raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    pkt = build_msg13(_del_raw, bytes([0x02]) + rec)          # atomic predel+create (v552f5 form)
+    send_rel(dst, pkt, f'<- ATOMIC predel+create CREW PARACHUTER: {src.current_pilot} '
+                       f'ONumber=0x{onum:04x} -> {dst.current_pilot})', to=3.0)
+    src.__dict__.setdefault('_para_created_peers', {}).setdefault(onum, set()).add(dst.addr)
+    log('PARA', f'create-crew-parachuter {src.current_pilot} St={src.client_number} '
+                f'ONumber=0x{onum:04x} rec={len(rec)}B body={hx(_ent["body"])} -> {dst.current_pilot}')
+    return True
+
 def _forget_canopies_on(owner, viewer):
     """v551f5: `viewer` rebuilt its world (respawn from HQ / airfield change / bail-respawn), so
     it no longer holds `owner`'s canopy - drop it from every created-set so the relay hook
@@ -10786,6 +10807,8 @@ def _telem_split_records(src, pl):
     _pn = getattr(src, 'para_obj_number', None)
     if _pn is not None:
         known[_pn] = TELEM_PARA_RECORD
+    for _co in (src.__dict__.get('crew_para_objs') or {}):
+        known[_co] = TELEM_PARA_RECORD                       # v555f5: bomber crew chutes
     def fit(i, acc, depth):
         if i == len(rest):
             return acc
@@ -11018,7 +11041,14 @@ def relay_telemetry(src, data, _split_obj=None):
     # DROP, do not truncate: a record boundary inside the batch is not yet established, and
     # guessing one produces the same crash. A dropped tick is invisible - telemetry runs at
     # ~13/s and the next normal frame re-syncs the peer.
-    if pl[0] > TELEM_MAX_BC and TELEM_SPLIT_MULTI and _opc == 0x07 and _split_obj is None:
+    # v555f5: split on SHAPE, not on bc>5 - a two-chute frame (34+34 -> 75B, bc=4) slipped under the
+    # block-count guard and was relayed raw (run_20260906_210637 21:54:41 -> both peers CTD). A
+    # single record is 34 (chute) or 77..86 (plane family); anything else with opcode 0x07 is
+    # tried against the tiler and split if it fits >= 2 records, else it falls through unchanged.
+    _rec_len = len(pl) - 7
+    _single_shape = (_rec_len == TELEM_PARA_RECORD) or (77 <= _rec_len <= 86)
+    if ((pl[0] > TELEM_MAX_BC or not _single_shape) and TELEM_SPLIT_MULTI
+            and _opc == 0x07 and _split_obj is None):
         # v547f5: split into single-record frames and relay each one (see TELEM_SPLIT_MULTI).
         _subs = _telem_split_records(src, pl)
         if _subs:
@@ -11033,8 +11063,10 @@ def relay_telemetry(src, data, _split_obj=None):
                                    f'(plane 0x{(src.my_obj_number or 0):04x}, chute '
                                    f'0x{(getattr(src, "para_obj_number", None) or 0):04x}) [v547f5]')
             _hdr8 = bytes(data[:8])
+            _mine555 = {src.my_obj_number, getattr(src, 'para_obj_number', None)} \
+                       | set(src.__dict__.get('crew_para_objs') or {})
             for _onum, _sub in _subs:
-                if _onum != src.my_obj_number and _onum != getattr(src, 'para_obj_number', None):
+                if _onum not in _mine555:
                     _dr = src.__dict__.setdefault('_telem_split_dropped', set())
                     if _onum not in _dr:
                         _dr.add(_onum)
@@ -11132,7 +11164,9 @@ def relay_telemetry(src, data, _split_obj=None):
     _gate_obj = _split_obj
     if _gate_obj is None and len(pl) >= 9:
         _gate_obj = int.from_bytes(pl[7:9], 'little')     # v548f5: single-record chute frames too
-    _chute_frame = (_gate_obj is not None and _gate_obj == getattr(src, 'para_obj_number', None))
+    _chute_frame = (_gate_obj is not None
+                    and (_gate_obj == getattr(src, 'para_obj_number', None)
+                         or _gate_obj in (src.__dict__.get('crew_para_objs') or {})))   # v555f5 crew too
     # v553f5: the chute-peer gate is applied PER PEER below, AFTER the create hook - filtering
     # `peers` up front excluded exactly the peers that still needed the canopy create (a clean
     # arena entry while the bailer was chute-only: run_20260906_205208 20:59:21, Alon never got
@@ -11172,6 +11206,11 @@ def relay_telemetry(src, data, _split_obj=None):
                 _plane_alive = getattr(src, 'flying', False)
                 if _plane_alive:
                     _submit_send(send_create_object_for, src, p, with_client=_wc)
+                # v555f5: bomber CREW chutes onto a rebuilt peer (same created-set logic per onum).
+                for _co555 in list(src.__dict__.get('crew_para_objs') or {}):
+                    _cs555 = (src.__dict__.get('_para_created_peers') or {}).get(_co555, set())
+                    if p.addr not in _cs555 and (_plane_alive or not _wc):
+                        _submit_send(send_crew_parachuter_create_for, src, p, _co555)
                 _pn550 = getattr(src, 'para_obj_number', None)
                 if _pn550 is not None:
                     # v551f5: re-create the canopy ONLY if p is not recorded as holding it. A missing
@@ -13632,6 +13671,19 @@ def _ingame_own_object_removed(s, tb, stored):
             s.para_obj_number = None   # v522f5: canopy lifecycle ends here (see the v519f5 block)
             log('PILOTKILL', f'{s.current_pilot} late own-delete for server-killed canopy '
                              f'0x{_ponum:04x} -> swallowed (kill already broadcast live) [v519f5]')
+            return
+        if _ponum is not None and _ponum in (s.__dict__.get('crew_para_objs') or {}):
+            # v555f5: a CREW chute came down - relay a bare delete so peers drop it, forget it.
+            _pexitc = stored[7] if len(stored) > 7 else 0
+            _pdc = build_delete_object_3(onumber=_ponum, client_number=None)
+            for _peerc in get_sessions_in_room(s.current_room):
+                if _peerc is not s:
+                    _submit_send(send_rel, _peerc, _pdc,
+                                 f'<- delete CREW PARACHUTER 0x{_ponum:04x} ({s.current_pilot})', to=3.0)
+            s.crew_para_objs.pop(_ponum, None)
+            (s.__dict__.get('_para_created_peers') or {}).pop(_ponum, None)
+            log('PARA', f'{s.current_pilot} crew chute 0x{_ponum:04x} removed (exit=0x{_pexitc:02x}) '
+                        f'-> relayed delete to peers, no pilot fate involved [v555f5]')
             return
         if _ponum is not None and _ponum == getattr(s, 'para_obj_number', None):
             _pexit0 = stored[7] if len(stored) > 7 else 0
@@ -17827,6 +17879,41 @@ def handle_post_auth(s, cmd, pl):
                 s.spawn_ident_next = _pi + 1
             log('POST-AUTH', f'msg-4 (type=0x{tb:02x}) parachute/bail object -> Number {_pn} '
                              f'ident={_pi}')
+            # v555f5 [CREW CHUTE vs PILOT CHUTE - the bomber bail]: a bomber bail registers MORE THAN
+            # ONE parachuter: the crew jump first with the record tag's HUMAN bit (0x80) CLEAR
+            # ('12 80 2e 01 ...'), the pilot's own chute follows with it SET ('92 80 32 01 ...').
+            # 2009 shows the same pair (messages04 7451/7462: Number=243 'B-17G(2)(p)', then
+            # Number=249 'AC2E_Bigalon'; St=47's B-17 put out 143/145/148/152 crew chutes, deleted
+            # later with MEC=2 on peers). Treating the crew chute as the PILOT'S bail booked the kill
+            # and fired the v537 crumble/death notification at a pilot still in the cockpit - his
+            # client killed him and blew the plane (run_20260906_210637 21:53:43: crew out-4 tag
+            # 0x12 -> BAILCRUMBLE -> StartPlace + delete 0x012e exit=0xb3 150ms later), and the
+            # orphaned crew object was the extra record behind the 75B two-chute frame CTD.
+            # A crew chute is an ordinary owned object: confirm it, create it on peers, relay its
+            # telemetry, relay its delete - NO bail semantics.
+            _tag555 = pl[7] if len(pl) > 7 else 0x80
+            if SEND_PARACHUTER and s.entered_game and s.my_obj_number is not None \
+                    and not (_tag555 & 0x80):
+                _crew = s.__dict__.setdefault('crew_para_objs', {})
+                _crew[_pn] = {'ident': _pi, 'at': time.time(),
+                              'body': bytes(pl[7:7 + PARACHUTER_HEADER_SIZE])}
+                _phist = s.__dict__.setdefault('_obj_number_history', [])
+                _phist.append((_pn, time.time()))
+                if len(_phist) > 16:
+                    del _phist[:-16]
+                log('PARA', f'{s.current_pilot} CREW chute -> object 0x{_pn:04x} (tag 0x{_tag555:02x}, '
+                            f'human bit clear; plane 0x{s.my_obj_number:04x}, pilot still aboard) - '
+                            f'confirm + create on peers, no bail booked [v555f5]')
+                if PARA_SEND_CONFIRM:
+                    threading.Thread(target=lambda nn=_pn, ii=_pi: send_reply(
+                        s, build_server_confirm_5(nn, ii),
+                        f'<- ServerConfirm 5 (CREW PARACHUTER Number={nn} ident={ii})'), daemon=True).start()
+                if PARA_SEND_CREATE:
+                    for _peer in get_sessions_in_room(s.current_room):
+                        if _peer is not s and getattr(_peer, 'flying', False):
+                            threading.Thread(target=send_crew_parachuter_create_for,
+                                             args=(s, _peer, _pn), daemon=True).start()
+                return
             # *** v248: THE PARACHUTER IS A SECOND OBJECT - CONFIRM IT AND CREATE IT ON PEERS. ***
             # After a bail there are TWO entities (the user's hint; the RE agrees - FUN_004f26b0
             # case 2 is literally "Create NetParachuter"):
