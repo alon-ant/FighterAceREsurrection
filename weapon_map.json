@@ -1,0 +1,4 @@
+{
+ "weapon_obj_to_scene": {},
+ "_note": "v447f5 reset: ALL prior anchors removed. Field proof (messages70, 2026-08-15): the msg-36 index space is NOT the production-panel scene space - 36-idx 33 contained 'a bridge' then 'USA Metal Factory' (panel-33 is the USA Bomber Airfield), so anchors expressed in panel indices destroy the WRONG objects. Do not re-anchor until the 36-space index<->scene mapping is established (Ghidra msg-36 handler table / TRNnn .gst decode). Each msg-36 destroy kills ONE remaining object in the scene; a destroy sent to an exhausted scene CTDs the client (Trn_Obj.cpp:415)."
+}
