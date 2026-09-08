@@ -294,7 +294,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v584f5'
+VERSION = 'v587f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3929,11 +3929,12 @@ def console_handler():
                 _rooms = sorted(_active_ingame_rooms())
                 if not _a or _a[0] == 'status':
                     log('CONSOLE', f'tc: triggers={"ON" if TC_TRIGGERS else "OFF"} attack%={TC_ATTACK_PERCENT} '
-                                   f'toggle={TC_ATTACK_TOGGLE_S:.0f}s tanks={TC_TANKS_ATTACK}/{TC_TANKS_DEFEND} '
+                                   f'defend%={TC_DEFEND_PERCENT} toggle={TC_ATTACK_TOGGLE_S:.0f}s tanks={TC_TANKS_ATTACK}/{TC_TANKS_DEFEND} '
                                    f'class_by_camp={TANK_CLASS_BY_CAMP}')
                     for (_r, _sidx), _tr in sorted(TRIGGERS.items()):
                         log('CONSOLE', f'  room {_r} scene {_sidx}: by {_tr["by"]} {time.time() - _tr["at"]:.0f}s ago '
-                                       f'camp {_tr["camp"]} attacker {_tr["attacker"]} columns {_tr["columns"]}')
+                                       f'camp {_tr["camp"]} attacker {_tr["attacker"]} columns {_tr["columns"]} '
+                                       f'defended={_tr.get("defended")}')
                     for _rid in _rooms:
                         _trn = _probe_terrain_for_room(_rid)
                         for _camp in sorted(set((SCENE_CAMP_BY_TERRAIN.get(_trn) or {}).values())):
@@ -9127,6 +9128,9 @@ def spawn_tank(room_id, camp, class_id, group_id=0, pos=None, reason='', send=Tr
     send=False registers it only (the caller batches the records itself)."""
     if not SPAWN_TANKS or room_id is None:
         return None
+    if not tank_consts_ok():
+        log('TANK', 'spawn refused - tank telemetry constants missing (tank_tables.json not loaded)')
+        return None
     onum = next_obj_number()
     TANKS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
                    'group': int(group_id), 'pos': tuple(pos) if pos else (0.0, 0.0, 0.0),
@@ -9322,13 +9326,18 @@ def tank_killed(onum, killer, reason=''):
 #     <grid> triggered by <pilot>' (+ the mission lines as chat for now).
 # Tank fire on scenes/planes is client-side cosmetic (no msg 31 from a NetTank) -> step 4.
 TC_TRIGGERS          = True
-TC_ATTACK_PERCENT    = 90       # scene damage % that triggers (2009 gamedef AttackPercent)
+TC_ATTACK_PERCENT    = 60       # scene damage % that triggers (user 2026-09-09; 2009 gamedef 90)
+TC_DEFEND_PERCENT    = 80       # v587f5: the DEFENDING column is raised only once the scene's damage
+                                # reaches this (at the trigger, or later as the assault progresses -
+                                # plane or tank fire alike); a separate gate from the attack trigger
 TC_ATTACK_TOGGLE_S   = 300      # per-scene re-trigger lockout (AttackToggleDelay)
 TC_TANKS_ATTACK      = 8
 TC_TANKS_DEFEND      = 8
 TC_TANK_FUEL_KG      = 300      # loadout drawn from the camp pool per tank
 TC_TANK_AMMO_KG      = 200
 TC_COLUMN_MPS        = 9.0
+TC_DEFEND_AT_TARGET  = True     # v585f5: defenders form AT the threatened scene (user), units/pool
+                                # still drawn as if produced by the camp's nearest tank producer
 TC_AI_CHAT           = True
 TC_AI_CHAT_PI        = None     # PlayerIndex the AI lines are stamped with (None = AI_ROSTER_PI)
 AI_ROSTER_PI         = 0x1fe    # v577f5: the 'AI' ROSTER player (msg 62) the chat lines come from
@@ -9430,6 +9439,12 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
     txy = tc_scene_xy(terrain, target_sidx)
     if not txy:
         return None
+    if not tank_consts_ok():
+        # v586f5: no tank_tables.json (live 2026-09-08 20:41: two triggers raised 32 tanks that
+        # never got a position update and were culled by every client 28 s later)
+        log('TC', f'room {room_id}: cannot raise a column - tank telemetry constants missing '
+                  f'(tank_tables.json not loaded next to server.py)')
+        return None
     fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1])
     if fac is None:
         tc_say(room_id, f'AI: {tc_camp_tag(camp)} has no tank factory to {purpose} '
@@ -9461,17 +9476,29 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
     if UNITS_MODEL:
         camp_units_take(room_id, camp, 'tank', loaded)
     cls = TANK_CLASS_BY_CAMP.get(int(camp), TANK_CLASS_DEFAULT)
-    gid = spawn_column(room_id, camp, cls, loaded, fx, fy, reason=f'(TC {purpose} of scene {target_sidx})')
+    if purpose == 'defend' and TC_DEFEND_AT_TARGET:
+        # v585f5: form on the far side of the target from the enemy's likely approach is not
+        # knowable here - form on a clear spot beside the scene centre; the columns tick parks
+        # them there and they engage anything that comes in gun range
+        sx_, sy_ = tank_clear_spot(terrain, txy[0] - TC_ASSAULT_RADIUS, txy[1])
+        gid = spawn_column(room_id, camp, cls, loaded, sx_, sy_, reason=f'(TC defend of scene {target_sidx}, at the scene)')
+        form_xy = (txy[0], txy[1])
+    else:
+        gid = spawn_column(room_id, camp, cls, loaded, fx, fy, reason=f'(TC {purpose} of scene {target_sidx})')
+        form_xy = (fx, fy)
     if gid is None:
         return None
     col = COLUMNS.get(gid)
     col['purpose'] = purpose; col['target'] = int(target_sidx); col['camp'] = int(camp)
     col['army'] = (gid % 9) + 1; col['battalion'] = ((gid * 3) % 7) + 1
-    column_goto(gid, txy[0], txy[1], TC_COLUMN_MPS)
+    if purpose == 'defend' and TC_DEFEND_AT_TARGET:
+        col['engaged'] = time.time()                       # already on station
+    else:
+        column_goto(gid, txy[0], txy[1], TC_COLUMN_MPS)
     tcamp = scene_camp(terrain, target_sidx)
     who = f' triggered by {trigger_pilot}' if trigger_pilot else ''
     tc_say(room_id, f'AI: {tc_ordinal(col["army"])} Army {tc_ordinal(col["battalion"])} Battalion at '
-                    f'{tc_grid(fx, fy)} forming to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
+                    f'{tc_grid(form_xy[0], form_xy[1])} forming to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
                     f'{tc_grid(txy[0], txy[1])}{who}')
     # mission lines, to each side
     if purpose == 'attack':
@@ -9482,7 +9509,7 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
                         f'{tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=tcamp)
     else:
         tc_say(room_id, f'Defend scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
-        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} '
+        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} '
                         f'defending {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
     log('TC', f'room {room_id}: column {gid} ({loaded}/{n_want} x class {cls}) {purpose} scene {target_sidx} '
               f'from {ftype} {fsidx} ({fd:.0f} m away)')
@@ -9517,9 +9544,31 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
             logx('TC', 'trigger bonus failed')
     tc_say(room_id, f'AI: {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} triggered by {pname}')
     ga = tc_raise_column(room_id, pcamp, TC_TANKS_ATTACK, sidx, 'attack', pname)
-    gd = tc_raise_column(room_id, tcamp, TC_TANKS_DEFEND, sidx, 'defend', pname)
-    TRIGGERS[key]['columns'] = [g for g in (ga, gd) if g is not None]
+    TRIGGERS[key]['columns'] = [g for g in (ga,) if g is not None]
+    TRIGGERS[key]['defended'] = False
+    tc_check_defend(room_id, sidx, reason='(at trigger)')     # v587f5: raise the defence only past TC_DEFEND_PERCENT
     return True
+
+def tc_check_defend(room_id, sidx, reason=''):
+    """v587f5: raise the defending column for a triggered scene once its damage reaches
+    TC_DEFEND_PERCENT (called at the trigger and after every later object kill on the scene,
+    from plane or tank fire). One defence per trigger."""
+    key = (room_id, int(sidx))
+    tr = TRIGGERS.get(key)
+    if not tr or tr.get('defended'):
+        return False
+    try:
+        frac = trn_scene_damage_frac(room_id, sidx)
+    except Exception:
+        return False
+    if frac * 100.0 + 1e-6 < TC_DEFEND_PERCENT:
+        return False
+    tr['defended'] = True
+    log('TC', f'room {room_id}: scene {sidx} damage {frac * 100:.0f}% >= {TC_DEFEND_PERCENT}% - raising the defence {reason}')
+    gd = tc_raise_column(room_id, tr['camp'], TC_TANKS_DEFEND, sidx, 'defend', tr.get('by'))
+    if gd is not None:
+        tr['columns'].append(gd)
+    return gd is not None
 
 # --- v576f5 ENGAGEMENT + CAPTURE (step 4 of the TC layer) --------------------------------
 # A NetTank's gun is client-side eyecandy (no msg 31 / 51 ever arrives for its fire), so the
@@ -9579,6 +9628,7 @@ def tc_ai_destroy_object(room_id, obj, oi, by=''):
         log('TC', f'room {room_id}: tank fire destroyed obj {obj} "{oi["name"]}" - scene {sc} damage {frac * 100:.0f}%')
         if trn_scene_complete(room_id, sc):
             supply_on_scene_destroyed(room_id, sc)
+        tc_check_defend(room_id, sc, reason='(tank fire)')          # v587f5
 
 def tc_capture_scene(room_id, sidx, camp, by_pilot=None):
     terrain = _probe_terrain_for_room(room_id)
@@ -9746,6 +9796,7 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
         frac = trn_scene_damage_frac(room_id, sidx)
         if frac * 100.0 + 1e-6 >= TC_ATTACK_PERCENT:
             tc_trigger_scene(room_id, sidx, pilot_sess, reason=f'(damage {frac * 100:.0f}% >= {TC_ATTACK_PERCENT}%)')
+        tc_check_defend(room_id, sidx, reason='(plane damage)')     # v587f5
     except Exception:
         logx('TC', 'trigger check failed')
 
