@@ -1,0 +1,1880 @@
+{
+ "terrain": 5,
+ "counts": {
+  "gst": 31,
+  "gat": 2,
+  "got": 42,
+  "gsi": 5,
+  "goi": 90
+ },
+ "gst": [
+  {
+   "i": 0,
+   "name": "Airfield",
+   "raw_tail": "4ce13944000000000000000000401c46"
+  },
+  {
+   "i": 1,
+   "name": "00 Airfield Old",
+   "raw_tail": "ce457a44000000000000000000401c46"
+  },
+  {
+   "i": 2,
+   "name": "00 Airfield Old",
+   "raw_tail": "ce457a44000000000000000000401c46"
+  },
+  {
+   "i": 3,
+   "name": "00 Airfield Old",
+   "raw_tail": "ce457a44000000000000000000401c46"
+  },
+  {
+   "i": 4,
+   "name": "00 Airfield Old",
+   "raw_tail": "ce457a44000000000000000000401c46"
+  },
+  {
+   "i": 5,
+   "name": "Planes Factory",
+   "raw_tail": "8a51564303000000ffffffff00401c46"
+  },
+  {
+   "i": 6,
+   "name": "Tank Factory",
+   "raw_tail": "1cc46a4303000000ffffffff00401c46"
+  },
+  {
+   "i": 7,
+   "name": "Village",
+   "raw_tail": "e21c124302000000ffffffff00401c46"
+  },
+  {
+   "i": 8,
+   "name": "Village",
+   "raw_tail": "28f5f64202000000ffffffff00401c46"
+  },
+  {
+   "i": 9,
+   "name": "Planes Factory",
+   "raw_tail": "847b574303000000ffffffff00401c46"
+  },
+  {
+   "i": 10,
+   "name": "Tank Factory",
+   "raw_tail": "c54f684303000000ffffffff00401c46"
+  },
+  {
+   "i": 11,
+   "name": "Bomber Airfield ",
+   "raw_tail": "2939a844010000000000000000401c46"
+  },
+  {
+   "i": 12,
+   "name": "00 Bomber Airfield Old",
+   "raw_tail": "9e14bc44010000000000000000401c46"
+  },
+  {
+   "i": 13,
+   "name": "00 Bomber Airfield Old",
+   "raw_tail": "1113bc44010000000000000000401c46"
+  },
+  {
+   "i": 14,
+   "name": "00 Bomber Airfield Old",
+   "raw_tail": "0865bc44010000000000000000401c46"
+  },
+  {
+   "i": 15,
+   "name": "00 Bomber Airfield Old",
+   "raw_tail": "360ebc44010000000000000000401c46"
+  },
+  {
+   "i": 16,
+   "name": "Front Line Airfield",
+   "raw_tail": "350d0b44000000000000000000401c46"
+  },
+  {
+   "i": 17,
+   "name": "Front Line Airfield",
+   "raw_tail": "350d0b44000000000000000000401c46"
+  },
+  {
+   "i": 18,
+   "name": "Airfield",
+   "raw_tail": "4ce13944000000000000000000401c46"
+  },
+  {
+   "i": 19,
+   "name": "Bomber Airfield",
+   "raw_tail": "2939a844010000000000000000401c46"
+  },
+  {
+   "i": 20,
+   "name": "Front Line Airfield",
+   "raw_tail": "350d0b44000000000000000000401c46"
+  },
+  {
+   "i": 21,
+   "name": "Front Line Airfield",
+   "raw_tail": "350d0b44000000000000000000401c46"
+  },
+  {
+   "i": 22,
+   "name": "Front Line Airfield",
+   "raw_tail": "350d0b44000000000000000000401c46"
+  },
+  {
+   "i": 23,
+   "name": "Airfield",
+   "raw_tail": "4ce13944000000000000000000401c46"
+  },
+  {
+   "i": 24,
+   "name": "Airfield",
+   "raw_tail": "4ce13944000000000000000000401c46"
+  },
+  {
+   "i": 25,
+   "name": "Airfield",
+   "raw_tail": "4ce13944000000000000000000401c46"
+  },
+  {
+   "i": 26,
+   "name": "Bomber Airfield",
+   "raw_tail": "2939a844010000000000000000401c46"
+  },
+  {
+   "i": 27,
+   "name": "Bomber Airfield ",
+   "raw_tail": "2939a844010000000000000000401c46"
+  },
+  {
+   "i": 28,
+   "name": "Bomber Airfield ",
+   "raw_tail": "2939a844010000000000000000401c46"
+  },
+  {
+   "i": 29,
+   "name": "Railyard",
+   "raw_tail": "a52e8e4304000000ffffffff00401c46"
+  },
+  {
+   "i": 30,
+   "name": "Substation",
+   "raw_tail": "b48b834204000000ffffffff00401c46"
+  }
+ ],
+ "got": [
+  {
+   "i": 0,
+   "name": "Hangar",
+   "value": 150,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 1,
+   "name": "Hangar",
+   "value": 150,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 2,
+   "name": "Hardened Ammo Bunker",
+   "value": 500,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 3,
+   "name": "Flak battery",
+   "value": 100,
+   "radius": 0,
+   "category": 3,
+   "destroy_mode": 0
+  },
+  {
+   "i": 4,
+   "name": "Flak battery",
+   "value": 100,
+   "radius": 0,
+   "category": 3,
+   "destroy_mode": 0
+  },
+  {
+   "i": 5,
+   "name": "AA battery",
+   "value": 100,
+   "radius": 0,
+   "category": 1,
+   "destroy_mode": 0
+  },
+  {
+   "i": 6,
+   "name": "AA battery",
+   "value": 100,
+   "radius": 0,
+   "category": 2,
+   "destroy_mode": 0
+  },
+  {
+   "i": 7,
+   "name": "Headquarters",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 8,
+   "name": "Headquarters",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 9,
+   "name": "Headquarters",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 10,
+   "name": "Headquarters",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 11,
+   "name": "Headquarters",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 12,
+   "name": "Large Ammo Bunker",
+   "value": 120,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 13,
+   "name": "Ammo Bunker",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 14,
+   "name": "Shed",
+   "value": 10,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 15,
+   "name": "Shed",
+   "value": 10,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 16,
+   "name": "Shed",
+   "value": 5,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 17,
+   "name": "Antenna",
+   "value": 120,
+   "radius": 50000,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 18,
+   "name": "Antenna",
+   "value": 100,
+   "radius": 20000,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 19,
+   "name": "Tree",
+   "value": 0,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 20,
+   "name": "Tree",
+   "value": 0,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 21,
+   "name": "Tree",
+   "value": 0,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 22,
+   "name": "Ammo Factory",
+   "value": 300,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 23,
+   "name": "Tank Factory",
+   "value": 300,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 24,
+   "name": "Plane Factory",
+   "value": 300,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 25,
+   "name": "Fuel Factory",
+   "value": 450,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 1
+  },
+  {
+   "i": 26,
+   "name": "Fuel Tank",
+   "value": 40,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 1
+  },
+  {
+   "i": 27,
+   "name": "Fuel Tank",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 1
+  },
+  {
+   "i": 28,
+   "name": "Hardened Fuel Tank",
+   "value": 120,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 1
+  },
+  {
+   "i": 29,
+   "name": "Metal Factory",
+   "value": 200,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 30,
+   "name": "House",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 31,
+   "name": "House",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 32,
+   "name": "House",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 33,
+   "name": "House",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 34,
+   "name": "House",
+   "value": 50,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 35,
+   "name": "Church",
+   "value": 100,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 36,
+   "name": "Rail Yard",
+   "value": 150,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 0
+  },
+  {
+   "i": 37,
+   "name": "Airfield",
+   "value": -1,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 3
+  },
+  {
+   "i": 38,
+   "name": "Bomber Airfield",
+   "value": -1,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 3
+  },
+  {
+   "i": 39,
+   "name": "Grass Airfield",
+   "value": -1,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 3
+  },
+  {
+   "i": 40,
+   "name": "Airfield",
+   "value": -1,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 3
+  },
+  {
+   "i": 41,
+   "name": "Bomber Airfield",
+   "value": -1,
+   "radius": 0,
+   "category": 0,
+   "destroy_mode": 3
+  }
+ ],
+ "gsi": [
+  {
+   "i": 0,
+   "scene_type": 16,
+   "camp": 1,
+   "flags": 1,
+   "x": -2592.37109375,
+   "y": 5891.859375,
+   "tail": "a4d8f54200401c46",
+   "type_name": "Front Line Airfield"
+  },
+  {
+   "i": 1,
+   "scene_type": 17,
+   "camp": 2,
+   "flags": 2,
+   "x": 5268.1796875,
+   "y": 1736.2421875,
+   "tail": "c2b70f4300401c46",
+   "type_name": "Front Line Airfield"
+  },
+  {
+   "i": 2,
+   "scene_type": 20,
+   "camp": 3,
+   "flags": 3,
+   "x": 4587.2890625,
+   "y": -5471.125,
+   "tail": "8afc174300401c46",
+   "type_name": "Front Line Airfield"
+  },
+  {
+   "i": 3,
+   "scene_type": 21,
+   "camp": 4,
+   "flags": 4,
+   "x": -2404.72265625,
+   "y": -5888.2734375,
+   "tail": "2c41ca4200401c46",
+   "type_name": "Front Line Airfield"
+  },
+  {
+   "i": 4,
+   "scene_type": 22,
+   "camp": 0,
+   "flags": 0,
+   "x": -6326.30078125,
+   "y": -116.140625,
+   "tail": "ef83064300401c46",
+   "type_name": "Front Line Airfield"
+  }
+ ],
+ "goi": [
+  {
+   "i": 0,
+   "type": 7,
+   "scene": 0,
+   "x": -2928.36328125,
+   "y": 5805.40625,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 1,
+   "type": 0,
+   "scene": 0,
+   "x": -2303.96484375,
+   "y": 6129.453125,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 2,
+   "type": 1,
+   "scene": 0,
+   "x": -2299.51171875,
+   "y": 6056.5,
+   "tail": "a4d8f542431dafb2ffff7f3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 3,
+   "type": 3,
+   "scene": 0,
+   "x": -2834.03125,
+   "y": 5565.0,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 4,
+   "type": 5,
+   "scene": 0,
+   "x": -2341.75,
+   "y": 6179.3125,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 5,
+   "type": 5,
+   "scene": 0,
+   "x": -2837.97265625,
+   "y": 5401.5625,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 6,
+   "type": 6,
+   "scene": 0,
+   "x": -3017.671875,
+   "y": 6144.90625,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 7,
+   "type": 6,
+   "scene": 0,
+   "x": -2346.21875,
+   "y": 6384.8515625,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 8,
+   "type": 18,
+   "scene": 0,
+   "x": -2845.453125,
+   "y": 5594.3828125,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 9,
+   "type": 39,
+   "scene": 0,
+   "x": -2592.1484375,
+   "y": 5892.0,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 10,
+   "type": 1,
+   "scene": 0,
+   "x": -2262.46484375,
+   "y": 6003.0234375,
+   "tail": "a4d8f542d5d031be5b1c7c3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 11,
+   "type": 13,
+   "scene": 0,
+   "x": -2909.91015625,
+   "y": 5706.90625,
+   "tail": "a4d8f5427b1b443fbb8d243f0000000000000000000000000000803f"
+  },
+  {
+   "i": 12,
+   "type": 31,
+   "scene": 0,
+   "x": -2883.53125,
+   "y": 5650.7421875,
+   "tail": "a4d8f542b18f70bf411dafbe0000000000000000000000000000803f"
+  },
+  {
+   "i": 13,
+   "type": 32,
+   "scene": 0,
+   "x": -3029.4765625,
+   "y": 6058.78125,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 14,
+   "type": 26,
+   "scene": 0,
+   "x": -2205.12890625,
+   "y": 5852.46875,
+   "tail": "a4d8f542d3d0313e5b1c7c3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 15,
+   "type": 26,
+   "scene": 0,
+   "x": -2192.62890625,
+   "y": 5810.625,
+   "tail": "a4d8f542b08f70bf441daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 16,
+   "type": 20,
+   "scene": 0,
+   "x": -2381.515625,
+   "y": 6327.296875,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 17,
+   "type": 20,
+   "scene": 0,
+   "x": -2363.3359375,
+   "y": 6309.453125,
+   "tail": "a4d8f542431dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 18,
+   "type": 0,
+   "scene": 1,
+   "x": 5452.0859375,
+   "y": 1410.9609375,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 19,
+   "type": 1,
+   "scene": 1,
+   "x": 5379.4609375,
+   "y": 1419.2421875,
+   "tail": "c2b70f435c1c7c3fcfd031be0000000000000000000000000000803f"
+  },
+  {
+   "i": 20,
+   "type": 3,
+   "scene": 1,
+   "x": 4988.25,
+   "y": 2030.9921875,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 21,
+   "type": 5,
+   "scene": 1,
+   "x": 5507.7421875,
+   "y": 1439.515625,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 22,
+   "type": 5,
+   "scene": 1,
+   "x": 4827.9765625,
+   "y": 2063.25,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 23,
+   "type": 6,
+   "scene": 1,
+   "x": 5591.234375,
+   "y": 2111.140625,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 24,
+   "type": 6,
+   "scene": 1,
+   "x": 5710.9375,
+   "y": 1408.21875,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 25,
+   "type": 18,
+   "scene": 1,
+   "x": 5019.171875,
+   "y": 2037.1328125,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 26,
+   "type": 39,
+   "scene": 1,
+   "x": 5268.28125,
+   "y": 1736.0,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 27,
+   "type": 1,
+   "scene": 1,
+   "x": 5320.3671875,
+   "y": 1392.046875,
+   "tail": "c2b70f43ffff7f3fba919d330000000000000000000000000000803f"
+  },
+  {
+   "i": 28,
+   "type": 13,
+   "scene": 1,
+   "x": 5141.1796875,
+   "y": 2081.0703125,
+   "tail": "c2b70f430200003fd5b35dbf0000000000000000000000000000803f"
+  },
+  {
+   "i": 29,
+   "type": 31,
+   "scene": 1,
+   "x": 5081.2890625,
+   "y": 2064.8515625,
+   "tail": "c2b70f43d2d031be5c1c7c3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 30,
+   "type": 32,
+   "scene": 1,
+   "x": 5508.46875,
+   "y": 2137.71875,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 31,
+   "type": 26,
+   "scene": 1,
+   "x": 5162.140625,
+   "y": 1361.71875,
+   "tail": "c2b70f43b28f703f421dafbe0000000000000000000000000000803f"
+  },
+  {
+   "i": 32,
+   "type": 26,
+   "scene": 1,
+   "x": 5118.765625,
+   "y": 1356.6796875,
+   "tail": "c2b70f430000003fd6b35d3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 33,
+   "type": 20,
+   "scene": 1,
+   "x": 5660.3828125,
+   "y": 1452.9765625,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 34,
+   "type": 20,
+   "scene": 1,
+   "x": 5639.65625,
+   "y": 1438.171875,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 35,
+   "type": 10,
+   "scene": 1,
+   "x": 5225.4609375,
+   "y": 2062.234375,
+   "tail": "c2b70f435c1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 36,
+   "type": 0,
+   "scene": 2,
+   "x": 4824.890625,
+   "y": -5759.53125,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 37,
+   "type": 1,
+   "scene": 2,
+   "x": 4751.9296875,
+   "y": -5763.984375,
+   "tail": "8afc1743ffff7f3f1633e0330000000000000000000000000000803f"
+  },
+  {
+   "i": 38,
+   "type": 3,
+   "scene": 2,
+   "x": 4260.4296875,
+   "y": -5229.46484375,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 39,
+   "type": 5,
+   "scene": 2,
+   "x": 4874.7421875,
+   "y": -5721.74609375,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 40,
+   "type": 5,
+   "scene": 2,
+   "x": 4096.9921875,
+   "y": -5225.5234375,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 41,
+   "type": 6,
+   "scene": 2,
+   "x": 4840.3359375,
+   "y": -5045.82421875,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 42,
+   "type": 6,
+   "scene": 2,
+   "x": 5080.28125,
+   "y": -5717.28125,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 43,
+   "type": 18,
+   "scene": 2,
+   "x": 4289.8125,
+   "y": -5218.04296875,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 44,
+   "type": 39,
+   "scene": 2,
+   "x": 4587.4296875,
+   "y": -5471.34765625,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 45,
+   "type": 1,
+   "scene": 2,
+   "x": 4698.453125,
+   "y": -5801.03125,
+   "tail": "8afc17435b1c7c3fdbd0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 46,
+   "type": 13,
+   "scene": 2,
+   "x": 4402.3359375,
+   "y": -5153.5859375,
+   "tail": "8afc1743bc8d243f7a1b44bf0000000000000000000000000000803f"
+  },
+  {
+   "i": 47,
+   "type": 31,
+   "scene": 2,
+   "x": 4346.171875,
+   "y": -5179.96484375,
+   "tail": "8afc1743441dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 48,
+   "type": 32,
+   "scene": 2,
+   "x": 4754.2109375,
+   "y": -5034.01953125,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 49,
+   "type": 26,
+   "scene": 2,
+   "x": 4547.8984375,
+   "y": -5858.3671875,
+   "tail": "8afc17435c1c7c3fced031be0000000000000000000000000000803f"
+  },
+  {
+   "i": 50,
+   "type": 26,
+   "scene": 2,
+   "x": 4506.0546875,
+   "y": -5870.8671875,
+   "tail": "8afc1743421daf3eb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 51,
+   "type": 20,
+   "scene": 2,
+   "x": 5022.7265625,
+   "y": -5681.98046875,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 52,
+   "type": 20,
+   "scene": 2,
+   "x": 5004.8828125,
+   "y": -5700.16015625,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 53,
+   "type": 8,
+   "scene": 2,
+   "x": 4502.9375,
+   "y": -5158.48046875,
+   "tail": "8afc1743b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 54,
+   "type": 0,
+   "scene": 3,
+   "x": -2167.125,
+   "y": -6176.6796875,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 55,
+   "type": 1,
+   "scene": 3,
+   "x": -2240.0859375,
+   "y": -6181.1328125,
+   "tail": "2c41ca42ffff7f3f1633e0330000000000000000000000000000803f"
+  },
+  {
+   "i": 56,
+   "type": 3,
+   "scene": 3,
+   "x": -2731.58203125,
+   "y": -5646.61328125,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 57,
+   "type": 5,
+   "scene": 3,
+   "x": -2117.2734375,
+   "y": -6138.89453125,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 58,
+   "type": 5,
+   "scene": 3,
+   "x": -2895.01953125,
+   "y": -5642.671875,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 59,
+   "type": 6,
+   "scene": 3,
+   "x": -2151.67578125,
+   "y": -5462.97265625,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 60,
+   "type": 6,
+   "scene": 3,
+   "x": -1911.7265625,
+   "y": -6134.4296875,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 61,
+   "type": 18,
+   "scene": 3,
+   "x": -2702.19921875,
+   "y": -5635.19140625,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 62,
+   "type": 39,
+   "scene": 3,
+   "x": -2404.578125,
+   "y": -5888.49609375,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 63,
+   "type": 1,
+   "scene": 3,
+   "x": -2293.5546875,
+   "y": -6218.1796875,
+   "tail": "2c41ca425b1c7c3fdbd0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 64,
+   "type": 13,
+   "scene": 3,
+   "x": -2589.67578125,
+   "y": -5570.734375,
+   "tail": "2c41ca42bc8d243f7a1b44bf0000000000000000000000000000803f"
+  },
+  {
+   "i": 65,
+   "type": 31,
+   "scene": 3,
+   "x": -2645.83984375,
+   "y": -5597.11328125,
+   "tail": "2c41ca42441dafbeb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 66,
+   "type": 32,
+   "scene": 3,
+   "x": -2237.80078125,
+   "y": -5451.16796875,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 67,
+   "type": 26,
+   "scene": 3,
+   "x": -2444.1171875,
+   "y": -6275.515625,
+   "tail": "2c41ca425c1c7c3fced031be0000000000000000000000000000803f"
+  },
+  {
+   "i": 68,
+   "type": 26,
+   "scene": 3,
+   "x": -2485.953125,
+   "y": -6288.015625,
+   "tail": "2c41ca42421daf3eb18f703f0000000000000000000000000000803f"
+  },
+  {
+   "i": 69,
+   "type": 20,
+   "scene": 3,
+   "x": -1969.2890625,
+   "y": -6099.12890625,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 70,
+   "type": 20,
+   "scene": 3,
+   "x": -1987.1328125,
+   "y": -6117.30859375,
+   "tail": "2c41ca42b18f703f461daf3e0000000000000000000000000000803f"
+  },
+  {
+   "i": 71,
+   "type": 9,
+   "scene": 3,
+   "x": -2529.58203125,
+   "y": -5589.5546875,
+   "tail": "2c41ca42481daf3eb18f70bf0000000000000000000000000000803f"
+  },
+  {
+   "i": 72,
+   "type": 0,
+   "scene": 4,
+   "x": -6142.39453125,
+   "y": -441.42578125,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 73,
+   "type": 1,
+   "scene": 4,
+   "x": -6215.01953125,
+   "y": -433.140625,
+   "tail": "ef8306435b1c7c3fced031be0000000000000000000000000000803f"
+  },
+  {
+   "i": 74,
+   "type": 3,
+   "scene": 4,
+   "x": -6606.23046875,
+   "y": 178.609375,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 75,
+   "type": 5,
+   "scene": 4,
+   "x": -6086.73828125,
+   "y": -412.8671875,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 76,
+   "type": 5,
+   "scene": 4,
+   "x": -6766.5,
+   "y": 210.8671875,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 77,
+   "type": 6,
+   "scene": 4,
+   "x": -6003.24609375,
+   "y": 258.7578125,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 78,
+   "type": 6,
+   "scene": 4,
+   "x": -5883.5390625,
+   "y": -444.1640625,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 79,
+   "type": 18,
+   "scene": 4,
+   "x": -6575.3125,
+   "y": 184.75,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 80,
+   "type": 39,
+   "scene": 4,
+   "x": -6326.19921875,
+   "y": -116.3828125,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 81,
+   "type": 1,
+   "scene": 4,
+   "x": -6274.109375,
+   "y": -460.3359375,
+   "tail": "ef830643feff7f3fd4cbb3330000000000000000000000000000803f"
+  },
+  {
+   "i": 82,
+   "type": 13,
+   "scene": 4,
+   "x": -6453.3046875,
+   "y": 228.6875,
+   "tail": "ef8306430100003fd4b35dbf0000000000000000000000000000803f"
+  },
+  {
+   "i": 83,
+   "type": 31,
+   "scene": 4,
+   "x": -6513.1953125,
+   "y": 212.46875,
+   "tail": "ef830643d2d031be5b1c7c3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 84,
+   "type": 32,
+   "scene": 4,
+   "x": -6086.01171875,
+   "y": 285.3359375,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 85,
+   "type": 26,
+   "scene": 4,
+   "x": -6432.33984375,
+   "y": -490.66015625,
+   "tail": "ef830643b18f703f411dafbe0000000000000000000000000000803f"
+  },
+  {
+   "i": 86,
+   "type": 26,
+   "scene": 4,
+   "x": -6475.7109375,
+   "y": -495.703125,
+   "tail": "ef830643feffff3ed6b35d3f0000000000000000000000000000803f"
+  },
+  {
+   "i": 87,
+   "type": 20,
+   "scene": 4,
+   "x": -5934.09765625,
+   "y": -399.40625,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 88,
+   "type": 20,
+   "scene": 4,
+   "x": -5954.82421875,
+   "y": -414.2109375,
+   "tail": "ef8306435b1c7c3fd7d0313e0000000000000000000000000000803f"
+  },
+  {
+   "i": 89,
+   "type": 11,
+   "scene": 4,
+   "x": -6385.66796875,
+   "y": 219.9296875,
+   "tail": "ef830643d2d031be5b1c7c3f0000000000000000000000000000803f"
+  }
+ ],
+ "obj_to_scene": {
+  "0": 0,
+  "1": 0,
+  "2": 0,
+  "3": 0,
+  "4": 0,
+  "5": 0,
+  "6": 0,
+  "7": 0,
+  "8": 0,
+  "9": 0,
+  "10": 0,
+  "11": 0,
+  "12": 0,
+  "13": 0,
+  "14": 0,
+  "15": 0,
+  "16": 0,
+  "17": 0,
+  "18": 1,
+  "19": 1,
+  "20": 1,
+  "21": 1,
+  "22": 1,
+  "23": 1,
+  "24": 1,
+  "25": 1,
+  "26": 1,
+  "27": 1,
+  "28": 1,
+  "29": 1,
+  "30": 1,
+  "31": 1,
+  "32": 1,
+  "33": 1,
+  "34": 1,
+  "35": 1,
+  "36": 2,
+  "37": 2,
+  "38": 2,
+  "39": 2,
+  "40": 2,
+  "41": 2,
+  "42": 2,
+  "43": 2,
+  "44": 2,
+  "45": 2,
+  "46": 2,
+  "47": 2,
+  "48": 2,
+  "49": 2,
+  "50": 2,
+  "51": 2,
+  "52": 2,
+  "53": 2,
+  "54": 3,
+  "55": 3,
+  "56": 3,
+  "57": 3,
+  "58": 3,
+  "59": 3,
+  "60": 3,
+  "61": 3,
+  "62": 3,
+  "63": 3,
+  "64": 3,
+  "65": 3,
+  "66": 3,
+  "67": 3,
+  "68": 3,
+  "69": 3,
+  "70": 3,
+  "71": 3,
+  "72": 4,
+  "73": 4,
+  "74": 4,
+  "75": 4,
+  "76": 4,
+  "77": 4,
+  "78": 4,
+  "79": 4,
+  "80": 4,
+  "81": 4,
+  "82": 4,
+  "83": 4,
+  "84": 4,
+  "85": 4,
+  "86": 4,
+  "87": 4,
+  "88": 4,
+  "89": 4
+ },
+ "scene_objects": {
+  "0": [
+   {
+    "obj": 0,
+    "type": 7,
+    "name": "Headquarters",
+    "value": 100
+   },
+   {
+    "obj": 1,
+    "type": 0,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 2,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 3,
+    "type": 3,
+    "name": "Flak battery",
+    "value": 100
+   },
+   {
+    "obj": 4,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 5,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 6,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 7,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 8,
+    "type": 18,
+    "name": "Antenna",
+    "value": 100
+   },
+   {
+    "obj": 10,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 11,
+    "type": 13,
+    "name": "Ammo Bunker",
+    "value": 100
+   },
+   {
+    "obj": 12,
+    "type": 31,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 13,
+    "type": 32,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 14,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 15,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   }
+  ],
+  "1": [
+   {
+    "obj": 18,
+    "type": 0,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 19,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 20,
+    "type": 3,
+    "name": "Flak battery",
+    "value": 100
+   },
+   {
+    "obj": 21,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 22,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 23,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 24,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 25,
+    "type": 18,
+    "name": "Antenna",
+    "value": 100
+   },
+   {
+    "obj": 27,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 28,
+    "type": 13,
+    "name": "Ammo Bunker",
+    "value": 100
+   },
+   {
+    "obj": 29,
+    "type": 31,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 30,
+    "type": 32,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 31,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 32,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 35,
+    "type": 10,
+    "name": "Headquarters",
+    "value": 100
+   }
+  ],
+  "2": [
+   {
+    "obj": 36,
+    "type": 0,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 37,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 38,
+    "type": 3,
+    "name": "Flak battery",
+    "value": 100
+   },
+   {
+    "obj": 39,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 40,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 41,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 42,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 43,
+    "type": 18,
+    "name": "Antenna",
+    "value": 100
+   },
+   {
+    "obj": 45,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 46,
+    "type": 13,
+    "name": "Ammo Bunker",
+    "value": 100
+   },
+   {
+    "obj": 47,
+    "type": 31,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 48,
+    "type": 32,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 49,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 50,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 53,
+    "type": 8,
+    "name": "Headquarters",
+    "value": 100
+   }
+  ],
+  "3": [
+   {
+    "obj": 54,
+    "type": 0,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 55,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 56,
+    "type": 3,
+    "name": "Flak battery",
+    "value": 100
+   },
+   {
+    "obj": 57,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 58,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 59,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 60,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 61,
+    "type": 18,
+    "name": "Antenna",
+    "value": 100
+   },
+   {
+    "obj": 63,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 64,
+    "type": 13,
+    "name": "Ammo Bunker",
+    "value": 100
+   },
+   {
+    "obj": 65,
+    "type": 31,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 66,
+    "type": 32,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 67,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 68,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 71,
+    "type": 9,
+    "name": "Headquarters",
+    "value": 100
+   }
+  ],
+  "4": [
+   {
+    "obj": 72,
+    "type": 0,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 73,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 74,
+    "type": 3,
+    "name": "Flak battery",
+    "value": 100
+   },
+   {
+    "obj": 75,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 76,
+    "type": 5,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 77,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 78,
+    "type": 6,
+    "name": "AA battery",
+    "value": 100
+   },
+   {
+    "obj": 79,
+    "type": 18,
+    "name": "Antenna",
+    "value": 100
+   },
+   {
+    "obj": 81,
+    "type": 1,
+    "name": "Hangar",
+    "value": 150
+   },
+   {
+    "obj": 82,
+    "type": 13,
+    "name": "Ammo Bunker",
+    "value": 100
+   },
+   {
+    "obj": 83,
+    "type": 31,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 84,
+    "type": 32,
+    "name": "House",
+    "value": 50
+   },
+   {
+    "obj": 85,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 86,
+    "type": 26,
+    "name": "Fuel Tank",
+    "value": 40
+   },
+   {
+    "obj": 89,
+    "type": 11,
+    "name": "Headquarters",
+    "value": 100
+   }
+  ]
+ },
+ "scene_info": {
+  "0": {
+   "camp": 1,
+   "type": 16,
+   "name": "Front Line Airfield",
+   "x": -2592.37109375,
+   "y": 5891.859375,
+   "total_value": 1430,
+   "n_destructible": 15
+  },
+  "1": {
+   "camp": 2,
+   "type": 17,
+   "name": "Front Line Airfield",
+   "x": 5268.1796875,
+   "y": 1736.2421875,
+   "total_value": 1430,
+   "n_destructible": 15
+  },
+  "2": {
+   "camp": 3,
+   "type": 20,
+   "name": "Front Line Airfield",
+   "x": 4587.2890625,
+   "y": -5471.125,
+   "total_value": 1430,
+   "n_destructible": 15
+  },
+  "3": {
+   "camp": 4,
+   "type": 21,
+   "name": "Front Line Airfield",
+   "x": -2404.72265625,
+   "y": -5888.2734375,
+   "total_value": 1430,
+   "n_destructible": 15
+  },
+  "4": {
+   "camp": 0,
+   "type": 22,
+   "name": "Front Line Airfield",
+   "x": -6326.30078125,
+   "y": -116.140625,
+   "total_value": 1430,
+   "n_destructible": 15
+  }
+ }
+}

@@ -264,11 +264,11 @@ TODO list:
       printer (FUN_004f6030 RE). The crumblep relay kills the pilot silently. Only a
       client-side patch or the ch3 chat workaround (ANNOUNCE_BAIL_KILL_CH3) can add it.
       LEFT AS-IS per user; documented so it isn't re-investigated as a bug.
-  [ ] HUSK TELEMETRY RELAY (TELEM-GUARD multi-record drop) - see the SPLIT MULTI-RECORD
-      TELEMETRY item above; peers see bailed planes fly straight because multi-record
-      frames are dropped. Needs safe record-splitting (naive relay CTDs recipients).
-  [ ] CANOPY ~28s CULL KEEPALIVE and CANOPY COLLISION KILLS (no msg-29 -> deferred path
-      only) and PARA_KILL_HITS tuning from the tally= logs - minor chute-path polish.
+  [x] (v547f5) HUSK TELEMETRY RELAY / SPLIT MULTI-RECORD TELEMETRY - done: frames are split
+      per object (see TELEM_SPLIT_MULTI); chutes steer, husks fall in view.
+  [x] (v548f5) CANOPY ~28s CULL - was the client stale-object cull once the husk-down cleared
+      s.flying and stopped the relay; relay now runs under canopy. CANOPY COLLISION KILLS and
+      PARA_KILL_HITS tuning are moot with SERVER_CHUTE_KILL off (v549f5, client-side health).
 
 bc formula: param_3 = bc x 16 + 1
 appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the datagram
@@ -294,7 +294,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v542f5'
+VERSION = 'v584f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3922,6 +3922,318 @@ def console_handler():
                 n = cleanup_custom_arenas(force=True, by=f'console:{_src}')
                 log('CONSOLE', f'cleanup: {n} custom arena(s) removed '
                                f'(empty + not persistent; persistent/occupied/official kept)')
+            elif cmd == 'tc':
+                # v575f5: tc status | tc trigger <scene> [room]  (force a trigger as the first
+                #         in-game pilot of an ENEMY camp, or the room's first pilot) | tc reset
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _rooms = sorted(_active_ingame_rooms())
+                if not _a or _a[0] == 'status':
+                    log('CONSOLE', f'tc: triggers={"ON" if TC_TRIGGERS else "OFF"} attack%={TC_ATTACK_PERCENT} '
+                                   f'toggle={TC_ATTACK_TOGGLE_S:.0f}s tanks={TC_TANKS_ATTACK}/{TC_TANKS_DEFEND} '
+                                   f'class_by_camp={TANK_CLASS_BY_CAMP}')
+                    for (_r, _sidx), _tr in sorted(TRIGGERS.items()):
+                        log('CONSOLE', f'  room {_r} scene {_sidx}: by {_tr["by"]} {time.time() - _tr["at"]:.0f}s ago '
+                                       f'camp {_tr["camp"]} attacker {_tr["attacker"]} columns {_tr["columns"]}')
+                    for _rid in _rooms:
+                        _trn = _probe_terrain_for_room(_rid)
+                        for _camp in sorted(set((SCENE_CAMP_BY_TERRAIN.get(_trn) or {}).values())):
+                            if _camp <= 7:
+                                log('CONSOLE', f'  room {_rid} camp {_camp}: units {camp_units_state(_rid, _camp)}')
+                elif _a[0] == 'reset':
+                    TRIGGERS.clear(); log('CONSOLE', 'tc: trigger lockouts cleared')
+                elif _a[0] == 'assault':
+                    # v581f5 TEST SHORTCUT: tc assault <scene> [n] [camp]  - spawn an ATTACK column of
+                    # <camp> (default: the first in-game pilot's side) right on the target scene
+                    # and mark it engaged, so the fire/capture logic runs without the drive.
+                    try:
+                        _sidx = int(_a[1], 0)
+                        _n = int(_a[2], 0) if len(_a) > 2 else TC_TANKS_ATTACK
+                        _rid = _rooms[0] if _rooms else None
+                        _ing = [x for x in get_sessions_in_room(_rid) if getattr(x, 'entered_game', False)] if _rid is not None else []
+                        _camp = int(_a[3], 0) if len(_a) > 3 else (int(_ing[0].nation) if _ing and _ing[0].nation is not None else None)
+                    except (IndexError, ValueError):
+                        _sidx = None; _rid = None; _camp = None
+                    if _sidx is None or _rid is None or _camp is None:
+                        log('CONSOLE', 'usage: tc assault <scene> [n] [camp]  (needs an in-game room)')
+                    else:
+                        _trn = _probe_terrain_for_room(_rid)
+                        _txy = tc_scene_xy(_trn, _sidx)
+                        if not _txy:
+                            log('CONSOLE', f'tc assault: unknown scene {_sidx}')
+                        elif scene_camp(_trn, _sidx) == _camp:
+                            log('CONSOLE', f'tc assault: scene {_sidx} already belongs to camp {_camp}')
+                        else:
+                            _cx, _cy = tank_clear_spot(_trn, _txy[0] + TC_ASSAULT_RADIUS, _txy[1])
+                            _cls = TANK_CLASS_BY_CAMP.get(_camp, TANK_CLASS_DEFAULT)
+                            _gid = spawn_column(_rid, _camp, _cls, _n, _cx, _cy, reason=f'(console assault of scene {_sidx})')
+                            if _gid is not None:
+                                _col = COLUMNS[_gid]
+                                _col['purpose'] = 'attack'; _col['target'] = int(_sidx); _col['camp'] = int(_camp)
+                                _col['army'] = (_gid % 9) + 1; _col['battalion'] = ((_gid * 3) % 7) + 1
+                                _col['engaged'] = time.time()
+                                _pil = _ing[0].current_pilot if _ing else None
+                                TRIGGERS[(_rid, int(_sidx))] = {'at': time.time(), 'by': _pil, 'camp': scene_camp(_trn, _sidx),
+                                                                'attacker': _camp, 'columns': [_gid]}
+                                log('CONSOLE', f'tc assault: column {_gid} ({_n} x class {_cls}, camp {_camp}) on scene {_sidx} '
+                                               f'"{_txy[2].strip()}" at {tc_grid(_txy[0], _txy[1])} - engaged; capture credit to {_pil}')
+                elif _a[0] == 'trigger':
+                    try:
+                        _sidx = int(_a[1], 0)
+                        _rid = int(_a[2], 0) if len(_a) > 2 else (_rooms[0] if _rooms else None)
+                    except (IndexError, ValueError):
+                        _sidx = None; _rid = None
+                    if _sidx is None or _rid is None:
+                        log('CONSOLE', 'usage: tc trigger <scene> [room]')
+                    else:
+                        _trn = _probe_terrain_for_room(_rid)
+                        _tc = scene_camp(_trn, _sidx)
+                        _ing = [x for x in get_sessions_in_room(_rid) if getattr(x, 'entered_game', False)]
+                        _pil = next((x for x in _ing if getattr(x, 'nation', None) not in (None, _tc)), None)
+                        if _pil is None:
+                            log('CONSOLE', f'tc trigger: no in-game pilot of a camp other than the scene\'s ({_tc}) in room {_rid}')
+                        else:
+                            TRIGGERS.pop((_rid, _sidx), None)
+                            _ok = tc_trigger_scene(_rid, _sidx, _pil, reason='(console)')
+                            log('CONSOLE', f'tc trigger scene {_sidx} as {_pil.current_pilot}: {"fired" if _ok else "not fired (same camp / unknown scene)"}')
+                else:
+                    log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc reset')
+            elif cmd == 'tank':
+                # v559f5/v560f5:
+                #   tank <class> <x> <y> [camp] [group]        spawn at world coords
+                #   tank <class> scene <idx> [camp] [group]    spawn at a gsi scene's X/Y
+                #   tank goto <onum> <x> <y> [m/s] | tank goto <onum> scene <idx> [m/s]
+                #   tank stop <onum> | tank list | tank del <onum|all>
+                #   Success = client log 'Create NetTank (<name>). St=496, ONumber=N (<ptr>)',
+                #   then the tank standing at the spot (updates every 2 s idle / 4 Hz moving).
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _rooms = sorted(_active_ingame_rooms())
+                def _scene_xy(_rid, _idx):
+                    _t = trn_tables(_probe_terrain_for_room(_rid)) or {}
+                    _g = (_t.get('gsi') or [])
+                    if 0 <= _idx < len(_g):
+                        return float(_g[_idx]['x']), float(_g[_idx]['y']), _g[_idx].get('type_name')
+                    return None
+                if not _a or _a[0] == 'list':
+                    if not TANKS:
+                        log('CONSOLE', f'tank: none spawned (classes {sorted(TANK_CLASSES)}; '
+                                       f'scales {"OK" if tank_consts_ok() else "MISSING"})')
+                    for _on, _t in sorted(TANKS.items()):
+                        log('CONSOLE', f'  tank 0x{_on:04x} room {_t["room"]} class {_t["class"]} '
+                                       f'camp {_t["camp"]} at ({_t["pos"][0]:.0f},{_t["pos"][1]:.0f}) '
+                                       f'goal={_t.get("goal")} peers={len(_t["peers"])} '
+                                       f'col={_t.get("column")} age {time.time() - _t["created"]:.0f}s')
+                    for _gid, _c in sorted(COLUMNS.items()):
+                        log('CONSOLE', f'  column {_gid}: {len(_c["members"])} x class {_c["class"]} camp {_c["camp"]} '
+                                       f'leader 0x{_c["leader"]:04x} room {_c["room"]}')
+                elif _a[0] == 'del':
+                    if len(_a) < 2:
+                        log('CONSOLE', 'usage: tank del <onum|all>')
+                    elif _a[1] == 'all':
+                        for _on in list(TANKS):
+                            delete_tank(_on, reason='(console)')
+                    else:
+                        try:
+                            delete_tank(int(_a[1], 0), reason='(console)')
+                        except ValueError:
+                            log('CONSOLE', 'usage: tank del <onum|all>')
+                elif _a[0] == 'column':
+                    # v570f5: tank column <class> <n> (<x> <y>|scene <idx>) [camp]
+                    _cls = None; _n = 0; _pos = None; _camp = None
+                    try:
+                        _cls = int(_a[1], 0); _n = int(_a[2], 0)
+                        if _a[3] == 'scene':
+                            _sxy = _scene_xy(_rooms[0], int(_a[4], 0)) if _rooms else None
+                            _pos = (_sxy[0], _sxy[1]) if _sxy else None
+                            _rest = _a[5:]
+                        else:
+                            _pos = (float(_a[3]), float(_a[4])); _rest = _a[5:]
+                        _camp = int(_rest[0], 0) if _rest else None
+                    except (IndexError, ValueError):
+                        _cls = None
+                    if _cls is None or _pos is None or not _rooms:
+                        log('CONSOLE', 'usage: tank column <class> <n> (<x> <y>|scene <idx>) [camp]  (needs an in-game room)')
+                    else:
+                        if _camp is None:
+                            _ing = [x for x in get_sessions_in_room(_rooms[0])
+                                    if getattr(x, 'entered_game', False) and getattr(x, 'nation', None) is not None]
+                            _camp = int(_ing[0].nation) if _ing else 0
+                        _gid = spawn_column(_rooms[0], _camp, _cls, _n, _pos[0], _pos[1], reason='(console)')
+                        log('CONSOLE', f'tank column: group {_gid} spawned - tank cgoto {_gid} <x> <y>|scene <idx> [m/s]')
+                elif _a[0] in ('cgoto', 'cstop', 'cdel'):
+                    try:
+                        _gid = int(_a[1], 0)
+                    except (IndexError, ValueError):
+                        _gid = None
+                    if _gid is None or _gid not in COLUMNS:
+                        log('CONSOLE', f'tank {_a[0]}: unknown column (have {sorted(COLUMNS)})')
+                    elif _a[0] == 'cstop':
+                        column_stop(_gid); log('CONSOLE', f'tank column {_gid}: stopped')
+                    elif _a[0] == 'cdel':
+                        _nd = column_delete(_gid, reason='(console)'); log('CONSOLE', f'tank column {_gid}: deleted ({_nd} sends)')
+                    else:
+                        _goal = None; _mps = None
+                        try:
+                            if _a[2] == 'scene':
+                                _sxy = _scene_xy(COLUMNS[_gid]['room'], int(_a[3], 0))
+                                _goal = (_sxy[0], _sxy[1]) if _sxy else None
+                                _mps = float(_a[4]) if len(_a) > 4 else None
+                            else:
+                                _goal = (float(_a[2]), float(_a[3]))
+                                _mps = float(_a[4]) if len(_a) > 4 else None
+                        except (IndexError, ValueError):
+                            _goal = None
+                        if _goal is None:
+                            log('CONSOLE', 'usage: tank cgoto <group> <x> <y>|scene <idx> [m/s]')
+                        else:
+                            column_goto(_gid, _goal[0], _goal[1], _mps)
+                            _ld = TANKS.get(COLUMNS[_gid]['leader'])
+                            _d = math.hypot(_goal[0] - _ld['pos'][0], _goal[1] - _ld['pos'][1]) if _ld else 0
+                            log('CONSOLE', f'tank column {_gid}: {len(COLUMNS[_gid]["members"])} tanks -> ({_goal[0]:.0f},{_goal[1]:.0f}) {_d:.0f} m')
+                elif _a[0] in ('aux', 'flags'):
+                    # v565f5: raw experiment knobs. aux = the five s16 fields at payload 0x10..0x18
+                    #   (-> +0x318 int, +0x320 x1/32768, +0x31c x1/32768, +0x2f8 x1/16384,
+                    #    +0x2fc x1.9175e-5); flags = payload[0xf] low bits (bit0 -> +0xf4,
+                    #    bit2 -> FUN_005ba950 gun state). Sent with every update from now on.
+                    try:
+                        _on = int(_a[1], 0)
+                    except (IndexError, ValueError):
+                        _on = None
+                    _t = TANKS.get(_on) if _on is not None else None
+                    if _t is None:
+                        log('CONSOLE', f'tank {_a[0]}: unknown tank')
+                    elif _a[0] == 'flags':
+                        try:
+                            _t['flags'] = int(_a[2], 0) & 0x07
+                            log('CONSOLE', f'tank 0x{_on:04x}: flags=0x{_t["flags"]:02x}')
+                        except (IndexError, ValueError):
+                            log('CONSOLE', 'usage: tank flags <onum> <0..7>')
+                    else:
+                        try:
+                            _v = [int(v, 0) for v in _a[2:7]]
+                            if not _v:
+                                _t['aux'] = None
+                                log('CONSOLE', f'tank 0x{_on:04x}: aux override cleared (driver controls)')
+                            else:
+                                _v += [0] * (5 - len(_v))
+                                _t['aux'] = tuple(_v)
+                                log('CONSOLE', f'tank 0x{_on:04x}: aux={_t["aux"]} (overrides the driver)')
+                        except ValueError:
+                            log('CONSOLE', 'usage: tank aux <onum> <s16 x5>  (no values = clear)')
+                elif _a[0] in ('goto', 'stop'):
+                    try:
+                        _on = int(_a[1], 0)
+                    except (IndexError, ValueError):
+                        _on = None
+                    _t = TANKS.get(_on) if _on is not None else None
+                    if _t is None:
+                        log('CONSOLE', f'tank {_a[0]}: unknown tank {_a[1] if len(_a) > 1 else "?"}')
+                    elif _a[0] == 'stop':
+                        _t['goal'] = None
+                        log('CONSOLE', f'tank 0x{_on:04x}: stopped at ({_t["pos"][0]:.0f},{_t["pos"][1]:.0f})')
+                    else:
+                        _goal = None; _mps = None
+                        try:
+                            if len(_a) >= 4 and _a[2] == 'scene':
+                                _sxy = _scene_xy(_t['room'], int(_a[3], 0))
+                                if _sxy:
+                                    _goal = (_sxy[0], _sxy[1])
+                                _mps = float(_a[4]) if len(_a) > 4 else None
+                            elif len(_a) >= 4:
+                                _goal = (float(_a[2]), float(_a[3]))
+                                _mps = float(_a[4]) if len(_a) > 4 else None
+                        except ValueError:
+                            _goal = None
+                        if _goal is None:
+                            log('CONSOLE', 'usage: tank goto <onum> <x> <y> [m/s] | tank goto <onum> scene <idx> [m/s]')
+                        else:
+                            _t['goal'] = _goal
+                            if _mps:
+                                _t['mps'] = _mps
+                            _d = math.hypot(_goal[0] - _t['pos'][0], _goal[1] - _t['pos'][1])
+                            log('CONSOLE', f'tank 0x{_on:04x}: goto ({_goal[0]:.0f},{_goal[1]:.0f}) '
+                                           f'{_d:.0f} m at {_t["mps"]:g} m/s (~{_d / _t["mps"]:.0f} s)')
+                elif not _rooms:
+                    log('CONSOLE', 'tank: no active in-game room')
+                else:
+                    _cls = None; _pos = None; _camp = None; _grp = 0; _where = ''
+                    try:
+                        _cls = int(_a[0], 0)
+                        if len(_a) >= 3 and _a[1] == 'scene':
+                            _sxy = _scene_xy(_rooms[0], int(_a[2], 0))
+                            if _sxy:
+                                _cx, _cy = tank_clear_spot(_probe_terrain_for_room(_rooms[0]), _sxy[0], _sxy[1])
+                                _pos = (_cx, _cy, 0.0); _where = f'scene {_a[2]} "{_sxy[2]}" (clear spot {_cx:.0f},{_cy:.0f})'
+                            _rest = _a[3:]
+                        elif len(_a) >= 3:
+                            _pos = (float(_a[1]), float(_a[2]), 0.0); _where = 'coords'
+                            _rest = _a[3:]
+                        else:
+                            _rest = _a[1:]
+                        _camp = int(_rest[0], 0) if len(_rest) > 0 else None
+                        _grp = int(_rest[1], 0) if len(_rest) > 1 else 0
+                    except ValueError:
+                        _cls = None
+                    if _camp is None:
+                        # v562f5: default to the side of the first in-game pilot of the room
+                        _ing = [x for x in get_sessions_in_room(_rooms[0])
+                                if getattr(x, 'entered_game', False) and getattr(x, 'nation', None) is not None]
+                        _camp = int(_ing[0].nation) if _ing else 0
+                    if _cls is None:
+                        log('CONSOLE', 'usage: tank <class 131..137> (<x> <y> | scene <idx>) [camp 0..4] [group]')
+                    else:
+                        if _cls not in TANK_CLASSES:
+                            log('CONSOLE', f'tank: class {_cls} not in the dumped set {sorted(TANK_CLASSES)} - sending anyway')
+                        if _pos is None:
+                            log('CONSOLE', 'tank: no position given - spawning at the origin (it will be culled in ~28 s unless updated)')
+                        _on = spawn_tank(_rooms[0], _camp, _cls, _grp, pos=_pos, reason='(console)')
+                        log('CONSOLE', f'tank: spawned 0x{_on:04x} (class {_cls}, camp {_camp}) at {_where or "origin"} '
+                                       f'in room {_rooms[0]}')
+            elif cmd == 'repair':
+                # v556f5: repair <obj|all|status> [room] [force]
+                #   status  - list dead objects with age and time-to-repair
+                #   <obj>   - restore one object now (msg-30 bit15-clear); 'force' skips the 30 s
+                #             Destroyer floor (ONLY for a test where nobody will re-destroy it)
+                #   all     - restore every dead object in the room
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _force = 'force' in _a
+                _a = [x for x in _a if x != 'force']
+                _rid = None
+                if len(_a) >= 2 and _a[1].isdigit():
+                    _rid = int(_a[1])
+                else:
+                    _rooms = sorted(_active_ingame_rooms())
+                    _rid = _rooms[0] if _rooms else None
+                if not _a or _a[0] == 'status':
+                    with _OBJ_REPAIR_LOCK:
+                        _items = sorted(_OBJ_DEAD_AT.items())
+                    if not _items:
+                        log('CONSOLE', f'repair: no dead objects (model={"ON" if OBJ_REPAIR_MODEL else "OFF"}, '
+                                       f'base={OBJ_REPAIR_BASE_S:.0f}s x{OBJ_REPAIR_S_PER_VALUE:g}/value '
+                                       f'max={OBJ_REPAIR_MAX_S:.0f}s decor={OBJ_REPAIR_DECOR_S:.0f}s)')
+                    for (_r, _o), _t0 in _items:
+                        _oi = trn_obj_info(_r, _o)
+                        _age = time.time() - _t0
+                        _left = obj_repair_seconds(_oi) - _age
+                        log('CONSOLE', f'  room {_r} obj {_o:>4} {(_oi or {}).get("name", "?"):22s} '
+                                       f'scene {(_oi or {}).get("scene", "?")!s:>3} dead {_age:6.0f}s '
+                                       f'repair in {max(0.0, _left):6.0f}s')
+                elif _rid is None:
+                    log('CONSOLE', 'repair: no active in-game room (give the room id)')
+                elif _a[0] == 'all':
+                    with _OBJ_REPAIR_LOCK:
+                        _objs = sorted(o for (r, o) in _SCENE36_DESTROYED if r == _rid)
+                    _done = repair_objects(_rid, _objs, reason='(console repair all)', force=_force)
+                    log('CONSOLE', f'repair: room {_rid} restored {len(_done)}/{len(_objs)}')
+                else:
+                    try:
+                        _o = int(_a[0], 0)
+                    except ValueError:
+                        _o = None
+                        log('CONSOLE', 'usage: repair <obj|all|status> [room] [force]')
+                    if _o is not None:
+                        _done = repair_objects(_rid, [_o], reason='(console repair)', force=_force)
+                        log('CONSOLE', f'repair: room {_rid} obj {_o} -> '
+                                       f'{"restored" if _done else "not restored (not dead, or under the 30s floor - add force)"}')
             elif cmd == 'destroy':
                 # destroy <sceneIdx> [camp] [progress]  - fire msg 36 SCENE DESTROY/STATE at a
                 # KNOWN scene index, to validate the msg-36 wire format live (independent of the
@@ -4276,6 +4588,11 @@ def console_handler():
                         log('CONSOLE', 'autopve hp: value must be an int')
                 elif aa[0] == 'reset':
                     SCENE_HP.clear()
+                    with _OBJ_REPAIR_LOCK:            # v556f5: the repair clocks go with the set
+                        _OBJ_DEAD_AT.clear()
+                        _OBJ_ARMED_AT.clear()
+                        _SCENE36_DESTROYED.clear()    # (was never cleared here before v556f5)
+                    GROUND_HP.clear()
                     for x in get_all_sessions():
                         x.__dict__.pop('_scene_destroyed', None)
                     log('CONSOLE', 'autopve: scene HP + destroyed-set reset')
@@ -4378,6 +4695,8 @@ def console_handler():
                 log('CONSOLE', 'say <message> - announce to ALL players (every arena: chat + 10s banner; lobby: Server chat)')
                 log('CONSOLE', 'list        - show all accounts and their pilots')
                 log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
+                log('CONSOLE', 'repair <obj|all|status> [room] [force] - v556f5 restore dead ground objects (msg 30) / list clocks')
+                log('CONSOLE', 'tank column <class> <n> (<x> <y>|scene <idx>) [camp] | tank cgoto <grp> ... [m/s] | cstop|cdel <grp> - v570f5 columns')
                 log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
                 log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
                 log('CONSOLE', 'update      - git pull the server dir + restart (only if there are new commits)')
@@ -6573,10 +6892,17 @@ SCORE_DEFS_DEFAULT = [(0, [(t, 0, 0, OBJ_SCORE_POINTS_DEFAULT) for t in range(32
 def push_player_roster_62(s, reason=''):
     """Send msg 62 to s: the full set of OTHER players already in s's room, so the
     client builds a REMOTE_PLAYER object for each. Self is excluded (the local pilot
-    is the player object allocated by the 201 grant, not a remote)."""
+    is the player object allocated by the 201 grant, not a remote).
+    v580f5: also the ENTRY-TIME msg-42 scene snapshot (2009: 'in 42'108' right after the
+    client id) - the client builds its HQ spawn list from its scene table, which is the
+    terrain default until a 42 arrives; captured scenes were missing from the list on rejoin."""
     room_id = s.current_room
     if room_id is None:
         return
+    try:
+        send_scene_snapshot_42_to(s, reason=f'(on entry {reason})')
+    except Exception:
+        logx('SCENE42', 'entry snapshot failed')
     peers = [x for x in get_sessions_in_room(room_id) if x is not s]
     if not peers:
         log('PLAYER62', f'no peers in room {room_id} to advertise to {s.current_pilot} {reason}')
@@ -8112,6 +8438,1338 @@ def build_create_object_2(st, onumber, nation, player_index=0, name='Player',
         body += build_client_record(st, player_index, name, squadron=squadron)
     body += obj
     return build_msg13(body)
+
+# --- v559f5 NET TANK (object Type 3) --------------------------------------------
+# Live-dumped from FA.exe (tank_tables.json, 2026-09-07) + FUN_0061cd50 (tankfact.cpp:0x19e):
+#   create-record header table @0xa30c98 [HeaderSize, telemetrySize, x] per Type:
+#     0 client 35/-   1 plane 28/79   2 parachuter 10/32   3 TANK 8/26   4 train 74/21
+#     5 car 10/22     6 ship 6/24     7 soldier 4/24        8 plane(alt) 28/81
+#   Type-3 record = 8-byte header + the common 13-byte trailer = 21 bytes:
+#     [0] tag = 3 | nation<<4 (bit7 human flag CLEAR: no GamerClientScore binding)
+#     [1] tank CLASS id - must match a loaded AIUNITS\*.tki class (ids 131..137 in the dump;
+#         a miss returns a NULL NetTank and the create is logged with (%p)=0)
+#     [2..4] one byte per gun (gunsnum<4): non-zero = gun present
+#     [5] pad   [6..7] s16 -> tank+0x2f4 (group/battalion id, best reading)
+#     [8..9] St (owner station u16)  [10..11] ONumber  [12..20] zero
+#   Telemetry envelope (FUN_007e3a70): [bc][T][00][00][07][tick u16][ONumber u16][payload 26]
+#     Size = 1+2+2+26 = 31 -> bc=1, T=(15<<4)|2 = 0xf2. The 26-byte payload format is the
+#     tank's NET::OBJECT vtable+4 Unpack (0x61dcf0, undefined in Ghidra as of 09-07) - NOT yet
+#     decoded, so send_tank_update() has no caller until it is.
+#   Ownership: AI objects hang off an 'AI client' station (2009 client log: 'Get PHYS_DATA for
+#   AI Client'). We register one Type-0 client record per recipient (St=AI_CLIENT_ST) before
+#   the first tank create, exactly like the plane peer-create flow.
+TANK_OBJ_TYPE     = 3
+TANK_HEADER_SIZE  = 8
+TANK_UPDATE_SIZE  = 26
+TANK_CLASSES      = {131: 2, 132: 3, 133: 1, 134: 2, 135: 2, 136: 2, 137: 3}   # class_id -> gunsnum
+AI_CLIENT_ST      = 0x1f0          # station number for the server's AI objects (< 512)
+AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station (never a real pilot)
+AI_CLIENT_NAME    = 'AI'
+SPAWN_TANKS       = True           # master switch for the tank spawn path
+TANKS = {}                         # onumber -> {'room','camp','class','group','pos','peers':set()}
+
+# --- v560f5 tank UPDATE payload (26 B) - decoded from FUN_0061dcf0 (tank Unpack) + sub-decoders
+#   [0..2] s24 X, [3..5] s24 Y   (x TANK_POS_XY_SCALE)   FUN_007ccb20 - the NET::OBJECT common part
+#   [6]    u8  Z  (x TANK_POS_Z_SCALE - TANK_POS_Z_OFF; the tank is terrain-clamped anyway)
+#   [7..10] forward unit vector, FUN_007ccf90: w1 = (a & 0x3fff) | dropped_axis<<14,
+#          w2 = (b & 0x3fff) | sign_of_dropped<<14; a,b = s14 x TANK_DIR_SCALE; dropped axis
+#          0=x 1=y 2=z is rebuilt as sqrt(1-a^2-b^2). FUN_00617d60 then ground-clamps X,Y and
+#          builds the model matrix from this vector (forward) + the terrain normal (up).
+#   [0xb] s16 A, [0xd] s16 B (x TANK_S16_SCALE): turret/gun direction = (sqrt(1-B^2)*A,
+#          +-sqrt(1-A^2)*sqrt(1-B^2), B), sign from flags bit3 -> FUN_005bab40
+#   [0xf] flags: bit0 -> +0xf4, bit2 -> FUN_005ba950 (gun state), bit3 = turret cos sign
+#   [0x10] s16 -> +0x318 (int), [0x12]/[0x14] s16 x S16 -> +0x320/+0x31c,
+#   [0x16] s16 x 1/16384 -> +0x2f8, [0x18] s16 x 1.9175e-5 -> +0x2fc   (aux; zero for now)
+# Scale constants come from the live dump (tank_tables.json 'float_consts', fa_dump_tank_tables
+# v2); dumped 2026-09-07: xy 0.032 m/count (double), Z = u8*25 - 500 m (doubles), dir 0.0002
+# per s14 count (double; 1.0 = 5000), s16 = 1/32768 (float). The loader takes the plausible
+# width per constant; without the file the packer refuses (no guessed constants on the wire).
+TANK_POS_XY_SCALE = None
+TANK_POS_Z_SCALE  = None
+TANK_POS_Z_OFF    = None
+TANK_DIR_SCALE    = None
+TANK_S16_SCALE    = None
+TANK_UPDATE_HZ    = 4.0            # moving cadence
+TANK_IDLE_S       = 2.0            # keep-alive cadence when stationary (client culls at ~28 s)
+TANK_DEFAULT_MPS  = 8.0            # 'goto' speed in world units (m) per second
+# v566f5 [CLIENT-SIDE TANK PHYSICS - field-mapped 2026-09-07 with the aux knobs]:
+#   aux[1] (+0x320, s16/32767)  = STEERING  (+ = turn right)
+#   aux[2] (+0x31c, s16/32767)  = THROTTLE  (drives forward)
+#   aux[3] (+0x2f8, s16/16384)  = speed SEED (also drives; taken as fraction of max)
+#   aux[0] (+0x318 int) no visible effect; aux[4] (+0x2fc) untested
+#   flags bit2 = FIRE gun, bit0 = hold fire
+# The client integrates these in FUN_00617f40 (target speed = throttle * class+0x74 *
+# TankSpeedMult, accel/turn limits from the class) and moves the tank itself between our
+# updates - so a bare position stream fights it (the tank 'skipped back' every keep-alive).
+# The driver now sends throttle/steer and integrates the SAME motion server-side, so the
+# position it sends is a small correction the client lerps through, not a snap.
+TANK_TURN_RATE_DPS = 40.0          # server-side heading slew (deg/s) - approximates the client
+TANK_STEER_GAIN    = 2.0           # steer = clamp(gain * sin(heading error))
+TANK_SPEED_SEED    = True          # send aux[3] = speed fraction alongside the throttle
+TANK_FALLBACK_MAX_MPS = 12.0       # per-class max speed when the dump has no phys block
+TANK_CLASS_MAX_MPS = {}            # class_id -> max speed (m/s), from tank_tables.json phys
+TANK_TICK_HZ       = 50.0          # client tank physics tick (dump 'move_dt'); speed unit = m/tick
+
+def _load_tank_consts():
+    """Pull the telemetry scale constants out of tank_tables.json (written by the dumper)."""
+    global TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE, TANK_TICK_HZ
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tank_tables.json')
+        _j = json.load(open(_p))
+        fc = _j.get('float_consts') or {}
+        def _g(prefix):
+            # the .rdata constants are DOUBLES (the decompile's '(float)_DAT_..' casts), the
+            # runtime one at c10f84 is a float: take whichever width holds a plausible scale.
+            for k, v in fc.items():
+                if k.startswith(prefix):
+                    for cand in (v.get('f64'), v.get('f32')):
+                        if cand is not None and 1e-6 <= abs(float(cand)) <= 1e4:
+                            return float(cand)
+            return None
+        TANK_POS_XY_SCALE = _g('pos_xy_scale'); TANK_POS_Z_SCALE = _g('pos_z_scale')
+        TANK_POS_Z_OFF = _g('pos_z_offset');    TANK_DIR_SCALE = _g('dir_s14_scale')
+        TANK_S16_SCALE = _g('s16_scale')
+        _mult = _g('tank_speed_mult') or 1.0
+        _tick = _g('move_dt') or 50.0          # client physics tick rate: speed unit = m / (1/tick) s
+        TANK_TICK_HZ = float(_tick)
+        for _c in (_j.get('tank_classes') or []):
+            _ph = _c.get('phys') or {}
+            if _c.get('class_id') is not None and _ph.get('max_speed_74'):
+                # class +0x74 is m per physics tick (0.2222 * 50 = 11.1 m/s = 40 km/h Cromwell)
+                TANK_CLASS_MAX_MPS[int(_c['class_id'])] = float(_ph['max_speed_74']) * float(_mult) * TANK_TICK_HZ
+            if _c.get('class_id') is not None and _ph.get('f38'):
+                TANK_CLASS_HP[int(_c['class_id'])] = float(_ph['f38'])     # v572f5: hit points
+        if TANK_CLASS_MAX_MPS:
+            log('TANK', f'class max speeds m/s (x mult {_mult:g} x tick {TANK_TICK_HZ:g}): ' +
+                        ', '.join(f'{k}={v:.1f}' for k, v in sorted(TANK_CLASS_MAX_MPS.items())))
+        if None in (TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE):
+            log('TANK', f'tank_tables.json has no float_consts yet - tank updates disabled until the '
+                        f'v2 dumper is run')
+        else:
+            log('TANK', f'telemetry scales: xy={TANK_POS_XY_SCALE!r} z={TANK_POS_Z_SCALE!r}'
+                        f'-{TANK_POS_Z_OFF!r} dir={TANK_DIR_SCALE!r} s16={TANK_S16_SCALE!r}')
+    except Exception as _e:
+        log('TANK', f'tank_tables.json not loaded ({_e}) - tank updates disabled')
+
+def tank_consts_ok():
+    return None not in (TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE)
+
+def _s24(v):
+    v = max(-0x800000, min(0x7fffff, int(round(v))))
+    return (v & 0xffffff).to_bytes(3, 'little')
+
+def _s14(v):
+    return max(-0x2000, min(0x1fff, int(round(v)))) & 0x3fff
+
+def _s16c(v):
+    return max(-32768, min(32767, int(round(v))))
+
+def pack_tank_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, aux=(0, 0, 0, 0, 0), aim=None):
+    """26-byte tank update payload. fwd = forward unit vector (x,y,z world frame); aim = optional
+    (ux,uy) world direction for the turret (default: along the hull)."""
+    if not tank_consts_ok():
+        raise RuntimeError('tank telemetry scale constants not loaded (run fa_dump_tank_tables v2)')
+    fx, fy, fz = fwd
+    n = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+    fx, fy, fz = fx / n, fy / n, fz / n
+    body = _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
+    body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+    # forward vector: drop the largest-magnitude axis so the sqrt rebuild is well-conditioned
+    comps = [fx, fy, fz]
+    k = max(range(3), key=lambda i: abs(comps[i]))
+    others = [comps[i] for i in range(3) if i != k]
+    w1 = _s14(others[0] / TANK_DIR_SCALE) | (k << 14)
+    w2 = _s14(others[1] / TANK_DIR_SCALE) | (0x4000 if comps[k] < 0 else 0)
+    body += struct.pack('<HH', w1, w2)
+    # turret: dir = (sqrt(1-B^2)*A, +-sqrt(1-A^2)*sqrt(1-B^2), B); level (B=0) -> (A, +-sqrt(1-A^2), 0)
+    # so A = the aim x component and flags bit3 = the sign of its y component
+    if aim is not None:
+        ax, ay = aim
+        an = math.hypot(ax, ay) or 1.0
+        tx_, ty_ = ax / an, ay / an
+    else:
+        tx_, ty_ = fx, fy
+    body += struct.pack('<hh', _s16c(tx_ / TANK_S16_SCALE), _s16c(0.0))
+    body += bytes([(flags & 0x07) | (0x08 if ty_ < 0 else 0)])
+    body += struct.pack('<hhhhh', *[_s16c(a) for a in aux])
+    assert len(body) == TANK_UPDATE_SIZE, len(body)
+    return body
+
+def tank_max_mps(t):
+    return TANK_CLASS_MAX_MPS.get(t.get('class'), TANK_FALLBACK_MAX_MPS)
+
+# --- v568f5 OBSTACLE AVOIDANCE (server-side; the client's ttgoto pathing only runs for
+# locally simulated tanks, a NetTank goes exactly where the host steers it) ---------------
+# Every placed terrain object is in the goi table with world X/Y; the got type row has a
+# 'radius' that is 0 for most buildings, so a default by kind applies. The driver looks ahead
+# along the path and deflects the wanted heading around the nearest blocking object.
+TANK_OBST_BUILDING_R = 18.0        # m, default footprint radius for a building-type object
+TANK_OBST_TREE_R     = 6.0         # m, destroy_mode 2 (trees)
+TANK_OBST_MARGIN     = 6.0         # m, clearance added to every radius
+TANK_OBST_LOOKAHEAD  = 60.0        # m, path segment checked each tick (min; 5 s of speed if more)
+TANK_OBST_CELL       = 100.0       # m, spatial grid cell
+_TANK_OBST_CACHE = {}              # terrain -> {'cell': {(cx,cy): [(x,y,r)]}, 'n': int}
+
+def _tank_obstacles(terrain):
+    """Spatial grid of (x, y, radius) for a terrain, built once from the trn tables."""
+    c = _TANK_OBST_CACHE.get(terrain)
+    if c is not None:
+        return c
+    grid, n = {}, 0
+    try:
+        tt = trn_tables(terrain) or {}
+        got = {int(g['i']): g for g in (tt.get('got') or [])}
+        for o in (tt.get('goi') or []):
+            try:
+                x, y = float(o['x']), float(o['y'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            g = got.get(int(o.get('type', -1)), {})
+            r = float(g.get('radius') or 0.0)
+            if r <= 0.0:
+                r = TANK_OBST_TREE_R if g.get('destroy_mode') == 2 else TANK_OBST_BUILDING_R
+            key = (int(x // TANK_OBST_CELL), int(y // TANK_OBST_CELL))
+            grid.setdefault(key, []).append((x, y, r))
+            n += 1
+    except Exception:
+        logx('TANK', f'obstacle grid for terrain {terrain} failed')
+    c = {'cell': grid, 'n': n}
+    _TANK_OBST_CACHE[terrain] = c
+    log('TANK', f'terrain {terrain}: obstacle grid {n} objects in {len(grid)} cells')
+    return c
+
+def _tank_obstacles_near(terrain, x, y, reach):
+    c = _tank_obstacles(terrain)
+    k = int(reach // TANK_OBST_CELL) + 1
+    cx, cy = int(x // TANK_OBST_CELL), int(y // TANK_OBST_CELL)
+    out = []
+    for i in range(cx - k, cx + k + 1):
+        for j in range(cy - k, cy + k + 1):
+            out.extend(c['cell'].get((i, j), ()))
+    return out
+
+def tank_avoid_dir(terrain, x, y, ux, uy, look):
+    """Deflect the wanted unit direction (ux,uy) around the nearest object whose padded
+    radius the path segment [pos, pos+u*look] would enter. Returns (ux, uy, blocking_or_None)."""
+    best = None
+    for ox, oy, r in _tank_obstacles_near(terrain, x, y, look):
+        rr = r + TANK_OBST_MARGIN
+        dx, dy = ox - x, oy - y
+        s = dx * ux + dy * uy                      # along-track distance to the object
+        if s < -rr or s > look + rr:
+            continue
+        d = dx * uy - dy * ux                      # lateral offset (+ = object on the LEFT)
+        if abs(d) >= rr:
+            continue
+        if best is None or s < best[0]:
+            best = (s, d, ox, oy, rr)
+    if best is None:
+        return ux, uy, None
+    s, d, ox, oy, rr = best
+    side = -1.0 if d > 0 else 1.0                 # object left -> pass on the right
+    # aim at the tangent point beside the object: centre + side * left-normal * (rr + 2)
+    lx, ly = -uy, ux                               # left normal of the path
+    tx, ty = ox + side * lx * (rr + 2.0), oy + side * ly * (rr + 2.0)
+    vx, vy = tx - x, ty - y
+    n = math.hypot(vx, vy)
+    if n < 1e-3:
+        return ux, uy, best
+    return vx / n, vy / n, best
+
+# --- v569f5 WINDOWED A* PATHING (replaces the v568f5 greedy deflection, which oscillated
+# into figure-8s between clustered objects) --------------------------------------------
+# Plan on an occupancy grid (TANK_PATH_CELL m) inside a window around the straight line to
+# a sub-goal at most TANK_PATH_HORIZON ahead; cells inside any padded obstacle are blocked.
+# The path is string-pulled to a few waypoints and followed; re-planned when the sub-goal
+# is reached, when the next leg becomes blocked, or every TANK_PATH_REPLAN_S.
+TANK_PATH_CELL      = 6.0
+TANK_PATH_HORIZON   = 400.0
+TANK_PATH_PAD       = 120.0        # window half-width beyond the start/sub-goal bbox
+TANK_PATH_REPLAN_S  = 20.0
+TANK_PATH_RETRY_S   = 2.0          # after a failed plan (start boxed in), retry no faster than this
+TANK_REPLAN_DRIFT_M = 40.0         # goal moved this far since the plan -> re-plan (formation slots)
+TANK_WP_REACH       = 7.0
+
+def _tank_blocked_at(obs, px, py):
+    for ox, oy, rr in obs:
+        if (ox - px) ** 2 + (oy - py) ** 2 < rr * rr:
+            return True
+    return False
+
+def _tank_los(obs, ax, ay, bx, by, step=3.0):
+    d = math.hypot(bx - ax, by - ay)
+    n = max(1, int(d / step))
+    for i in range(n + 1):
+        f = i / n
+        if _tank_blocked_at(obs, ax + (bx - ax) * f, ay + (by - ay) * f):
+            return False
+    return True
+
+def tank_plan_path(terrain, sx, sy, gx, gy):
+    """A* from (sx,sy) toward (gx,gy) within a bounded window. Returns a waypoint list
+    (excluding the start, ending at the sub-goal) or [] when nothing is reachable."""
+    import heapq
+    dist = math.hypot(gx - sx, gy - sy)
+    if dist > TANK_PATH_HORIZON:
+        f = TANK_PATH_HORIZON / dist
+        gx, gy = sx + (gx - sx) * f, sy + (gy - sy) * f
+    x0, x1 = min(sx, gx) - TANK_PATH_PAD, max(sx, gx) + TANK_PATH_PAD
+    y0, y1 = min(sy, gy) - TANK_PATH_PAD, max(sy, gy) + TANK_PATH_PAD
+    cell = TANK_PATH_CELL
+    W, H = int((x1 - x0) / cell) + 1, int((y1 - y0) / cell) + 1
+    reach = max(x1 - x0, y1 - y0) / 2 + 50.0
+    obs = [(ox, oy, r + TANK_OBST_MARGIN)
+           for ox, oy, r in _tank_obstacles_near(terrain, (x0 + x1) / 2, (y0 + y1) / 2, reach)
+           if x0 - 40 <= ox <= x1 + 40 and y0 - 40 <= oy <= y1 + 40]
+    blocked = bytearray(W * H)
+    for ox, oy, rr in obs:
+        ci0, ci1 = max(0, int((ox - rr - x0) / cell)), min(W - 1, int((ox + rr - x0) / cell))
+        cj0, cj1 = max(0, int((oy - rr - y0) / cell)), min(H - 1, int((oy + rr - y0) / cell))
+        r2 = rr * rr
+        for i in range(ci0, ci1 + 1):
+            px = x0 + (i + 0.5) * cell
+            for j in range(cj0, cj1 + 1):
+                py = y0 + (j + 0.5) * cell
+                if (ox - px) ** 2 + (oy - py) ** 2 < r2:
+                    blocked[j * W + i] = 1
+    def _c(x, y):
+        return (max(0, min(W - 1, int((x - x0) / cell))), max(0, min(H - 1, int((y - y0) / cell))))
+    si, sj = _c(sx, sy); gi, gj = _c(gx, gy)
+    blocked[sj * W + si] = 0                      # we are where we are
+    _fr = int(12.0 / cell) + 1                    # v571f5: boxed-in start (inside a padded circle) can still leave
+    for i in range(si - _fr, si + _fr + 1):
+        for j in range(sj - _fr, sj + _fr + 1):
+            if 0 <= i < W and 0 <= j < H and (i - si) ** 2 + (j - sj) ** 2 <= _fr * _fr:
+                blocked[j * W + i] = 0
+    if blocked[gj * W + gi]:                      # sub-goal inside something: nearest free cell
+        best = None
+        for rad in range(1, 12):
+            for i in range(gi - rad, gi + rad + 1):
+                for j in range(gj - rad, gj + rad + 1):
+                    if 0 <= i < W and 0 <= j < H and not blocked[j * W + i]:
+                        d2 = (i - gi) ** 2 + (j - gj) ** 2
+                        if best is None or d2 < best[0]:
+                            best = (d2, i, j)
+            if best:
+                break
+        if not best:
+            return []
+        gi, gj = best[1], best[2]
+    start, goal = sj * W + si, gj * W + gi
+    g = {start: 0.0}; came = {}
+    openq = [(0.0, start)]
+    nbrs = ((1, 0, 1.0), (-1, 0, 1.0), (0, 1, 1.0), (0, -1, 1.0),
+            (1, 1, 1.4142), (1, -1, 1.4142), (-1, 1, 1.4142), (-1, -1, 1.4142))
+    expanded = 0
+    while openq:
+        _f, cur = heapq.heappop(openq)
+        if cur == goal:
+            break
+        expanded += 1
+        if expanded > 60000:
+            return []
+        ci, cj = cur % W, cur // W
+        for di, dj, w in nbrs:
+            ni, nj = ci + di, cj + dj
+            if not (0 <= ni < W and 0 <= nj < H):
+                continue
+            nxt = nj * W + ni
+            if blocked[nxt]:
+                continue
+            if di and dj and (blocked[cj * W + ni] or blocked[nj * W + ci]):
+                continue                          # no corner cutting
+            ng = g[cur] + w
+            if ng < g.get(nxt, 1e18):
+                g[nxt] = ng; came[nxt] = cur
+                h = math.hypot(ni - gi, nj - gj)
+                heapq.heappush(openq, (ng + h, nxt))
+    if goal not in came and goal != start:
+        return []
+    cells = []
+    cur = goal
+    while cur != start:
+        cells.append(cur); cur = came[cur]
+    cells.reverse()
+    pts = [(x0 + (c % W + 0.5) * cell, y0 + (c // W + 0.5) * cell) for c in cells]
+    if pts:
+        pts[-1] = (gx, gy) if not blocked[goal] else pts[-1]
+    # string-pull: keep only the waypoints needed for free straight legs
+    out, ax, ay = [], sx, sy
+    i = 0
+    while i < len(pts):
+        j = len(pts) - 1
+        while j > i and not _tank_los(obs, ax, ay, pts[j][0], pts[j][1]):
+            j -= 1
+        out.append(pts[j]); ax, ay = pts[j]
+        i = j + 1
+    return out
+
+def tank_clear_spot(terrain, x, y, radius_max=120.0):
+    """Nearest point to (x,y) that is outside every padded obstacle - for spawning at a scene
+    centre (which is usually inside a building)."""
+    def _free(px, py):
+        for ox, oy, r in _tank_obstacles_near(terrain, px, py, 40.0):
+            if math.hypot(ox - px, oy - py) < r + TANK_OBST_MARGIN:
+                return False
+        return True
+    if _free(x, y):
+        return x, y
+    ring = 15.0
+    while ring <= radius_max:
+        for k in range(12):
+            a = 2 * math.pi * k / 12
+            px, py = x + ring * math.cos(a), y + ring * math.sin(a)
+            if _free(px, py):
+                return px, py
+        ring += 15.0
+    return x, y
+
+def _tank_controls(t):
+    """(flags, aux) for the current motion state: throttle/steer/speed-seed from the driver,
+    experiment overrides from `tank aux/flags` when set."""
+    flags = t.get('flags', 0)
+    if t.get('aux') is not None:
+        return flags, t['aux']
+    thr = t.get('_throttle', 0.0)
+    steer = t.get('_steer', 0.0)
+    # v567f5: the speed seed (+0x2f8, s16/16384) is in the client's unit - metres per physics
+    # tick - not a fraction: 8 m/s -> 0.16 m/tick -> 2621. (v566f5 sent the throttle fraction
+    # here = 36 m/s, which is what kept sprinting ahead of the corrections.)
+    seed = (t.get('_speed_mps', 0.0) / TANK_TICK_HZ) if TANK_SPEED_SEED else 0.0
+    return flags, (0, _s16c(steer * 32767), _s16c(thr * 32767), _s16c(seed * 16384), 0)
+
+def tank_broadcast_state(onum):
+    """Send the tank's current state to every flying session in its room. Returns count."""
+    t = TANKS.get(onum)
+    if t is None or not tank_consts_ok():
+        return 0
+    x, y, z = t['pos']
+    try:
+        _fl, _ax = _tank_controls(t)
+        pl = pack_tank_state(x, y, z, t.get('fwd', (1.0, 0.0, 0.0)), flags=_fl, aux=_ax, aim=t.get('_aim'))
+    except Exception as _e:
+        if not t.get('_pack_err_logged'):
+            t['_pack_err_logged'] = True
+            log('TANK', f'pack failed for 0x{onum:04x}: {_e} (logged once)')
+        return 0
+    n = 0
+    for p in get_sessions_in_room(t['room']):
+        if getattr(p, 'addr', None) in t['peers'] and send_tank_update(onum, p, pl):
+            n += 1
+    t['last_sent'] = time.time()
+    return n
+
+# --- v570f5 TANK COLUMNS (step 1 of the TC layer) ---------------------------------------
+# A column = one leader driven by the normal goto/A* logic + followers that hold formation
+# slots behind it (staggered file: slot i sits i*TANK_COL_SPACING back, alternating
+# +-TANK_COL_LATERAL). Follower goals are refreshed every driver tick from the leader's
+# pose, so each follower still runs its own A* around obstacles. When the leader stops the
+# slots freeze and the followers close up on them.
+TANK_COL_SPACING = 18.0
+TANK_COL_LATERAL = 8.0
+TANK_COL_MAX     = 8
+COLUMNS = {}                       # group_id -> {'room','camp','class','leader','members':[onum..]}
+
+def _col_slot(leader, i):
+    """World position of formation slot i (1-based) behind the leader's current pose."""
+    x, y, _z = leader['pos']
+    fx, fy, _fz = leader.get('fwd', (1.0, 0.0, 0.0))
+    lx, ly = -fy, fx                               # left normal
+    back = TANK_COL_SPACING * i
+    side = TANK_COL_LATERAL * (1 if i % 2 else -1)
+    return (x - fx * back + lx * side, y - fy * back + ly * side)
+
+def spawn_column(room_id, camp, class_id, n, x, y, group_id=None, reason=''):
+    """Spawn n tanks in a staggered file around (x,y) as one column. Returns group_id."""
+    n = max(1, min(TANK_COL_MAX, int(n)))
+    if group_id is None:
+        group_id = (max(COLUMNS) + 1) if COLUMNS else 1
+    terr = _probe_terrain_for_room(room_id)
+    onums = []
+    fake_leader = {'pos': (x, y, 0.0), 'fwd': (1.0, 0.0, 0.0)}
+    for i in range(n):
+        px, py = (x, y) if i == 0 else _col_slot(fake_leader, i)
+        if terr is not None:
+            px, py = tank_clear_spot(terr, px, py)
+        on = spawn_tank(room_id, camp, class_id, group_id, pos=(px, py, 0.0),
+                        reason=f'{reason} column {group_id} #{i + 1}/{n}', send=False)
+        if on is None:
+            break
+        TANKS[on]['column'] = group_id
+        TANKS[on]['slot'] = i
+        onums.append(on)
+    if not onums:
+        return None
+    # one msg-2 with all the records per recipient (one reliable send per client)
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        body = bytearray([0x02]) + _ensure_ai_client_on(p)
+        for on in onums:
+            body += build_tank_record(AI_CLIENT_ST, on, camp, class_id, group_id)
+            TANKS[on]['peers'].add(getattr(p, 'addr', None))
+        _submit_send(send_rel, p, build_msg13(bytes(body)),
+                     f'<- CreateObject 2 TANK x{len(onums)} column {group_id} {reason}', to=3.0)
+    if tank_consts_ok():
+        for on in onums:
+            threading.Timer(0.5, tank_broadcast_state, args=(on,)).start()
+    COLUMNS[group_id] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
+                         'leader': onums[0], 'members': onums, 'created': time.time()}
+    log('TANK', f'room {room_id}: column {group_id} = {len(onums)} x class {class_id} camp {camp} '
+                f'at ({x:.0f},{y:.0f}) leader 0x{onums[0]:04x} {reason}')
+    return group_id
+
+def column_goto(group_id, gx, gy, mps=None):
+    col = COLUMNS.get(group_id)
+    if col is None:
+        return False
+    lead = TANKS.get(col['leader'])
+    if lead is None:
+        col['members'] = [o for o in col['members'] if o in TANKS]
+        if not col['members']:
+            COLUMNS.pop(group_id, None); return False
+        col['leader'] = col['members'][0]; lead = TANKS[col['leader']]
+        log('TANK', f'column {group_id}: leader gone, 0x{col["leader"]:04x} promoted')
+    lead['goal'] = (float(gx), float(gy))
+    if mps:
+        lead['mps'] = float(mps)
+    for on in col['members']:
+        t = TANKS.get(on)
+        if t is not None and on != col['leader']:
+            t['mps'] = min(tank_max_mps(t), lead['mps'] * 1.25)   # followers may close up
+    return True
+
+def column_stop(group_id):
+    col = COLUMNS.get(group_id)
+    if col is None:
+        return False
+    for on in col['members']:
+        t = TANKS.get(on)
+        if t is not None:
+            t['goal'] = None
+    return True
+
+def column_delete(group_id, reason=''):
+    col = COLUMNS.pop(group_id, None)
+    if col is None:
+        return 0
+    n = 0
+    for on in list(col['members']):
+        n += delete_tank(on, reason=reason)
+    return n
+
+def _columns_tick():
+    """Refresh follower goals from the leader's pose (called each driver tick)."""
+    for gid, col in list(COLUMNS.items()):
+        col['members'] = [o for o in col['members'] if o in TANKS]
+        if not col['members']:
+            COLUMNS.pop(gid, None); continue
+        if col['leader'] not in TANKS:
+            col['leader'] = col['members'][0]
+            log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted')
+        lead = TANKS[col['leader']]
+        moving = lead.get('goal') is not None
+        slot = 0
+        for on in col['members']:
+            if on == col['leader']:
+                continue
+            slot += 1
+            t = TANKS[on]
+            sx, sy = _col_slot(lead, slot)
+            if moving:
+                t['goal'] = (sx, sy)
+            elif t.get('_col_park') != (round(sx), round(sy)):
+                t['goal'] = (sx, sy)                # leader halted: close up once, then rest
+                t['_col_park'] = (round(sx), round(sy))
+
+def _tank_driver_loop():
+    """v560f5/v566f5: drive each tank toward its goal as a throttle/steer controller (the
+    client runs the same physics), integrate the same motion here, keep idle tanks alive."""
+    dt = 1.0 / TANK_UPDATE_HZ
+    while True:
+        try:
+            time.sleep(dt)
+            now = time.time()
+            _columns_tick()                                     # v570f5
+            _tc_acc = globals().get('_TC_ENG_ACC', 0.0) + dt
+            if _tc_acc >= 1.0:
+                _tc_acc = 0.0
+                try:
+                    _tc_engagement_tick()                       # v576f5, 1 Hz
+                except Exception:
+                    logx('TC', 'engagement tick failed')
+            globals()['_TC_ENG_ACC'] = _tc_acc
+            for onum, t in list(TANKS.items()):
+                goal = t.get('goal')
+                moving = False
+                if goal is not None:
+                    x, y, z = t['pos']
+                    gx, gy = goal
+                    dx, dy = gx - x, gy - y
+                    dist = math.hypot(dx, dy)
+                    vmax = tank_max_mps(t)
+                    want = min(t.get('mps', TANK_DEFAULT_MPS), vmax)
+                    # v570f5: a column follower regulates on its slot distance instead of stopping
+                    _col = COLUMNS.get(t.get('column'))
+                    _follower = (_col is not None and _col['leader'] != onum and _col['leader'] in TANKS
+                                 and TANKS[_col['leader']].get('goal') is not None)
+                    if _follower:
+                        _lv = TANKS[_col['leader']].get('_speed_mps', 0.0)
+                        want = max(0.0, min(vmax, _lv + 0.6 * (dist - 2.0)))
+                        if dist < 2.0:
+                            want = max(0.0, _lv - 0.5)
+                    elif dist < 30.0:
+                        # slow down over the last 30 m so the stop lands on the goal
+                        want = max(1.0, want * dist / 30.0)
+                    fx, fy, _fz = t.get('fwd', (1.0, 0.0, 0.0))
+                    if dist < 0.5:                                  # v571f5: on the slot / goal - hold
+                        if not _follower:
+                            t['pos'] = (gx, gy, z); t['goal'] = None
+                            log('TANK', f'0x{onum:04x} reached goal ({gx:.0f},{gy:.0f})')
+                        t['_throttle'] = 0.0; t['_steer'] = 0.0; t['_speed_mps'] = 0.0
+                        tank_broadcast_state(onum)
+                        continue
+                    if not _follower and dist <= max(3.0, want * dt):
+                        t['pos'] = (gx, gy, z); t['goal'] = None
+                        t['_throttle'] = 0.0; t['_steer'] = 0.0; t['_speed_mps'] = 0.0
+                        log('TANK', f'0x{onum:04x} reached goal ({gx:.0f},{gy:.0f})')
+                        tank_broadcast_state(onum)
+                        continue
+                    ux, uy = dx / dist, dy / dist
+                    # v569f5: follow the planned waypoint list (windowed A*), re-planning as needed
+                    _terr = t.get('terrain')
+                    if _terr is None:
+                        _terr = t['terrain'] = _probe_terrain_for_room(t['room'])
+                    if _terr is not None and dist > 8.0:
+                        _wps = t.get('_wps')
+                        _pg = t.get('_wp_goal')
+                        _drift = (math.hypot(goal[0] - _pg[0], goal[1] - _pg[1]) if _pg else 1e9)
+                        _need = (not _wps or now - t.get('_planned_at', 0.0) > TANK_PATH_REPLAN_S
+                                 or _drift > TANK_REPLAN_DRIFT_M)   # v570f5/v571f5: moving formation slots
+                        if _need and not _wps and now - t.get('_planned_at', 0.0) < TANK_PATH_RETRY_S:
+                            _need = False                            # v571f5: failed plan - retry slowly, drive straight meanwhile
+                        if _wps and not _need:
+                            _nx, _ny = _wps[0]
+                            _passed = False
+                            if len(_wps) > 1:      # overshot the corner? the leg to the next one points back
+                                _lx, _ly = _wps[1][0] - _nx, _wps[1][1] - _ny
+                                _passed = (_nx - x) * _lx + (_ny - y) * _ly < 0
+                            if _passed or math.hypot(_nx - x, _ny - y) <= TANK_WP_REACH:
+                                _wps.pop(0)
+                                if not _wps:
+                                    _need = True
+                        if _need:
+                            _wps = tank_plan_path(_terr, x, y, gx, gy)
+                            t['_wps'] = _wps; t['_planned_at'] = now; t['_wp_goal'] = goal
+                            if _wps and len(_wps) > 1:
+                                log('TANK', f'0x{onum:04x} path: {len(_wps)} waypoint(s), next ({_wps[0][0]:.0f},{_wps[0][1]:.0f})')
+                            elif not _wps and now - t.get('_noroute_logged', 0.0) > 10.0:
+                                t['_noroute_logged'] = now
+                                log('TANK', f'0x{onum:04x} path: no route found in window - driving straight (retry every {TANK_PATH_RETRY_S:g}s)')
+                        if _wps:
+                            _nx, _ny = _wps[0]
+                            if len(_wps) == 1 and _pg is not None and _drift <= TANK_REPLAN_DRIFT_M:
+                                _nx, _ny = goal              # last leg: track the live slot, not the stale plan
+                            _wd = math.hypot(_nx - x, _ny - y)
+                            if _wd > 1e-3:
+                                ux, uy = (_nx - x) / _wd, (_ny - y) / _wd
+                    # heading error: cross > 0 -> goal is to the LEFT (ccw), client steer + = right
+                    cross = fx * uy - fy * ux
+                    dot = max(-1.0, min(1.0, fx * ux + fy * uy))
+                    err = math.atan2(cross, dot)                     # signed, rad
+                    max_step = math.radians(TANK_TURN_RATE_DPS) * dt
+                    step = max(-max_step, min(max_step, err))
+                    ca, sa = math.cos(step), math.sin(step)
+                    fx, fy = fx * ca - fy * sa, fx * sa + fy * ca    # rotate toward the goal
+                    t['fwd'] = (fx, fy, 0.0)
+                    t['_steer'] = -max(-1.0, min(1.0, TANK_STEER_GAIN * math.sin(err)))
+                    # ease off the throttle while turning hard
+                    turn_scale = max(0.3, 1.0 - abs(err) / math.pi)
+                    v = want * turn_scale
+                    t['_throttle'] = max(0.0, min(1.0, v / vmax))
+                    t['_speed_mps'] = v
+                    t['pos'] = (x + fx * v * dt, y + fy * v * dt, z)
+                    moving = True
+                if moving or now - t.get('last_sent', 0.0) >= TANK_IDLE_S:
+                    tank_broadcast_state(onum)
+        except Exception:
+            logx('TANK', 'driver step failed')
+
+def build_tank_record(st, onumber, nation, class_id, group_id=0, guns=None):
+    """21-byte Type-3 NetTank object record (see the block notes)."""
+    rec = bytearray(TANK_HEADER_SIZE + 13)
+    rec[0] = (TANK_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    rec[1] = class_id & 0xff
+    n = TANK_CLASSES.get(class_id, 1) if guns is None else int(guns)
+    for i in range(min(3, max(0, n))):
+        rec[2 + i] = 1
+    struct.pack_into('<h', rec, 6, int(group_id))
+    struct.pack_into('<H', rec, TANK_HEADER_SIZE, st & 0xffff)
+    struct.pack_into('<H', rec, TANK_HEADER_SIZE + 2, onumber & 0xffff)
+    return bytes(rec)
+
+def build_tank_update(tick, onumber, payload26):
+    """Unreliable appspace frame for one tank object update."""
+    assert len(payload26) == TANK_UPDATE_SIZE
+    size = 1 + 2 + 2 + TANK_UPDATE_SIZE                    # 31
+    bc, t = size // 16, ((size % 16) << 4) | 0x02
+    return bytes([bc, t, 0, 0, 0x07]) + struct.pack('<HH', tick & 0xffff, onumber & 0xffff) + bytes(payload26)
+
+def _ensure_ai_client_on(dst):
+    """Register the AI station (Type-0 client record) on a recipient once per world."""
+    if dst.__dict__.get('_ai_client_room') == dst.current_room:
+        return b''
+    dst._ai_client_room = dst.current_room
+    return build_client_record(AI_CLIENT_ST, AI_CLIENT_PI, AI_CLIENT_NAME, squadron=0)
+
+def spawn_tank(room_id, camp, class_id, group_id=0, pos=None, reason='', send=True):
+    """Create one NetTank on every in-game client of the room. Returns its ONumber.
+    send=False registers it only (the caller batches the records itself)."""
+    if not SPAWN_TANKS or room_id is None:
+        return None
+    onum = next_obj_number()
+    TANKS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
+                   'group': int(group_id), 'pos': tuple(pos) if pos else (0.0, 0.0, 0.0),
+                   'fwd': (1.0, 0.0, 0.0), 'goal': None, 'mps': TANK_DEFAULT_MPS,
+                   'peers': set(), 'created': time.time(), 'last_sent': 0.0}
+    rec = build_tank_record(AI_CLIENT_ST, onum, camp, class_id, group_id)
+    n = 0
+    if not send:
+        return onum
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
+        pkt = build_msg13(body)
+        _submit_send(send_rel, p, pkt, f'<- CreateObject 2 TANK class={class_id} camp={camp} '
+                                       f'ONumber=0x{onum:04x} St={AI_CLIENT_ST} {reason}', to=3.0)
+        TANKS[onum]['peers'].add(getattr(p, 'addr', None))
+        n += 1
+    log('TANK', f'room {room_id}: spawn tank ONumber=0x{onum:04x} class={class_id} camp={camp} '
+                f'group={group_id} at ({TANKS[onum]["pos"][0]:.0f},{TANKS[onum]["pos"][1]:.0f}) '
+                f'({len(rec)}B record) -> {n} session(s) {reason}')
+    if tank_consts_ok():
+        threading.Timer(0.5, tank_broadcast_state, args=(onum,)).start()   # first fix after the create lands
+    else:
+        log('TANK', f'0x{onum:04x}: NO position updates (scale constants missing) - the client '
+                    f'will cull it after ~28 s')
+    return onum
+
+def delete_tank(onum, reason='', entry=None):
+    """Server-require-delete (msg-3 record) the tank on every client that has it. `entry` =
+    a full 12-byte kill entry ([id][0x53][hunter tail]) makes every client run ExitDataArrive:
+    FUN_004f8f20 MEC 5 on a non-plane non-chute object -> FUN_00478640 'X has destroyed Y'
+    (cyan + kill sound on the hunter's own client, plain line elsewhere) and, for object type
+    3 = tank, FUN_004a02a0 = the tank explosion. Bare (2-byte) = silent removal."""
+    t = TANKS.pop(onum, None)
+    if t is None:
+        return 0
+    if entry is not None:
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + bytes(entry)
+    else:
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    pkt = build_msg13(raw)
+    n = 0
+    for p in get_sessions_in_room(t['room']):
+        if getattr(p, 'addr', None) in t['peers']:
+            _submit_send(send_rel, p, pkt, f'<- delete TANK 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0)
+            n += 1
+    log('TANK', f'room {t["room"]}: delete tank 0x{onum:04x}{" with kill entry" if entry else ""} -> {n} session(s) {reason}')
+    return n
+
+def send_tank_update(onum, tick_for, payload26):
+    """Send one update frame to a single recipient (tick re-stamped to his clock)."""
+    t = TANKS.get(onum)
+    if t is None:
+        return False
+    rt = getattr(tick_for, 'last_telem_tick', None)
+    if rt is None:
+        return False
+    frame = build_tank_update((rt - RELAY_TICK_LEAD) & 0xFFFF, onum, payload26)
+    seq = getattr(tick_for, '_relay_seq', 0) & 0xFF
+    tick_for._relay_seq = seq + 1
+    pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
+    try:
+        sock.sendto(pkt, tick_for.addr)
+        return True
+    except OSError:
+        return False
+
+def _tank_note_client_delete(s, pl):
+    """v563f5/v564f5: the client's msg-3 delete NOTIFY lists every object it dropped. Entries:
+    a PLANE is [id u16][exit u8][tail by EEC] (EXIT_EEC_ENTRY_SIZE), a TANK is a bare [id u16]
+    (no exit data) - messages49: `03 | 02 01 90 | 01 01` = plane 0x0102 (exit 0x90) + tank
+    0x0101. Walk the list, typing each entry by whether the id is one of our tanks. A tank
+    named here is gone from that client (the airfield-change DISTANCE cull 'Check discon. and
+    del N (tank), (Dist=..)' or the ~28 s no-update cull) -> drop the peer so updates stop
+    and the next ServerConfirm re-creates it. THIS NOTIFY IS THE ONLY TRUTH: an exit-to-HQ +
+    refly on the same field keeps the tank in the client's world (no notify), and a re-create
+    then asserts !Objects[no->Number()] (Network.cpp:391 CTD, run_215405 22:01:42)."""
+    try:
+        body = bytes(pl)
+        if len(body) < 7 or body[4] != 0x03:
+            return
+        i = 5
+        while i + 2 <= len(body):
+            onum = struct.unpack_from('<H', body, i)[0]
+            t = TANKS.get(onum)
+            if t is not None:
+                if getattr(s, 'addr', None) in t['peers']:
+                    t['peers'].discard(s.addr)
+                    log('TANK', f'{s.current_pilot} dropped tank 0x{onum:04x} (client delete notify) - '
+                                f'{len(t["peers"])} peer(s) still have it; re-created at his next ServerConfirm')
+                i += 2
+            elif i + 3 <= len(body):
+                i += EXIT_EEC_ENTRY_SIZE.get(body[i + 2] & 0xf, 3)
+            else:
+                break
+    except Exception:
+        pass
+
+# --- v572f5 TANK DAMAGE (step 2 of the TC layer) ----------------------------------------
+# A plane hitting a NetTank makes the shooter's client send msg 51 (0x33) to the object's
+# owner station (our AI station): body = 6-byte records [victim ONumber u16][attacker
+# ONumber u16][damage u16] (run_20260908_000748: 0x0105 hit by 0x0106 for 1136 / 558 - two
+# 40 mm round types, armour already applied client-side). Tank health = class pCTI+0x38
+# (1000 for the Cromwell; +0x30/+0x34 = 70/30 are its front/side armour mm). At <= 0 the
+# tank dies: score + ai_tanks counter to the killer, chat line, TANK_WRECK_S of flags bit0
+# (the 'hold fire' state - a dead tank stops shooting) and then a bare msg-3 delete.
+TANK_CLASS_HP     = {}             # class_id -> hit points (from tank_tables.json phys f38)
+TANK_FALLBACK_HP  = 1000.0
+TANK_KILL_SCORE   = 150            # points for a tank kill (GROUND_KILL_SCORE model)
+TANK_WRECK_S      = 20.0           # seconds the dead tank stays as a wreck before the delete
+TANK_DAMAGE       = True
+
+def tank_hp_max(t):
+    return TANK_CLASS_HP.get(t.get('class'), TANK_FALLBACK_HP)
+
+def _handle_tank_hit_51(s, pl):
+    try:
+        body = bytes(pl)
+        if len(body) < 11 or body[4] != 0x33:
+            return
+        i = 5
+        while i + 6 <= len(body):
+            victim, attacker, dmg = struct.unpack_from('<HHH', body, i)
+            i += 6
+            t = TANKS.get(victim)
+            if t is None:
+                log('TANKHIT', f'{s.current_pilot}: hit on 0x{victim:04x} by 0x{attacker:04x} dmg={dmg} '
+                               f'- not one of our tanks (ignored)')
+                continue
+            if not TANK_DAMAGE or t.get('dead'):
+                continue
+            hp_max = tank_hp_max(t)
+            t['hp'] = t.get('hp', hp_max) - float(dmg)
+            t['last_hit_by'] = s
+            log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit tank 0x{victim:04x} class {t["class"]} '
+                           f'camp {t["camp"]} for {dmg} -> hp {t["hp"]:.0f}/{hp_max:.0f}')
+            if t['hp'] <= 0:
+                tank_killed(victim, s, reason='(msg-51 damage)')
+    except Exception:
+        logx('TANKHIT', 'msg-51 handling failed')
+
+def tank_killed(onum, killer, reason=''):
+    """v572f5/v574f5: book the kill and delete the tank with a KILL ENTRY (see delete_tank) -
+    the 2009 host's way: the clients themselves print the cyan 'has destroyed' line and blow
+    the tank up. No chat line, no wreck timer."""
+    t = TANKS.get(onum)
+    if t is None or t.get('dead'):
+        return
+    t['dead'] = True
+    t['goal'] = None
+    col = COLUMNS.get(t.get('column'))
+    if col is not None and onum in col['members']:
+        col['members'].remove(onum)
+        if col['leader'] == onum and col['members']:
+            col['leader'] = col['members'][0]
+            log('TANK', f'column {t["column"]}: leader 0x{onum:04x} killed, 0x{col["leader"]:04x} promoted')
+    kname = getattr(killer, 'current_pilot', None) if killer is not None else None
+    log('TANK', f'tank 0x{onum:04x} class {t["class"]} camp {t["camp"]} DESTROYED by {kname or "?"} {reason}')
+    if killer is not None and kname and GROUND_KILL_SCORE:
+        try:
+            _mode = scoring_mode_for_room(killer.current_room)
+            if _mode is not None:
+                _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(kname, TANK_KILL_SCORE, bomber=_bomber, mode=_mode)
+                _nt = db_bump_pilot_counter(kname, 'ai_tanks', 1)
+                log('SCORE', f'{kname} +{TANK_KILL_SCORE} = tank kill (0x{onum:04x}) -> '
+                             f'{"BOMBER" if _bomber else "FIGHTER"} score | total {_sc} rank {_old}->{_rk} tanks={_nt}')
+                send_stat_block_25(killer, reason='(tank kill)')
+            else:
+                log('SCORE', f'{kname} tank kill NOT booked (room outside the scored arena modes)')
+        except Exception:
+            logx('TANK', 'tank kill credit failed')
+    entry = None
+    if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
+        # 12-byte kill entry: [id][0x53 = MEC 5 shot down | EEC 3][hunter obj|St|PI|PPT(plane)|nation]
+        entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
+    delete_tank(onum, reason=f'(killed by {kname or "?"})', entry=entry)
+
+# --- v575f5 TC TRIGGERS (step 3 of the TC layer) -----------------------------------------
+# The screenshot/wiki contract:
+#   * a pilot's damage takes a scene to AttackPercent -> the scene is TRIGGERED by him
+#     (Trigger Scene Bonus, AttackToggleDelay lockout per scene);
+#   * attacker side: 'X tanks are called to attack the target. Find the nearest scene to the
+#     target that can produce all of the required units, fully loaded; if none can, do
+#     nothing; if one can produce some, produce them, create them at the scene and run to the
+#     target' (wiki, TC Production and Supply). Units come from the camp's built tank units
+#     (UNITS_MODEL), fuel/ammo from the camp pool; the column spawns at the producing Tank
+#     Factory and drives to the target.
+#   * defender side: the target camp's nearest tank factory raises a defending column to the
+#     threatened scene.
+#   * AI chat: 'AI: <n>th Army <m>th Battalion at <grid> forming to attack <CAMP> <Scene> at
+#     <grid> triggered by <pilot>' (+ the mission lines as chat for now).
+# Tank fire on scenes/planes is client-side cosmetic (no msg 31 from a NetTank) -> step 4.
+TC_TRIGGERS          = True
+TC_ATTACK_PERCENT    = 90       # scene damage % that triggers (2009 gamedef AttackPercent)
+TC_ATTACK_TOGGLE_S   = 300      # per-scene re-trigger lockout (AttackToggleDelay)
+TC_TANKS_ATTACK      = 8
+TC_TANKS_DEFEND      = 8
+TC_TANK_FUEL_KG      = 300      # loadout drawn from the camp pool per tank
+TC_TANK_AMMO_KG      = 200
+TC_COLUMN_MPS        = 9.0
+TC_AI_CHAT           = True
+TC_AI_CHAT_PI        = None     # PlayerIndex the AI lines are stamped with (None = AI_ROSTER_PI)
+AI_ROSTER_PI         = 0x1fe    # v577f5: the 'AI' ROSTER player (msg 62) the chat lines come from
+AI_ROSTER_NATION     = 7        # neutral slot
+TC_AI_CHANNEL        = 3        # FUN_004f6030: channels 3/4 print '<name>: <text>' in a fixed colour
+TANK_CLASS_BY_CAMP   = {1: 131} # camp -> tank class id; 131 = Cromwell (GB). Others: map with
+                                # `tank <class> scene N` and the client's 'Create NetTank (<name>)'
+TANK_CLASS_DEFAULT   = 131
+TRIGGERS = {}                   # (room, scene) -> {'at', 'by', 'camp', 'attacker', 'columns': [...]}
+_TC_CAMP_TAGS = {0: 'US', 1: 'GB', 2: 'SU'}    # observed side tags; others print as 'camp N'
+
+def tc_camp_tag(camp):
+    return _TC_CAMP_TAGS.get(int(camp), f'camp {camp}')
+
+TC_MAP_HALF          = 131072.0 # MapCoord.cpp: half the map edge (2^N/2); 131072 verified on trn02
+
+def tc_grid(x, y):
+    """World -> map grid label, inverse of the client's MapCoord.cpp (FUN_00495530):
+    X = col*2048 - half + 1024, Y = half - (row-1)*2048 - 1024; letters: col < 26 -> 'A'+col,
+    else two letters with (L1-'A')*26 + (L2-'A') + 26. Verified 2026-09-08 on trn02: scene 51
+    -> 73,AW, scene 47 -> 67,AS, Bomber Airfield (scene 30) -> 95,AM."""
+    try:
+        col = int(math.floor((x + TC_MAP_HALF) / 2048.0))
+        row = int(math.floor((TC_MAP_HALF - y) / 2048.0)) + 1
+        if col < 0:
+            col = 0
+        if col < 26:
+            letters = chr(65 + col)
+        else:
+            letters = chr(65 + (col - 26) // 26) + chr(65 + (col - 26) % 26)
+        return f'{row},{letters}'
+    except Exception:
+        return f'({x:.0f},{y:.0f})'
+
+def tc_ordinal(n):
+    return f'{n}{"th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")}'
+
+def ensure_ai_roster_on(s):
+    """v577f5: the client's chat handler (FUN_004f6030) drops any msg 20 whose PlayerIndex is
+    not a roster player ('ChatMessage from unknown player'), and prints channel-3/4 lines as
+    '<name>: <text>'. So the 2009 'AI: ...' lines were chat from a roster player named AI.
+    Add that player to this client once per world (msg 62); cleared in handle_leave_arena."""
+    if s.__dict__.get('_ai_roster_room') == s.current_room:
+        return
+    s._ai_roster_room = s.current_room
+    pkt = build_msg13(build_add_player_62([(AI_ROSTER_PI, AI_ROSTER_NATION, 'AI')]))
+    _submit_send(send_rel, s, pkt, '<- AddPlayer 62 (AI roster player)', to=3.0)
+
+def tc_say(room_id, text, camp=None):
+    """AI chat line to the room (or one camp): channel 3 from the 'AI' roster player, so the
+    client renders 'AI: <text>' itself (the text must not carry the prefix)."""
+    if not TC_AI_CHAT:
+        return
+    if text.startswith('AI: '):
+        text = text[4:]
+    pi = TC_AI_CHAT_PI if TC_AI_CHAT_PI is not None else AI_ROSTER_PI
+    pkt = build_chat_display_20(TC_AI_CHANNEL, text, pi)
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        if camp is not None and getattr(p, 'nation', None) != camp:
+            continue
+        ensure_ai_roster_on(p)
+        _submit_send(send_rel, p, pkt, f'<- AI chat: {text[:60]}', to=3.0)
+        n += 1
+    log('TC', f'room {room_id} AI{"" if camp is None else f" (camp {camp})"}: {text}  -> {n}')
+
+def tc_scene_xy(terrain, sidx):
+    tt = trn_tables(terrain) or {}
+    g = tt.get('gsi') or []
+    if 0 <= sidx < len(g):
+        return float(g[sidx]['x']), float(g[sidx]['y']), g[sidx].get('type_name') or 'scene'
+    return None
+
+def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty):
+    """Nearest scene of `camp` whose type is a tank producer, as (sidx, x, y, dist) or None."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
+    best = None
+    for sidx, c in table.items():
+        if c != camp:
+            continue
+        tn = (scene_type_for(terrain, sidx) or '').lower()
+        if 'tank' not in tn:
+            continue
+        sxy = tc_scene_xy(terrain, sidx)
+        if not sxy:
+            continue
+        d = math.hypot(sxy[0] - tx, sxy[1] - ty)
+        if best is None or d < best[3]:
+            best = (sidx, sxy[0], sxy[1], d)
+    return best
+
+def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
+    """Wiki rule: the camp's nearest tank producer to the target raises as many fully loaded
+    tanks as it can (units from the camp's built tank units, fuel/ammo from the camp pool).
+    Returns the column id or None."""
+    terrain = _probe_terrain_for_room(room_id)
+    txy = tc_scene_xy(terrain, target_sidx)
+    if not txy:
+        return None
+    fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1])
+    if fac is None:
+        tc_say(room_id, f'AI: {tc_camp_tag(camp)} has no tank factory to {purpose} '
+                        f'{tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2]} at {tc_grid(txy[0], txy[1])}')
+        return None
+    fsidx, fx, fy, fd = fac
+    ftype = scene_type_for(terrain, fsidx) or 'Tank Factory'
+    # units: what the camp has built; loadout: what the pool can equip
+    have = camp_units_state(room_id, camp)['tank'] if UNITS_MODEL else n_want
+    n = min(n_want, have)
+    if n <= 0:
+        tc_say(room_id, f'AI: {tc_camp_tag(camp)} {ftype} at {tc_grid(fx, fy)} has no tank units to '
+                        f'{purpose} {txy[2]} at {tc_grid(txy[0], txy[1])}')
+        log('TC', f'room {room_id}: camp {camp} cannot raise a column - 0 tank units built')
+        return None
+    loaded = 0
+    for _i in range(n):
+        r = camp_supply_take(room_id, terrain, camp, TC_TANK_AMMO_KG, TC_TANK_FUEL_KG)
+        if r is None:
+            loaded = n; break                       # no pool table -> arcade: everyone rolls
+        got_a, got_f = r[0], r[1]
+        if got_a < TC_TANK_AMMO_KG * 0.5 or got_f < TC_TANK_FUEL_KG * 0.5:
+            break                                   # not 'fully loaded' - stop here
+        loaded += 1
+    if loaded <= 0:
+        tc_say(room_id, f'AI: {tc_camp_tag(camp)} {ftype} at {tc_grid(fx, fy)} cannot fuel and arm its tanks')
+        log('TC', f'room {room_id}: camp {camp} cannot raise a column - pool empty')
+        return None
+    if UNITS_MODEL:
+        camp_units_take(room_id, camp, 'tank', loaded)
+    cls = TANK_CLASS_BY_CAMP.get(int(camp), TANK_CLASS_DEFAULT)
+    gid = spawn_column(room_id, camp, cls, loaded, fx, fy, reason=f'(TC {purpose} of scene {target_sidx})')
+    if gid is None:
+        return None
+    col = COLUMNS.get(gid)
+    col['purpose'] = purpose; col['target'] = int(target_sidx); col['camp'] = int(camp)
+    col['army'] = (gid % 9) + 1; col['battalion'] = ((gid * 3) % 7) + 1
+    column_goto(gid, txy[0], txy[1], TC_COLUMN_MPS)
+    tcamp = scene_camp(terrain, target_sidx)
+    who = f' triggered by {trigger_pilot}' if trigger_pilot else ''
+    tc_say(room_id, f'AI: {tc_ordinal(col["army"])} Army {tc_ordinal(col["battalion"])} Battalion at '
+                    f'{tc_grid(fx, fy)} forming to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
+                    f'{tc_grid(txy[0], txy[1])}{who}')
+    # mission lines, to each side
+    if purpose == 'attack':
+        tc_say(room_id, f'Attack {tc_camp_tag(tcamp)} scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
+        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} '
+                        f'attacking {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+        tc_say(room_id, f'Destroy {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} headed for '
+                        f'{tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=tcamp)
+    else:
+        tc_say(room_id, f'Defend scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
+        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} '
+                        f'defending {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+    log('TC', f'room {room_id}: column {gid} ({loaded}/{n_want} x class {cls}) {purpose} scene {target_sidx} '
+              f'from {ftype} {fsidx} ({fd:.0f} m away)')
+    return gid
+
+def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
+    """A pilot took scene `sidx` past AttackPercent: bonus + attack/defend columns."""
+    terrain = _probe_terrain_for_room(room_id)
+    key = (room_id, int(sidx))
+    now = time.time()
+    prev = TRIGGERS.get(key)
+    if prev and now - prev['at'] < TC_ATTACK_TOGGLE_S:
+        return False
+    tcamp = scene_camp(terrain, sidx)
+    pcamp = getattr(pilot_sess, 'nation', None)
+    if tcamp is None or pcamp is None or tcamp == pcamp:
+        return False
+    pname = getattr(pilot_sess, 'current_pilot', None) or 'a pilot'
+    txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
+    TRIGGERS[key] = {'at': now, 'by': pname, 'camp': tcamp, 'attacker': pcamp, 'columns': []}
+    log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" (camp {tcamp}) TRIGGERED by {pname} '
+              f'(camp {pcamp}) {reason}')
+    if GROUND_KILL_SCORE:
+        try:
+            _mode = scoring_mode_for_room(room_id)
+            if _mode is not None:
+                _bomber = is_bomber_plane(getattr(pilot_sess, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(pname, TRIGGER_SCENE_BONUS_2004, bomber=_bomber, mode=_mode)
+                log('SCORE', f'{pname} +{TRIGGER_SCENE_BONUS_2004} = triggered scene {sidx} | total {_sc} rank {_old}->{_rk}')
+                send_stat_block_25(pilot_sess, reason='(trigger bonus)')
+        except Exception:
+            logx('TC', 'trigger bonus failed')
+    tc_say(room_id, f'AI: {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} triggered by {pname}')
+    ga = tc_raise_column(room_id, pcamp, TC_TANKS_ATTACK, sidx, 'attack', pname)
+    gd = tc_raise_column(room_id, tcamp, TC_TANKS_DEFEND, sidx, 'defend', pname)
+    TRIGGERS[key]['columns'] = [g for g in (ga, gd) if g is not None]
+    return True
+
+# --- v576f5 ENGAGEMENT + CAPTURE (step 4 of the TC layer) --------------------------------
+# A NetTank's gun is client-side eyecandy (no msg 31 / 51 ever arrives for its fire), so the
+# server books everything: attacking tanks in range of the target scene's destructible objects
+# wear flags bit2 (fire) and deal TC_TANK_DPS to the nearest object each second (same per-
+# object HP rule as plane damage; kills go out as the msg-30 destroy form to everyone, the
+# repair clock starts); enemy tanks in gun range of each other trade TC_TANK_VS_TANK_DPS and
+# die through the kill-entry delete with the shooting tank as hunter. CAPTURE: scene damage
+# >= CapturePercent (room setting, else TC_CAPTURE_PERCENT) with a live attacking tank within
+# TC_CAPTURE_RADIUS -> the scene's camp flips to the attacker (production, supply pool and
+# the map follow via SCENE_CAMP_BY_TERRAIN), +CAPTURE_SCENE_BONUS to the triggering pilot,
+# msg-42 snapshot re-pushed, AI line. Defending columns park at the scene and shoot back.
+TC_ENGAGE_RADIUS     = 350.0    # m from the scene centre: column is 'at' the target
+TC_ASSAULT_RADIUS    = 120.0    # m: where the column drives to once engaged (a clear spot)
+TC_TANK_GUN_RANGE    = 300.0    # m, tank -> object / tank -> tank
+TC_TANK_DPS          = 120.0    # damage per second per tank on a scene object (plane 40 mm ~ 500/hit)
+TC_TANK_VS_TANK_DPS  = 60.0     # per second per shooter on an enemy tank (1000 HP -> ~17 s duel)
+TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent setting
+TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
+TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
+_TC_AI_KILLER = object()        # sentinel 'killer' -> broadcast_scene_36 sends the 30 form to all
+
+def tc_room_setting(room_id, key, default):
+    try:
+        v = db_get_room_settings(room_id).get(key)
+        return int(v) if v is not None else default
+    except Exception:
+        return default
+
+def tc_scene_objects(room_id, terrain, sidx):
+    """[(obj, oi, x, y, valuable)] still-alive objects of a scene (decorations included as
+    fallback targets - the client's own gun AI likes shooting trees, so let them fall)."""
+    tt = trn_tables(terrain) or {}
+    out = []
+    for o in (tt.get('goi') or []):
+        if int(o.get('scene', -1)) != int(sidx):
+            continue
+        obj = int(o['i'])
+        if (room_id, obj) in _SCENE36_DESTROYED:
+            continue
+        oi = trn_obj_info(room_id, obj)
+        if not oi:
+            continue
+        valuable = oi.get('value', 0) > 0 and oi.get('destroy_mode') != 2
+        out.append((obj, oi, float(o['x']), float(o['y']), valuable))
+    return out
+
+def tc_ai_destroy_object(room_id, obj, oi, by=''):
+    """Kill a scene object by AI fire: registry + msg-30 destroy form to everyone, SCENE_HP."""
+    sc = oi.get('scene')
+    camp = scene_camp(_probe_terrain_for_room(room_id), sc) if sc is not None and sc >= 0 else 0
+    broadcast_scene_36(room_id, [(obj, camp if camp != SCENE_CAMP_NEUTRAL else 0, 0.0)],
+                       reason=f'(AI tank fire {by})', killer=_TC_AI_KILLER)
+    if sc is not None and sc >= 0:
+        frac = trn_scene_damage_frac(room_id, sc)
+        SCENE_HP[(room_id, sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - frac)))
+        log('TC', f'room {room_id}: tank fire destroyed obj {obj} "{oi["name"]}" - scene {sc} damage {frac * 100:.0f}%')
+        if trn_scene_complete(room_id, sc):
+            supply_on_scene_destroyed(room_id, sc)
+
+def tc_capture_scene(room_id, sidx, camp, by_pilot=None):
+    terrain = _probe_terrain_for_room(room_id)
+    old = scene_camp(terrain, sidx)
+    if old == camp:
+        return False
+    SCENE_CAMP_BY_TERRAIN.setdefault(terrain, {})[int(sidx)] = int(camp)
+    txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
+    log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" CAPTURED by camp {camp} (was {old})'
+              f'{" - triggered by " + by_pilot if by_pilot else ""}')
+    tc_say(room_id, f'AI: {tc_camp_tag(camp)} forces have captured {tc_camp_tag(old)} {txy[2].strip()} at '
+                    f'{tc_grid(txy[0], txy[1])}{" (triggered by " + by_pilot + ")" if by_pilot else ""}')
+    if by_pilot and GROUND_KILL_SCORE:
+        sess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == by_pilot), None)
+        _mode = scoring_mode_for_room(room_id)
+        if sess is not None and _mode is not None:
+            try:
+                _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(by_pilot, CAPTURE_SCENE_BONUS_2004, bomber=_bomber, mode=_mode)
+                log('SCORE', f'{by_pilot} +{CAPTURE_SCENE_BONUS_2004} = captured scene {sidx} | total {_sc} rank {_old}->{_rk}')
+                send_stat_block_25(sess, reason='(capture bonus)')
+            except Exception:
+                logx('TC', 'capture bonus failed')
+    try:
+        broadcast_scene_snapshot_42(room_id, reason=f'(scene {sidx} captured by camp {camp})')
+    except Exception:
+        logx('TC', 'snapshot after capture failed')
+    TRIGGERS.pop((room_id, int(sidx)), None)
+    return True
+
+def _tc_engagement_tick():
+    """1 Hz: fire control, AI damage on scenes and tanks, capture checks."""
+    now = time.time()
+    for gid, col in list(COLUMNS.items()):
+        purpose = col.get('purpose')
+        if purpose not in ('attack', 'defend', 'hold'):
+            continue
+        room_id, sidx = col['room'], col.get('target')
+        terrain = _probe_terrain_for_room(room_id)
+        txy = tc_scene_xy(terrain, sidx) if sidx is not None else None
+        if not txy:
+            continue
+        # v583f5: an attacker whose target already belongs to its own camp (captured by another
+        # column, or re-triggered after a flip) becomes a garrison - no friendly fire
+        if purpose == 'attack' and scene_camp(terrain, sidx) == col['camp']:
+            col['purpose'] = purpose = 'hold'; col['held_at'] = col.get('held_at', now)
+            log('TC', f'column {gid}: target scene {sidx} is ours - holding')
+        members = [(o, TANKS[o]) for o in col['members'] if o in TANKS and not TANKS[o].get('dead')]
+        if not members:
+            continue
+        near = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_ENGAGE_RADIUS]
+        if purpose == 'attack' and near and not col.get('engaged'):
+            col['engaged'] = now
+            # v578f5: close to assault distance (a clear spot TC_ASSAULT_RADIUS from the centre,
+            # on our side of it) instead of parking at the engage radius
+            lead = TANKS.get(col['leader'])
+            if lead is not None:
+                vx, vy = lead['pos'][0] - txy[0], lead['pos'][1] - txy[1]
+                vn = math.hypot(vx, vy) or 1.0
+                ax, ay = txy[0] + vx / vn * TC_ASSAULT_RADIUS, txy[1] + vy / vn * TC_ASSAULT_RADIUS
+                ax, ay = tank_clear_spot(terrain, ax, ay)
+                column_goto(gid, ax, ay, TC_COLUMN_MPS)
+            tc_say(room_id, f'AI: {tc_ordinal(col.get("army", 1))} Army {tc_ordinal(col.get("battalion", 1))} '
+                            f'Battalion is attacking {tc_camp_tag(scene_camp(terrain, sidx))} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+        # --- tank vs tank (any enemy tank in gun range, columns or singles) ---
+        for _o, t in members:
+            t['_target_tank'] = None
+            for o2, t2 in TANKS.items():
+                if t2 is t or t2.get('dead') or t2['room'] != room_id or t2['camp'] == t['camp']:
+                    continue
+                if math.hypot(t2['pos'][0] - t['pos'][0], t2['pos'][1] - t['pos'][1]) <= TC_TANK_GUN_RANGE:
+                    t['_target_tank'] = o2
+                    break
+        # --- attackers: shoot the scene's objects (valuable ones only; decorations are left alone) ---
+        objs = [e for e in tc_scene_objects(room_id, terrain, sidx) if e[4]] if purpose == 'attack' else []
+        # v583f5: nothing valuable within gun range of the leader -> advance the column to the
+        # nearest remaining valuable object (a clear spot short of it), instead of stalling
+        if purpose == 'attack' and col.get('engaged') and objs:
+            lead = TANKS.get(col['leader'])
+            if lead is not None:
+                lx, ly = lead['pos'][0], lead['pos'][1]
+                if not any(math.hypot(e[2] - lx, e[3] - ly) <= TC_TANK_GUN_RANGE * 0.9 for e in objs):
+                    nearest = min(objs, key=lambda e: math.hypot(e[2] - lx, e[3] - ly))
+                    if lead.get('goal') is None or math.hypot(nearest[2] - lead['goal'][0], nearest[3] - lead['goal'][1]) > TC_TANK_GUN_RANGE:
+                        dx, dy = nearest[2] - lx, nearest[3] - ly
+                        dn = math.hypot(dx, dy) or 1.0
+                        stand = max(40.0, dn - TC_TANK_GUN_RANGE * 0.6)
+                        gx_, gy_ = tank_clear_spot(terrain, lx + dx / dn * stand, ly + dy / dn * stand)
+                        column_goto(gid, gx_, gy_, TC_COLUMN_MPS)
+                        log('TC', f'column {gid}: advancing on obj {nearest[0]} "{nearest[1]["name"]}" ({dn:.0f} m away)')
+        for onum, t in members:
+            firing = False
+            t['_aim'] = None
+            if t.get('_target_tank') in TANKS:
+                v = TANKS[t['_target_tank']]
+                v['hp'] = v.get('hp', tank_hp_max(v)) - TC_TANK_VS_TANK_DPS
+                firing = True
+                t['_aim'] = (v['pos'][0] - t['pos'][0], v['pos'][1] - t['pos'][1])
+                if v['hp'] <= 0 and not v.get('dead'):
+                    tank_killed_by_tank(t['_target_tank'], onum)
+            elif objs and purpose == 'attack':
+                in_range = [e for e in objs if math.hypot(e[2] - t['pos'][0], e[3] - t['pos'][1]) <= TC_TANK_GUN_RANGE]
+                if in_range:
+                    best = min(in_range, key=lambda e: math.hypot(e[2] - t['pos'][0], e[3] - t['pos'][1]))
+                    firing = True
+                    obj, oi = best[0], best[1]
+                    t['_aim'] = (best[2] - t['pos'][0], best[3] - t['pos'][1])
+                    key = (room_id, obj)
+                    GROUND_HP[key] = GROUND_HP.get(key, 0) + int(TC_TANK_DPS)
+                    need = (OBJ_HP_DECORATION if (oi['value'] <= 0 or oi['destroy_mode'] == 2)
+                            else max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE))
+                    if GROUND_HP[key] >= need:
+                        tc_ai_destroy_object(room_id, obj, oi, by=f'column {gid}')
+                        objs = [e for e in objs if e[0] != obj]
+            newflags = (t.get('flags', 0) | 0x04) if firing else (t.get('flags', 0) & ~0x04)
+            if purpose == 'hold' and t.get('_target_tank') not in TANKS:
+                newflags = (newflags & ~0x04) | 0x01          # v583f5: garrison holds fire (client AI too)
+            else:
+                newflags &= ~0x01
+            if newflags != t.get('flags', 0):
+                t['flags'] = newflags
+                t['last_sent'] = 0.0               # push the fire state now
+        # --- capture ---
+        if purpose == 'attack':
+            cap_pct = tc_room_setting(room_id, 'capture_percent', TC_CAPTURE_PERCENT)
+            frac = trn_scene_damage_frac(room_id, sidx)
+            close = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS]
+            if col.get('engaged') and now - col.get('_cap_logged', 0.0) > 30.0:
+                col['_cap_logged'] = now
+                log('TC', f'column {gid}: scene {sidx} damage {frac * 100:.0f}% (capture at {cap_pct}%), '
+                          f'{len(close)}/{len(members)} tank(s) inside {TC_CAPTURE_RADIUS:.0f} m')
+            if close and frac * 100.0 + 1e-6 >= cap_pct:
+                trig = TRIGGERS.get((room_id, int(sidx))) or {}
+                if tc_capture_scene(room_id, sidx, col['camp'], by_pilot=trig.get('by')):
+                    col['purpose'] = 'hold'; col['held_at'] = now
+                    for _o, t in members:
+                        t['flags'] = t.get('flags', 0) & ~0x04
+        elif purpose == 'hold' and now - col.get('held_at', now) > TC_HOLD_AFTER_CAPTURE_S:
+            log('TC', f'column {gid}: garrison withdrawn from scene {sidx}')
+            column_delete(gid, reason='(garrison withdrawn)')
+
+def tank_killed_by_tank(onum, shooter_onum):
+    """AI-on-AI kill: same kill-entry delete, hunter = the shooting tank (AI station)."""
+    t = TANKS.get(onum)
+    if t is None or t.get('dead'):
+        return
+    t['dead'] = True; t['goal'] = None
+    col = COLUMNS.get(t.get('column'))
+    if col is not None and onum in col['members']:
+        col['members'].remove(onum)
+        if col['leader'] == onum and col['members']:
+            col['leader'] = col['members'][0]
+    sh = TANKS.get(shooter_onum) or {}
+    log('TC', f'tank 0x{onum:04x} (camp {t["camp"]}) destroyed by tank 0x{shooter_onum:04x} (camp {sh.get("camp")})')
+    entry = (struct.pack('<H', onum & 0x7fff) + bytes([0x53])
+             + struct.pack('<H', shooter_onum & 0xffff) + struct.pack('<H', AI_CLIENT_ST)
+             + struct.pack('<I', AI_CLIENT_PI & 0xffff) + bytes([0x02 | ((int(sh.get('camp', 0)) & 7) << 5)]))
+    delete_tank(onum, reason=f'(killed by tank 0x{shooter_onum:04x})', entry=entry)
+
+def tc_check_scene_trigger(room_id, sidx, pilot_sess):
+    """Called from the ground-damage path after a kill: trigger when damage >= AttackPercent."""
+    if not TC_TRIGGERS or room_id is None or sidx is None or sidx < 0:
+        return
+    try:
+        frac = trn_scene_damage_frac(room_id, sidx)
+        if frac * 100.0 + 1e-6 >= TC_ATTACK_PERCENT:
+            tc_trigger_scene(room_id, sidx, pilot_sess, reason=f'(damage {frac * 100:.0f}% >= {TC_ATTACK_PERCENT}%)')
+    except Exception:
+        logx('TC', 'trigger check failed')
+
+def tank_recreate_for(s, reason=''):
+    """v563f5/v570f5: after a (re)spawn, create every tank of the room this session doesn't
+    hold - ALL in one msg-2 (one reliable send), the record walker takes concatenated records."""
+    if not SPAWN_TANKS or not TANKS:
+        return 0
+    rid = getattr(s, 'current_room', None)
+    body = bytearray([0x02]); n = 0; ids = []
+    for onum, t in list(TANKS.items()):
+        if t['room'] != rid or getattr(s, 'addr', None) in t['peers']:
+            continue
+        if n == 0:
+            body += _ensure_ai_client_on(s)
+        body += build_tank_record(AI_CLIENT_ST, onum, t['camp'], t['class'], t['group'])
+        t['peers'].add(s.addr)
+        t['last_sent'] = 0.0          # the driver sends a fix on its next tick
+        n += 1; ids.append(f'0x{onum:04x}')
+    if n:
+        _submit_send(send_rel, s, build_msg13(bytes(body)),
+                     f'<- CreateObject 2 TANK x{n} {ids} (re-create {reason})', to=3.0)
+        log('TANK', f'{s.current_pilot}: re-created {n} tank(s) in one msg-2 {reason}')
+    return n
 
 def preload_squadron_list(s, reason=''):
     """Push the 0xce squadron list to a client so it has the list loaded in-session. Once per
@@ -9959,6 +11617,21 @@ def rank_for_score(score):
             break
     return min(max(rank, 0), 12)
 
+def db_bump_pilot_counter(name, col, n=1):
+    """v558f5: +n on one integer stat column (ai_buildings / ai_tanks / ai_ground ...). Missing
+    column (un-migrated DB) -> no-op. Returns the new value or None."""
+    if not name or n == 0:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
+    if col not in have:
+        conn.close(); return None
+    conn.execute(f"UPDATE pilots SET {col} = MAX(0, COALESCE({col},0) + ?) WHERE pilot_name=?",
+                 (int(n), name))
+    row = conn.execute(f"SELECT COALESCE({col},0) FROM pilots WHERE pilot_name=?", (name,)).fetchone()
+    conn.commit(); conn.close()
+    return int(row[0]) if row else None
+
 def db_apply_score_delta(name, delta, bomber=False, mode=None):
     """v223/v242: add `delta` points to a pilot's career score, recompute their RANK, persist both.
 
@@ -10809,13 +12482,29 @@ def _telem_split_records(src, pl):
         known[_pn] = TELEM_PARA_RECORD
     for _co in (src.__dict__.get('crew_para_objs') or {}):
         known[_co] = TELEM_PARA_RECORD                       # v555f5: bomber crew chutes
+    _mine = getattr(src, 'my_obj_number', None)
+    # v584f5 [CTD FIX - online 09-07 Taurus/Butterz, Network.cpp:167 Length=-49/-2]: a bomber
+    # frame is plane(81) + crew chute(34), which tiles two ways (34+81 == 81+34). With the
+    # plane's fresh post-respawn ONumber not yet in known, the search tried 34 FIRST for it, the
+    # leftover fitted 81 exactly, and a chute-sized slice went out under the PLANE's ONumber ->
+    # every peer consumed a plane record from 34 bytes and died. Rules now: the plane's own
+    # number is never a chute size; every slice's ONumber must be one of the sender's objects
+    # (a garbage boundary lands on a random word inside a record, which is not).
+    owned = set(known) | ({_mine} if _mine is not None else set())
     def fit(i, acc, depth):
         if i == len(rest):
             return acc
         if i + 2 > len(rest) or depth > 12:
             return None
         onum = int.from_bytes(rest[i:i+2], 'little')
-        cands = [known[onum]] if onum in known else list(TELEM_RECORD_SIZES)
+        if owned and onum not in owned:
+            return None
+        if onum in known:
+            cands = [known[onum]]
+        elif onum == _mine:
+            cands = [sz for sz in TELEM_RECORD_SIZES if sz != TELEM_PARA_RECORD]
+        else:
+            cands = list(TELEM_RECORD_SIZES)
         for sz in cands:
             if i + sz <= len(rest):
                 r = fit(i + sz, acc + [(onum, rest[i:i+sz])], depth + 1)
@@ -11632,6 +13321,10 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                 if _pcp is not None:
                     _pcp.discard(s.addr)
                 _forget_canopies_on(_p, s)      # v551f5: their canopy is gone from our world too
+        # v564f5: NO tank peer-drop here. The client KEEPS NetTanks across an HQ re-entry /
+        # same-field refly (only far ones go, via its distance cull + msg-3 notify); assuming
+        # a drop and re-creating hit '!Objects[no->Number()]' (Network.cpp:391 CTD). The
+        # msg-3 notify (_tank_note_client_delete) is the single source of truth.
         _why = (f'airfield change ({old_af}->{af})' if af_changed else 'HQ re-entry (world rebuilt)')
         log('FLY23', f'{_why} -> peers re-create objects on {s.current_pilot}')
     if s.__dict__.pop('_rejoin_pending', False):     # re-join only (first join did this at enter)
@@ -11696,6 +13389,11 @@ def handle_leave_arena(s):
     takes over (it will then re-request news/arena list itself)."""
     log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
+    s.__dict__.pop('_dead_snapshot_room', None)   # v556f5: next world gets the dead snapshot again
+    s.__dict__.pop('_ai_client_room', None)       # v563f5: the AI station must be re-registered too
+    s.__dict__.pop('_ai_roster_room', None)       # v577f5: and the AI roster player
+    for _t in TANKS.values():                      # v563f5: the world is gone with the leave
+        _t['peers'].discard(getattr(s, 'addr', None))
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -12700,6 +14398,17 @@ def scene_snapshot_entries(terrain):
     return [(camps.get(i, 7), SCENE_STATE_NORMAL) for i in range(max(camps) + 1)]
 
 
+def send_scene_snapshot_42_to(s, reason=''):
+    """v580f5: one msg-42 scene snapshot to a single session (entry-time ownership)."""
+    trn = _probe_terrain_for_room(s.current_room)
+    entries = scene_snapshot_entries(trn)
+    if not entries:
+        return False
+    ok = send_rel(s, build_scene_snapshot_42(entries), f'<- SCENE_SNAPSHOT 42 x{len(entries)} {reason}', to=3.0)
+    s._panel_snap_sent = True
+    log('SCENE42', f'{getattr(s, "current_pilot", "?")}: msg 42 x{len(entries)} sent={ok} {reason}')
+    return ok
+
 def broadcast_scene_snapshot_42(room_id, reason=''):
     """Send the full scene snapshot to everyone in-game in a room. Returns the number of sessions."""
     trn = _probe_terrain_for_room(room_id)
@@ -12761,16 +14470,28 @@ DESTROY_NAMING_CAMP = 0
 #   missing it will destroy the wrong building, so keep it off for normal play.
 
 MSG_SCENE_OBJSTATE_30 = 0x1e
-# Send msg 30 after every msg 36. See v290 notes: msg 36 announces, msg 30 actually changes the
-# world. Set False to get the pre-v290 announce-only behaviour.
-SEND_SCENE_STATE_30 = True
+# v556f5 [REPAIR MODEL - THE v290 READING WAS INVERTED]: msg 30 is NOT "the destroy that
+# follows the announce". Decompiled handler FUN_004f6880 + TRN_OBJECT vtable (base 0xa36e74):
+#   u16 idx (bit15 CLEAR)          -> FUN_00568eb0(obj, 0, 0)  -> vtable+0x54 = FUN_00554240
+#                                     -> FUN_00567370 = RESTORE (clears +0x16c destroyed flag)
+#   u16 idx|0x8000 + u16 value     -> FUN_00568eb0(obj, 1, value) -> DESTROY form:
+#                                     vtable+0x50 FUN_00567fd0 SetDestroyed(value>=2);
+#                                     value 0/1 = animated + sound, value>=2 = SILENT snapshot
+#                                     (the 2009 join-time 'in 30'149' form); a type-1 building
+#                                     additionally gets FUN_00568210 Destroy(local plane) = the
+#                                     10 s secondary blast (FUN_0044f970) attributed to it.
+# So the 2-byte record we fired after every msg-36 was a RESTORE - the "buildings repair in
+# moments" symptom (field-confirmed 2026-09-07: SEND_SCENE_STATE_30=False -> no repair at all,
+# an airfield stayed at 93% for 10+ min). Left False for good; the repair model below sends
+# the restore form deliberately, on the server's own clock.
+SEND_SCENE_STATE_30 = False
 
 def build_scene_state_30(indices, progress=None):
     """Build FA msg 30 (0x1e) SCENE OBJECT STATE.
 
-    Wire (from LAB_004f6880): [0x1e] then per object either
-        u16 (idx & 0x7fff)                      -> bit15 clear: vtable[+0x54], the DESTROY path
-        u16 (idx | 0x8000) + u16 value          -> bit15 set:   progress/capture path
+    Wire (from FUN_004f6880): [0x1e] then per object either
+        u16 (idx & 0x7fff)                      -> bit15 clear: RESTORE (repair) - v556f5 corrected
+        u16 (idx | 0x8000) + u16 value          -> bit15 set:   DESTROY form (value>=2 = silent)
     NO pad byte. The handler's `inc edi` skips the TYPE byte itself, and `dec ebx` makes the
     record area Length-1. Since each record consumes 2 or 4 and the loop exits on ebx<=0, the
     body length must be ODD - which every observed live length is (5, 13, 49, 149). An even
@@ -12795,7 +14516,10 @@ def build_scene_destroy_36(records):
     ('You have destroyed USA Metal Factory'). camp must be the owning scene's REAL camp
     (0..4); camp 0xff routes the client into a neutral/bridge path ('a bridge' for ANY
     index). progress <= 0 = destroy. Framed with build_ingame_pkt so the client's Size ==
-    the true byte count (the live 'in 36'8' = 1 record)."""
+    the true byte count (the live 'in 36'8' = 1 record).
+    v557f5 CORRECTION (FUN_004f9d90 decompile): EVERY record is a destroy - the f32 is not
+    progress but the SCORE credited to the receiving client (added to his score record, bumps
+    his ground-kill counter when > 0, reported back via out-25). 2009's 'Score:0' = f32 0."""
     body = bytearray([MSG_SCENE_STATE_36])
     for scene_idx, camp, progress in records:
         body += struct.pack('<HBf', scene_idx & 0xFFFF, camp & 0xFF, float(progress))
@@ -12932,53 +14656,72 @@ def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff
     log('SUPPLY60', f'room {room_id}: msg 60 broadcast -> {len(sess)} session(s) {reason}')
     return len(sess)
 
-def broadcast_scene_36(room_id, records, reason='', force=False):
-    """Send a msg-36 SCENE DESTROY/STATE to every player currently in `room_id`.
-    `records` = [(scene_idx, camp, progress), ...]. Reliable (matches the live
-    reliable 'in 36'). Returns the number of sessions the packet was sent to.
+def broadcast_scene_36(room_id, records, reason='', force=False, killer=None):
+    """Deliver a goi-object DESTROY to a room. `records` = [(obj_idx, camp, score), ...].
+    v557f5 [2009 CONTRACT, from the decompiled msg-36 handler FUN_004f9d90]: msg 36 is
+    addressed to ONE client - it is unconditionally 'YOU destroyed <owner> <name>' (needs the
+    local player, prints EVENT string 0x81 / 0xcb for camp 0xff, adds the f32 to the LOCAL
+    pilot's score record and bumps his ground-kill counter +0x7c when > 0, then the client
+    reports its score with out-25) and applies FUN_00568eb0(obj, 1, 0) = animated wreck.
+    So with `killer` given: 36 -> the killer only; everyone ELSE gets the msg-30 DESTROY form
+    [idx|0x8000][u16 age] (the 2009 periodic 'in 30'5'), which shows the same wreck +
+    explosion + 60 s fire and, for destroy_mode-1 objects (explosive: fuel/ammo), arms the
+    client's 10 s detonation. Without `killer` (console/probe tests) the 36 goes to all, as
+    before. EVERY 36 record is a destroy on the wire (the float is score, not progress), so
+    every record enters the registry.
     v447f5 [CTD GUARD] (v449f5 semantics: PER OBJECT): each goi object is destroyed AT
-    MOST ONCE per room per server run. Field proof (run_20260815_234008 / messages70):
+    MOST ONCE while it is dead. Field proof (run_20260815_234008 / messages70):
     TRN_OBJECT::Destroy (FUN_00568210) asserts '!Destroyer.PTR()' (Trn_Obj.cpp:415, instant
     CTD) when a destroy arrives for an object whose Destroyer is already set - the probe
     sweep's re-destroy of index 46 killed the client 2s later. Every path (probe, sweep,
     console destroy, auto-PvE) flows through here, so the registry catches them all;
-    `force=True` bypasses for deliberate experiments only."""
+    `force=True` bypasses for deliberate experiments only. v556f5: the repair model clears
+    the entry again when the object is restored."""
     if room_id is None or not records:
         return 0
     if not force:
-        _skips = [i for i, _c, _p in records if _p <= 0 and (room_id, i) in _SCENE36_DESTROYED]
+        _skips = [i for i, _c, _p in records if (room_id, i) in _SCENE36_DESTROYED]
         if _skips:
-            records = [r for r in records if not (r[2] <= 0 and (room_id, r[0]) in _SCENE36_DESTROYED)]
-            log('SCENE36', f'room {room_id}: SKIPPED re-destroy of scene(s) {_skips} - already '
-                           f'destroyed this run (a second destroy of an exhausted scene is the '
-                           f'Trn_Obj.cpp:415 client CTD) {reason}')
+            records = [r for r in records if (room_id, r[0]) not in _SCENE36_DESTROYED]
+            log('SCENE36', f'room {room_id}: SKIPPED re-destroy of obj(s) {_skips} - still dead '
+                           f'(a second destroy of a dead object is the Trn_Obj.cpp:415 client '
+                           f'CTD; it becomes killable again when the repair model restores it) {reason}')
         if not records:
             return 0
-    for _i, _c, _p in records:
-        if _p <= 0:
+    _now = time.time()
+    with _OBJ_REPAIR_LOCK:
+        for _i, _c, _p in records:
             _SCENE36_DESTROYED.add((room_id, _i))
+            _OBJ_DEAD_AT[(room_id, _i)] = _now        # v556f5: repair clock starts here
+            _OBJ_ARMED_AT[(room_id, _i)] = _now       # v557f5: Destroyer floor clock
     pkt = build_scene_destroy_36(records)
     sess = get_sessions_in_room(room_id)
-    _desc = ', '.join(f'scene={i} camp=0x{c:02x} prog={p:g}' for i, c, p in records)
-    for s in sess:
+    _desc = ', '.join(f'obj={i} camp=0x{c:02x} score={p:g}' for i, c, p in records)
+    _idx = [i for i, _c, _p in records]
+    if killer is not None and SCENE36_TO_KILLER_ONLY:
+        _to36 = [s for s in sess if s is killer]
+        _to30 = [s for s in sess if s is not killer]
+    else:
+        _to36, _to30 = list(sess), []
+    _age30 = SCENE30_AI_AGE if killer is _TC_AI_KILLER else SCENE30_PEER_AGE
+    for s in _to36:
         _submit_send(send_rel, s, pkt, f'<- SCENE_DESTROY 36 [{_desc}] {reason}', to=3.0)
-    log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(sess)} session(s) {reason}')
+    if _to30:
+        pkt30 = build_scene_state_30(_idx, progress=_age30)
+        for s in _to30:
+            _submit_send(send_rel, s, pkt30, f'<- SCENE_DESTROY 30 {_idx} age={_age30} {reason}', to=3.0)
+    log('SCENE36', f'room {room_id}: msg 36 [{_desc}] -> {len(_to36)} session(s)'
+                   + (f', msg 30 destroy-form -> {len(_to30)} peer(s)' if _to30 else '')
+                   + f' {reason}')
     # v449f5: the v291 store-loss hook is GONE from here. It keyed record indices as SCENES,
     # but msg-36 records index goi OBJECTS (field-proven 2026-08-16) - zeroing the stores of
     # scene idx==objIdx was wrong-space. Scene store loss now lives in the auto-destroy path
     # (_handle_ground_damage_31), fired when trn_scene_complete says the LAST destructible
     # object of a scene died. Manual console destroys / probes cause no store loss.
-    if SEND_SCENE_STATE_30:
-        # v290: msg 36 only ANNOUNCES. msg 30 is what actually clears the object from the world -
-        # in the 2009 log every destroy is followed by one. Sent with bit15 clear (2-byte records)
-        # so the client takes vtable[+0x54], the destroy path. v449f5: same OBJECT index space
-        # as msg 36 (the 30 handler reads PARR<TRN_OBJECT*> too, xref 0x4f68fc).
-        _idx = [i for i, _c, _p in records]
-        pkt30 = build_scene_state_30(_idx)
-        for s in sess:
-            _submit_send(send_rel, s, pkt30, f'<- SCENE_STATE 30 {_idx} {reason}', to=3.0)
-        log('SCENE30', f'room {room_id}: msg 30 {_idx} -> {len(sess)} session(s) {reason}')
-    return len(sess)
+    # v556f5/v557f5: the old SEND_SCENE_STATE_30 block (bit15-clear 2-byte records after every
+    # 36) is gone - that record is the client RESTORE and was the 'buildings repair in moments'
+    # bug. See the MSG_SCENE_OBJSTATE_30 notes.
+    return len(_to36) + len(_to30)
 
 # --- PvE CALIBRATION RECORDER -----------------------------------------------
 # Deliberately NOT routed through fa_logging: that writes `logs/` relative to the CWD, and a run
@@ -13013,6 +14756,213 @@ AUTO_DESTROY_REQUIRE_MAP = True
 # per run - the client kills one remaining object per destroy and ASSERTS (Trn_Obj.cpp:415,
 # instant CTD) when a destroy arrives for an exhausted scene. See broadcast_scene_36.
 _SCENE36_DESTROYED = set()
+
+# --- v556f5 GROUND-OBJECT REPAIR MODEL --------------------------------------------
+# The server is the ONLY repair authority: the client has no self-repair timer at all
+# (BuildingsRepairRate is forced to 0 at 212-serve; TRN_OBJECT's two time events are the 10 s
+# secondary blast FUN_005666b0 kind 1 and the 15 s tree-fall kind 2 - neither restores). A
+# destroyed object comes back only when we send the msg-30 RESTORE record (bit15 clear).
+# Per-object timing: value-scaled, so an AA battery is back long before a bridge.
+#   OBJ_REPAIR_MIN_S      hard floor. The client's +0x188 Destroyer is cleared ONLY by the 10 s
+#                         post-destroy time event; a RESTORE that lands before it CANCELS that
+#                         event (FUN_00567370 -> FUN_00566db0) and leaves Destroyer set, so the
+#                         NEXT destroy of the object asserts '!Destroyer.PTR()' (Trn_Obj.cpp:415
+#                         CTD). 30 s gives every peer's 10 s event room to fire.
+#   OBJ_REPAIR_S_PER_VALUE seconds per got 'value' point: hangar 180 -> 540 s, factory 200 ->
+#                         600 s, AA 100 -> base 300 s, bridge 1000 -> capped 1800 s.
+#   OBJ_REPAIR_DECOR_S    trees/fences (value 0 or destroy_mode 2).
+# On repair: registry entry dropped (so it can die again), GROUND_HP zeroed, SCENE_HP recomputed
+# from the destroyed-value fraction (map damage %, production efficiency follow), one reliable
+# msg-30 restore batch to everyone in the room. Late joiners get the dead set as a SILENT
+# msg-30 destroy snapshot at ServerConfirm (send_dead_object_snapshot_30). Single-flag revert:
+# OBJ_REPAIR_MODEL=False keeps the pre-v556f5 never-repair behaviour.
+OBJ_REPAIR_MODEL       = True
+OBJ_REPAIR_MIN_S       = 30.0
+OBJ_REPAIR_BASE_S      = 300.0
+OBJ_REPAIR_S_PER_VALUE = 3.0
+OBJ_REPAIR_MAX_S       = 1800.0
+OBJ_REPAIR_DECOR_S     = 300.0
+OBJ_REPAIR_TICK_S      = 10.0      # scheduler cadence
+# v557f5: msg-30 destroy-form `value` = AGE of the destruction in ~1.024 s units (FUN_00568eb0:
+# value*1024 ms; <2 s plays the explosion, fire burns 60-age s, non-zero arms the destroy_mode-1
+# detonation). Peers of a fresh kill get age 1 (explosion + fire + detonation); a joiner's
+# snapshot carries the real age (old wrecks: no sound, no fire).
+SCENE30_PEER_AGE       = 1
+SCENE30_AI_AGE         = 61        # v580f5: AI-fire kills = wreck only, no explosion/fire particles
+                                   # (age >= 60 -> no fire; the animated form at AI rates exhausted the
+                                   # client's particle pool: Fa3_ParticleSystemCreator.cpp:942 CTD)
+OBJ_SNAPSHOT_MAX_AGE   = 60000     # u16 cap for the snapshot age
+SNAPSHOT_MAX_BURNING   = 6         # v580f5: fresh (burning) wrecks allowed in one join snapshot
+# v557f5: 36 -> killer only, 30 destroy-form -> everyone else (FUN_004f9d90 is 'YOU destroyed').
+# False = pre-v557f5 36-to-all (every peer got 'You have destroyed' + the score).
+SCENE36_TO_KILLER_ONLY = True
+# v557f5: the msg-36 f32 is SCORE credited to the recipient (added to his score record, bumps
+# his ground-kill counter, then he reports out-25). Points = got value * pct/100 (BuildingsScore
+# semantics; the client's own display value is value*BuildingsScore/100). 0 = 'Score:0' and no
+# ground-kill tally, which is what we sent until now.
+SCENE36_SCORE_PCT      = 100
+# v558f5: also book the ground-kill points server-side (DB score + Buildings counter + msg-25
+# push). Off = client-local credit only, which the next msg-25 push erases.
+GROUND_KILL_SCORE      = True
+_OBJ_DEAD_AT = {}                  # (room_id, obj) -> wall time of the msg-36 destroy
+_OBJ_ARMED_AT = {}                 # (room_id, obj) -> last time ANY client was told to destroy it
+                                   # (kill or join snapshot) - the 30 s Destroyer floor keys off this
+_OBJ_REPAIR_LOCK = threading.Lock()
+
+def obj_repair_seconds(oi):
+    """Repair delay for a goi object from its trn_obj_info (None -> decoration timing)."""
+    if oi is None or oi.get('value', 0) <= 0 or oi.get('destroy_mode') == 2:
+        secs = OBJ_REPAIR_DECOR_S
+    else:
+        secs = min(OBJ_REPAIR_MAX_S, max(OBJ_REPAIR_BASE_S, oi['value'] * OBJ_REPAIR_S_PER_VALUE))
+    return max(OBJ_REPAIR_MIN_S, float(secs))
+
+def repair_objects(room_id, objs, reason='', force=False):
+    """Bring goi objects back: registry + HP reset, msg-30 RESTORE to the room, SCENE_HP
+    recompute. Objects younger than OBJ_REPAIR_MIN_S are deferred unless force (CTD floor -
+    see the model notes). Returns the list actually repaired."""
+    if room_id is None or not objs:
+        return []
+    now = time.time()
+    done, deferred = [], []
+    with _OBJ_REPAIR_LOCK:
+        for obj in objs:
+            key = (room_id, int(obj))
+            if key not in _SCENE36_DESTROYED:
+                continue
+            if not force and now - max(_OBJ_DEAD_AT.get(key, 0.0),
+                                       _OBJ_ARMED_AT.get(key, 0.0)) < OBJ_REPAIR_MIN_S:
+                deferred.append(int(obj))
+                continue
+            _SCENE36_DESTROYED.discard(key)
+            _OBJ_DEAD_AT.pop(key, None)
+            _OBJ_ARMED_AT.pop(key, None)
+            GROUND_HP[key] = 0
+            done.append(int(obj))
+    if deferred:
+        log('REPAIR', f'room {room_id}: deferred {deferred} - younger than the {OBJ_REPAIR_MIN_S:.0f}s '
+                      f'Destroyer floor {reason}')
+    if not done:
+        return []
+    sess = get_sessions_in_room(room_id)
+    for i in range(0, len(done), 60):                 # 60 x 2B + type = 121B per packet
+        chunk = done[i:i + 60]
+        pkt = build_scene_state_30(chunk)
+        for s in sess:
+            _submit_send(send_rel, s, pkt, f'<- SCENE_RESTORE 30 {chunk} {reason}', to=3.0)
+    scenes = {}
+    for obj in done:
+        oi = trn_obj_info(room_id, obj)
+        sc = oi['scene'] if oi else None
+        if sc is not None and sc >= 0:
+            scenes.setdefault(sc, []).append(f'{obj}:{oi["name"]}')
+        else:
+            scenes.setdefault(None, []).append(str(obj))
+    for sc, names in scenes.items():
+        if sc is None:
+            log('REPAIR', f'room {room_id}: repaired unmapped obj(s) {names} {reason}')
+            continue
+        frac = trn_scene_damage_frac(room_id, sc)
+        SCENE_HP[(room_id, sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - frac)))
+        si = trn_scene_info(room_id, sc) or {}
+        log('REPAIR', f'room {room_id}: scene {sc} "{si.get("name")}" repaired {names} -> '
+                      f'damage now {int(round(frac * 100))}% {reason}')
+    log('REPAIR', f'room {room_id}: msg 30 RESTORE x{len(done)} -> {len(sess)} session(s) {reason}')
+    return done
+
+def obj_repair_due(room_id=None):
+    """[(room, obj)] whose repair clock has expired. v578f5: objects of a scene with live
+    ENEMY tanks inside TC_CAPTURE_RADIUS are not repaired - the scene is contested."""
+    now = time.time()
+    with _OBJ_REPAIR_LOCK:
+        items = list(_OBJ_DEAD_AT.items())
+    due = []
+    contested_cache = {}
+    for (rid, obj), t0 in items:
+        if room_id is not None and rid != room_id:
+            continue
+        oi = trn_obj_info(rid, obj)
+        if now - t0 >= obj_repair_seconds(oi):
+            sc = oi.get('scene') if oi else None
+            if sc is not None and sc >= 0:
+                key = (rid, int(sc))
+                if key not in contested_cache:
+                    contested_cache[key] = tc_scene_contested(rid, sc)
+                if contested_cache[key]:
+                    continue
+            due.append((rid, obj))
+    return due
+
+def tc_scene_contested(room_id, sidx):
+    """True when a live tank of another camp sits within TC_CAPTURE_RADIUS of the scene."""
+    try:
+        terrain = _probe_terrain_for_room(room_id)
+        txy = tc_scene_xy(terrain, sidx)
+        if not txy:
+            return False
+        camp = scene_camp(terrain, sidx)
+        for t in TANKS.values():
+            if t['room'] != room_id or t.get('dead') or t['camp'] == camp:
+                continue
+            if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+                return True
+    except Exception:
+        pass
+    return False
+
+def _obj_repair_loop():
+    """v556f5: the repair scheduler. Runs even for empty rooms so the registry stays honest;
+    the restore packet simply reaches zero sessions there."""
+    while True:
+        try:
+            time.sleep(OBJ_REPAIR_TICK_S)
+            if not OBJ_REPAIR_MODEL:
+                continue
+            by_room = {}
+            for rid, obj in obj_repair_due():
+                by_room.setdefault(rid, []).append(obj)
+            for rid, objs in by_room.items():
+                repair_objects(rid, objs, reason='(auto: repair clock expired)')
+        except Exception:
+            logx('REPAIR', 'repair loop step failed')
+
+def send_dead_object_snapshot_30(s, reason=''):
+    """v556f5: tell a (re)entering client which goi objects are currently dead, as msg-30
+    destroy records carrying the real AGE (v557f5: >=2 s -> no explosion sound; >=60 s -> no
+    fire; the 2009 spawn-time 'in 30'149' form). Harmless on an object the client already has
+    dead: FUN_00568eb0 exits on the +0x16c guard. Without this a late joiner sees intact
+    buildings the server considers dead - and cannot destroy them. Note: destroy_mode-1
+    objects (fuel/ammo) arm the joiner's 10 s detonation (blast within ~200 m, attributed to
+    his own plane) - the client's semantic, watch a spawn beside a dead fuel dump."""
+    rid = getattr(s, 'current_room', None)
+    if rid is None:
+        return 0
+    now = time.time()
+    with _OBJ_REPAIR_LOCK:
+        dead = sorted(o for (r, o) in _SCENE36_DESTROYED if r == rid)
+        ages = {o: max(1, min(OBJ_SNAPSHOT_MAX_AGE, int((now - _OBJ_DEAD_AT.get((rid, o), now)) / 1.024)))
+                for o in dead}
+        for o in dead:
+            _OBJ_ARMED_AT[(rid, o)] = now
+    # v580f5: at most SNAPSHOT_MAX_BURNING wrecks arrive 'fresh' (fire particles); the rest
+    # are aged past 60 s -> wreck only (particle-pool CTD guard)
+    _fresh = sorted((o for o in dead if ages[o] < 60), key=lambda o: ages[o])
+    for o in _fresh[SNAPSHOT_MAX_BURNING:]:
+        ages[o] = 61
+    if not dead:
+        return 0
+    body = bytearray([MSG_SCENE_OBJSTATE_30])
+    sent = 0
+    for i, o in enumerate(dead, 1):
+        body += struct.pack('<HH', (o & 0x7FFF) | 0x8000, ages[o])
+        if len(body) >= 161 or i == len(dead):          # 40 x 4B + type per packet
+            _submit_send(send_rel, s, build_ingame_pkt(bytes(body)),
+                         f'<- SCENE_DEAD_SNAPSHOT 30 x{(len(body) - 1) // 4} {reason}', to=3.0)
+            sent += 1
+            body = bytearray([MSG_SCENE_OBJSTATE_30])
+    log('REPAIR', f'{getattr(s, "current_pilot", "?")} room {rid}: dead-object snapshot '
+                  f'x{len(dead)} in {sent} pkt(s) {dead if len(dead) <= 12 else ""} {reason}')
+    return len(dead)
 
 def weapon_map_load():
     """(Re)load weapon_map.json. Returns the number of anchors. Safe to call any time."""
@@ -13193,10 +15143,44 @@ def _handle_ground_damage_31(s, body, via=''):
             return scene_camp(_trn, sidx)
         # One msg-36 per killed OBJECT, carrying the owning scene's REAL camp (NEVER 0xff -
         # that value routes the client into the neutral/bridge path: every 0xff destroy in
-        # the 2026-08-15 session rendered 'a bridge' regardless of index).
-        _recs36 = [(obj, _camp36(oi['scene']) if oi['scene'] is not None and oi['scene'] >= 0
-                    else 0, 0.0) for obj, oi in destroyed]
-        broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)')
+        # the 2026-08-15 session rendered 'a bridge' regardless of index). v557f5: the f32 is
+        # the SCORE the killer's client credits itself (got value * SCENE36_SCORE_PCT/100;
+        # decorations 0), and the 36 goes to the KILLER only - peers get the 30 destroy form.
+        _recs36 = [(obj,
+                    _camp36(oi['scene']) if oi['scene'] is not None and oi['scene'] >= 0 else 0,
+                    float(oi['value'] * SCENE36_SCORE_PCT) / 100.0 if oi['value'] > 0 else 0.0)
+                   for obj, oi in destroyed]
+        broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)',
+                           killer=s)
+        # v558f5 [GROUND-KILL SCORE, server side]. The msg-36 f32 only credits the killer's
+        # CLIENT-LOCAL score record, and the server re-pushes msg 25 from the DB with every 88 /
+        # HQ screen - so the credit vanished on the next push (run_20260907_171511: bscore 3902
+        # -> 3237 after the AA death, never up). Book the same points here, into the fighter/
+        # bomber column by what the killer is FLYING (v242 rule), plus the Buildings counter
+        # (msg-25 f19), and push the block so the two sides agree at once. Custom arenas
+        # (scoring_mode None) stay off the boards. (The client's own 'Score:%i' line after a
+        # destroy is uninitialised-vararg garbage - FUN_004f9d90 passes two args to a
+        # three-slot format - ignore its number.)
+        if GROUND_KILL_SCORE and s.current_pilot:
+            _gk_pts = sum(int(round(r[2])) for r in _recs36)
+            _gk_n = sum(1 for r in _recs36 if r[2] > 0)
+            _gk_mode = scoring_mode_for_room(s.current_room)
+            if _gk_pts > 0 and _gk_mode is not None:
+                _gk_bomber = is_bomber_plane(getattr(s, 'plane_type', None))
+                _gk_sc, _gk_rk, _gk_old = db_apply_score_delta(s.current_pilot, _gk_pts,
+                                                               bomber=_gk_bomber, mode=_gk_mode)
+                _gk_bld = db_bump_pilot_counter(s.current_pilot, 'ai_buildings', _gk_n)
+                log('SCORE', f'{s.current_pilot} +{_gk_pts} = ground kill(s) x{_gk_n} '
+                             f'({", ".join(oi["name"] for _o, oi in destroyed if oi["value"] > 0)}) '
+                             f'-> {"BOMBER" if _gk_bomber else "FIGHTER"} score | total {_gk_sc} '
+                             f'rank {_gk_old}->{_gk_rk} buildings={_gk_bld}')
+                try:
+                    send_stat_block_25(s, reason='(ground kill)')
+                except Exception:
+                    logx('SCORE', 'stat25 push after ground kill failed')
+            elif _gk_pts > 0:
+                log('SCORE', f'{s.current_pilot} ground kill(s) x{_gk_n} worth {_gk_pts} NOT booked '
+                             f'(room {s.current_room} is outside the scored arena modes)')
         for obj, oi in destroyed:
             _sc = oi['scene']
             _hp_need = (OBJ_HP_DECORATION if (oi['value'] <= 0 or oi['destroy_mode'] == 2)
@@ -13222,6 +15206,7 @@ def _handle_ground_damage_31(s, body, via=''):
                     log('AUTOPVE', f'scene {_sc} "{_si.get("name")}" camp={_si.get("camp")} is '
                                    f'FULLY DESTROYED (all {_si.get("n_destructible")} destructible '
                                    f'objects down) - stores lost {_lost}')
+                tc_check_scene_trigger(s.current_room, _sc, s)      # v575f5: AttackPercent -> trigger
 
 
 # --- PvE OBJ->SCENE LIVE PROBE (no .q6 needed) ------------------------------
@@ -13452,6 +15437,19 @@ def _fire_server_confirm(s, via='', ident=None):
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s.spawn_pending = False   # v416f5: world rebuilt + player inserted -> refreshes are safe again
     s._sp_confirmed = True    # v479f5: this spawn completed - the SPAWN-WATCH watchdog stands down
+    # v556f5: dead-object snapshot for a client whose world may not carry the room's current
+    # destroyed set (fresh join, HQ re-entry rebuild). Once per room per world; handle_leave_arena
+    # clears the mark. Re-sends are harmless (client-side +0x16c guard) - the mark only saves bytes.
+    if OBJ_REPAIR_MODEL and s.__dict__.get('_dead_snapshot_room') != s.current_room:
+        s._dead_snapshot_room = s.current_room
+        try:
+            send_dead_object_snapshot_30(s, reason='(at ServerConfirm)')
+        except Exception:
+            logx('REPAIR', 'dead-object snapshot failed')
+    try:
+        tank_recreate_for(s, reason='(at ServerConfirm)')   # v563f5
+    except Exception:
+        logx('TANK', 'tank re-create at ServerConfirm failed')
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -14625,6 +16623,15 @@ def _camp_metal_debit(room_id, terrain, camp, want_metal):
             spent += take
     return spent
 
+
+def camp_units_take(room_id, camp, kind, n):
+    """v575f5: consume up to n built units of a kind for a camp. Returns the number taken."""
+    key = (room_id, int(camp))
+    with _SUPPLY_UNITS_LOCK:
+        u = _SUPPLY_UNITS.setdefault(key, {'aircraft': 0, 'tank': 0, 'ship': 0})
+        got = max(0, min(int(n), int(u.get(kind, 0))))
+        u[kind] = int(u.get(kind, 0)) - got
+    return got
 
 def camp_units_state(room_id, camp):
     """Current built-not-deployed unit counts for a camp, {'aircraft','tank','ship'}."""
@@ -17712,13 +19719,17 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07}  # v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
         # 0x21 already sitting in NO_ECHO_SUBS. Guard the TYPE byte too.
         NO_ECHO_TYPES = {0x21}
         if sub in NO_ECHO_SUBS:
+            if sub == 0x03:
+                _tank_note_client_delete(s, stored)     # v563f5: client dropped a tank -> forget that peer
+            elif sub == 0x33:
+                _handle_tank_hit_51(s, stored)          # v572f5: NetTank hit report
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
@@ -18742,6 +20753,9 @@ threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
 threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
+threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
+_load_tank_consts()                                                 # v560f5: tank telemetry scales
+threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive
 threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts
 
 _drop_ts=0.0
