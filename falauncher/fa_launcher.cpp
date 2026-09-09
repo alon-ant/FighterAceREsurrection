@@ -347,6 +347,19 @@
 //     an over-quota Mega link not being skipped.
 //     Revert by: delete the L-FIX-12 block + the ResolveMirror route + the
 //     PollDownload decrypt phase + outName; restore out=isoName.
+// 2026-09-09: launcher v5.4b - L-FIX-12b: plain-http mirror probe fix +
+//     version banner. WinInetGet passed INTERNET_FLAG_SECURE
+//     unconditionally, so probing an http:// mirror attempted TLS against
+//     port 80, got nothing, and L-FIX-11 rejected the mirror ('no
+//     response') even though aria2 downloads from it fine - broke direct
+//     mirrors like http://download.fa-re.net/FA42DeluxeEdition.iso. The
+//     flag is now set only for https:// URLs (the ticket fetch already did
+//     this; the Mega API POST is https-only and untouched). Also: every
+//     run now opens the stage log with 'V: launcher vX.Y' so a stale exe
+//     is visible at a glance.
+//     Falsify by: a reachable plain-http mirror serving the ISO being
+//     rejected by the probe, or a stage log without a V: first line.
+//     Revert by: restore the unconditional flag; drop the Stage banner.
 // ============================================================================
 
 #ifndef UNICODE
@@ -1367,9 +1380,13 @@ static std::string WinInetGet(const std::wstring& url, DWORD maxBytes,
     DWORD to = 15000;
     InternetSetOptionW(hNet, INTERNET_OPTION_CONNECT_TIMEOUT, &to, sizeof to);
     InternetSetOptionW(hNet, INTERNET_OPTION_RECEIVE_TIMEOUT, &to, sizeof to);
-    HINTERNET hUrl = InternetOpenUrlW(hNet, url.c_str(), nullptr, 0,
-                                      INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE |
-                                      INTERNET_FLAG_SECURE, 0);
+    // L-FIX-12b: INTERNET_FLAG_SECURE only for https URLs. Unconditional, it
+    // makes WinInet attempt TLS against port 80 on plain http mirrors, the
+    // probe sees "no response", and a perfectly good direct mirror
+    // (e.g. http://download.fa-re.net/...) gets rejected.
+    DWORD ofl = INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE;
+    if (url.rfind(L"https://", 0) == 0) ofl |= INTERNET_FLAG_SECURE;
+    HINTERNET hUrl = InternetOpenUrlW(hNet, url.c_str(), nullptr, 0, ofl, 0);
     if (hUrl) {
         if (contentType) {
             wchar_t ct[128] = L""; DWORD cl = sizeof ct;
@@ -2657,6 +2674,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmd) {
                         L"setup.\nPlease run FighterAce42_Setup.exe to (re)install.");
         OleUninitialize(); return 1;
     }
+    // L-FIX-12b: version banner as the first stage line of every run, so a
+    // stale exe is visible at a glance in launcher_stage.txt.
+    Stage(L"V: launcher v5.4b (L-FIX-12b)");
     // NOTE: we deliberately do NOT hard-fail here if GameDir is missing. The real
     // client path normally arrives from the server (X-Game-Client-Path header) at
     // launch time; GameDir/ClientExe in the ini are only a fallback. Validating the
