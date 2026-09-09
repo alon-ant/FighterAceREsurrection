@@ -317,7 +317,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v604f5'
+VERSION = 'v605f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9394,7 +9394,8 @@ SOLDIER_HP          = 60.0
 SOLDIER_KILL_SCORE  = 20
 DEFENCE_NAME_KEYS   = ('tower', 'aa ', 'aa battery', 'flak', 'bunker', 'mg ', 'machine gun', 'pillbox')
 DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
-DEFENCE_DPS         = 10.0      # per defence object per second (60 HP soldier -> 6 s under one tower)
+DEFENCE_DPS         = 3.0       # v605f5: per defence object per second (was 10: two batteries killed a
+                                # 13-man stick in 55 s before it could fire - live 09-09 18:25)
 
 def _handle_soldier_hit(s, victim, attacker, dmg):
     sd = SOLDIERS.get(victim)
@@ -10085,11 +10086,12 @@ def _tc_engagement_tick():
         if purpose == 'attack':
             cap_pct = tc_room_setting(room_id, 'capture_percent', TC_CAPTURE_PERCENT)
             frac = trn_scene_damage_frac(room_id, sidx)
-            close = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS]
+            _pr = tc_presence_radius(terrain, sidx)                   # v605f5
+            close = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= _pr]
             if col.get('engaged') and now - col.get('_cap_logged', 0.0) > 30.0:
                 col['_cap_logged'] = now
                 log('TC', f'column {gid}: scene {sidx} damage {frac * 100:.0f}% (capture at {cap_pct}%), '
-                          f'{len(close)}/{len(members)} tank(s) inside {TC_CAPTURE_RADIUS:.0f} m')
+                          f'{len(close)}/{len(members)} tank(s) inside {_pr:.0f} m')
             if close and frac * 100.0 + 1e-6 >= cap_pct:
                 trig = TRIGGERS.get((room_id, int(sidx))) or {}
                 if tc_capture_scene(room_id, sidx, col['camp'], by_pilot=trig.get('by')):
@@ -10155,7 +10157,7 @@ PARA_STICK_WINDOW_S   = 20.0    # chutes landing within this of each other form 
 PARA_WALK_MPS         = 2.4     # v596f5: 1.5 -> 2.4 (user: faster)
 PARA_SOLDIERS_PER_CHUTE = 1
 PARA_STICK_LIFETIME_S = 1800.0
-PARA_CAPTURE_MIN      = 4       # soldiers needed at the scene to count as 'attacker present'
+PARA_CAPTURE_MIN      = 2       # v605f5: soldiers present at the scene for a capture (was 4)
 STICKS = {}                     # stick_id -> {'room','camp','pos','n','target','landed_at','by'}
 
 # --- v589f5 PARATROOP LOADING (msg 113 -> 114) --------------------------------------------
@@ -10650,6 +10652,11 @@ def _sticks_tick(dt=1.0):
 def _soldiers_tick(moving_sticks):
     return                                                 # v591f5: walking is per soldier in _sticks_tick
 
+def tc_presence_radius(terrain, sidx):
+    """v605f5: 'on the scene' for capture / contested checks = the perimeter ring + 100 m (units
+    deployed on a big airfield's ring sat outside the old flat 400 m)."""
+    return max(TC_CAPTURE_RADIUS, tc_ring_radius(terrain, sidx) + 100.0)
+
 def tc_sticks_at_scene(rid, sidx, camp):
     """Soldiers of `camp` within capture reach of the scene (stick 'n' scaled by the share
     of its objects that are actually there)."""
@@ -10657,15 +10664,16 @@ def tc_sticks_at_scene(rid, sidx, camp):
     txy = tc_scene_xy(terrain, sidx)
     if not txy:
         return 0
+    pr = tc_presence_radius(terrain, sidx)
     n = 0
     for st in STICKS.values():
         if st['room'] != rid or st['camp'] != camp:
             continue
         objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
         if objs:
-            near = sum(1 for o in objs if math.hypot(SOLDIERS[o]['pos'][0] - txy[0], SOLDIERS[o]['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS)
+            near = sum(1 for o in objs if math.hypot(SOLDIERS[o]['pos'][0] - txy[0], SOLDIERS[o]['pos'][1] - txy[1]) <= pr)
             n += int(round(st['n'] * near / len(objs)))
-        elif math.hypot(st['pos'][0] - txy[0], st['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+        elif math.hypot(st['pos'][0] - txy[0], st['pos'][1] - txy[1]) <= pr:
             n += st['n']
     return n
 
@@ -10736,9 +10744,7 @@ def _tc_para_capture_tick():
                     soldier_killed(o, None, reason=f'(scene defence {e[1]["name"]})',
                                    ai_hunter=(PPT_CLASS_AA, scene_camp(terrain, sidx)))
                     objs = [q for q in objs if q != o]
-        # --- capture ---
-        if not st.get('arrived'):
-            continue
+        # --- capture (v605f5: presence is enough - no 'arrived' precondition, like the tanks) ---
         if tc_sticks_at_scene(rid, sidx, camp) < PARA_CAPTURE_MIN:
             continue
         cap_pct = tc_room_setting(rid, 'capture_percent', TC_CAPTURE_PERCENT)
@@ -16006,15 +16012,16 @@ def tc_scene_contested(room_id, sidx):
         if not txy:
             return False
         camp = scene_camp(terrain, sidx)
+        pr = tc_presence_radius(terrain, sidx)                        # v605f5
         for t in TANKS.values():
             if t['room'] != room_id or t.get('dead') or t['camp'] == camp:
                 continue
-            if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+            if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= pr:
                 return True
         for sd in SOLDIERS.values():                   # v591f5: infantry on the scene counts too
             if sd['room'] != room_id or sd['camp'] == camp:
                 continue
-            if math.hypot(sd['pos'][0] - txy[0], sd['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+            if math.hypot(sd['pos'][0] - txy[0], sd['pos'][1] - txy[1]) <= pr:
                 return True
     except Exception:
         pass
