@@ -7,6 +7,7 @@
 #   Direct links to any web server, e.g.:
 #   http://fa-re-srv.ddns.net/FA42DeluxeEdition.iso
 
+http://download.fa-re.net/FA42DeluxeEdition.iso
 https://mega.nz/file/GNJnSACZ#-ri9b5DMSJrGUwLisUoCtEq3vCrqDzKkLzqVlGLsjnk
 https://drive.google.com/file/d/1V93JcBbDHDrUSk_EfitC49hgurKxGG7R/view
 https://drive.google.com/file/d/1lfjDPTXNgFCm-XF2RYnOzHx6rRNF0LF4/view

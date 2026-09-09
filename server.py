@@ -269,6 +269,29 @@ TODO list:
   [x] (v548f5) CANOPY ~28s CULL - was the client stale-object cull once the husk-down cleared
       s.flying and stopped the relay; relay now runs under canopy. CANOPY COLLISION KILLS and
       PARA_KILL_HITS tuning are moot with SERVER_CHUTE_KILL off (v549f5, client-side health).
+  [ ] (TC, 2026-09-09) DEFENDERS DON'T PATROL - a defending column (spawned at the scene, or
+      arrived) stays in its last position; it should circle / patrol the defended scene
+      (perimeter waypoints around TC_ASSAULT_RADIUS, keep the gun AI engaged on approach).
+  [ ] (TC, 2026-09-09) IDLE TANKS NOT REUSED - garrisons / idle defenders sit until the 10-min
+      withdrawal; a new trigger nearby should first re-task an idle friendly column within reach
+      (a captured scene's defenders become the attack/defend force for the next trigger) before
+      producing a fresh battalion from the factory.
+  [ ] (TC, 2026-09-09) TANKS FIRE MACHINE GUNS, NOT THE MAIN GUN - the client-side gun AI uses
+      the MG on scene objects; the main gun is presumably selected by gun class (create record
+      gun flags [2..4] / the class's gun defs at pCTI+0x120) or by the update's fire flags -
+      check the gun-def block and whether flags bit2 vs another bit picks the weapon.
+  [ ] (TC, 2026-09-09) TANK CLASS PER CAMP - only GB=131 (Cromwell) mapped; spawn 132..137 once
+      each and read the client's 'Create NetTank (<name>)' lines.
+  [ ] (TC, 2026-09-09) MISSION LINES VIA msg 143 - the blue name-less lines ([143][kind u8]
+      "CC,TTT,text", FUN_004f4f20) instead of AI chat; msg 111 map marker for soldier groups.
+  [ ] (TC, 2026-09-09) FIGHTER-COVER CREDIT - a kill within ~3 km of a friendly column with an
+      active mission earns a cover bonus / counter (ribbon page).
+  [ ] (TC, 2026-09-09) TRAINS - NetTrain Type 4 (74B header, 21B update) + rail network.
+  [ ] (TC, 2026-09-09) AIR TRAIN SPAWN - the AI transport that flies supply between scenes
+      ('Air train supplied GB Tank Factory at 44.8kt'): a server-owned NetPlane on the AI
+      station flying scene-to-scene, delivering via the cargo model (msg 106 CargoRequest /
+      107 answer = metal/fuel/ammo pickup+drop, Msn_Prod.cpp FUN_00559250 - also the player
+      transport cargo mechanic, not yet wired).
 
 bc formula: param_3 = bc x 16 + 1
 appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the datagram
@@ -294,7 +317,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v587f5'
+VERSION = 'v604f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3977,6 +4000,55 @@ def console_handler():
                                                                 'attacker': _camp, 'columns': [_gid]}
                                 log('CONSOLE', f'tc assault: column {_gid} ({_n} x class {_cls}, camp {_camp}) on scene {_sidx} '
                                                f'"{_txy[2].strip()}" at {tc_grid(_txy[0], _txy[1])} - engaged; capture credit to {_pil}')
+                elif _a[0] == 'paradrop':
+                    # v588f5 TEST: tc paradrop <scene> [n] [camp] - announce a stick of n soldiers of
+                    # <camp> (default: the first in-game pilot's side) beside the scene via msg 112, as
+                    # if a transport had just dropped them there
+                    try:
+                        _sidx = int(_a[1], 0)
+                        _n = int(_a[2], 0) if len(_a) > 2 else 8
+                        _rid = _rooms[0] if _rooms else None
+                        _ing = [x for x in get_sessions_in_room(_rid) if getattr(x, 'entered_game', False)] if _rid is not None else []
+                        _camp = int(_a[3], 0) if len(_a) > 3 else (int(_ing[0].nation) if _ing and _ing[0].nation is not None else None)
+                    except (IndexError, ValueError):
+                        _sidx = None; _rid = None; _camp = None
+                    if _sidx is None or _rid is None or _camp is None or not tank_consts_ok():
+                        log('CONSOLE', 'usage: tc paradrop <scene> [n] [camp]  (needs an in-game room + tank_tables.json)')
+                    else:
+                        _trn = _probe_terrain_for_room(_rid)
+                        _txy = tc_scene_xy(_trn, _sidx)
+                        if not _txy:
+                            log('CONSOLE', f'tc paradrop: unknown scene {_sidx}')
+                        else:
+                            _pts = []
+                            for _i in range(max(1, min(24, _n))):
+                                _ang = 2 * math.pi * _i / max(1, min(24, _n))
+                                _px, _py = tank_clear_spot(_trn, _txy[0] + 150 * math.cos(_ang), _txy[1] + 150 * math.sin(_ang))
+                                _pts.append((_px, _py, 0.0))
+                            _pil = _ing[0].current_pilot if _ing else None
+                            _sid = tc_para_announce(_rid, _camp, _sidx, _pts, by=_pil)
+                            log('CONSOLE', f'tc paradrop: stick {_sid} ({len(_pts)} x camp {_camp}) beside scene {_sidx} at {tc_grid(_txy[0], _txy[1])}')
+                elif _a[0] == 'ppt':
+                    # v600f5: tc ppt <tank> <soldier> <aa> - PPT class knobs for AI kill lines
+                    try:
+                        global PPT_CLASS_TANK, PPT_CLASS_SOLDIER, PPT_CLASS_AA
+                        PPT_CLASS_TANK = int(_a[1], 0); PPT_CLASS_SOLDIER = int(_a[2], 0); PPT_CLASS_AA = int(_a[3], 0)
+                        log('CONSOLE', f'tc ppt: tank={PPT_CLASS_TANK} soldier={PPT_CLASS_SOLDIER} aa={PPT_CLASS_AA}')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc ppt <tank> <soldier> <aa>  (0..31)')
+                elif _a[0] == 'soldier':
+                    # v593f5: tc soldier <throttle 0..1> <state> <rate1> <rate2> - live knobs for the
+                    # soldier update's control fields (walking animation experiments)
+                    try:
+                        global SOLDIER_WALK_THROTTLE, SOLDIER_WALK_STATE, SOLDIER_WALK_RATE1, SOLDIER_WALK_RATE2
+                        SOLDIER_WALK_THROTTLE = float(_a[1])
+                        SOLDIER_WALK_STATE = int(_a[2], 0) if len(_a) > 2 else SOLDIER_WALK_STATE
+                        SOLDIER_WALK_RATE1 = int(_a[3], 0) if len(_a) > 3 else SOLDIER_WALK_RATE1
+                        SOLDIER_WALK_RATE2 = int(_a[4], 0) if len(_a) > 4 else SOLDIER_WALK_RATE2
+                        log('CONSOLE', f'tc soldier: throttle={SOLDIER_WALK_THROTTLE} state={SOLDIER_WALK_STATE} '
+                                       f'rate1={SOLDIER_WALK_RATE1} rate2={SOLDIER_WALK_RATE2}')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc soldier <throttle 0..1> [state] [rate1] [rate2]')
                 elif _a[0] == 'trigger':
                     try:
                         _sidx = int(_a[1], 0)
@@ -3997,7 +4069,7 @@ def console_handler():
                             _ok = tc_trigger_scene(_rid, _sidx, _pil, reason='(console)')
                             log('CONSOLE', f'tc trigger scene {_sidx} as {_pil.current_pilot}: {"fired" if _ok else "not fired (same camp / unknown scene)"}')
                 else:
-                    log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc reset')
+                    log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc paradrop <scene> [n] [camp] | tc reset')
             elif cmd == 'tank':
                 # v559f5/v560f5:
                 #   tank <class> <x> <y> [camp] [group]        spawn at world coords
@@ -8466,6 +8538,7 @@ TANK_CLASSES      = {131: 2, 132: 3, 133: 1, 134: 2, 135: 2, 136: 2, 137: 3}   #
 AI_CLIENT_ST      = 0x1f0          # station number for the server's AI objects (< 512)
 AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station (never a real pilot)
 AI_CLIENT_NAME    = 'AI'
+RECREATE_CHUNK    = 16             # v604f5: max object records per re-create msg-2 (385 B proven; 1,057 B was dropped)
 SPAWN_TANKS       = True           # master switch for the tank spawn path
 TANKS = {}                         # onumber -> {'room','camp','class','group','pos','peers':set()}
 
@@ -8505,15 +8578,29 @@ TANK_DEFAULT_MPS  = 8.0            # 'goto' speed in world units (m) per second
 # The driver now sends throttle/steer and integrates the SAME motion server-side, so the
 # position it sends is a small correction the client lerps through, not a snap.
 TANK_TURN_RATE_DPS = 40.0          # server-side heading slew (deg/s) - approximates the client
+TANK_LOOKAHEAD_S   = 0.25          # v596f5: position look-ahead per update (one interval)
 TANK_STEER_GAIN    = 2.0           # steer = clamp(gain * sin(heading error))
 TANK_SPEED_SEED    = True          # send aux[3] = speed fraction alongside the throttle
 TANK_FALLBACK_MAX_MPS = 12.0       # per-class max speed when the dump has no phys block
 TANK_CLASS_MAX_MPS = {}            # class_id -> max speed (m/s), from tank_tables.json phys
 TANK_TICK_HZ       = 50.0          # client tank physics tick (dump 'move_dt'); speed unit = m/tick
+PLANE_POS_SCALE    = None          # v592f5: plane-family packed position scale (dump 'plane_pos_scale')
+
+def unpack_plane_pos9(b):
+    """FUN_007cca00: 9-byte bit-packed position of the plane family (planes, parachuters)."""
+    v = int.from_bytes(bytes(b[:9]), 'little')
+    x = v & 0x1ffffff
+    if x & 0x1000000:
+        x -= 0x2000000
+    y = (v >> 25) & 0x1ffffff
+    if y & 0x1000000:
+        y -= 0x2000000
+    z = (v >> 50) & 0x3fffff
+    return x * PLANE_POS_SCALE, y * PLANE_POS_SCALE, z * PLANE_POS_SCALE - TANK_POS_Z_OFF
 
 def _load_tank_consts():
     """Pull the telemetry scale constants out of tank_tables.json (written by the dumper)."""
-    global TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE, TANK_TICK_HZ
+    global TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE, TANK_TICK_HZ, PLANE_POS_SCALE
     try:
         _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tank_tables.json')
         _j = json.load(open(_p))
@@ -8530,6 +8617,10 @@ def _load_tank_consts():
         TANK_POS_XY_SCALE = _g('pos_xy_scale'); TANK_POS_Z_SCALE = _g('pos_z_scale')
         TANK_POS_Z_OFF = _g('pos_z_offset');    TANK_DIR_SCALE = _g('dir_s14_scale')
         TANK_S16_SCALE = _g('s16_scale')
+        PLANE_POS_SCALE = _g('plane_pos_scale')
+        if PLANE_POS_SCALE is None:
+            log('TANK', 'plane_pos_scale missing from tank_tables.json - chute landing points (paratroops) '
+                        'unavailable until the v5 dumper is run')
         _mult = _g('tank_speed_mult') or 1.0
         _tick = _g('move_dt') or 50.0          # client physics tick rate: speed unit = m / (1/tick) s
         TANK_TICK_HZ = float(_tick)
@@ -8706,10 +8797,13 @@ def _tank_los(obs, ax, ay, bx, by, step=3.0):
             return False
     return True
 
-def tank_plan_path(terrain, sx, sy, gx, gy):
+def tank_plan_path(terrain, sx, sy, gx, gy, margin=None):
     """A* from (sx,sy) toward (gx,gy) within a bounded window. Returns a waypoint list
-    (excluding the start, ending at the sub-goal) or [] when nothing is reachable."""
+    (excluding the start, ending at the sub-goal) or [] when nothing is reachable.
+    margin: clearance added to obstacle radii (default TANK_OBST_MARGIN; infantry uses less)."""
     import heapq
+    if margin is None:
+        margin = TANK_OBST_MARGIN
     dist = math.hypot(gx - sx, gy - sy)
     if dist > TANK_PATH_HORIZON:
         f = TANK_PATH_HORIZON / dist
@@ -8719,7 +8813,7 @@ def tank_plan_path(terrain, sx, sy, gx, gy):
     cell = TANK_PATH_CELL
     W, H = int((x1 - x0) / cell) + 1, int((y1 - y0) / cell) + 1
     reach = max(x1 - x0, y1 - y0) / 2 + 50.0
-    obs = [(ox, oy, r + TANK_OBST_MARGIN)
+    obs = [(ox, oy, r + margin)
            for ox, oy, r in _tank_obstacles_near(terrain, (x0 + x1) / 2, (y0 + y1) / 2, reach)
            if x0 - 40 <= ox <= x1 + 40 and y0 - 40 <= oy <= y1 + 40]
     blocked = bytearray(W * H)
@@ -8847,6 +8941,10 @@ def tank_broadcast_state(onum):
     x, y, z = t['pos']
     try:
         _fl, _ax = _tank_controls(t)
+        if t.get('_speed_mps', 0.0) > 0.1 and t.get('goal') is not None:
+            # v596f5: one-interval look-ahead on the sent position (see soldier_broadcast_state)
+            fx, fy, _fz = t.get('fwd', (1.0, 0.0, 0.0))
+            x, y = x + fx * t['_speed_mps'] * TANK_LOOKAHEAD_S, y + fy * t['_speed_mps'] * TANK_LOOKAHEAD_S
         pl = pack_tank_state(x, y, z, t.get('fwd', (1.0, 0.0, 0.0)), flags=_fl, aux=_ax, aim=t.get('_aim'))
     except Exception as _e:
         if not t.get('_pack_err_logged'):
@@ -8969,6 +9067,8 @@ def _columns_tick():
             col['leader'] = col['members'][0]
             log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted')
         lead = TANKS[col['leader']]
+        if col.get('deployed'):
+            continue                                  # v594f5: on a perimeter - per-tank goals, no formation
         moving = lead.get('goal') is not None
         slot = 0
         for on in col['members']:
@@ -8992,11 +9092,16 @@ def _tank_driver_loop():
             time.sleep(dt)
             now = time.time()
             _columns_tick()                                     # v570f5
+            try:
+                _sticks_tick(dt)                                # v593f5: 4 Hz soldier walking
+            except Exception:
+                logx('PARA', 'sticks tick failed')
             _tc_acc = globals().get('_TC_ENG_ACC', 0.0) + dt
             if _tc_acc >= 1.0:
                 _tc_acc = 0.0
                 try:
                     _tc_engagement_tick()                       # v576f5, 1 Hz
+                    _tc_para_capture_tick()                     # v588f5
                 except Exception:
                     logx('TC', 'engagement tick failed')
             globals()['_TC_ENG_ACC'] = _tc_acc
@@ -9217,11 +9322,15 @@ def _tank_note_client_delete(s, pl):
         while i + 2 <= len(body):
             onum = struct.unpack_from('<H', body, i)[0]
             t = TANKS.get(onum)
+            sd = SOLDIERS.get(onum)
             if t is not None:
                 if getattr(s, 'addr', None) in t['peers']:
                     t['peers'].discard(s.addr)
                     log('TANK', f'{s.current_pilot} dropped tank 0x{onum:04x} (client delete notify) - '
                                 f'{len(t["peers"])} peer(s) still have it; re-created at his next ServerConfirm')
+                i += 2
+            elif sd is not None:
+                sd['peers'].discard(getattr(s, 'addr', None))       # v590f5: soldiers are bare entries too
                 i += 2
             elif i + 3 <= len(body):
                 i += EXIT_EEC_ENTRY_SIZE.get(body[i + 2] & 0xf, 3)
@@ -9257,6 +9366,9 @@ def _handle_tank_hit_51(s, pl):
             victim, attacker, dmg = struct.unpack_from('<HHH', body, i)
             i += 6
             t = TANKS.get(victim)
+            if t is None and victim in SOLDIERS:
+                _handle_soldier_hit(s, victim, attacker, dmg)          # v597f5
+                continue
             if t is None:
                 log('TANKHIT', f'{s.current_pilot}: hit on 0x{victim:04x} by 0x{attacker:04x} dmg={dmg} '
                                f'- not one of our tanks (ignored)')
@@ -9272,6 +9384,71 @@ def _handle_tank_hit_51(s, pl):
                 tank_killed(victim, s, reason='(msg-51 damage)')
     except Exception:
         logx('TANKHIT', 'msg-51 handling failed')
+
+# --- v597f5 SOLDIER LIFE ------------------------------------------------------------------
+# A soldier hit arrives on the same msg-51 path as a tank hit (the client's 'Hit To %s Soldier'
+# reporter is the NET::OBJECT twin of the tank's). SOLDIER_HP is a guess (one 40 mm round or a
+# short MG burst); the kill uses the same kill-entry delete, so every client prints the
+# 'has destroyed' line (cyan + sound for the shooter) and runs the object's death.
+SOLDIER_HP          = 60.0
+SOLDIER_KILL_SCORE  = 20
+DEFENCE_NAME_KEYS   = ('tower', 'aa ', 'aa battery', 'flak', 'bunker', 'mg ', 'machine gun', 'pillbox')
+DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
+DEFENCE_DPS         = 10.0      # per defence object per second (60 HP soldier -> 6 s under one tower)
+
+def _handle_soldier_hit(s, victim, attacker, dmg):
+    sd = SOLDIERS.get(victim)
+    if sd is None or sd.get('dead'):
+        return
+    sd['hp'] = sd.get('hp', SOLDIER_HP) - float(dmg)
+    log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit soldier 0x{victim:04x} camp {sd["camp"]} '
+                   f'for {dmg} -> hp {sd["hp"]:.0f}/{SOLDIER_HP:.0f}')
+    if sd['hp'] <= 0:
+        soldier_killed(victim, s, reason='(msg-51 damage)')
+
+def soldier_killed(onum, killer, reason='', ai_hunter=None):
+    """ai_hunter = (ppt_class, camp) for a non-player hunter (scene defence: PPT_CLASS_AA) - the
+    client then prints '<C3> anti-aircraft destroyed <C3> soldier' (film wording)."""
+    sd = SOLDIERS.get(onum)
+    if sd is None or sd.get('dead'):
+        return
+    sd['dead'] = True
+    st = STICKS.get(sd.get('stick'))
+    if st is not None:
+        st['n'] = max(0, st['n'] - PARA_SOLDIERS_PER_CHUTE)
+        if onum in (st.get('objs') or []):
+            st['objs'].remove(onum)
+    kname = getattr(killer, 'current_pilot', None) if killer is not None else None
+    log('PARA', f'soldier 0x{onum:04x} camp {sd["camp"]} KILLED by {kname or "?"} {reason}'
+                f'{" - stick " + str(sd.get("stick")) + " now " + str(st["n"]) if st else ""}')
+    if killer is not None and kname and GROUND_KILL_SCORE:
+        try:
+            _mode = scoring_mode_for_room(killer.current_room)
+            if _mode is not None:
+                _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(kname, SOLDIER_KILL_SCORE, bomber=_bomber, mode=_mode)
+                _ng = db_bump_pilot_counter(kname, 'ai_ground', 1)
+                log('SCORE', f'{kname} +{SOLDIER_KILL_SCORE} = soldier kill (0x{onum:04x}) -> '
+                             f'{"BOMBER" if _bomber else "FIGHTER"} score | total {_sc} rank {_old}->{_rk} ground={_ng}')
+                send_stat_block_25(killer, reason='(soldier kill)')
+        except Exception:
+            logx('PARA', 'soldier kill credit failed')
+    entry = None
+    if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
+        entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
+    elif ai_hunter is not None:
+        _cls, _hc = ai_hunter
+        entry = (struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + struct.pack('<H', 0xffff)
+                 + struct.pack('<H', AI_CLIENT_ST) + struct.pack('<I', AI_CLIENT_PI & 0xffff)
+                 + bytes([(int(_cls) & 0x1f) | ((int(_hc) & 7) << 5)]))
+    sd2 = SOLDIERS.pop(onum, None)
+    if sd2 is None:
+        return
+    raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(entry) if entry else struct.pack('<H', onum & 0xFFFF))
+    pkt = build_msg13(raw)
+    for p in get_sessions_in_room(sd2['room']):
+        if getattr(p, 'addr', None) in sd2['peers']:
+            _submit_send(send_rel, p, pkt, f'<- delete SOLDIER 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0)
 
 def tank_killed(onum, killer, reason=''):
     """v572f5/v574f5: book the kill and delete the tank with a KILL ENTRY (see delete_tank) -
@@ -9347,10 +9524,30 @@ TANK_CLASS_BY_CAMP   = {1: 131} # camp -> tank class id; 131 = Cromwell (GB). Ot
                                 # `tank <class> scene N` and the client's 'Create NetTank (<name>)'
 TANK_CLASS_DEFAULT   = 131
 TRIGGERS = {}                   # (room, scene) -> {'at', 'by', 'camp', 'attacker', 'columns': [...]}
-_TC_CAMP_TAGS = {0: 'US', 1: 'GB', 2: 'SU'}    # observed side tags; others print as 'camp N'
+_TC_CAMP_TAGS = {0: 'US', 1: 'GB', 2: 'SU', 3: 'GE', 4: 'JP'}    # 2-letter (AI lines); 1=GB 2=SU observed, 0=US docs, 3/4 assumed
+_TC_CAMP_TAGS3 = {0: 'USA', 1: 'GBR', 2: 'SOV', 3: 'GER', 4: 'JPN'}  # 3-letter (event/kill lines, films)
+_TC_CAMP_FULL = {0: 'the United States', 1: 'Great Britain', 2: 'the Soviet Union', 3: 'Germany', 4: 'Japan'}
 
 def tc_camp_tag(camp):
     return _TC_CAMP_TAGS.get(int(camp), f'camp {camp}')
+
+def tc_camp_tag3(camp):
+    return _TC_CAMP_TAGS3.get(int(camp), f'camp {camp}')
+
+def tc_camp_full(camp):
+    return _TC_CAMP_FULL.get(int(camp), f'camp {camp}')
+
+def tc_scene_kind_word(type_name):
+    """'airbase' / 'factory' / 'scene' - the films' trigger lines use these three."""
+    t = (type_name or '').lower()
+    if 'airfield' in t or 'airbase' in t:
+        return 'airbase'
+    if 'factory' in t:
+        return 'factory'
+    return 'scene'
+
+def tc_camp_scene_count(terrain, camp):
+    return sum(1 for c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).values() if c == int(camp))
 
 TC_MAP_HALF          = 131072.0 # MapCoord.cpp: half the map edge (2^N/2); 131072 verified on trn02
 
@@ -9386,9 +9583,9 @@ def ensure_ai_roster_on(s):
     pkt = build_msg13(build_add_player_62([(AI_ROSTER_PI, AI_ROSTER_NATION, 'AI')]))
     _submit_send(send_rel, s, pkt, '<- AddPlayer 62 (AI roster player)', to=3.0)
 
-def tc_say(room_id, text, camp=None):
-    """AI chat line to the room (or one camp): channel 3 from the 'AI' roster player, so the
-    client renders 'AI: <text>' itself (the text must not carry the prefix)."""
+def tc_say(room_id, text, camp=None, to=None):
+    """AI chat line to the room, one camp, or one session: channel 3 from the 'AI' roster player,
+    so the client renders 'AI: <text>' itself (the text must not carry the prefix)."""
     if not TC_AI_CHAT:
         return
     if text.startswith('AI: '):
@@ -9396,7 +9593,7 @@ def tc_say(room_id, text, camp=None):
     pi = TC_AI_CHAT_PI if TC_AI_CHAT_PI is not None else AI_ROSTER_PI
     pkt = build_chat_display_20(TC_AI_CHANNEL, text, pi)
     n = 0
-    for p in get_sessions_in_room(room_id):
+    for p in ([to] if to is not None else get_sessions_in_room(room_id)):
         if not getattr(p, 'entered_game', False):
             continue
         if camp is not None and getattr(p, 'nation', None) != camp:
@@ -9404,7 +9601,7 @@ def tc_say(room_id, text, camp=None):
         ensure_ai_roster_on(p)
         _submit_send(send_rel, p, pkt, f'<- AI chat: {text[:60]}', to=3.0)
         n += 1
-    log('TC', f'room {room_id} AI{"" if camp is None else f" (camp {camp})"}: {text}  -> {n}')
+    log('TC', f'room {room_id} AI{"" if camp is None else f" (camp {camp})"}{" -> " + to.current_pilot if to is not None else ""}: {text}  -> {n}')
 
 def tc_scene_xy(terrain, sidx):
     tt = trn_tables(terrain) or {}
@@ -9445,19 +9642,49 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         log('TC', f'room {room_id}: cannot raise a column - tank telemetry constants missing '
                   f'(tank_tables.json not loaded next to server.py)')
         return None
+    _alive = sum(1 for t in TANKS.values() if t['room'] == room_id and not t.get('dead'))
+    if _alive >= TC_MAX_TANKS_PER_ROOM:
+        log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM - no new battalion (idle reuse only)')
+        _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
+        if _reuse is None:
+            tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+            return None
     fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1])
-    if fac is None:
-        tc_say(room_id, f'AI: {tc_camp_tag(camp)} has no tank factory to {purpose} '
-                        f'{tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2]} at {tc_grid(txy[0], txy[1])}')
+    if fac is None or fac[3] > TC_TANK_LINK_RADIUS_M:
+        # v602f5 film wording (the wiki's TankProducerLinkRadius rule)
+        tc_say(room_id, f'AI: The scene {tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2].strip()} at '
+                        f'{tc_grid(txy[0], txy[1])} is out of range of any tanks units')
         return None
     fsidx, fx, fy, fd = fac
     ftype = scene_type_for(terrain, fsidx) or 'Tank Factory'
+    # v600f5 [FILM CONTRACT 'switch strategy']: an idle friendly column within TC_REUSE_RADIUS of
+    # the target is re-tasked instead of raising a new battalion
+    _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
+    if _reuse is not None:
+        gid, col = _reuse
+        lead = TANKS.get(col['leader'])
+        col['purpose'] = purpose; col['target'] = int(target_sidx)
+        col['engaged'] = None; col['deployed'] = None; col['_ring_after_attack'] = False
+        for _o in col['members']:
+            if _o in TANKS:
+                TANKS[_o]['_tgt_obj'] = None; TANKS[_o]['flags'] = TANKS[_o].get('flags', 0) & ~0x05
+        column_goto(gid, txy[0], txy[1], TC_COLUMN_MPS)
+        tcamp = scene_camp(terrain, target_sidx)
+        who = f' triggered by {trigger_pilot}' if (trigger_pilot and purpose == 'attack') else ''
+        lx, ly = (lead['pos'][0], lead['pos'][1]) if lead else (txy[0], txy[1])
+        tc_say(room_id, f'AI: {tc_ordinal(col.get("army", 1))} Army {tc_ordinal(col.get("battalion", 1))} Battalion at '
+                        f'{tc_grid(lx, ly)} switch strategy to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
+                        f'{tc_grid(txy[0], txy[1])}{who}')
+        tc_mission_lines(room_id, camp, tcamp, purpose, (lx, ly), txy, trigger_pilot)
+        log('TC', f'room {room_id}: column {gid} re-tasked ({purpose} scene {target_sidx}) - switch strategy')
+        return gid
     # units: what the camp has built; loadout: what the pool can equip
     have = camp_units_state(room_id, camp)['tank'] if UNITS_MODEL else n_want
     n = min(n_want, have)
     if n <= 0:
-        tc_say(room_id, f'AI: {tc_camp_tag(camp)} {ftype} at {tc_grid(fx, fy)} has no tank units to '
-                        f'{purpose} {txy[2]} at {tc_grid(txy[0], txy[1])}')
+        tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                        f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         log('TC', f'room {room_id}: camp {camp} cannot raise a column - 0 tank units built')
         return None
     loaded = 0
@@ -9470,7 +9697,8 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
             break                                   # not 'fully loaded' - stop here
         loaded += 1
     if loaded <= 0:
-        tc_say(room_id, f'AI: {tc_camp_tag(camp)} {ftype} at {tc_grid(fx, fy)} cannot fuel and arm its tanks')
+        tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                        f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         log('TC', f'room {room_id}: camp {camp} cannot raise a column - pool empty')
         return None
     if UNITS_MODEL:
@@ -9501,19 +9729,48 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
                     f'{tc_grid(form_xy[0], form_xy[1])} forming to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
                     f'{tc_grid(txy[0], txy[1])}{who}')
     # mission lines, to each side
+    tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot)
+    log('TC', f'room {room_id}: column {gid} ({loaded}/{n_want} x class {cls}) {purpose} scene {target_sidx} '
+              f'from {ftype} {fsidx} ({fd:.0f} m away)')
+    return gid
+
+def tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot):
+    """The per-side mission lines, film wording (kind 'A'/'I'). Chat fallback for clients without
+    a mission script (msg 104 produces the real ones)."""
+    if not TC_CHAT_MISSION_LINES:
+        return
+    who = f' (triggered by {trigger_pilot})' if trigger_pilot else ''
     if purpose == 'attack':
         tc_say(room_id, f'Attack {tc_camp_tag(tcamp)} scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
-        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} '
+        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} '
                         f'attacking {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
-        tc_say(room_id, f'Destroy {tc_camp_tag(camp)} tanks at {tc_grid(fx, fy)} headed for '
+        tc_say(room_id, f'Destroy {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} headed for '
                         f'{tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=tcamp)
     else:
         tc_say(room_id, f'Defend scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
         tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} '
                         f'defending {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
-    log('TC', f'room {room_id}: column {gid} ({loaded}/{n_want} x class {cls}) {purpose} scene {target_sidx} '
-              f'from {ftype} {fsidx} ({fd:.0f} m away)')
-    return gid
+
+TC_REUSE_RADIUS = 20000.0   # v600f5: idle friendly column within this of a new target is re-tasked
+TC_TANK_LINK_RADIUS_M = 60000.0  # v602f5: farther than this from any tank producer -> 'out of range of any tanks units'
+
+def tc_find_idle_column(room_id, camp, tx, ty):
+    """Nearest column of `camp` that is holding / deployed on a perimeter with no enemy in gun
+    range (idle), within TC_REUSE_RADIUS of (tx,ty)."""
+    best = None
+    for gid, col in COLUMNS.items():
+        if col['room'] != room_id or col.get('camp') != int(camp):
+            continue
+        if col.get('purpose') not in ('hold', 'defend') or not col.get('deployed'):
+            continue
+        members = [TANKS[o] for o in col['members'] if o in TANKS and not TANKS[o].get('dead')]
+        if not members or any(t.get('_target_tank') in TANKS for t in members):
+            continue
+        lead = TANKS.get(col['leader']) or members[0]
+        d = math.hypot(lead['pos'][0] - tx, lead['pos'][1] - ty)
+        if d <= TC_REUSE_RADIUS and (best is None or d < best[2]):
+            best = (gid, col, d)
+    return (best[0], best[1]) if best else None
 
 def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     """A pilot took scene `sidx` past AttackPercent: bonus + attack/defend columns."""
@@ -9532,6 +9789,10 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     TRIGGERS[key] = {'at': now, 'by': pname, 'camp': tcamp, 'attacker': pcamp, 'columns': []}
     log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" (camp {tcamp}) TRIGGERED by {pname} '
               f'(camp {pcamp}) {reason}')
+    _kind = tc_scene_kind_word(txy[2])
+    # v600f5 film wording: to the pilot, then the broadcast
+    tc_say(room_id, f'You have triggered tank attack on the {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=pilot_sess)
+    tc_say(room_id, f'The {_kind} at {tc_grid(txy[0], txy[1])} has been triggered!')
     if GROUND_KILL_SCORE:
         try:
             _mode = scoring_mode_for_room(room_id)
@@ -9543,6 +9804,9 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
         except Exception:
             logx('TC', 'trigger bonus failed')
     tc_say(room_id, f'AI: {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} triggered by {pname}')
+    if TC_USE_MSG104:
+        send_trigger_104(room_id, 2, pcamp, sidx, pname)      # attackers' script: attack_scene
+        send_trigger_104(room_id, 1, tcamp, sidx, pname)      # defenders' script: defense_scene
     ga = tc_raise_column(room_id, pcamp, TC_TANKS_ATTACK, sidx, 'attack', pname)
     TRIGGERS[key]['columns'] = [g for g in (ga,) if g is not None]
     TRIGGERS[key]['defended'] = False
@@ -9589,6 +9853,39 @@ TC_TANK_VS_TANK_DPS  = 60.0     # per second per shooter on an enemy tank (1000 
 TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent setting
 TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
+TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
+TC_MAX_TANKS_PER_ROOM = 32      # v604f5: no new battalion while this many tanks are alive in the room
+# v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
+# proven; the others are knobs (`tc ppt <tank> <soldier> <aa>`) - the client's kill line names the
+# hunter from this ('GBR tank destroyed GER tank', 'GBR anti-aircraft destroyed GER soldier').
+PPT_CLASS_TANK    = 3
+PPT_CLASS_SOLDIER = 7
+PPT_CLASS_AA      = 4
+TC_DEFEND_RING_M     = 220.0    # v594f5: perimeter radius floor; v596f5: the real ring is the scene's own
+                                # extent (farthest object from the centre) + TC_RING_PAD - airfields are big
+TC_RING_PAD          = 150.0
+TC_TANK_STAND_OFF    = 180.0    # v595f5: attackers close to this distance from their target object
+
+_SCENE_EXTENT = {}
+def tc_scene_extent(terrain, sidx):
+    """Farthest scene object from the scene centre (m), cached per terrain/scene."""
+    key = (terrain, int(sidx))
+    if key in _SCENE_EXTENT:
+        return _SCENE_EXTENT[key]
+    ext = 0.0
+    try:
+        txy = tc_scene_xy(terrain, sidx)
+        tt = trn_tables(terrain) or {}
+        for o in (tt.get('goi') or []):
+            if int(o.get('scene', -1)) == int(sidx):
+                ext = max(ext, math.hypot(float(o['x']) - txy[0], float(o['y']) - txy[1]))
+    except Exception:
+        pass
+    _SCENE_EXTENT[key] = ext
+    return ext
+
+def tc_ring_radius(terrain, sidx, floor=None):
+    return max(floor if floor is not None else TC_DEFEND_RING_M, tc_scene_extent(terrain, sidx) + TC_RING_PAD)
 _TC_AI_KILLER = object()        # sentinel 'killer' -> broadcast_scene_36 sends the 30 form to all
 
 def tc_room_setting(room_id, key, default):
@@ -9639,8 +9936,11 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None):
     txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
     log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" CAPTURED by camp {camp} (was {old})'
               f'{" - triggered by " + by_pilot if by_pilot else ""}')
-    tc_say(room_id, f'AI: {tc_camp_tag(camp)} forces have captured {tc_camp_tag(old)} {txy[2].strip()} at '
-                    f'{tc_grid(txy[0], txy[1])}{" (triggered by " + by_pilot + ")" if by_pilot else ""}')
+    if TC_USE_MSG41:
+        send_scene_capture_41(room_id, sidx, camp)               # v601f5: the client's own capture
+    tc_say(room_id, f'AI: {tc_camp_tag(old)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} has been captured by '
+                    f'{tc_camp_full(camp)}!')
+    # ('AI: <camp> owns N scenes.' is an EVENT-mode line - 4 of 102 films, all event recordings - not regular TC)
     if by_pilot and GROUND_KILL_SCORE:
         sess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == by_pilot), None)
         _mode = scoring_mode_for_room(room_id)
@@ -9680,17 +9980,20 @@ def _tc_engagement_tick():
         if not members:
             continue
         near = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_ENGAGE_RADIUS]
+        # v594f5: defenders / garrisons deploy on a perimeter ring instead of sitting in a huddle
+        if purpose in ('defend', 'hold') and near and not col.get('deployed'):
+            col['deployed'] = now
+            n_m = max(1, len(members))
+            _ring = tc_ring_radius(terrain, sidx)
+            for i, (o, t) in enumerate(members):
+                ang = 2 * math.pi * i / n_m
+                r = _ring + (60.0 if i % 2 else 0.0)
+                gx_, gy_ = tank_clear_spot(terrain, txy[0] + r * math.cos(ang), txy[1] + r * math.sin(ang))
+                t['goal'] = (gx_, gy_); t['mps'] = min(tank_max_mps(t), TC_COLUMN_MPS)
+            log('TC', f'column {gid}: {len(members)} tank(s) deploying on the {_ring:.0f} m perimeter of scene {sidx}')
         if purpose == 'attack' and near and not col.get('engaged'):
             col['engaged'] = now
-            # v578f5: close to assault distance (a clear spot TC_ASSAULT_RADIUS from the centre,
-            # on our side of it) instead of parking at the engage radius
-            lead = TANKS.get(col['leader'])
-            if lead is not None:
-                vx, vy = lead['pos'][0] - txy[0], lead['pos'][1] - txy[1]
-                vn = math.hypot(vx, vy) or 1.0
-                ax, ay = txy[0] + vx / vn * TC_ASSAULT_RADIUS, txy[1] + vy / vn * TC_ASSAULT_RADIUS
-                ax, ay = tank_clear_spot(terrain, ax, ay)
-                column_goto(gid, ax, ay, TC_COLUMN_MPS)
+            col['deployed'] = now                       # v595f5: formation off - per-tank targets from here
             tc_say(room_id, f'AI: {tc_ordinal(col.get("army", 1))} Army {tc_ordinal(col.get("battalion", 1))} '
                             f'Battalion is attacking {tc_camp_tag(scene_camp(terrain, sidx))} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         # --- tank vs tank (any enemy tank in gun range, columns or singles) ---
@@ -9704,21 +10007,40 @@ def _tc_engagement_tick():
                     break
         # --- attackers: shoot the scene's objects (valuable ones only; decorations are left alone) ---
         objs = [e for e in tc_scene_objects(room_id, terrain, sidx) if e[4]] if purpose == 'attack' else []
-        # v583f5: nothing valuable within gun range of the leader -> advance the column to the
-        # nearest remaining valuable object (a clear spot short of it), instead of stalling
-        if purpose == 'attack' and col.get('engaged') and objs:
-            lead = TANKS.get(col['leader'])
-            if lead is not None:
-                lx, ly = lead['pos'][0], lead['pos'][1]
-                if not any(math.hypot(e[2] - lx, e[3] - ly) <= TC_TANK_GUN_RANGE * 0.9 for e in objs):
-                    nearest = min(objs, key=lambda e: math.hypot(e[2] - lx, e[3] - ly))
-                    if lead.get('goal') is None or math.hypot(nearest[2] - lead['goal'][0], nearest[3] - lead['goal'][1]) > TC_TANK_GUN_RANGE:
-                        dx, dy = nearest[2] - lx, nearest[3] - ly
-                        dn = math.hypot(dx, dy) or 1.0
-                        stand = max(40.0, dn - TC_TANK_GUN_RANGE * 0.6)
-                        gx_, gy_ = tank_clear_spot(terrain, lx + dx / dn * stand, ly + dy / dn * stand)
-                        column_goto(gid, gx_, gy_, TC_COLUMN_MPS)
-                        log('TC', f'column {gid}: advancing on obj {nearest[0]} "{nearest[1]["name"]}" ({dn:.0f} m away)')
+        # v595f5 (same end behaviour as the infantry): once engaged, every tank picks its own
+        # target (nearest valuable object not already claimed by a column-mate), drives to
+        # TC_TANK_STAND_OFF short of it, stops and fires; when it dies it takes the next; with
+        # nothing left the column falls back to the perimeter ring like a garrison.
+        if purpose == 'attack' and col.get('engaged'):
+            claimed = {t.get('_tgt_obj')[0] for _o, t in members if t.get('_tgt_obj')}
+            for onum, t in members:
+                tgt = t.get('_tgt_obj')
+                if tgt is not None and all(e[0] != tgt[0] for e in objs):
+                    tgt = None
+                if tgt is None and objs:
+                    free = [e for e in objs if e[0] not in claimed] or objs
+                    tgt = min(free, key=lambda e: math.hypot(e[2] - t['pos'][0], e[3] - t['pos'][1]))
+                    claimed.add(tgt[0])
+                t['_tgt_obj'] = tgt
+                if tgt is None:
+                    continue
+                dx, dy = tgt[2] - t['pos'][0], tgt[3] - t['pos'][1]
+                d = math.hypot(dx, dy) or 1.0
+                if d > TC_TANK_STAND_OFF + 15.0:
+                    gx_, gy_ = tank_clear_spot(terrain, tgt[2] - dx / d * TC_TANK_STAND_OFF, tgt[3] - dy / d * TC_TANK_STAND_OFF)
+                    if t.get('goal') is None or math.hypot(t['goal'][0] - gx_, t['goal'][1] - gy_) > 20.0:
+                        t['goal'] = (gx_, gy_); t['mps'] = min(tank_max_mps(t), TC_COLUMN_MPS)
+                elif t.get('goal') is not None:
+                    t['goal'] = None                    # in range: stop and shoot
+            if not objs and not col.get('_ring_after_attack'):
+                col['_ring_after_attack'] = True
+                n_m = max(1, len(members))
+                _ring = tc_ring_radius(terrain, sidx)
+                for i, (o, t) in enumerate(members):
+                    ang = 2 * math.pi * i / n_m
+                    gx_, gy_ = tank_clear_spot(terrain, txy[0] + _ring * math.cos(ang), txy[1] + _ring * math.sin(ang))
+                    t['goal'] = (gx_, gy_)
+                log('TC', f'column {gid}: nothing left to shoot at scene {sidx} - taking the perimeter')
         for onum, t in members:
             firing = False
             t['_aim'] = None
@@ -9730,9 +10052,15 @@ def _tc_engagement_tick():
                 if v['hp'] <= 0 and not v.get('dead'):
                     tank_killed_by_tank(t['_target_tank'], onum)
             elif objs and purpose == 'attack':
+                tgt = t.get('_tgt_obj')
                 in_range = [e for e in objs if math.hypot(e[2] - t['pos'][0], e[3] - t['pos'][1]) <= TC_TANK_GUN_RANGE]
-                if in_range:
+                if tgt is not None and any(e[0] == tgt[0] for e in in_range):
+                    best = tgt                          # v595f5: shoot the claimed target first
+                elif in_range:
                     best = min(in_range, key=lambda e: math.hypot(e[2] - t['pos'][0], e[3] - t['pos'][1]))
+                else:
+                    best = None
+                if best is not None:
                     firing = True
                     obj, oi = best[0], best[1]
                     t['_aim'] = (best[2] - t['pos'][0], best[3] - t['pos'][1])
@@ -9743,6 +10071,8 @@ def _tc_engagement_tick():
                     if GROUND_HP[key] >= need:
                         tc_ai_destroy_object(room_id, obj, oi, by=f'column {gid}')
                         objs = [e for e in objs if e[0] != obj]
+                        if t.get('_tgt_obj') and t['_tgt_obj'][0] == obj:
+                            t['_tgt_obj'] = None
             newflags = (t.get('flags', 0) | 0x04) if firing else (t.get('flags', 0) & ~0x04)
             if purpose == 'hold' and t.get('_target_tank') not in TANKS:
                 newflags = (newflags & ~0x04) | 0x01          # v583f5: garrison holds fire (client AI too)
@@ -9763,12 +10093,24 @@ def _tc_engagement_tick():
             if close and frac * 100.0 + 1e-6 >= cap_pct:
                 trig = TRIGGERS.get((room_id, int(sidx))) or {}
                 if tc_capture_scene(room_id, sidx, col['camp'], by_pilot=trig.get('by')):
-                    col['purpose'] = 'hold'; col['held_at'] = now
+                    col['purpose'] = 'hold'; col['held_at'] = now; col['deployed'] = None
                     for _o, t in members:
                         t['flags'] = t.get('flags', 0) & ~0x04
+                    lead = TANKS.get(col['leader'])
+                    lx, ly = (lead['pos'][0], lead['pos'][1]) if lead else (txy[0], txy[1])
+                    tc_say(room_id, f'AI: {tc_ordinal(col.get("army", 1))} Army {tc_ordinal(col.get("battalion", 1))} '
+                                    f'Battalion at {tc_grid(lx, ly)} switch strategy to defend {tc_camp_tag(col["camp"])} '
+                                    f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         elif purpose == 'hold' and now - col.get('held_at', now) > TC_HOLD_AFTER_CAPTURE_S:
             log('TC', f'column {gid}: garrison withdrawn from scene {sidx}')
             column_delete(gid, reason='(garrison withdrawn)')
+        elif purpose == 'defend' and col.get('deployed'):
+            # v604f5: idle defenders don't live forever (48 tanks accumulated live on 09-09)
+            if any(t.get('_target_tank') in TANKS for _o, t in members):
+                col['_last_contact'] = now
+            elif now - col.get('_last_contact', col.get('deployed', now)) > TC_DEFEND_IDLE_S:
+                log('TC', f'column {gid}: defenders of scene {sidx} stood down after {TC_DEFEND_IDLE_S:.0f}s without contact')
+                column_delete(gid, reason='(defence stood down)')
 
 def tank_killed_by_tank(onum, shooter_onum):
     """AI-on-AI kill: same kill-entry delete, hunter = the shooting tank (AI station)."""
@@ -9783,10 +10125,656 @@ def tank_killed_by_tank(onum, shooter_onum):
             col['leader'] = col['members'][0]
     sh = TANKS.get(shooter_onum) or {}
     log('TC', f'tank 0x{onum:04x} (camp {t["camp"]}) destroyed by tank 0x{shooter_onum:04x} (camp {sh.get("camp")})')
+    # v600f5: the tail's PPT class names the hunter in the client's line ('GBR tank destroyed GER
+    # tank' in the films) - PPT_CLASS_TANK is a knob until the PPT table is read
     entry = (struct.pack('<H', onum & 0x7fff) + bytes([0x53])
              + struct.pack('<H', shooter_onum & 0xffff) + struct.pack('<H', AI_CLIENT_ST)
-             + struct.pack('<I', AI_CLIENT_PI & 0xffff) + bytes([0x02 | ((int(sh.get('camp', 0)) & 7) << 5)]))
+             + struct.pack('<I', AI_CLIENT_PI & 0xffff) + bytes([(PPT_CLASS_TANK & 0x1f) | ((int(sh.get('camp', 0)) & 7) << 5)]))
     delete_tank(onum, reason=f'(killed by tank 0x{shooter_onum:04x})', entry=entry)
+
+# --- v588f5 PARATROOPS (TC layer, item 6a) ----------------------------------------------
+# 2009 mechanic from FA.exe: a transport drops Type-2 parachuters with the HUMAN bit clear
+# (the crew-chute form v555f5 already confirms, creates on peers and relays). When they land
+# the host sends msg 112 (0x70) PARA_TO_SOLDIER: [0x70][nation s8][s16 target][u32 aux] then
+# N x 7-byte packed positions (s24 X, s24 Y, u8 Z); FUN_0068db10 makes each CLIENT spawn its
+# own local soldiers of class soldier-<nation> at those spots, grouped, heading for the
+# target. The soldiers are client-side visuals; the server keeps the stick as a unit
+# (position, walk toward the scene at infantry speed) and counts it as 'attacker present'
+# for the capture rule. A drop is a paratroop drop when the dropping plane is a TRANSPORT
+# (crew chutes from a dying bomber keep the v555f5 semantics).
+# Sibling messages (both TC-mode only, flag DAT_00c6e8a4): msg 111 (0x6f) GroupDynamicMissionCB
+# = [0x6f][add u8][mission type u8][u16 local ObjectNumber][params] attaches a MISSION object
+# (FUN_00416360: position + entity + 100 m radius) to a LOCAL group - the map marker for a
+# soldier group; msg 143 (0x8f) = the mission-line text '[kind u8]"CC,TTT,text"' (FUN_004f4f20).
+# Neither is required for the drop itself.
+MSG_PARA_TO_SOLDIER_112 = 0x70
+PARATROOPS           = True
+TRANSPORT_PLANE_NAMES = {'C-47A', 'Dakota_Mk.II', 'Li-2', 'Ju-52/3m'}
+TRANSPORT_PLANE_IDS   = {i for i, n in enumerate(PLANE_ROSTER) if n in TRANSPORT_PLANE_NAMES}
+PARA_STICK_WINDOW_S   = 20.0    # chutes landing within this of each other form one stick
+PARA_WALK_MPS         = 2.4     # v596f5: 1.5 -> 2.4 (user: faster)
+PARA_SOLDIERS_PER_CHUTE = 1
+PARA_STICK_LIFETIME_S = 1800.0
+PARA_CAPTURE_MIN      = 4       # soldiers needed at the scene to count as 'attacker present'
+STICKS = {}                     # stick_id -> {'room','camp','pos','n','target','landed_at','by'}
+
+# --- v589f5 PARATROOP LOADING (msg 113 -> 114) --------------------------------------------
+# Decoded from FA.exe (Msn_Prod.cpp 'ParatroopRequest', AI-side handler FUN_00559c20 = msg
+# 113, client-side answer handler msg 114 @0x559f80):
+#   113 request  [0x71][s8 count][u16 ident][u16 scene | bit15]   count > 0 = load from the
+#                scene, count < 0 = return to it (bit15 = refund); sent ~2 s after spawn
+#   114 answer   [0x72][u16 ident][s8 given]
+# The client dumps the cargo if no answer arrives within 15 s ('Not receive cargo answer').
+# The 2009 AI gave min(asked, potential - created) and charged the scene's stores (metal per
+# soldier). Ours: a per-scene stock of PARA_SCENE_STOCK soldiers, regenerating at
+# PARA_REGEN_PER_MIN, only from scenes of the pilot's own camp; LimitedParatroopers=yes arenas
+# are the ones where this matters.
+MSG_PARA_REQUEST_113 = 0x71
+MSG_PARA_ANSWER_114  = 0x72
+PARA_SCENE_STOCK     = 40
+PARA_REGEN_PER_MIN   = 2.0
+_PARA_STOCK = {}                # (room, scene) -> {'taken': n, 'at': t}
+
+def para_scene_avail(room_id, sidx):
+    st = _PARA_STOCK.get((room_id, int(sidx)))
+    if st is None:
+        return PARA_SCENE_STOCK
+    regen = (time.time() - st['at']) / 60.0 * PARA_REGEN_PER_MIN
+    return max(0, min(PARA_SCENE_STOCK, PARA_SCENE_STOCK - st['taken'] + int(regen)))
+
+def para_scene_take(room_id, sidx, n):
+    key = (room_id, int(sidx))
+    avail = para_scene_avail(room_id, sidx)
+    st = _PARA_STOCK.setdefault(key, {'taken': 0, 'at': time.time()})
+    st['taken'] = PARA_SCENE_STOCK - avail + max(0, n)
+    st['at'] = time.time()
+
+def _handle_para_request_113(s, pl):
+    try:
+        body = bytes(pl)
+        if len(body) < 10 or body[4] != MSG_PARA_REQUEST_113:
+            return
+        count = struct.unpack_from('<b', body, 5)[0]
+        ident = struct.unpack_from('<H', body, 6)[0]
+        sw = struct.unpack_from('<H', body, 8)[0]
+        sidx, refund = sw & 0x7fff, bool(sw & 0x8000)
+        rid = s.current_room
+        terrain = _probe_terrain_for_room(rid)
+        scamp = scene_camp(terrain, sidx) if rid is not None else None
+        given = 0
+        if count > 0:
+            if scamp is not None and scamp == getattr(s, 'nation', None):
+                given = min(count, para_scene_avail(rid, sidx))
+                if given > 0:
+                    para_scene_take(rid, sidx, given)
+            log('PARA', f'{s.current_pilot}: asks {count} paratroops from scene {sidx} (camp {scamp}) -> given {given} '
+                        f'(stock left {para_scene_avail(rid, sidx) if rid is not None else "?"})')
+        elif count < 0:
+            if refund and rid is not None:
+                st = _PARA_STOCK.get((rid, int(sidx)))
+                if st is not None:
+                    st['taken'] = max(0, st['taken'] + count)      # count is negative
+            log('PARA', f'{s.current_pilot}: returns {-count} paratroops to scene {sidx}{" (refund)" if refund else ""}')
+        pkt = build_ingame_pkt(bytes([MSG_PARA_ANSWER_114]) + struct.pack('<Hb', ident, given))
+        _submit_send(send_rel, s, pkt, f'<- PARA_ANSWER 114 ident={ident} given={given}', to=3.0)
+    except Exception:
+        logx('PARA', 'msg-113 handling failed')
+
+def is_transport_plane(plane_id):
+    try:
+        return int(plane_id) in TRANSPORT_PLANE_IDS
+    except (TypeError, ValueError):
+        return False
+
+# --- v590f5 NETSOLDIER OBJECTS (visible paratroops) --------------------------------------
+# Normal clients ignore msg 112 (its handler exists only when DAT_00c6e8a4 - the offline /
+# AI-client simulation flag - is set), so a stick is shown as server-owned NetSoldier objects
+# (create Type 7: [7|nation<<4][class id][s16 group] + trailer = 17 B; update 24 B, FUN_0068ebc0:
+# [0..6] packed pos, [7..10] forward vector, [0xb] flags (bit2 fire), [0xc]/[0xd] bytes centred
+# on 0x7f, [0xe] s16 state, [0x10]/[0x12] s16 rates, [0x14]/[0x16] s16 aim) on the AI station,
+# walked by the server with the stick. Classes 170..174 = the five soldier-<nation> models.
+SOLDIER_OBJ_TYPE      = 7
+SOLDIER_HEADER_SIZE   = 4
+SOLDIER_UPDATE_SIZE   = 24
+SOLDIER_CLASS_BY_CAMP = {}      # camp -> class id (170..174); unmapped -> SOLDIER_CLASS_DEFAULT
+SOLDIER_CLASS_DEFAULT = 170
+SOLDIER_MAX_PER_STICK = 32      # objects per stick (v593f5: was 8 - every dropped chute gets its soldier)
+SOLDIER_SPREAD_M      = 6.0
+# v593f5 soldier motion: like the tank, the client runs the soldier's own physics from the update's
+# control fields (bytes 0xc/0xd centred on 0x7f, /125 -> +-1.0 = throttle/turn; s16 state = the
+# animation/state; two s16 rates /3276 and /18770). A bare 1 Hz position stream 'warps' the
+# figure; sending a throttle while walking lets the client animate and move it between our
+# corrections (sent at 4 Hz while moving). The exact state/rate meanings are knob-tunable:
+# console `tc soldier <throttle 0..1> <state> <rate1> <rate2>`.
+SOLDIER_WALK_THROTTLE = 1.0     # the byte at 0xc is the walk ANIMATION speed (user probe: 1 = walk, 0 = stand)
+SOLDIER_WALK_STATE    = 1
+SOLDIER_WALK_RATE1    = 0
+SOLDIER_WALK_RATE2    = 0
+SOLDIER_OBST_MARGIN   = 1.5     # v594f5: infantry clearance around buildings/trees (tanks 6 m)
+SOLDIER_LOOKAHEAD_S   = 0.3     # v596f5: position look-ahead in each update (rubber-band)
+SOLDIER_RING_MIN      = 110.0   # defenders take a perimeter ring around the scene
+SOLDIER_RING_MAX      = 170.0
+SOLDIER_STAND_OFF     = 60.0    # attackers close to this distance from their soft target
+SOLDIERS = {}                   # onum -> {'room','camp','stick','pos','fwd','peers','last_sent','off'}
+
+def build_soldier_record(st, onumber, nation, class_id, group_id=0):
+    rec = bytearray(SOLDIER_HEADER_SIZE + 13)
+    rec[0] = (SOLDIER_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    rec[1] = class_id & 0xff
+    struct.pack_into('<h', rec, 2, int(group_id))
+    struct.pack_into('<H', rec, SOLDIER_HEADER_SIZE, st & 0xffff)
+    struct.pack_into('<H', rec, SOLDIER_HEADER_SIZE + 2, onumber & 0xffff)
+    return bytes(rec)
+
+def pack_soldier_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, state=0, throttle=0.0, turn=0.0,
+                       rate1=0, rate2=0, aim=None):
+    body = _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
+    body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+    fx, fy, fz = fwd
+    n = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+    comps = [fx / n, fy / n, fz / n]
+    k = max(range(3), key=lambda i: abs(comps[i]))
+    others = [comps[i] for i in range(3) if i != k]
+    w1 = _s14(others[0] / TANK_DIR_SCALE) | (k << 14)
+    w2 = _s14(others[1] / TANK_DIR_SCALE) | (0x4000 if comps[k] < 0 else 0)
+    body += struct.pack('<HH', w1, w2)
+    body += bytes([flags & 0x0f,
+                   max(0, min(255, int(round(0x7f + throttle * 125.0)))),
+                   max(0, min(255, int(round(0x7f + turn * 125.0))))])
+    # v599f5: aim = (A, B, +-sqrt(1-A^2-B^2)) from the last two s16 fields (x1/32760); zeros = straight
+    # UP (the 'firing at the sky'). Default: along the hull, level.
+    ax_, ay_ = (aim if aim is not None else (fx / n, fy / n))
+    an = math.hypot(ax_, ay_) or 1.0
+    ax_, ay_ = ax_ / an * 0.999, ay_ / an * 0.999
+    body += struct.pack('<hhhhh', int(state), _s16c(rate1), _s16c(rate2), _s16c(ax_ * 32760), _s16c(ay_ * 32760))
+    assert len(body) == SOLDIER_UPDATE_SIZE, len(body)
+    return body
+
+def _send_unrel_frame_to(sess, onum, payload):
+    """One object-update frame (any payload size) to one session, tick re-stamped."""
+    rt = getattr(sess, 'last_telem_tick', None)
+    if rt is None:
+        return False
+    size = 1 + 2 + 2 + len(payload)
+    frame = (bytes([size // 16, ((size % 16) << 4) | 0x02, 0, 0, 0x07])
+             + struct.pack('<HH', (rt - RELAY_TICK_LEAD) & 0xFFFF, onum & 0xffff) + bytes(payload))
+    seq = getattr(sess, '_relay_seq', 0) & 0xFF
+    sess._relay_seq = seq + 1
+    try:
+        sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, sess.addr)
+        return True
+    except OSError:
+        return False
+
+def soldier_broadcast_state(onum):
+    sd = SOLDIERS.get(onum)
+    if sd is None or not tank_consts_ok():
+        return 0
+    x, y, z = sd['pos']
+    try:
+        _mv = sd.get('moving', False)
+        if _mv:
+            # v596f5: send the position the client should reach by the NEXT update (look-ahead one
+            # interval) so its lerp lands on time instead of chasing us - less rubber-band
+            fx, fy, _fz = sd.get('fwd', (1.0, 0.0, 0.0))
+            x, y = x + fx * PARA_WALK_MPS * SOLDIER_LOOKAHEAD_S, y + fy * PARA_WALK_MPS * SOLDIER_LOOKAHEAD_S
+        pl = pack_soldier_state(x, y, z, sd.get('fwd', (1.0, 0.0, 0.0)), flags=sd.get('flags', 0),
+                                state=SOLDIER_WALK_STATE if _mv else 0,
+                                throttle=SOLDIER_WALK_THROTTLE if _mv else 0.0,
+                                rate1=SOLDIER_WALK_RATE1 if _mv else 0, rate2=SOLDIER_WALK_RATE2 if _mv else 0,
+                                aim=sd.get('_aim'))
+    except Exception:
+        return 0
+    n = 0
+    for p in get_sessions_in_room(sd['room']):
+        if getattr(p, 'addr', None) in sd['peers'] and _send_unrel_frame_to(p, onum, pl):
+            n += 1
+    sd['last_sent'] = time.time()
+    return n
+
+def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
+    """Create up to SOLDIER_MAX_PER_STICK NetSoldiers at the given positions (one msg-2 per
+    client). Returns the list of ONumbers."""
+    if not SPAWN_TANKS or not tank_consts_ok() or not positions:
+        return []
+    cls = SOLDIER_CLASS_BY_CAMP.get(int(camp), SOLDIER_CLASS_DEFAULT)
+    cx = sum(p[0] for p in positions) / len(positions); cy = sum(p[1] for p in positions) / len(positions)
+    onums = []
+    for (x, y, z) in positions[:SOLDIER_MAX_PER_STICK]:
+        on = next_obj_number()
+        SOLDIERS[on] = {'room': rid, 'camp': int(camp) & 7, 'class': cls, 'stick': stick_id,
+                        'pos': (x, y, 0.0), 'off': (x - cx, y - cy), 'fwd': (1.0, 0.0, 0.0),
+                        'peers': set(), 'last_sent': 0.0, 'flags': 0, 'created': time.time()}
+        onums.append(on)
+    n = 0
+    for p in get_sessions_in_room(rid):
+        if not getattr(p, 'entered_game', False):
+            continue
+        for ci in range(0, len(onums), RECREATE_CHUNK):          # v604f5: size-capped batches
+            chunk = onums[ci:ci + RECREATE_CHUNK]
+            body = bytearray([0x02]) + (_ensure_ai_client_on(p) if ci == 0 else b'')
+            for on in chunk:
+                body += build_soldier_record(AI_CLIENT_ST, on, camp, cls, stick_id)
+                SOLDIERS[on]['peers'].add(getattr(p, 'addr', None))
+            _submit_send(send_rel, p, build_msg13(bytes(body)),
+                         f'<- CreateObject 2 SOLDIER x{len(chunk)} stick {stick_id} {reason}', to=3.0)
+        n += 1
+    log('PARA', f'room {rid}: stick {stick_id}: {len(onums)} NetSoldier(s) class {cls} camp {camp} -> {n} session(s) {reason}')
+    for on in onums:
+        threading.Timer(0.5, soldier_broadcast_state, args=(on,)).start()
+    return onums
+
+def delete_soldiers(onums, reason=''):
+    for on in list(onums):
+        sd = SOLDIERS.pop(on, None)
+        if sd is None:
+            continue
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', on & 0xFFFF)
+        pkt = build_msg13(raw)
+        for p in get_sessions_in_room(sd['room']):
+            if getattr(p, 'addr', None) in sd['peers']:
+                _submit_send(send_rel, p, pkt, f'<- delete SOLDIER 0x{on:04x} {reason}', to=3.0)
+
+def _soldiers_tick(moving_sticks):
+    """Place each soldier at its stick's centre + offset, facing the stick's heading; send at
+    4 Hz while the stick walks, 2 s keep-alive otherwise."""
+    now = time.time()
+    for on, sd in list(SOLDIERS.items()):
+        st = STICKS.get(sd['stick'])
+        if st is None:
+            delete_soldiers([on], reason='(stick gone)'); continue
+        cx, cy = st['pos']
+        sd['pos'] = (cx + sd['off'][0], cy + sd['off'][1], 0.0)
+        if st.get('fwd'):
+            sd['fwd'] = st['fwd']
+        if sd['stick'] in moving_sticks or now - sd.get('last_sent', 0.0) >= TANK_IDLE_S:
+            soldier_broadcast_state(on)
+
+def build_para_to_soldier_112(nation, target_sidx, aux, positions):
+    body = bytearray([MSG_PARA_TO_SOLDIER_112, int(nation) & 0xff])
+    body += struct.pack('<hI', int(target_sidx) if target_sidx >= 0 else -1, int(aux) & 0xffffffff)
+    for (x, y, z) in positions:
+        body += _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
+        body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+    return build_ingame_pkt(bytes(body))
+
+def tc_nearest_enemy_scene(terrain, camp, x, y, max_d=6000.0):
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
+    best = None
+    for sidx, c in table.items():
+        if c == camp or c > 7:
+            continue
+        sxy = tc_scene_xy(terrain, sidx)
+        if not sxy:
+            continue
+        d = math.hypot(sxy[0] - x, sxy[1] - y)
+        if d <= max_d and (best is None or d < best[1]):
+            best = (sidx, d)
+    return best
+
+def tc_nearest_scene_any(terrain, x, y):
+    """Closest scene of ANY camp (paratroops walk to the closest scene wherever they land)."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
+    best = None
+    for sidx, c in table.items():
+        if c is None or c > 7:
+            continue
+        sxy = tc_scene_xy(terrain, sidx)
+        if not sxy:
+            continue
+        d = math.hypot(sxy[0] - x, sxy[1] - y)
+        if best is None or d < best[1]:
+            best = (sidx, d)
+    return best
+
+# v591f5 soldier combat rules (user 2026-09-09): a stick walks to the CLOSEST scene; friendly ->
+# defend until killed or the life timer runs out; hostile -> attack, but infantry only chews
+# SOFT targets (value < SOLDIER_HARD_VALUE: no hangars / factories) and can never push a scene
+# past SOLDIER_DAMAGE_CAP on its own - the capture still needs planes/tanks for the rest.
+SOLDIER_GUN_RANGE    = 150.0
+SOLDIER_DPS          = 12.0     # per soldier per second on a soft object
+SOLDIER_HARD_VALUE   = 150      # objects with value >= this are hard (hangar 150, factories 200+)
+SOLDIER_DAMAGE_CAP   = 0.30     # infantry alone cannot take a scene past this damage fraction
+
+def tc_para_landed(s, onum, ent):
+    """A human-bit-clear chute from a TRANSPORT came down: spawn its soldier right there and
+    add it to the pilot's current stick (first landing picks the stick's target = the closest
+    scene of any camp; the AI line goes out when the stick closes)."""
+    if not PARATROOPS or not tank_consts_ok() or ent is None:
+        return
+    if not is_transport_plane(getattr(s, 'plane_type', None)):
+        return
+    pos = ent.get('pos')
+    if pos is None:
+        log('PARA', f'{s.current_pilot}: paratroop chute 0x{onum:04x} landed without a known position - ignored')
+        return
+    camp = getattr(s, 'nation', None)
+    rid = s.current_room
+    if camp is None or rid is None:
+        return
+    now = time.time()
+    st = s.__dict__.get('_para_stick')
+    if st is None or now - st['last'] > PARA_STICK_WINDOW_S or st['room'] != rid or st.get('closed'):
+        terrain = _probe_terrain_for_room(rid)
+        tgt = tc_nearest_scene_any(terrain, pos[0], pos[1])
+        sidx = tgt[0] if tgt else -1
+        tcamp = scene_camp(terrain, sidx) if sidx >= 0 else None
+        sid = (max(STICKS) + 1) if STICKS else 1
+        st = STICKS[sid] = {'id': sid, 'room': rid, 'camp': int(camp), 'pos': (pos[0], pos[1]), 'n': 0,
+                            'target': sidx, 'purpose': ('defend' if tcamp == int(camp) else 'attack') if sidx >= 0 else 'none',
+                            'landed_at': now, 'last': now, 'by': s.current_pilot, 'arrived': False,
+                            'fwd': (1.0, 0.0, 0.0), 'objs': [], 'positions': []}
+        s._para_stick = st
+        threading.Timer(PARA_STICK_WINDOW_S + 0.5, tc_para_stick_close, args=(s, st)).start()
+    st['positions'].append((pos[0], pos[1], 0.0))
+    st['n'] += PARA_SOLDIERS_PER_CHUTE
+    st['last'] = now
+    if len(st['objs']) < SOLDIER_MAX_PER_STICK:
+        st['objs'] += spawn_soldiers(rid, camp, [(pos[0], pos[1], 0.0)], st['id'], reason='(chute landed)')
+    log('PARA', f'{s.current_pilot}: paratroop landed at {tc_grid(pos[0], pos[1])} - stick {st["id"]} now {st["n"]} '
+                f'({st["purpose"]} scene {st["target"]})')
+
+def tc_para_stick_close(s, st):
+    """The stick window closed: announce it (msg 112 for AI clients + the AI line)."""
+    if s.__dict__.get('_para_stick') is st and time.time() - st['last'] < PARA_STICK_WINDOW_S:
+        threading.Timer(PARA_STICK_WINDOW_S - (time.time() - st['last']) + 0.5, tc_para_stick_close, args=(s, st)).start()
+        return
+    st['closed'] = True
+    if s.__dict__.get('_para_stick') is st:
+        s._para_stick = None
+    rid, camp, pts, sidx = st['room'], st['camp'], st['positions'], st['target']
+    if not pts:
+        return
+    terrain = _probe_terrain_for_room(rid)
+    cx = sum(p[0] for p in pts) / len(pts); cy = sum(p[1] for p in pts) / len(pts)
+    pkt = build_para_to_soldier_112(camp, sidx, 0, pts)
+    for p in get_sessions_in_room(rid):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- PARA_TO_SOLDIER 112 x{len(pts)} camp {camp} -> scene {sidx}', to=3.0)
+    txy = tc_scene_xy(terrain, sidx) if sidx >= 0 else None
+    log('PARA', f'room {rid}: stick {st["id"]} = {st["n"]} {tc_camp_tag(camp)} soldiers ({len(st["objs"])} objects) at '
+                f'{tc_grid(cx, cy)} -> {st["purpose"]} scene {sidx}')
+    if txy:
+        verb = 'moving to defend' if st['purpose'] == 'defend' else 'moving on'
+        tc_say(rid, f'AI: {tc_camp_tag(camp)} paratroops ({st["n"]}) landed at {tc_grid(cx, cy)} '
+                    f'{"dropped by " + st["by"] + ", " if st.get("by") else ""}{verb} {tc_camp_tag(scene_camp(terrain, sidx))} '
+                    f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+        key = (rid, int(sidx))
+        if st['purpose'] == 'attack' and key not in TRIGGERS and st.get('by'):
+            TRIGGERS[key] = {'at': time.time(), 'by': st['by'], 'camp': scene_camp(terrain, sidx), 'attacker': int(camp),
+                             'columns': [], 'defended': False}
+
+def tc_para_announce(rid, camp, sidx, pts, by=None):
+    """Console/test entry: a whole stick at once (msg 112 + soldiers + AI line)."""
+    terrain = _probe_terrain_for_room(rid)
+    cx = sum(p[0] for p in pts) / len(pts); cy = sum(p[1] for p in pts) / len(pts)
+    tcamp = scene_camp(terrain, sidx) if sidx >= 0 else None
+    sid = (max(STICKS) + 1) if STICKS else 1
+    st = STICKS[sid] = {'id': sid, 'room': rid, 'camp': int(camp), 'pos': (cx, cy), 'n': len(pts) * PARA_SOLDIERS_PER_CHUTE,
+                        'target': sidx, 'purpose': ('defend' if tcamp == int(camp) else 'attack') if sidx >= 0 else 'none',
+                        'landed_at': time.time(), 'last': time.time(), 'by': by, 'arrived': False,
+                        'fwd': (1.0, 0.0, 0.0), 'objs': [], 'positions': list(pts), 'closed': False}
+    st['objs'] = spawn_soldiers(rid, camp, pts, sid, reason='(stick landed)')
+    class _S: pass
+    _fake = _S(); _fake.__dict__['_para_stick'] = None
+    tc_para_stick_close(_fake, st)
+    return sid
+
+def ai_objects_reset_for(s, reason=''):
+    """v594f5: the client's tank/soldier gun AI decides friend-or-foe from the object's nation
+    vs the player's side AT CREATE TIME (a GB stick ignored its dropper after he switched to
+    US). On a side change, delete every AI object on that client and forget it as a peer -
+    the next ServerConfirm re-creates them all with the client on its new side."""
+    addr = getattr(s, 'addr', None)
+    if addr is None:
+        return 0
+    ids = [on for on, t in TANKS.items() if addr in t['peers']] + [on for on, sd in SOLDIERS.items() if addr in sd['peers']]
+    if not ids:
+        return 0
+    for on in ids:
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', on & 0xFFFF)
+        _submit_send(send_rel, s, build_msg13(raw), f'<- delete AI object 0x{on:04x} {reason}', to=3.0)
+        if on in TANKS:
+            TANKS[on]['peers'].discard(addr)
+        if on in SOLDIERS:
+            SOLDIERS[on]['peers'].discard(addr)
+    log('TC', f'{s.current_pilot}: {len(ids)} AI object(s) deleted on his client {reason} - re-created at his next ServerConfirm')
+    return len(ids)
+
+def _soldier_goal(st, sd, o, terrain, txy):
+    """v594f5: where this soldier should stand. Defender -> its slot on a ring round the scene;
+    attacker -> SOLDIER_STAND_OFF short of its assigned soft target (or the ring if none left)."""
+    if st.get('purpose') == 'attack':
+        tgt = sd.get('_tgt_obj')
+        if tgt is not None:
+            tx, ty = tgt[2], tgt[3]
+            dx, dy = tx - sd['pos'][0], ty - sd['pos'][1]
+            d = math.hypot(dx, dy) or 1.0
+            if d > SOLDIER_STAND_OFF:
+                return (tx - dx / d * SOLDIER_STAND_OFF, ty - dy / d * SOLDIER_STAND_OFF)
+            return (sd['pos'][0], sd['pos'][1])
+    # ring slot: angle from the soldier's own number, radius from the scene's extent (v596f5)
+    k = o % 12
+    ang = 2 * math.pi * k / 12.0
+    base = tc_ring_radius(terrain, st['target'], floor=SOLDIER_RING_MIN)
+    r = base if (o // 12) % 2 == 0 else base + (SOLDIER_RING_MAX - SOLDIER_RING_MIN)
+    return (txy[0] + r * math.cos(ang), txy[1] + r * math.sin(ang))
+
+def _soldier_step(sd, o, terrain, gx, gy, dt, now):
+    """Walk one soldier toward (gx,gy) along a planned path with infantry clearance. Returns
+    True when it moved."""
+    x, y, _z = sd['pos']
+    dist = math.hypot(gx - x, gy - y)
+    if dist <= 2.0:
+        sd['moving'] = False
+        return False
+    wps = sd.get('_wps')
+    pg = sd.get('_wp_goal')
+    drift = math.hypot(gx - pg[0], gy - pg[1]) if pg else 1e9
+    need = (not wps or now - sd.get('_planned_at', 0.0) > TANK_PATH_REPLAN_S or drift > 25.0)
+    if need and not wps and now - sd.get('_planned_at', 0.0) < TANK_PATH_RETRY_S:
+        need = False
+    if need:
+        wps = tank_plan_path(terrain, x, y, gx, gy, margin=SOLDIER_OBST_MARGIN) if terrain is not None else []
+        sd['_wps'] = wps; sd['_planned_at'] = now; sd['_wp_goal'] = (gx, gy)
+    if wps:
+        nx, ny = wps[0]
+        if math.hypot(nx - x, ny - y) <= 3.0:
+            wps.pop(0)
+            nx, ny = wps[0] if wps else (gx, gy)
+    else:
+        nx, ny = gx, gy
+    dx, dy = nx - x, ny - y
+    d = math.hypot(dx, dy) or 1.0
+    step = min(d, PARA_WALK_MPS * dt)
+    sd['fwd'] = (dx / d, dy / d, 0.0)
+    sd['pos'] = (x + dx / d * step, y + dy / d * step, 0.0)
+    sd['moving'] = True
+    return True
+
+def _sticks_tick(dt=1.0):
+    """4 Hz (v593f5): every soldier walks toward its stick's scene; the stick's centre follows;
+    expire old sticks (defenders live PARA_STICK_LIFETIME_S)."""
+    now = time.time()
+    for sid, st in list(STICKS.items()):
+        if now - st['landed_at'] > PARA_STICK_LIFETIME_S or st['n'] <= 0:
+            delete_soldiers(st.get('objs') or [], reason='(stick expired)')
+            log('PARA', f'stick {sid}: life expired - {st["n"]} soldiers withdrawn')
+            STICKS.pop(sid, None); continue
+        objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
+        st['objs'] = objs
+        if st['target'] < 0:
+            for o in objs:
+                if now - SOLDIERS[o].get('last_sent', 0.0) >= TANK_IDLE_S:
+                    soldier_broadcast_state(o)
+            continue
+        terrain = _probe_terrain_for_room(st['room'])
+        txy = tc_scene_xy(terrain, st['target'])
+        if not txy:
+            continue
+        arrived = 0
+        for o in objs:
+            sd = SOLDIERS[o]
+            gx, gy = _soldier_goal(st, sd, o, terrain, txy)
+            if sd.get('firing'):
+                sd['moving'] = False                      # v594f5: stand while shooting
+                if now - sd.get('last_sent', 0.0) >= TANK_IDLE_S:
+                    soldier_broadcast_state(o)
+                arrived += 1
+                continue
+            if _soldier_step(sd, o, terrain, gx, gy, dt, now):
+                soldier_broadcast_state(o)
+            else:
+                if math.hypot(txy[0] - sd['pos'][0], txy[1] - sd['pos'][1]) <= TC_CAPTURE_RADIUS:
+                    arrived += 1
+                if now - sd.get('last_sent', 0.0) >= TANK_IDLE_S:
+                    soldier_broadcast_state(o)
+        if objs:
+            st['pos'] = (sum(SOLDIERS[o]['pos'][0] for o in objs) / len(objs),
+                         sum(SOLDIERS[o]['pos'][1] for o in objs) / len(objs))
+        else:
+            x, y = st['pos']
+            dx, dy = txy[0] - x, txy[1] - y
+            d = math.hypot(dx, dy)
+            if d > 60.0:
+                step = min(d, PARA_WALK_MPS * dt)
+                st['pos'] = (x + dx / d * step, y + dy / d * step)
+            else:
+                arrived = 1
+        if arrived and not st['arrived'] and (not objs or arrived >= max(1, len(objs) // 2)):
+            st['arrived'] = True
+            log('PARA', f'stick {sid}: {st["n"]} soldiers at scene {st["target"]} ({st["purpose"]})')
+            if st['purpose'] == 'attack':
+                tc_check_defend(st['room'], st['target'], reason='(paratroops at the scene)')
+
+def _soldiers_tick(moving_sticks):
+    return                                                 # v591f5: walking is per soldier in _sticks_tick
+
+def tc_sticks_at_scene(rid, sidx, camp):
+    """Soldiers of `camp` within capture reach of the scene (stick 'n' scaled by the share
+    of its objects that are actually there)."""
+    terrain = _probe_terrain_for_room(rid)
+    txy = tc_scene_xy(terrain, sidx)
+    if not txy:
+        return 0
+    n = 0
+    for st in STICKS.values():
+        if st['room'] != rid or st['camp'] != camp:
+            continue
+        objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
+        if objs:
+            near = sum(1 for o in objs if math.hypot(SOLDIERS[o]['pos'][0] - txy[0], SOLDIERS[o]['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS)
+            n += int(round(st['n'] * near / len(objs)))
+        elif math.hypot(st['pos'][0] - txy[0], st['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+            n += st['n']
+    return n
+
+def _tc_para_capture_tick():
+    """v588f5/v591f5: attacking sticks at a hostile scene shoot its SOFT objects (never past
+    SOLDIER_DAMAGE_CAP); the scene flips when damage >= capture% with >= PARA_CAPTURE_MIN
+    soldiers present."""
+    for sid, st in list(STICKS.items()):
+        if st['target'] < 0 or st.get('purpose') != 'attack':
+            continue
+        rid, sidx, camp = st['room'], st['target'], st['camp']
+        terrain = _probe_terrain_for_room(rid)
+        if scene_camp(terrain, sidx) == camp:
+            st['purpose'] = 'defend'                        # captured meanwhile -> garrison
+            for o in st.get('objs') or []:
+                if o in SOLDIERS:
+                    SOLDIERS[o]['flags'] &= ~0x04
+            continue
+        objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
+        frac = trn_scene_damage_frac(rid, sidx)
+        # --- soft-target fire under the infantry cap ---
+        if objs and frac < SOLDIER_DAMAGE_CAP:
+            soft = [e for e in tc_scene_objects(rid, terrain, sidx) if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE]
+            per_soldier = st['n'] / max(1, len(objs))
+            for o in objs:
+                sd = SOLDIERS[o]
+                # v594f5: each soldier keeps an assigned soft target and closes on it (the walk
+                # goal); it fires once within gun range
+                tgt = sd.get('_tgt_obj')
+                if tgt is None or all(e[0] != tgt[0] for e in soft):
+                    tgt = min(soft, key=lambda e: math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1])) if soft else None
+                    sd['_tgt_obj'] = tgt
+                if tgt is None or math.hypot(tgt[2] - sd['pos'][0], tgt[3] - sd['pos'][1]) > SOLDIER_GUN_RANGE:
+                    sd['flags'] &= ~0x04; sd['firing'] = False; sd['_aim'] = None
+                    continue
+                best = tgt
+                sd['flags'] |= 0x04; sd['firing'] = True
+                sd['fwd'] = (best[2] - sd['pos'][0], best[3] - sd['pos'][1], 0.0)
+                sd['_aim'] = (best[2] - sd['pos'][0], best[3] - sd['pos'][1])
+                key = (rid, best[0])
+                GROUND_HP[key] = GROUND_HP.get(key, 0) + int(SOLDIER_DPS * per_soldier)
+                need = max(OBJ_HP_MIN, best[1]['value'] * OBJ_HP_PER_VALUE)
+                if GROUND_HP[key] >= need:
+                    tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}')
+                    soft = [e for e in soft if e[0] != best[0]]
+                    sd['_tgt_obj'] = None
+                    frac = trn_scene_damage_frac(rid, sidx)
+                    if frac >= SOLDIER_DAMAGE_CAP:
+                        break
+        elif objs:
+            for o in objs:
+                SOLDIERS[o]['flags'] &= ~0x04; SOLDIERS[o]['firing'] = False; SOLDIERS[o]['_tgt_obj'] = None; SOLDIERS[o]['_aim'] = None
+        # --- v599f5: the scene's own defences shoot back (client-side AI guns report nothing for
+        # our objects, so it is modelled here): each live defence object within DEFENCE_RANGE of
+        # an enemy soldier deals DEFENCE_DPS to the nearest one per second ---
+        if objs:
+            defs = [e for e in tc_scene_objects(rid, terrain, sidx)
+                    if any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
+            for e in defs:
+                near = [o for o in objs if o in SOLDIERS and math.hypot(e[2] - SOLDIERS[o]['pos'][0], e[3] - SOLDIERS[o]['pos'][1]) <= DEFENCE_RANGE]
+                if not near:
+                    continue
+                o = min(near, key=lambda q: math.hypot(e[2] - SOLDIERS[q]['pos'][0], e[3] - SOLDIERS[q]['pos'][1]))
+                sd = SOLDIERS[o]
+                sd['hp'] = sd.get('hp', SOLDIER_HP) - DEFENCE_DPS
+                if sd['hp'] <= 0:
+                    log('PARA', f'soldier 0x{o:04x} killed by {e[1]["name"]} (obj {e[0]}) of scene {sidx}')
+                    soldier_killed(o, None, reason=f'(scene defence {e[1]["name"]})',
+                                   ai_hunter=(PPT_CLASS_AA, scene_camp(terrain, sidx)))
+                    objs = [q for q in objs if q != o]
+        # --- capture ---
+        if not st.get('arrived'):
+            continue
+        if tc_sticks_at_scene(rid, sidx, camp) < PARA_CAPTURE_MIN:
+            continue
+        cap_pct = tc_room_setting(rid, 'capture_percent', TC_CAPTURE_PERCENT)
+        if frac * 100.0 + 1e-6 >= cap_pct:
+            trig = TRIGGERS.get((rid, int(sidx))) or {}
+            tc_capture_scene(rid, sidx, camp, by_pilot=trig.get('by') or st.get('by'))
+
+# --- v601f5 REAL TC MESSAGES (from FA.exe, film-verified effects) -----------------------
+#   msg 41 (0x29) CaptureScene  [0x29][u16 scene][u8 camp] -> FUN_0044e5c0 SCENE::Capture on
+#        the client: camp flip, 'GER Tank Factory at 72,BN has been captured by GBR' (kind 0x0d,
+#        string 0xaf), map recolour, eviction of anyone parked there (film tag 24 records it).
+#   msg 104 (0x68) Trigger      [0x68][sub 1=defence|2=attack][u8 camp][u16 scene][pilot\0] ->
+#        the client's MISSION SCRIPT (msn_scpt.cpp) events 'defense_scene'/'attack_scene'(scene,
+#        camp, name): the blue mission lines, siren and map markers of the films come from the
+#        script. Needs a script-loaded client (DAT_00c89e80) - the chat fallback stays available.
+TC_USE_MSG41  = True
+TC_USE_MSG104 = True
+TC_CHAT_MISSION_LINES = True      # keep the AI-chat mission lines while msg 104 is being verified
+
+def send_scene_capture_41(room_id, sidx, camp):
+    pkt = build_ingame_pkt(bytes([0x29]) + struct.pack('<HB', int(sidx) & 0xffff, int(camp) & 0xff))
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- CAPTURE 41 scene {sidx} camp {camp}', to=3.0); n += 1
+    log('TC', f'room {room_id}: msg 41 capture scene {sidx} -> camp {camp} ({n} session(s))')
+
+def send_trigger_104(room_id, sub, camp, sidx, pilot_name=''):
+    body = bytes([0x68, int(sub) & 0xff, int(camp) & 0xff]) + struct.pack('<H', int(sidx) & 0xffff) \
+           + (pilot_name or '').encode('latin1', 'replace')[:31] + b'\x00'
+    pkt = build_ingame_pkt(body)
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- TRIGGER 104 sub {sub} camp {camp} scene {sidx} by {pilot_name!r}', to=3.0); n += 1
+    log('TC', f'room {room_id}: msg 104 {"attack" if sub == 2 else "defence"}_scene({sidx}, camp {camp}, {pilot_name!r}) -> {n} session(s)')
 
 def tc_check_scene_trigger(room_id, sidx, pilot_sess):
     """Called from the ground-damage path after a kill: trigger when damage >= AttackPercent."""
@@ -9796,31 +10784,75 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
         frac = trn_scene_damage_frac(room_id, sidx)
         if frac * 100.0 + 1e-6 >= TC_ATTACK_PERCENT:
             tc_trigger_scene(room_id, sidx, pilot_sess, reason=f'(damage {frac * 100:.0f}% >= {TC_ATTACK_PERCENT}%)')
+        else:
+            tc_pretrigger_warn(room_id, sidx, pilot_sess, frac)                 # v600f5
+        if (room_id, int(sidx)) in TRIGGERS:
+            terrain = _probe_terrain_for_room(room_id)
+            txy = tc_scene_xy(terrain, sidx)
+            if txy and pilot_sess is not None and getattr(pilot_sess, 'nation', None) != scene_camp(terrain, sidx):
+                tc_say(room_id, f'Your hit helps capture scene {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=pilot_sess)
         tc_check_defend(room_id, sidx, reason='(plane damage)')     # v587f5
     except Exception:
         logx('TC', 'trigger check failed')
 
+TC_WARN_PERCENT = 40   # v600f5: 'Your airbase at X is about to be triggered!' to the owners at this damage
+
+def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
+    key = (room_id, int(sidx))
+    if frac * 100.0 + 1e-6 < TC_WARN_PERCENT or key in TRIGGERS:
+        return
+    warned = globals().setdefault('_TC_WARNED', {})
+    if time.time() - warned.get(key, 0.0) < TC_ATTACK_TOGGLE_S:
+        return
+    terrain = _probe_terrain_for_room(room_id)
+    txy = tc_scene_xy(terrain, sidx)
+    tcamp = scene_camp(terrain, sidx)
+    if not txy or tcamp is None or tcamp > 7:
+        return
+    warned[key] = time.time()
+    tc_say(room_id, f'Your {tc_scene_kind_word(txy[2])} at {tc_grid(txy[0], txy[1])} is about to be triggered!', camp=tcamp)
+
 def tank_recreate_for(s, reason=''):
-    """v563f5/v570f5: after a (re)spawn, create every tank of the room this session doesn't
-    hold - ALL in one msg-2 (one reliable send), the record walker takes concatenated records."""
+    """v563f5/v570f5/v604f5: after a (re)spawn, create every tank of the room this session
+    doesn't hold - batched, but never more than RECREATE_CHUNK records per msg-2: the live
+    48-tank batch (1,057 B) at 09-09 17:15 was silently not applied by the client (16 x 21 B +
+    client record = 385 B is field-proven), leaving invisible tanks that went on capturing."""
     if not SPAWN_TANKS or not TANKS:
         return 0
     rid = getattr(s, 'current_room', None)
-    body = bytearray([0x02]); n = 0; ids = []
-    for onum, t in list(TANKS.items()):
-        if t['room'] != rid or getattr(s, 'addr', None) in t['peers']:
-            continue
-        if n == 0:
+    todo = [(onum, t) for onum, t in list(TANKS.items()) if t['room'] == rid and getattr(s, 'addr', None) not in t['peers']]
+    n = 0
+    for i in range(0, len(todo), RECREATE_CHUNK):
+        chunk = todo[i:i + RECREATE_CHUNK]
+        body = bytearray([0x02])
+        if i == 0:
             body += _ensure_ai_client_on(s)
-        body += build_tank_record(AI_CLIENT_ST, onum, t['camp'], t['class'], t['group'])
-        t['peers'].add(s.addr)
-        t['last_sent'] = 0.0          # the driver sends a fix on its next tick
-        n += 1; ids.append(f'0x{onum:04x}')
-    if n:
+        ids = []
+        for onum, t in chunk:
+            body += build_tank_record(AI_CLIENT_ST, onum, t['camp'], t['class'], t['group'])
+            t['peers'].add(s.addr); t['last_sent'] = 0.0
+            ids.append(f'0x{onum:04x}'); n += 1
         _submit_send(send_rel, s, build_msg13(bytes(body)),
-                     f'<- CreateObject 2 TANK x{n} {ids} (re-create {reason})', to=3.0)
-        log('TANK', f'{s.current_pilot}: re-created {n} tank(s) in one msg-2 {reason}')
-    return n
+                     f'<- CreateObject 2 TANK x{len(chunk)} {ids} (re-create {reason})', to=3.0)
+    if n:
+        log('TANK', f'{s.current_pilot}: re-created {n} tank(s) in {(n + RECREATE_CHUNK - 1) // RECREATE_CHUNK} msg-2(s) {reason}')
+    # v590f5/v604f5: soldiers the same way, same chunking
+    stodo = [(onum, sd) for onum, sd in list(SOLDIERS.items()) if sd['room'] == rid and getattr(s, 'addr', None) not in sd['peers']]
+    sn = 0
+    for i in range(0, len(stodo), RECREATE_CHUNK):
+        chunk = stodo[i:i + RECREATE_CHUNK]
+        sbody = bytearray([0x02])
+        if i == 0 and n == 0:
+            sbody += _ensure_ai_client_on(s)
+        for onum, sd in chunk:
+            sbody += build_soldier_record(AI_CLIENT_ST, onum, sd['camp'], sd['class'], sd['stick'])
+            sd['peers'].add(s.addr); sd['last_sent'] = 0.0
+            sn += 1
+        _submit_send(send_rel, s, build_msg13(bytes(sbody)),
+                     f'<- CreateObject 2 SOLDIER x{len(chunk)} (re-create {reason})', to=3.0)
+    if sn:
+        log('PARA', f'{s.current_pilot}: re-created {sn} soldier(s) {reason}')
+    return n + sn
 
 def preload_squadron_list(s, reason=''):
     """Push the 0xce squadron list to a client so it has the list loaded in-session. Once per
@@ -12844,6 +13876,20 @@ def relay_telemetry(src, data, _split_obj=None):
     if _split_obj is None and len(pl) >= 9 and 34 <= len(pl) - 7 <= 90:
         # v547f5: learn this object's record size from its single-record frames (feeds the splitter)
         src.__dict__.setdefault('_rec_size_by_obj', {})[int.from_bytes(pl[7:9], 'little')] = len(pl) - 7
+    # v588f5/v592f5 [PARATROOPS]: remember every crew/para chute's last position. The plane
+    # family (planes, chutes) packs its position in NINE bytes, bit-packed (FUN_007cca00): X =
+    # 25-bit signed at bits 0..24, Y = 25-bit signed at bits 25..49, Z = 22-bit unsigned at bits
+    # 50..71, all x PLANE_POS_SCALE (dumped double @0xa48090), Z minus 500 - NOT the tank's 7-byte
+    # form (v591f5 read that and put every landing at the take-off field).
+    if len(pl) >= 18 and PLANE_POS_SCALE:
+        _co_onum = int.from_bytes(pl[7:9], 'little')
+        _crew_ent = (src.__dict__.get('crew_para_objs') or {}).get(_co_onum)
+        if _crew_ent is not None:
+            try:
+                _px, _py, _pz = unpack_plane_pos9(pl[9:18])
+                _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
+            except Exception:
+                pass
     # v243: and the quantised world POSITION (body[0:6] = 3x u16, i.e. pl[9:15]). This is what tells
     # a CRASH apart from a clean parked exit - the two are byte-identical in the exit packet, so the
     # only way to know the plane was flying is to look at whether it was actually moving.
@@ -13129,8 +14175,14 @@ def handle_team_select(s, nation):
             broadcast_player_change_63(s, None, op=CP_OP_CAMP, reason='(team leave)')
     else:
         _changed = s.nation != nation
+        _prev_nation = s.nation
         s.nation = nation
         log('TEAM', f'{s.current_pilot} joined side {nation} - msg 63 op=CAMP')
+        if _changed and _prev_nation is not None and s.current_room is not None:
+            try:
+                ai_objects_reset_for(s, reason=f'(side change {_prev_nation}->{nation})')   # v594f5
+            except Exception:
+                logx('TC', 'AI object reset on side change failed')
         # Broadcast only on an actual change (see the team-leave branch): the first join
         # after entering broadcasts (s.nation was reset to None at SendEnterToGame), while
         # a reliable retransmit of the same join finds s.nation already set -> no re-send.
@@ -13445,6 +14497,8 @@ def handle_leave_arena(s):
     s.__dict__.pop('_ai_roster_room', None)       # v577f5: and the AI roster player
     for _t in TANKS.values():                      # v563f5: the world is gone with the leave
         _t['peers'].discard(getattr(s, 'addr', None))
+    for _sd in SOLDIERS.values():                  # v598f5: soldiers too (rejoin re-creates them)
+        _sd['peers'].discard(getattr(s, 'addr', None))
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -14957,6 +16011,11 @@ def tc_scene_contested(room_id, sidx):
                 continue
             if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
                 return True
+        for sd in SOLDIERS.values():                   # v591f5: infantry on the scene counts too
+            if sd['room'] != room_id or sd['camp'] == camp:
+                continue
+            if math.hypot(sd['pos'][0] - txy[0], sd['pos'][1] - txy[1]) <= TC_CAPTURE_RADIUS:
+                return True
     except Exception:
         pass
     return False
@@ -15729,10 +16788,14 @@ def _ingame_own_object_removed(s, tb, stored):
                 if _peerc is not s:
                     _submit_send(send_rel, _peerc, _pdc,
                                  f'<- delete CREW PARACHUTER 0x{_ponum:04x} ({s.current_pilot})', to=3.0)
-            s.crew_para_objs.pop(_ponum, None)
+            _crew_ent_l = s.crew_para_objs.pop(_ponum, None)
             (s.__dict__.get('_para_created_peers') or {}).pop(_ponum, None)
             log('PARA', f'{s.current_pilot} crew chute 0x{_ponum:04x} removed (exit=0x{_pexitc:02x}) '
                         f'-> relayed delete to peers, no pilot fate involved [v555f5]')
+            try:
+                tc_para_landed(s, _ponum, _crew_ent_l)          # v588f5: paratroop?
+            except Exception:
+                logx('PARA', 'paratroop landing hook failed')
             return
         if _ponum is not None and _ponum == getattr(s, 'para_obj_number', None):
             _pexit0 = stored[7] if len(stored) > 7 else 0
@@ -16433,6 +17496,7 @@ _SUPPLY_LOCK = threading.Lock()
 _SUPPLY_UNITS = {}                       # (room_id, camp) -> {'aircraft':n,'tank':n,'ship':n}
 _SUPPLY_UNITS_LOCK = threading.Lock()
 UNITS_MODEL        = True                # master switch for the v429f5 units layer
+SPAWN_SPENDS_UNITS = True                # v602f5: a spawn spends an aircraft unit (tank unit + narration when none)
 UNIT_METAL_COST    = 2000                # TUNABLE: stored metal consumed to build one unit
 UNIT_CAP_PER_CAMP  = 99                  # TUNABLE: max built-not-deployed units of a type per camp
 UNITS_PER_TICK_MAX = 4                   # TUNABLE: units of a type a camp can build in one step
@@ -17778,6 +18842,10 @@ SUPPLY_TC_AMMO_ADD_KG   = 150  # v443f5: reference only - the LEAN cap is gone (
 # weights (client Data files) or msg-73 SendRepairInfo reconciliation are the upgrade path.
 SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG = 500
 SUPPLY_TC_SPAWN_AMMO_BOMBER_KG  = 6500
+# v603f5: fuel drawn at spawn is a full tank by class (the old flat 300 kg 'top-up' vanished
+# under one minute of production; a Lancaster carries ~6,000 kg, a fighter ~400-600 kg).
+SUPPLY_TC_SPAWN_FUEL_FIGHTER_KG = 500
+SUPPLY_TC_SPAWN_FUEL_BOMBER_KG  = 5000
 
 def _tc_pool_draw(s, ammo_ask, fuel_ask):
     """v443f5: THE 'CHECK SUPPLY FIRST' PRIMITIVE shared by every TC grant path. Draws up to
@@ -18146,7 +19214,8 @@ def _grant_spawn_supply(s):
     _pt = getattr(s, 'plane_type', None)
     _bomber = bool(is_bomber_plane(_pt))
     _ask_a = SUPPLY_TC_SPAWN_AMMO_BOMBER_KG if _bomber else SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG
-    _draw = _tc_pool_draw(s, _ask_a, SUPPLY_TC_FUEL_ADD_KG)
+    _ask_f = SUPPLY_TC_SPAWN_FUEL_BOMBER_KG if _bomber else SUPPLY_TC_SPAWN_FUEL_FIGHTER_KG   # v603f5
+    _draw = _tc_pool_draw(s, _ask_a, _ask_f)
     if _draw is None:
         # unmapped terrain: serve arcade-style rather than deny (same rationale as the poll)
         send_supply_grant_60(
@@ -18156,11 +19225,24 @@ def _grant_spawn_supply(s):
                         f'arcade-style grant')
         return
     _got_a, _got_f, _rem_a, _rem_f, _src = _draw
-    _fuel_ok = _got_f >= SUPPLY_TC_FUEL_ADD_KG
+    _fuel_ok = _got_f >= _ask_f
     _ammo_ok = _got_a >= _ask_a
     _flags = 0x01 | (0x02 if _fuel_ok else 0x00) | (0x04 if _ammo_ok else 0x00)
-    if not (_fuel_ok and _ammo_ok) and SPAWN59_NARRATE_SHORTAGE:
-        _flags |= 0x08                     # authentic 'insufficient aircraft units' narration
+    # v602f5 [FILM CONTRACT]: msg-60 bit 3 = the 'Insufficient aircraft units at this base to
+    # supply your plane normally, / taking from tank production to create your plane' pair
+    # (strings 0xe5/0xe6; 170 pairs in the films, ALWAYS about units, never fuel/ammo). Spend
+    # one AIRCRAFT unit of the camp per spawn; when none is built, spend a TANK unit and narrate.
+    _unit_note = ''
+    if UNITS_MODEL and SPAWN_SPENDS_UNITS:
+        if camp_units_take(s.current_room, s.nation, 'aircraft', 1) < 1:
+            if camp_units_take(s.current_room, s.nation, 'tank', 1) >= 1:
+                _flags |= 0x08; _unit_note = ' [no aircraft unit - TANK unit spent, narrated]'
+            else:
+                _unit_note = ' [no units built at all - spawned anyway]'
+        else:
+            _unit_note = ' [aircraft unit spent]'
+    elif not (_fuel_ok and _ammo_ok) and SPAWN59_NARRATE_SHORTAGE:
+        _flags |= 0x08                     # legacy: narrate on a fuel/ammo shortage
     send_supply_grant_60(
         s, flags=_flags,
         amount=(0 if _fuel_ok else max(0, int(_got_f)) & 0xffff),
@@ -18171,7 +19253,7 @@ def _grant_spawn_supply(s):
                     f'{"bomber" if _bomber else "fighter"}(plane={_pt}) '
                     f'ammo {"FULL ARM" if _ammo_ok else f"LIMITED {_got_a}kg"} '
                     f'(ceiling {_ask_a}) fuel {"loadout" if _fuel_ok else "LIMITED"} '
-                    f'debit a={_got_a} f={_got_f} kg [{_src} now ammo {_rem_a} fuel {_rem_f} kg]')
+                    f'debit a={_got_a} f={_got_f} kg [{_src} now ammo {_rem_a} fuel {_rem_f} kg]{_unit_note}')
 
 def _handle_ask_resources_59(s, pl):
     """v437f5: reply to the client's spawn-time msg-59 with an immediate msg-60 grant."""
@@ -19770,7 +20852,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
@@ -19781,6 +20863,8 @@ def handle_post_auth(s, cmd, pl):
                 _tank_note_client_delete(s, stored)     # v563f5: client dropped a tank -> forget that peer
             elif sub == 0x33:
                 _handle_tank_hit_51(s, stored)          # v572f5: NetTank hit report
+            elif sub == 0x71:
+                _handle_para_request_113(s, stored)     # v589f5: paratroop load/unload request
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
