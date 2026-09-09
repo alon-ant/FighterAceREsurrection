@@ -317,7 +317,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v605f5'
+VERSION = 'v607f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9854,6 +9854,7 @@ TC_TANK_VS_TANK_DPS  = 60.0     # per second per shooter on an enemy tank (1000 
 TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent setting
 TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
+CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
 TC_MAX_TANKS_PER_ROOM = 32      # v604f5: no new battalion while this many tanks are alive in the room
 # v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
@@ -9914,8 +9915,10 @@ def tc_scene_objects(room_id, terrain, sidx):
         out.append((obj, oi, float(o['x']), float(o['y']), valuable))
     return out
 
-def tc_ai_destroy_object(room_id, obj, oi, by=''):
-    """Kill a scene object by AI fire: registry + msg-30 destroy form to everyone, SCENE_HP."""
+def tc_ai_destroy_object(room_id, obj, oi, by='', credit_pilot=None):
+    """Kill a scene object by AI fire: registry + msg-30 destroy form to everyone, SCENE_HP.
+    v607f5: credit_pilot (the pilot who dropped the paratroops) is booked the object's points
+    like a ground kill of his own."""
     sc = oi.get('scene')
     camp = scene_camp(_probe_terrain_for_room(room_id), sc) if sc is not None and sc >= 0 else 0
     broadcast_scene_36(room_id, [(obj, camp if camp != SCENE_CAMP_NEUTRAL else 0, 0.0)],
@@ -9927,8 +9930,24 @@ def tc_ai_destroy_object(room_id, obj, oi, by=''):
         if trn_scene_complete(room_id, sc):
             supply_on_scene_destroyed(room_id, sc)
         tc_check_defend(room_id, sc, reason='(tank fire)')          # v587f5
+    if credit_pilot and GROUND_KILL_SCORE and oi.get('value', 0) > 0:
+        try:
+            sess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == credit_pilot), None)
+            _mode = scoring_mode_for_room(room_id)
+            _pts = int(round(oi['value'] * SCENE36_SCORE_PCT / 100.0))
+            if sess is not None and _mode is not None and _pts > 0:
+                _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(credit_pilot, _pts, bomber=_bomber, mode=_mode)
+                _bld = db_bump_pilot_counter(credit_pilot, 'ai_buildings', 1)
+                log('SCORE', f'{credit_pilot} +{_pts} = his paratroops destroyed {oi["name"]} (obj {obj}) | total {_sc} '
+                             f'rank {_old}->{_rk} buildings={_bld}')
+                send_stat_block_25(sess, reason='(paratroop kill)')
+        except Exception:
+            logx('TC', 'paratroop kill credit failed')
 
-def tc_capture_scene(room_id, sidx, camp, by_pilot=None):
+def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
+    """assist_pilot (v607f5): the pilot whose paratroops made the capture, when he is not the
+    trigger pilot - booked CAPTURE_ASSIST_BONUS."""
     terrain = _probe_terrain_for_room(room_id)
     old = scene_camp(terrain, sidx)
     if old == camp:
@@ -9953,6 +9972,17 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None):
                 send_stat_block_25(sess, reason='(capture bonus)')
             except Exception:
                 logx('TC', 'capture bonus failed')
+    if assist_pilot and assist_pilot != by_pilot and GROUND_KILL_SCORE:
+        sess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == assist_pilot), None)
+        _mode = scoring_mode_for_room(room_id)
+        if sess is not None and _mode is not None:
+            try:
+                _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(assist_pilot, CAPTURE_ASSIST_BONUS, bomber=_bomber, mode=_mode)
+                log('SCORE', f'{assist_pilot} +{CAPTURE_ASSIST_BONUS} = capture assist (his troops took scene {sidx}) | total {_sc} rank {_old}->{_rk}')
+                send_stat_block_25(sess, reason='(capture assist)')
+            except Exception:
+                logx('TC', 'capture assist bonus failed')
     try:
         broadcast_scene_snapshot_42(room_id, reason=f'(scene {sidx} captured by camp {camp})')
     except Exception:
@@ -10221,6 +10251,126 @@ def _handle_para_request_113(s, pl):
         _submit_send(send_rel, s, pkt, f'<- PARA_ANSWER 114 ident={ident} given={given}', to=3.0)
     except Exception:
         logx('PARA', 'msg-113 handling failed')
+
+# --- v606f5 CARGO (msg 106 -> 107): transport pick-up, air-drop and landed unload ----------
+# From FA.exe Msn_Prod.cpp FUN_00559250 (the 2009 AI-side handler):
+#   106 request [0x6a][u16 ident][u16 scene | bit15 PICK-UP | bit14 deliver-for-bonus]
+#               [u16 metal kg][u16 fuel kg][u16 ammo kg][u32 PI][u16 dist/100 m][u16 flight s]
+#   107 answer  [0x6b][u16 ident][s16 metal][s16 fuel][s16 ammo] = the SHORTFALL per kind
+#               (asked - given; 0 = everything). The client waits for it like the paratroop answer.
+# The client itself chooses the scene (its 'drop at nearest scene' path, ParachuteResourceRadius
+# for air-drops), so air-dropped cargo and a landed unload both arrive here as a DROP. A drop
+# adds the kilograms to that scene's stores (capped by storage) and REPAIRS it: every
+# CARGO_REPAIR_KG_PER_VALUE kg of METAL rebuilds one value point of destroyed objects,
+# cheapest first (the object's value x that rate), honouring the 30 s Destroyer floor.
+# Pick-up takes from the scene's stores (own camp only). Deliveries earn CARGO_SCORE_PER_KG_*
+# points (the 2009 bonus was metal/fuel/ammo x gamedef percentages).
+MSG_CARGO_REQUEST_106 = 0x6a
+MSG_CARGO_ANSWER_107  = 0x6b
+CARGO_MODEL              = True
+CARGO_REPAIR_KG_PER_VALUE = 5.0     # 5 kg of metal per value point: hangar (150) = 750 kg, factory 1000+
+CARGO_REPAIR_WITH_FUEL_AMMO = False # only metal rebuilds; fuel/ammo just stock the scene
+CARGO_SCORE_PER_KG_METAL = 0.10
+CARGO_SCORE_PER_KG_FUEL  = 0.05
+CARGO_SCORE_PER_KG_AMMO  = 0.05
+
+def _scene_store_add(room_id, terrain, sidx, metal, fuel, ammo):
+    """Add kg to a scene's stores, capped by its storage. Returns (accepted m,f,a)."""
+    r = supply_state(room_id, terrain, sidx)
+    if not r or r[0] is None or not r[1]:
+        return (0, 0, 0)
+    st, p = r
+    got = []
+    with _SUPPLY_LOCK:
+        for kind, amt in (('metal', metal), ('fuel', fuel), ('ammo', ammo)):
+            cap = int(p['caps'].get(kind, 0))
+            room_left = max(0, cap - int(st.get(kind, 0)))
+            add = max(0, min(room_left, int(amt)))
+            st[kind] = int(st.get(kind, 0)) + add
+            got.append(add)
+    return tuple(got)
+
+def _scene_store_take(room_id, terrain, sidx, metal, fuel, ammo):
+    r = supply_state(room_id, terrain, sidx)
+    if not r or r[0] is None:
+        return (0, 0, 0)
+    st = r[0]
+    got = []
+    with _SUPPLY_LOCK:
+        for kind, amt in (('metal', metal), ('fuel', fuel), ('ammo', ammo)):
+            take = max(0, min(int(st.get(kind, 0)), int(amt)))
+            st[kind] = int(st.get(kind, 0)) - take
+            got.append(take)
+    return tuple(got)
+
+def cargo_repair_scene(room_id, sidx, metal_kg, reason=''):
+    """Spend metal on the scene's destroyed objects, cheapest first. Returns (objs repaired, kg spent)."""
+    if metal_kg <= 0:
+        return [], 0
+    dead = sorted((o for (r, o) in _SCENE36_DESTROYED if r == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
+    todo, spent = [], 0
+    for o in dead:
+        oi = trn_obj_info(room_id, o)
+        if not oi or oi.get('scene') != int(sidx):
+            continue
+        cost = max(50.0, float(oi.get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE)
+        if spent + cost > metal_kg:
+            continue
+        todo.append(o); spent += cost
+    done = repair_objects(room_id, todo, reason=f'(cargo repair {reason})') if todo else []
+    return done, int(spent) if done else 0
+
+def _handle_cargo_request_106(s, pl):
+    if not CARGO_MODEL:
+        return
+    try:
+        body = bytes(pl)
+        if len(body) < 5 + 18 or body[4] != MSG_CARGO_REQUEST_106:
+            return
+        ident, sw, metal, fuel, ammo, pi, dist, ftime = struct.unpack_from('<HHHHHIHH', body, 5)
+        sidx = sw & 0x3fff
+        pickup, bonus = bool(sw & 0x8000), bool(sw & 0x4000)
+        rid = s.current_room
+        terrain = _probe_terrain_for_room(rid)
+        scamp = scene_camp(terrain, sidx) if rid is not None else None
+        txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
+        short = [0, 0, 0]
+        if pickup:
+            if scamp is not None and scamp == getattr(s, 'nation', None):
+                gm, gf, ga = _scene_store_take(rid, terrain, sidx, metal, fuel, ammo)
+            else:
+                gm = gf = ga = 0
+            short = [metal - gm, fuel - gf, ammo - ga]
+            log('CARGO', f'{s.current_pilot} PICK-UP at scene {sidx} "{txy[2].strip()}" (camp {scamp}): asked '
+                         f'm{metal}/f{fuel}/a{ammo} kg -> given m{gm}/f{gf}/a{ga} (dist {dist * 100} m, {ftime}s)')
+        else:
+            gm, gf, ga = _scene_store_add(rid, terrain, sidx, metal, fuel, ammo)
+            short = [metal - gm, fuel - gf, ammo - ga]
+            repaired, spent = cargo_repair_scene(rid, sidx, gm if not CARGO_REPAIR_WITH_FUEL_AMMO else gm + gf + ga,
+                                                 reason=f'by {s.current_pilot}')
+            pts = int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO))
+            log('CARGO', f'{s.current_pilot} DROP at scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
+                         f'm{metal}/f{fuel}/a{ammo} kg -> stored m{gm}/f{gf}/a{ga}, repaired {len(repaired)} obj(s) '
+                         f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus})')
+            if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
+                try:
+                    _mode = scoring_mode_for_room(rid)
+                    if _mode is not None:
+                        _sc, _rk, _old = db_apply_score_delta(s.current_pilot, pts, bomber=True, mode=_mode)
+                        log('SCORE', f'{s.current_pilot} +{pts} = cargo delivery to scene {sidx} | total {_sc} rank {_old}->{_rk}')
+                        send_stat_block_25(s, reason='(cargo delivery)')
+                except Exception:
+                    logx('CARGO', 'delivery bonus failed')
+            if gm or gf or ga:
+                parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
+                tc_say(rid, f'AI: {s.current_pilot} delivered {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}'
+                            + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
+        pkt = build_ingame_pkt(bytes([MSG_CARGO_ANSWER_107]) + struct.pack('<Hhhh', ident,
+                               max(-32768, min(32767, short[0])), max(-32768, min(32767, short[1])), max(-32768, min(32767, short[2]))))
+        _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 ident={ident} short m{short[0]}/f{short[1]}/a{short[2]}', to=3.0)
+    except Exception:
+        logx('CARGO', 'msg-106 handling failed')
 
 def is_transport_plane(plane_id):
     try:
@@ -10717,7 +10867,7 @@ def _tc_para_capture_tick():
                 GROUND_HP[key] = GROUND_HP.get(key, 0) + int(SOLDIER_DPS * per_soldier)
                 need = max(OBJ_HP_MIN, best[1]['value'] * OBJ_HP_PER_VALUE)
                 if GROUND_HP[key] >= need:
-                    tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}')
+                    tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}', credit_pilot=st.get('by'))   # v607f5
                     soft = [e for e in soft if e[0] != best[0]]
                     sd['_tgt_obj'] = None
                     frac = trn_scene_damage_frac(rid, sidx)
@@ -10750,7 +10900,7 @@ def _tc_para_capture_tick():
         cap_pct = tc_room_setting(rid, 'capture_percent', TC_CAPTURE_PERCENT)
         if frac * 100.0 + 1e-6 >= cap_pct:
             trig = TRIGGERS.get((rid, int(sidx))) or {}
-            tc_capture_scene(rid, sidx, camp, by_pilot=trig.get('by') or st.get('by'))
+            tc_capture_scene(rid, sidx, camp, by_pilot=trig.get('by') or st.get('by'), assist_pilot=st.get('by'))   # v607f5
 
 # --- v601f5 REAL TC MESSAGES (from FA.exe, film-verified effects) -----------------------
 #   msg 41 (0x29) CaptureScene  [0x29][u16 scene][u8 camp] -> FUN_0044e5c0 SCENE::Capture on
@@ -20859,7 +21009,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
@@ -20872,6 +21022,8 @@ def handle_post_auth(s, cmd, pl):
                 _handle_tank_hit_51(s, stored)          # v572f5: NetTank hit report
             elif sub == 0x71:
                 _handle_para_request_113(s, stored)     # v589f5: paratroop load/unload request
+            elif sub == 0x6a:
+                _handle_cargo_request_106(s, stored)    # v606f5: cargo pick-up / drop
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
