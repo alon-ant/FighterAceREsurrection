@@ -325,7 +325,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v632f5'
+VERSION = 'v638f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1112,10 +1112,87 @@ def db_get_pilot_slot(acct, name):
                        (acct, name)).fetchone()
     conn.close(); return row[0] if row else None
 
-def db_next_slot(acct):
+# v635f5 [LOBBY ERROR REPLIES]: the client's lobby request handlers (msg 226 create pilot =
+# FUN_004ee090 etc.) read a RESULT byte right after the sub byte and hand it to the waiting
+# dialog; with no reply the dialog waits for the client's timeout. Refusals now answer with the
+# client's own packet and a non-zero result. The code->text mapping is the client's (knobs).
+# Client result strings seen 2026-09-11: 2 -> 'a pilot with this name already exists', 3 ->
+# 'vulgar pilot name'. 1 and 4+ still to be read off the dialog (1 = invalid name?, one of them
+# should be the too-many-pilots text).
+PILOT_ERR_NAME_TAKEN = 2
+PILOT_ERR_RESERVED   = 3
+PILOT_ERR_LIMIT      = 4
+PILOT_ERR_INVALID    = 1
+PILOT_NAME_ALLOWED   = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')   # v637f5: server-side name rule
+
+def pilot_name_invalid(name):
+    """True when a pilot name carries characters outside PILOT_NAME_ALLOWED (. , / ; ! @ ^ ...)
+    or is empty / too long (the client's own filter let these through - user report 09-11)."""
+    if not name or len(name) > 24:
+        return True
+    return any(c not in PILOT_NAME_ALLOWED for c in name)
+
+# v638f5: VULGAR names - the client only filters them for display AFTER sending the create, so
+# the server ended up holding pilots the client refused to show. Word list = badwords.txt next to
+# server.py (one per line, case-insensitive substring match; '#' comments), plus a short default.
+_BADWORDS_DEFAULT = ('fuck', 'shit', 'cunt', 'nigger', 'nigga', 'faggot', 'bitch', 'asshole', 'hitler', 'nazi')
+_BADWORDS = None
+
+def badwords():
+    global _BADWORDS
+    if _BADWORDS is None:
+        words = set(_BADWORDS_DEFAULT)
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'badwords.txt'), 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    w = line.strip().lower()
+                    if w and not w.startswith('#'):
+                        words.add(w)
+        except Exception:
+            pass
+        _BADWORDS = words
+    return _BADWORDS
+
+def pilot_name_vulgar(name):
+    low = (name or '').lower()
+    return any(w in low for w in badwords())
+
+_PILOT_CREATE_LOCK = threading.Lock()
+
+def lobby_reply_with_result(s, stored, code, label):
+    """Answer a lobby request with the server->client RESPONSE form (type 0x42, bc=2, 33 B data:
+    [sub][result][0][0][name...]) - the layout the delete-success reply uses - carrying the
+    request's sub and a non-zero result. (v635f5 echoed the 0x22 request with the byte set; the
+    dialog kept waiting - the 0x22 form is the request, not the answer.)"""
+    try:
+        pkt = bytes(stored)
+        sub = pkt[4] if len(pkt) > 4 else 0xe2
+        name = pkt[6:].split(b'\x00')[0] if len(pkt) > 6 else b''
+        data = bytearray(33); data[0] = sub; data[1] = code & 0xff
+        nb = name + b'\x00'
+        data[4:4 + min(len(nb), 29)] = nb[:29]
+        resp = build_typed_pkt(0x42, bytes(data), bc=2)
+        threading.Thread(target=lambda: send_rel(s, resp, f'<- {label} (0x42 result {code})', to=5.0), daemon=True).start()
+    except Exception:
+        logx('PILOT', 'lobby error reply failed')
+
+MAX_PILOTS_PER_ACCOUNT = 5   # v634f5: the retail limit, enforced server-side (was client-only)
+
+def db_pilot_count(acct):
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute("SELECT MAX(slot_index) FROM pilots WHERE account_name=?", (acct,)).fetchone()
-    conn.close(); return (row[0] or 0) + 1
+    row = conn.execute("SELECT COUNT(*) FROM pilots WHERE account_name=?", (acct,)).fetchone()
+    conn.close(); return int(row[0] or 0)
+
+def db_next_slot(acct):
+    """Lowest free slot 1..MAX_PILOTS_PER_ACCOUNT (v634f5: reuses a deleted pilot's slot instead
+    of MAX+1 forever), or MAX+1 when the account is full (the caller refuses before that)."""
+    conn = sqlite3.connect(DB_PATH)
+    used = {int(r[0]) for r in conn.execute("SELECT slot_index FROM pilots WHERE account_name=?", (acct,)).fetchall() if r[0] is not None}
+    conn.close()
+    for i in range(1, MAX_PILOTS_PER_ACCOUNT + 1):
+        if i not in used:
+            return i
+    return (max(used) if used else 0) + 1
 
 def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, lost_to_ai=False,
                    mode=None, count_pilot_death=True):
@@ -16597,7 +16674,7 @@ OBJ_HP_DECORATION = 600
 # The A->C map is built at terrain load into runtime arrays ([0xc85038] display list,
 # [0xc87270] raw array) and is exactly the table.goi objIdx->sceneIdx data the .q6 route
 # targets. Leave OFF until that translation is obtained (per-building calibration or table.goi).
-AUTO_SCENE_DESTROY = False
+AUTO_SCENE_DESTROY = True   # v633f5: ON by default (user); the obj->scene translation comes from the trn tables
 _UNMAPPED_SEEN = set()   # objs already reported as un-anchored, so the log stays readable
 # Camp used when we need the client to NAME a scene whose real owner we don't know. Any value in
 # 0..4 takes the named path; 0xFF forces the generic 'a bridge' and yields no information.
@@ -20708,7 +20785,11 @@ PREFIXED_NORMALISE_SUB = True
 # three are newly LIVE traffic - the v436f5 Type=1 flip re-enabled the client's Msn_Prod
 # emitters - and the internet (GCP) path wraps pervasively (v364f5), so without the re-frame a
 # wrapped spawn-time msg-59 would silently miss the resupply reply.
-PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x3b, 0x45, 0x47, 0x49, 0x7d}
+PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x3b, 0x45, 0x47, 0x49, 0x7d,
+                         0xe2, 0xe3, 0xe7}   # v636f5: lobby pilot create/delete/rename - the client's
+                                             # retry after a refusal arrives PREFIXED (run_20260911_003815
+                                             # 00:41-00:42: five creates dropped -> 'timeout, clicking create
+                                             # again works')
 
 # v411f5: a full re-frame makes the recovered frame BYTE-IDENTICAL to its direct (cmd==0)
 # form - but the entire in-game dispatch (the delete-notify death path, DAMAGE28/collision
@@ -20771,6 +20852,8 @@ def handle_post_auth(s, cmd, pl):
                               if PREFIXED_REFRAME_RELEASES_CMD else '') + _extra)
             pl = pl[4:]
             bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
+            if _isub in (0xe2, 0xe3, 0xe7):
+                stored = bytes(pl)                  # v636f5: the lobby echo must be the INNER frame
             if PREFIXED_REFRAME_RELEASES_CMD:
                 # v411f5: the frame is now byte-identical to a direct arrival - let it
                 # dispatch like one (the whole in-game handler block is gated on cmd == 0).
@@ -21726,15 +21809,48 @@ def handle_post_auth(s, cmd, pl):
                     send_rel(s, build_chat_broadcast('Server',
                              f'The name "{new_name}" is reserved for staff and cannot be used.'),
                              '<- reserved-name refusal', to=2.0)
-                    return    # no create echo -> client never registers the pilot
+                    lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, 'create-pilot refusal')   # v635f5
+                    return
+                if new_name and pilot_name_invalid(new_name):
+                    # v637f5: prohibited characters (. , / ; ! @ ^ ...) - the client does not filter them
+                    log('PILOT', f'REFUSED pilot name "{new_name}" - prohibited characters')
+                    send_rel(s, build_chat_broadcast('Server',
+                             'Pilot names may only use letters, digits, - and _.'),
+                             '<- invalid-name refusal', to=2.0)
+                    lobby_reply_with_result(s, stored, PILOT_ERR_INVALID, 'create-pilot refusal')
+                    return
                 if new_name and db_pilot_name_taken(new_name):
                     log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
                     send_rel(s, build_chat_broadcast('Server',
                              f'A pilot named "{new_name}" already exists. Choose another name.'),
                              '<- duplicate-name refusal', to=2.0)
-                    return    # no create echo -> client's create does not complete
+                    lobby_reply_with_result(s, stored, PILOT_ERR_NAME_TAKEN, 'create-pilot refusal')   # v635f5
+                    return
+                if new_name and db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT:
+                    # v634f5: the 5-pilot account limit is now the server's, not the client's
+                    log('PILOT', f'REFUSED pilot "{new_name}" - account {s.account} already has {MAX_PILOTS_PER_ACCOUNT} pilots')
+                    send_rel(s, build_chat_broadcast('Server',
+                             f'This account already has {MAX_PILOTS_PER_ACCOUNT} pilots. Delete one to create another.'),
+                             '<- pilot-limit refusal', to=2.0)
+                    lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, 'create-pilot refusal')   # v635f5
+                    return
+                if new_name and pilot_name_vulgar(new_name):
+                    log('PILOT', f'REFUSED pilot name "{new_name}" - vulgar (server list)')
+                    lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, 'create-pilot refusal (vulgar)')   # code 3 = the client's 'vulgar' text
+                    return
                 if new_name:
-                    slot=db_next_slot(s.account); db_ensure_pilot(new_name,s.account,slot)
+                    # v638f5: count + insert under one lock, and drop a duplicate create of the same
+                    # name within 3 s (the client's retry framings could both get through)
+                    with _PILOT_CREATE_LOCK:
+                        _last = s.__dict__.get('_last_create')
+                        if _last and _last[0] == new_name and time.time() - _last[1] < 3.0:
+                            log('PILOT', f'duplicate create of "{new_name}" within 3 s ignored (retry framing)')
+                            threading.Thread(target=lambda: send_rel(s, stored, '<- echo 0xe2 (dup)', to=5.0), daemon=True).start(); return
+                        if db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT:
+                            log('PILOT', f'REFUSED pilot "{new_name}" - account {s.account} already has {MAX_PILOTS_PER_ACCOUNT} pilots (locked re-check)')
+                            lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, 'create-pilot refusal'); return
+                        s._last_create = (new_name, time.time())
+                        slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
             threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe2',to=5.0),daemon=True).start(); return
 
         if tb == 0x42 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
