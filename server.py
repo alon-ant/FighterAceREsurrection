@@ -286,7 +286,15 @@ TODO list:
       "CC,TTT,text", FUN_004f4f20) instead of AI chat; msg 111 map marker for soldier groups.
   [ ] (TC, 2026-09-09) FIGHTER-COVER CREDIT - a kill within ~3 km of a friendly column with an
       active mission earns a cover bonus / counter (ribbon page).
-  [ ] (TC, 2026-09-09) TRAINS - NetTrain Type 4 (74B header, 21B update) + rail network.
+  [x] (TC, 2026-09-10) UNITS DISPLAY - RESOLVED (FA.exe 0x557457, the 60 s camp-score task): the
+      client OVERWRITES the msg-40 unit slots every minute with FUN_00557310 = the summed VALUE
+      (vtable+0x68) of the camp's LIVE objects - fighters (slot 0), bombers (slot 1), tanks+trains
+      (slot 2). 'Aircraft/Tank/Ship units' on Ctrl-L / HQ are 'value of deployed units', not a
+      stock (10,417 = a loco + 8 wagons; 1,562 = one Tempest). Authentic 2009 behaviour; the
+      resources rows are ours. Nothing to feed.
+  [ ] (TC, 2026-09-10) CONSOLE + MULTI-ROOM - `tc` / `train` console verbs act on the FIRST in-game
+      room; with two arenas up they need a room argument (supply <room> <scene> already has one).
+  [ ] (TC, 2026-09-10) TRAINS - NetTrain Type 4 (74B header, 21B update) + rail network.
   [ ] (TC, 2026-09-09) AIR TRAIN SPAWN - the AI transport that flies supply between scenes
       ('Air train supplied GB Tank Factory at 44.8kt'): a server-owned NetPlane on the AI
       station flying scene-to-scene, delivering via the cargo model (msg 106 CargoRequest /
@@ -317,7 +325,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v607f5'
+VERSION = 'v630f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3945,6 +3953,79 @@ def console_handler():
                 n = cleanup_custom_arenas(force=True, by=f'console:{_src}')
                 log('CONSOLE', f'cleanup: {n} custom arena(s) removed '
                                f'(empty + not persistent; persistent/occupied/official kept)')
+            elif cmd == 'train':
+                # v613f5: train <road> <node> [wagons] [camp] | train speed <onum> <mps> | train del <onum> | train list
+                global TRAIN_LOCO_CLASS, TRAIN_WAGON_CLASS, TRAIN_STATE_MOVING, TRAIN_SPEED_UNIT
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _rooms = sorted(_active_ingame_rooms())
+                try:
+                    if not _a or _a[0] == 'list':
+                        for _on, _tr in TRAINS.items():
+                            log('CONSOLE', f'  train 0x{_on:04x} room {_tr["room"]} camp {_tr["camp"]} road {_tr["road"]} node {_tr["node"]} '
+                                           f'+{_tr["dist"]:.0f} m {_tr["mps"]:.1f} m/s wagons {_tr["wagons"]} peers {len(_tr["peers"])}')
+                        if not TRAINS:
+                            log('CONSOLE', 'train: none')
+                    elif _a[0] == 'speed':
+                        _on = int(_a[1], 0); TRAINS[_on]['mps'] = float(_a[2])
+                        TRAINS[_on]['state'] = TRAIN_STATE_MOVING if float(_a[2]) > 0 else TRAIN_STATE_STOPPED
+                        TRAINS[_on]['last_sent'] = 0.0; train_broadcast_state(_on)
+                        log('CONSOLE', f'train 0x{_on:04x} speed {float(_a[2]):.1f} m/s (state {TRAINS[_on]["state"]})')
+                    elif _a[0] == 'supply':
+                        # v624f5: train supply <camp> [road]  - raise a supply train for a camp now (test)
+                        _rid = _rooms[0] if _rooms else None
+                        _camp = int(_a[1], 0)
+                        if _rid is None:
+                            log('CONSOLE', 'train supply: no in-game room')
+                        else:
+                            _trn = _probe_terrain_for_room(_rid)
+                            _stn = rail_stations(_trn)
+                            if len(_a) > 2:
+                                _roads = [int(_a[2], 0)]
+                            else:
+                                _roads = sorted(_stn, key=lambda r: -len(rails_stations_own(_trn, r, _camp)))
+                            _on = None
+                            for _r in _roads:
+                                if rails_stations_own(_trn, _r, _camp):
+                                    _on = spawn_supply_train(_rid, _camp, _r, reason='(console)')
+                                    if _on is not None:
+                                        break
+                            log('CONSOLE', f'train supply camp {_camp}: {"train 0x%04x" % _on if _on is not None else "no line with a station of that camp"}')
+                    elif _a[0] == 'del':
+                        delete_train(int(_a[1], 0), reason='(console)')
+                    elif _a[0] == 'flags':
+                        # train flags <onum> <state 0-3> [dir 0/1] [camp 0-7]  - probe the update's flag byte
+                        _on = int(_a[1], 0); _tr = TRAINS[_on]
+                        _tr['state'] = int(_a[2], 0) & 3
+                        if len(_a) > 3: _tr['dir'] = int(_a[3], 0) & 1
+                        if len(_a) > 4: _tr['camp'] = int(_a[4], 0) & 7
+                        _tr['last_sent'] = 0.0; train_broadcast_state(_on)
+                        log('CONSOLE', f'train 0x{_on:04x} flags: state {_tr["state"]} dir {_tr.get("dir", 0)} camp {_tr["camp"]}')
+                    elif _a[0] == 'jump':
+                        # train jump <onum> <node> [dist]  - teleport by rail coordinates (no speed)
+                        _on = int(_a[1], 0); _tr = TRAINS[_on]
+                        _rd = rails_for(_probe_terrain_for_room(_tr['room']))['roads'][_tr['road']]
+                        _tr['node'] = max(0, min(len(_rd['nodes']) - 2, int(_a[2], 0)))     # v615f5: clamped (node 100 on a 36-node road = CTD)
+                        _tr['dist'] = float(_a[3]) if len(_a) > 3 else 0.0
+                        _tr['last_sent'] = 0.0; train_broadcast_state(_on)
+                        log('CONSOLE', f'train 0x{_on:04x} jumped to node {_tr["node"]} +{_tr["dist"]:.0f} m')
+                    elif _a[0] == 'unit':
+                        TRAIN_SPEED_UNIT = float(_a[1]); log('CONSOLE', f'train speed unit {TRAIN_SPEED_UNIT}')
+                    elif _a[0] == 'knobs':
+                        TRAIN_LOCO_CLASS = int(_a[1], 0); TRAIN_WAGON_CLASS = int(_a[2], 0)
+                        TRAIN_STATE_MOVING = int(_a[4], 0) if len(_a) > 4 else TRAIN_STATE_MOVING
+                        log('CONSOLE', f'train knobs: loco {TRAIN_LOCO_CLASS} wagon {TRAIN_WAGON_CLASS} state {TRAIN_STATE_MOVING}')
+                    else:
+                        _road = int(_a[0], 0); _node = int(_a[1], 0)
+                        _nw = int(_a[2], 0) if len(_a) > 2 else 3
+                        _rid = _rooms[0] if _rooms else None
+                        _ing = [x for x in get_sessions_in_room(_rid) if getattr(x, 'entered_game', False)] if _rid is not None else []
+                        _camp = int(_a[3], 0) if len(_a) > 3 else (int(_ing[0].nation) if _ing and _ing[0].nation is not None else 0)
+                        if _rid is None:
+                            log('CONSOLE', 'train: no in-game room')
+                        else:
+                            spawn_train(_rid, _camp, _road, _node, _nw, reason='(console)')
+                except (IndexError, ValueError, KeyError) as e:
+                    log('CONSOLE', f'usage: train <road> <node> [wagons] [camp] | train speed <onum> <mps> | train del <onum> | train list | train knobs <loco> <wagon> [speed_unit] [state]  ({e})')
             elif cmd == 'tc':
                 # v575f5: tc status | tc trigger <scene> [room]  (force a trigger as the first
                 #         in-game pilot of an ENEMY camp, or the room's first pilot) | tc reset
@@ -4428,7 +4509,8 @@ def console_handler():
                             f"  room {rid} scene {sid:>3} {scene_type_for(_t, sid) or '?':22s} "
                             f"ammo {st['ammo']:>6}/{_c['ammo']:<6} "
                             f"fuel {st['fuel']:>6}/{_c['fuel']:<6} "
-                            f"metal {st['metal']:>6}/{_c['metal']:<6}")
+                            f"metal {st['metal']:>6}/{_c['metal']:<6} "
+                            f"units {scene_units_state(rid, sid)}")
                 elif len(args) >= 2:
                     rid, sid = int(args[0]), int(args[1])
                     _t = _probe_terrain_for_room(rid)
@@ -4451,7 +4533,7 @@ def console_handler():
                             f"fuel {st['fuel']}/{p['caps']['fuel']} "
                             f"metal {st['metal']}/{p['caps']['metal']} "
                             f"| rates a={p['rates']['ammo']} f={p['rates']['fuel']} "
-                            f"m={p['rates']['metal']}/min")
+                            f"m={p['rates']['metal']}/min | units {scene_units_state(rid, sid)}")
                 else:
                     log('CONSOLE', 'usage: supply | supply <room> <scene> | '
                                    'supply <room> <scene> <ammo> <fuel> [metal]')
@@ -9093,6 +9175,10 @@ def _tank_driver_loop():
             now = time.time()
             _columns_tick()                                     # v570f5
             try:
+                _trains_tick(dt)                                # v613f5
+            except Exception:
+                logx('TRAIN', 'trains tick failed')
+            try:
                 _sticks_tick(dt)                                # v593f5: 4 Hz soldier walking
             except Exception:
                 logx('PARA', 'sticks tick failed')
@@ -9102,6 +9188,7 @@ def _tank_driver_loop():
                 try:
                     _tc_engagement_tick()                       # v576f5, 1 Hz
                     _tc_para_capture_tick()                     # v588f5
+                    _recreate_near_pilots()                     # v627f5
                 except Exception:
                     logx('TC', 'engagement tick failed')
             globals()['_TC_ENG_ACC'] = _tc_acc
@@ -9332,6 +9419,9 @@ def _tank_note_client_delete(s, pl):
             elif sd is not None:
                 sd['peers'].discard(getattr(s, 'addr', None))       # v590f5: soldiers are bare entries too
                 i += 2
+            elif onum in TRAINS:
+                TRAINS[onum]['peers'].discard(getattr(s, 'addr', None))   # v613f5
+                i += 2
             elif i + 3 <= len(body):
                 i += EXIT_EEC_ENTRY_SIZE.get(body[i + 2] & 0xf, 3)
             else:
@@ -9350,6 +9440,16 @@ def _tank_note_client_delete(s, pl):
 TANK_CLASS_HP     = {}             # class_id -> hit points (from tank_tables.json phys f38)
 TANK_FALLBACK_HP  = 1000.0
 TANK_KILL_SCORE   = 150            # points for a tank kill (GROUND_KILL_SCORE model)
+# v608f5 ARMOUR: the client's per-hit damage is by round energy (live msg-51 values: MG 1-81, 20 mm
+# ~210-320, 40 mm+ 500-1150, bombs 3000+). Applied raw, 3-4 x 20 mm killed a 1000 HP tank. Scale
+# by band so light rounds mostly bounce: 20 mm needs ~20 hits, 40 mm ~3, a bomb still kills.
+TANK_DMG_BANDS = ((100, 0.03), (400, 0.20), (700, 0.60), (10**9, 1.0))   # (raw < bound, scale)
+
+def tank_effective_damage(raw):
+    for bound, scale in TANK_DMG_BANDS:
+        if raw < bound:
+            return raw * scale
+    return raw
 TANK_WRECK_S      = 20.0           # seconds the dead tank stays as a wreck before the delete
 TANK_DAMAGE       = True
 
@@ -9365,9 +9465,18 @@ def _handle_tank_hit_51(s, pl):
         while i + 6 <= len(body):
             victim, attacker, dmg = struct.unpack_from('<HHH', body, i)
             i += 6
+            # v626f5: a TRAIN hit names the railcar - victim = train ONumber | (car index << 10):
+            # 0x010d loco, 0x0d0d car 3, 0x1d0d car 7 (live 09-10 22:34). ONumbers stay < 1024.
+            _car = victim >> 10
+            if _car and (victim & 0x3ff) in TRAINS:
+                _handle_train_hit(s, victim & 0x3ff, attacker, dmg, car=_car)
+                continue
             t = TANKS.get(victim)
             if t is None and victim in SOLDIERS:
                 _handle_soldier_hit(s, victim, attacker, dmg)          # v597f5
+                continue
+            if t is None and victim in TRAINS:
+                _handle_train_hit(s, victim, attacker, dmg, car=0)      # v617f5/v626f5: the loco
                 continue
             if t is None:
                 log('TANKHIT', f'{s.current_pilot}: hit on 0x{victim:04x} by 0x{attacker:04x} dmg={dmg} '
@@ -9376,10 +9485,11 @@ def _handle_tank_hit_51(s, pl):
             if not TANK_DAMAGE or t.get('dead'):
                 continue
             hp_max = tank_hp_max(t)
-            t['hp'] = t.get('hp', hp_max) - float(dmg)
+            eff = tank_effective_damage(float(dmg))                    # v608f5 armour bands
+            t['hp'] = t.get('hp', hp_max) - eff
             t['last_hit_by'] = s
             log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit tank 0x{victim:04x} class {t["class"]} '
-                           f'camp {t["camp"]} for {dmg} -> hp {t["hp"]:.0f}/{hp_max:.0f}')
+                           f'camp {t["camp"]} for {dmg} (eff {eff:.0f}) -> hp {t["hp"]:.0f}/{hp_max:.0f}')
             if t['hp'] <= 0:
                 tank_killed(victim, s, reason='(msg-51 damage)')
     except Exception:
@@ -9530,12 +9640,21 @@ _TC_CAMP_TAGS3 = {0: 'USA', 1: 'GBR', 2: 'SOV', 3: 'GER', 4: 'JPN'}  # 3-letter 
 _TC_CAMP_FULL = {0: 'the United States', 1: 'Great Britain', 2: 'the Soviet Union', 3: 'Germany', 4: 'Japan'}
 
 def tc_camp_tag(camp):
+    n = globals().get('_CAMP_NAMES_ACTIVE') or {}
+    if int(camp) in n and n[int(camp)][0]:
+        return n[int(camp)][0]
     return _TC_CAMP_TAGS.get(int(camp), f'camp {camp}')
 
 def tc_camp_tag3(camp):
+    n = globals().get('_CAMP_NAMES_ACTIVE') or {}
+    if int(camp) in n and len(n[int(camp)]) > 1 and n[int(camp)][1]:
+        return n[int(camp)][1]
     return _TC_CAMP_TAGS3.get(int(camp), f'camp {camp}')
 
 def tc_camp_full(camp):
+    n = globals().get('_CAMP_NAMES_ACTIVE') or {}
+    if int(camp) in n and len(n[int(camp)]) > 2 and n[int(camp)][2]:
+        return n[int(camp)][2]
     return _TC_CAMP_FULL.get(int(camp), f'camp {camp}')
 
 def tc_scene_kind_word(type_name):
@@ -9703,7 +9822,7 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         log('TC', f'room {room_id}: camp {camp} cannot raise a column - pool empty')
         return None
     if UNITS_MODEL:
-        camp_units_take(room_id, camp, 'tank', loaded)
+        camp_units_take(room_id, camp, 'tank', loaded, prefer_xy=(fx, fy))    # v621f5: from the producing factory first
     cls = TANK_CLASS_BY_CAMP.get(int(camp), TANK_CLASS_DEFAULT)
     if purpose == 'defend' and TC_DEFEND_AT_TARGET:
         # v585f5: form on the far side of the target from the enemy's likely approach is not
@@ -10239,9 +10358,11 @@ def _handle_para_request_113(s, pl):
                 given = min(count, para_scene_avail(rid, sidx))
                 if given > 0:
                     para_scene_take(rid, sidx, given)
+            s._troops_aboard = int(s.__dict__.get('_troops_aboard', 0) or 0) + given     # v609f5
             log('PARA', f'{s.current_pilot}: asks {count} paratroops from scene {sidx} (camp {scamp}) -> given {given} '
                         f'(stock left {para_scene_avail(rid, sidx) if rid is not None else "?"})')
         elif count < 0:
+            s._troops_aboard = max(0, int(s.__dict__.get('_troops_aboard', 0) or 0) + count)   # v609f5 (count < 0)
             if refund and rid is not None:
                 st = _PARA_STOCK.get((rid, int(sidx)))
                 if st is not None:
@@ -10371,6 +10492,616 @@ def _handle_cargo_request_106(s, pl):
         _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 ident={ident} short m{short[0]}/f{short[1]}/a{short[2]}', to=3.0)
     except Exception:
         logx('CARGO', 'msg-106 handling failed')
+
+# --- v609f5 AIR-DROPPED CARGO (msg 105 -> 107) ------------------------------------------
+# FA.exe VNet_Rcv.cpp FUN_004f7aa0 'GiveRscToScene': the client batches every cargo chute
+# LANDING (5 s flush) into one message:
+#   105 [0x69][u16 ident][u16 flight s][u16 dist/100][u32 PI] + N x ONE_GIVE_RSC_TO_SCENE (10 B):
+#       [7-byte packed pos: s24 X, s24 Y, u8 Z][u8 metal][u8 fuel][u8 ammo]   (kg per chute)
+#   Each chute is credited to the nearest scene within PARA_RESOURCE_RADIUS (gamedef
+#   ParachuteResourceRadius); the 2009 AI then answered 107 (zeros = all delivered, negative
+#   amounts = nothing delivered), 108 [ident][ok][total] when some missed, and the bonus.
+# Live 09-09 19:15: 14 chutes x 100 kg ammo at (-30636,-16749) = 150 m from the GB Tank Factory.
+MSG_GIVE_RSC_105 = 0x69
+PARA_RESOURCE_RADIUS = 2000.0
+
+def _handle_give_rsc_105(s, pl):
+    if not CARGO_MODEL:
+        return
+    try:
+        body = bytes(pl)
+        if len(body) < 5 + 11 or body[4] != MSG_GIVE_RSC_105:
+            return
+        ident, ftime, dist, pi = struct.unpack_from('<HHHI', body, 5)
+        n = (len(body) - 16) // 10
+        rid = s.current_room
+        terrain = _probe_terrain_for_room(rid)
+        tot = [0, 0, 0]; deliv = [0, 0, 0]; per_scene = {}; missed = 0
+        for i in range(n):
+            e = body[16 + i * 10: 26 + i * 10]
+            x = int.from_bytes(e[0:3], 'little', signed=True) * TANK_POS_XY_SCALE
+            y = int.from_bytes(e[3:6], 'little', signed=True) * TANK_POS_XY_SCALE
+            m, f, a = e[7], e[8], e[9]
+            tot[0] += m; tot[1] += f; tot[2] += a
+            near = tc_nearest_scene_any(terrain, x, y)
+            if not near or near[1] > PARA_RESOURCE_RADIUS:
+                missed += 1; continue
+            sidx = near[0]
+            gm, gf, ga = _scene_store_add(rid, terrain, sidx, m, f, a)
+            deliv[0] += gm; deliv[1] += gf; deliv[2] += ga
+            ps = per_scene.setdefault(sidx, [0, 0, 0]); ps[0] += gm; ps[1] += gf; ps[2] += ga
+        pts = 0
+        for sidx, (gm, gf, ga) in per_scene.items():
+            txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
+            scamp = scene_camp(terrain, sidx)
+            repaired, spent = cargo_repair_scene(rid, sidx, gm, reason=f'air-drop by {s.current_pilot}')
+            pts += int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO))
+            parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
+            log('CARGO', f'{s.current_pilot} AIR-DROP -> scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
+                         f'{", ".join(parts) or "nothing"}, repaired {len(repaired)} obj(s) ({spent} kg metal)')
+            if parts:
+                tc_say(rid, f'AI: {s.current_pilot} air-dropped {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}' + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
+        log('CARGO', f'{s.current_pilot} msg 105: {n} chute(s), {missed} out of range; total m{tot[0]}/f{tot[1]}/a{tot[2]} kg, '
+                     f'delivered m{deliv[0]}/f{deliv[1]}/a{deliv[2]} (flight {ftime}s, dist {dist * 100} m) -> bonus {pts}')
+        if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
+            try:
+                _mode = scoring_mode_for_room(rid)
+                if _mode is not None:
+                    _sc, _rk, _old = db_apply_score_delta(s.current_pilot, pts, bomber=True, mode=_mode)
+                    log('SCORE', f'{s.current_pilot} +{pts} = air-dropped cargo | total {_sc} rank {_old}->{_rk}')
+                    send_stat_block_25(s, reason='(air-drop bonus)')
+            except Exception:
+                logx('CARGO', 'air-drop bonus failed')
+        # answer: zeros = everything delivered; negatives = what did not reach a scene
+        und = [-(tot[i] - deliv[i]) for i in range(3)]
+        pkt = build_ingame_pkt(bytes([MSG_CARGO_ANSWER_107]) + struct.pack('<Hhhh', ident, und[0], und[1], und[2]))
+        _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 (air-drop) ident={ident} undelivered m{und[0]}/f{und[1]}/a{und[2]}', to=3.0)
+        if 0 < missed < n:
+            pkt8 = build_ingame_pkt(bytes([0x6c]) + struct.pack('<HBB', ident, n - missed, n))
+            _submit_send(send_rel, s, pkt8, f'<- CARGO_PARTIAL 108 {n - missed}/{n} chutes in range', to=3.0)
+    except Exception:
+        logx('CARGO', 'msg-105 handling failed')
+
+# --- v613f5 TRAINS (NetTrain, Type 4) - FIRST CUT --------------------------------------
+# From FA.exe: create record (vaninfo.cpp FUN_00694740, 74 B header) = [4|nation<<4][loco class]
+# [flags: bit2 = direction?][u8 road][u16 node][f32 dist] + up to 32 x u16 [wagon class | count<<8],
+# zero-terminated; + the 13 B trailer. Update (railcar FUN_006865c0, 21 B) = [7-byte packed pos]
+# [flags: state bits0-2, bits4-5, bit6 = direction][u16 speed][u8 road][u16 node][f32 dist along
+# the road][u32 wagon-destroyed mask]. The client positions the consist by RAIL coordinates on
+# its AI::ROADMAP (dumped from the running client: rails_<trn>.json next to server.py - roads
+# with [x, y, alt, cumulative distance] nodes). Wagon classes 140..148 (dumper v8); which one is
+# the loco is unknown -> knobs. Console: `train <road> <node> [wagons] [camp]`, `train speed
+# <onum> <mps>`, `train del <onum>`, `train list`.
+SPAWN_TRAINS      = True
+TRAIN_OBJ_TYPE    = 4
+TRAIN_HEADER_SIZE = 74
+TRAIN_UPDATE_SIZE = 21
+TRAIN_LOCO_CLASS  = 141      # fallback; TRAIN_LOCO_BY_CAMP below (dump v9: 141..145 = locos, +0x34 = nation)
+TRAIN_LOCO_BY_CAMP = {0: 145, 1: 141, 2: 144, 3: 142, 4: 143}
+TRAIN_WAGON_CLASS = 146      # wagons: 140 (type1/1000kg), 146 (type0/2000), 147 (type2/2000), 148 (type2/1500)
+TRAIN_WAGON_MIX   = [(146, 2), (147, 2), (148, 2), (140, 2)]   # default 8-wagon consist: 2 x each kind
+TRAIN_SPEED_UNIT  = 1.0 / 512.0   # u16 speed x this = m/s (dump v9: c163ac = 0.001953125)
+TRAIN_STATE_MOVING = 2       # train.cpp states: 0 stop, 1 brake, 2 roll at the given speed, 3 accelerate to max
+TRAIN_STATE_STOPPED = 0
+TRAIN_TICK_HZ     = 4.0
+TRAINS = {}                  # onum -> {'room','camp','road','node','dist','dir','mps','peers','last_sent','wagons'}
+_RAILS = {}                  # terrain -> {'roads': [...]}
+
+# --- v617f5 TRAIN SUPPLY SYSTEM ----------------------------------------------------------
+# Trains ARE the supply link (user): every camp runs consists on the rail lines that serve at
+# least two of its scenes; a train stops at each own-camp station (a scene with a rail node
+# within TRAIN_STATION_RADIUS), picks up surplus from producers (stores above TRAIN_PICKUP_KEEP
+# of capacity) and drops what a consumer is short of (below TRAIN_DROP_FILL). Wagon classes by
+# kind (dump v9, +0x10 cargo type / +0x24 capacity): 146 metal 2000 kg, 147 fuel 2000, 148 ammo
+# 1500, 140 'units' 1000. Trains take msg-51 hits (loco HP = class +0x30 = 10000) and die with
+# the kill-entry delete ('GBR LtC X destroyed GER train' in the films); a dead train's cargo is
+# lost and the camp gets a new one after TRAIN_RESPAWN_S. The abstract every-5-minutes
+# deliveries are switched off for camps that have visible trains.
+TRAIN_SUPPLY          = True
+TRAIN_STATION_RADIUS  = 900.0
+TRAIN_CRUISE_MPS      = 22.0
+TRAIN_STOP_S          = 30.0
+TRAIN_PICKUP_KEEP     = 0.50   # producers keep this fraction of capacity
+TRAIN_DROP_FILL       = 0.85   # consumers are topped up to this fraction
+TRAIN_HP              = 3000.0   # v627f5: halved again (user) - loco ~5 x 30 mm, ~10 x 20 mm, one bomb
+WAGON_HP              = 1500.0   # wagons: ~2-3 x 30 mm, 5 x 20 mm
+
+def train_effective_damage(raw):
+    """Trains are not armoured: full reported damage, MG rounds (<100) at 30%."""
+    return raw * 0.3 if raw < 100 else raw
+TRAIN_KILL_SCORE      = 300
+TRAIN_RESPAWN_S       = 600.0
+TRAIN_PER_CAMP_MAX    = 3
+TRAIN_WAGONS_DEFAULT  = 8
+WAGON_KIND = {146: 'metal', 147: 'fuel', 148: 'ammo', 140: 'units'}
+WAGON_CAP  = {146: 2000, 147: 2000, 148: 1500, 140: 1000}
+_TRAIN_LOST_AT = {}           # (room, camp, road) -> time the train died (respawn timer)
+
+def rail_stations(terrain):
+    """road index -> sorted list of (node index, scene index) for scenes with a rail node within
+    TRAIN_STATION_RADIUS. Cached per terrain."""
+    cache = globals().setdefault('_RAIL_STATIONS', {})
+    if terrain in cache:
+        return cache[terrain]
+    rails = rails_for(terrain)
+    out = {}
+    if rails:
+        tt = trn_tables(terrain) or {}
+        for sidx, g in enumerate(tt.get('gsi') or []):
+            sx, sy = float(g['x']), float(g['y'])
+            best = None
+            for road in rails['roads']:
+                for ni, nd in enumerate(road['nodes'][:-1]):
+                    d = math.hypot(nd[0] - sx, nd[1] - sy)
+                    if d <= TRAIN_STATION_RADIUS and (best is None or d < best[0]):
+                        best = (d, road['index'], ni)
+            if best:
+                out.setdefault(best[1], []).append((best[2], sidx))
+        for r in out:
+            out[r].sort()
+    cache[terrain] = out
+    n = sum(len(v) for v in out.values())
+    log('TRAIN', f'terrain {terrain}: {n} rail station(s) on {len(out)} road(s): ' +
+                 ' '.join(f'r{r}:{[s for _n, s in v]}' for r, v in sorted(out.items())))
+    return out
+
+def _train_next_station(tr, rails, stations):
+    """The next own-camp station ahead of the train in its direction (node index), or None."""
+    terrain = tr['terrain']
+    road = rails['roads'][tr['road']]
+    st = [(ni, s) for ni, s in stations.get(tr['road'], []) if scene_camp(terrain, s) == tr['camp']]
+    if not st:
+        return None
+    n = len(road['nodes']) - 1
+    if tr.get('dir', 0) == 0:
+        ahead = [(ni, s) for ni, s in st if ni > tr['node'] or (ni == tr['node'] and tr['dist'] < 1.0 and tr.get('_last_station') != s)]
+        if ahead:
+            return ahead[0]
+        return st[0] if road.get('loop') else None
+    else:
+        behind = [(ni, s) for ni, s in st if ni < tr['node'] or (ni == tr['node'] and tr['dist'] < 1.0 and tr.get('_last_station') != s)]
+        if behind:
+            return behind[-1]
+        return st[-1] if road.get('loop') else None
+
+def train_capacity(tr):
+    cap = {'metal': 0, 'fuel': 0, 'ammo': 0, 'units': 0}
+    parts = tr.get('parts')
+    if parts:                                       # v625f5: dead wagons carry nothing
+        for p in parts[1:]:
+            if p['hp'] > 0 and p['kind'] in cap:
+                cap[p['kind']] += WAGON_CAP.get(p.get('cls'), 0)
+        return cap
+    for cls, cnt in tr.get('wagons', []):
+        k = WAGON_KIND.get(cls)
+        if k:
+            cap[k] += WAGON_CAP.get(cls, 0) * cnt
+    return cap
+
+def train_exchange(tr, sidx):
+    """At a station: drop what the scene is short of, pick up what it has in surplus."""
+    rid, terrain = tr['room'], tr['terrain']
+    r = supply_state(rid, terrain, sidx)
+    if not r or r[0] is None or not r[1]:
+        return None
+    st, p = r
+    cap = train_capacity(tr)
+    load = tr.setdefault('load', {'metal': 0, 'fuel': 0, 'ammo': 0, 'units': 0})
+    rates = p.get('rates') or {}
+    moved = {}
+    with _SUPPLY_LOCK:
+        for kind in ('metal', 'fuel', 'ammo'):
+            scap = int(p['caps'].get(kind, 0))
+            if scap <= 0:
+                continue
+            have = int(st.get(kind, 0))
+            produces = float(rates.get(kind, 0)) > 0
+            if produces:
+                keep = int(scap * TRAIN_PICKUP_KEEP)
+                surplus = max(0, have - keep)
+                room_left = max(0, cap[kind] - load[kind])
+                take = min(surplus, room_left)
+                if take > 0:
+                    st[kind] = have - take; load[kind] += take; moved[kind] = moved.get(kind, 0) - take
+            else:
+                want = max(0, int(scap * TRAIN_DROP_FILL) - have)
+                give = min(want, load[kind])
+                if give > 0:
+                    st[kind] = have + give; load[kind] -= give; moved[kind] = moved.get(kind, 0) + give
+    return moved
+
+def _train_stop_at(tr, onum, station):
+    ni, sidx = station
+    tr['node'] = ni; tr['dist'] = 0.0
+    tr['mps'] = 0.0; tr['state'] = TRAIN_STATE_STOPPED
+    tr['stop_until'] = time.time() + TRAIN_STOP_S
+    tr['_last_station'] = sidx
+    train_broadcast_state(onum)
+    terrain = tr['terrain']
+    txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
+    moved = train_exchange(tr, sidx)
+    if moved:
+        parts = [f'{"+" if v > 0 else ""}{v}kg {k}' for k, v in moved.items() if v]
+        log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) at scene {sidx} "{txy[2].strip()}" {tc_grid(txy[0], txy[1])}: '
+                     f'{", ".join(parts)}; load now {tr["load"]}')
+        drops = [f'{v}kg {k}' for k, v in moved.items() if v > 0]
+        if drops and TC_AI_CHAT:
+            tc_say(tr['room'], f'AI: Train supplied {tc_camp_tag(tr["camp"])} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} '
+                               f'with {", ".join(drops)}', camp=tr['camp'])
+    else:
+        log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) at scene {sidx} "{txy[2].strip()}": nothing to exchange')
+
+def _train_ai_tick(onum, tr, rails, stations, now):
+    """Run / stop logic for a supply train."""
+    if not tr.get('supply'):
+        return
+    road = rails['roads'][tr['road']]
+    if tr.get('stop_until'):
+        if now < tr['stop_until']:
+            return
+        tr['stop_until'] = None
+        nxt = _train_next_station(tr, rails, stations)
+        if nxt is None and not road.get('loop'):
+            tr['dir'] = 1 - tr.get('dir', 0)            # open line: shuttle back
+            nxt = _train_next_station(tr, rails, stations)
+        if nxt is None:
+            tr['stop_until'] = now + 60.0               # nothing of ours on this line right now
+            return
+        tr['target'] = nxt
+        tr['mps'] = TRAIN_CRUISE_MPS; tr['state'] = TRAIN_STATE_MOVING
+        train_broadcast_state(onum)
+        return
+    tgt = tr.get('target')
+    if not tgt:
+        tr['stop_until'] = now                       # pick a target next tick
+        return
+    ni, sidx = tgt
+    if scene_camp(tr['terrain'], sidx) != tr['camp']:  # captured while we were coming: skip it
+        tr['stop_until'] = now; return
+    # arrival: the driver stepped onto (or past) the station node
+    if tr.get('dir', 0) == 0:
+        arrived = tr['node'] == ni and tr['dist'] < TRAIN_CRUISE_MPS * 0.3 or (tr['node'] > ni and not road.get('loop'))
+    else:
+        arrived = tr['node'] == ni and tr['dist'] < TRAIN_CRUISE_MPS * 0.3 or (tr['node'] < ni)
+    if arrived:
+        _train_stop_at(tr, onum, tgt); tr['target'] = None
+
+def spawn_supply_train(rid, camp, road_idx, reason=''):
+    terrain = _probe_terrain_for_room(rid)
+    stations = rails_stations_own(terrain, road_idx, camp)
+    if not stations:
+        return None
+    # v623f5: start at the producer station (factory / rail yard / port) nearest the camp's rear
+    # Bomber Airfield(s) - the back-area depot - rather than the lowest node number
+    rear = [tc_scene_xy(terrain, s) for s, c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).items()
+            if c == camp and 'bomber' in (scene_type_for(terrain, s) or '').lower()]
+    def _rear_dist(sidx):
+        xy = tc_scene_xy(terrain, sidx)
+        if not xy or not rear:
+            return 0.0
+        return min(math.hypot(xy[0] - r[0], xy[1] - r[1]) for r in rear if r)
+    def _is_depot(sidx):
+        t = (scene_type_for(terrain, sidx) or '').lower()
+        return any(k in t for k in ('factory', 'rail', 'port', 'depot'))
+    depots = [st for st in stations if _is_depot(st[1])] or stations
+    ni, sidx = min(depots, key=lambda st: _rear_dist(st[1]))
+    onum = spawn_train(rid, camp, road_idx, ni, TRAIN_WAGONS_DEFAULT,
+                       reason=f'{reason} from {(scene_type_for(terrain, sidx) or "scene").strip()} {sidx}')
+    if onum is None:
+        return None
+    tr = TRAINS[onum]
+    tr.update({'supply': True, 'terrain': terrain, 'load': {'metal': 0, 'fuel': 0, 'ammo': 0, 'units': 0},
+               'hp': TRAIN_HP, 'stop_until': time.time() + 5.0, '_last_station': None, 'target': None})
+    return onum
+
+def rails_stations_own(terrain, road_idx, camp):
+    return [(ni, s) for ni, s in rail_stations(terrain).get(road_idx, []) if scene_camp(terrain, s) == camp]
+
+def ensure_camp_trains(rid):
+    """Once a minute: every camp gets a train on each rail line serving >= 2 of its scenes (up to
+    TRAIN_PER_CAMP_MAX), respawning TRAIN_RESPAWN_S after a loss."""
+    if not TRAIN_SUPPLY or not tank_consts_ok():
+        return
+    terrain = _probe_terrain_for_room(rid)
+    rails = rails_for(terrain)
+    if not rails:
+        return
+    stations = rail_stations(terrain)
+    now = time.time()
+    camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).values() if c is not None and c <= 7})
+    for camp in camps:
+        have = [tr for tr in TRAINS.values() if tr['room'] == rid and tr['camp'] == camp and tr.get('supply')]
+        if len(have) >= TRAIN_PER_CAMP_MAX:
+            continue
+        busy_roads = {tr['road'] for tr in have}
+        cands = [(len(rails_stations_own(terrain, r, camp)), r) for r in stations if r not in busy_roads]
+        cands = [(n, r) for n, r in cands if n >= 2]
+        cands.sort(reverse=True)
+        for n, r in cands:
+            if len(have) >= TRAIN_PER_CAMP_MAX:
+                break
+            lost = _TRAIN_LOST_AT.get((rid, camp, r))
+            if lost and now - lost < TRAIN_RESPAWN_S:
+                continue
+            on = spawn_supply_train(rid, camp, r, reason=f'(supply line: {n} stations)')
+            if on is not None:
+                have.append(TRAINS[on])
+
+def train_killed(onum, killer, reason='', ai_hunter=None):
+    tr = TRAINS.get(onum)
+    if tr is None or tr.get('dead'):
+        return
+    tr['dead'] = True
+    _TRAIN_LOST_AT[(tr['room'], tr['camp'], tr['road'])] = time.time()
+    kname = getattr(killer, 'current_pilot', None) if killer is not None else None
+    log('TRAIN', f'train 0x{onum:04x} camp {tr["camp"]} DESTROYED by {kname or "?"} {reason} - cargo lost {tr.get("load")}')
+    if killer is not None and kname and GROUND_KILL_SCORE:
+        try:
+            _mode = scoring_mode_for_room(killer.current_room)
+            if _mode is not None:
+                _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(kname, TRAIN_KILL_SCORE, bomber=_bomber, mode=_mode)
+                _ng = db_bump_pilot_counter(kname, 'ai_ground', 1)
+                log('SCORE', f'{kname} +{TRAIN_KILL_SCORE} = train kill (0x{onum:04x}) | total {_sc} rank {_old}->{_rk} ground={_ng}')
+                send_stat_block_25(killer, reason='(train kill)')
+        except Exception:
+            logx('TRAIN', 'train kill credit failed')
+    entry = None
+    if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
+        entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
+    tr2 = TRAINS.pop(onum, None)
+    if tr2 is None:
+        return
+    raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(entry) if entry else struct.pack('<H', onum & 0xFFFF))
+    pkt = build_msg13(raw)
+    for p in get_sessions_in_room(tr2['room']):
+        if getattr(p, 'addr', None) in tr2['peers']:
+            _submit_send(send_rel, p, pkt, f'<- delete TRAIN 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0)
+
+def _handle_train_hit(s, victim, attacker, dmg, car=0):
+    """v625f5/v626f5: the client's report names the railcar (car 0 = loco, 1..N wagons in consist
+    order). A dead wagon sets its bit in the update's destroyed mask (the client wrecks it), its
+    cargo is lost; a dead loco kills the train."""
+    tr = TRAINS.get(victim)
+    if tr is None or tr.get('dead'):
+        return
+    eff = train_effective_damage(float(dmg))
+    parts = tr.setdefault('parts', None)
+    if parts is None:
+        parts = [{'kind': 'loco', 'hp': TRAIN_HP}]
+        for cls, cnt in tr.get('wagons', []):
+            for _i in range(cnt):
+                parts.append({'kind': WAGON_KIND.get(cls, 'wagon'), 'cls': cls, 'hp': WAGON_HP})
+        tr['parts'] = parts
+    i = car if 0 <= car < len(parts) else 0
+    part = parts[i]
+    if part['hp'] <= 0:
+        return
+    part['hp'] -= eff
+    tr['hp'] = parts[0]['hp']
+    log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit train 0x{victim:04x} camp {tr["camp"]} for {dmg} (eff {eff:.0f}) '
+                   f'-> {part["kind"]} #{i} hp {max(0, part["hp"]):.0f}')
+    if part['hp'] <= 0:
+        if i == 0:
+            train_killed(victim, s, reason='(loco destroyed)')
+            return
+        tr['mask'] = tr.get('mask', 0) | (1 << (i - 1))
+        kind = part['kind']
+        if kind in (tr.get('load') or {}):
+            cap_lost = WAGON_CAP.get(part.get('cls'), 0)
+            tr['load'][kind] = max(0, tr['load'][kind] - cap_lost)
+        log('TRAIN', f'train 0x{victim:04x}: wagon #{i} ({kind}) destroyed by {s.current_pilot} - mask 0x{tr["mask"]:x}')
+        tr['last_sent'] = 0.0; train_broadcast_state(victim)
+
+def rails_for(terrain):
+    terrain = _tbase(terrain)               # v629f5
+    if terrain in _RAILS:
+        return _RAILS[terrain]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'rails_trn{int(terrain):02d}.json')
+    try:
+        with open(path, 'r') as f:
+            _RAILS[terrain] = json.load(f)
+    except Exception as e:
+        log('TRAIN', f'no rail map for terrain {terrain} ({path}): {e}')
+        _RAILS[terrain] = None
+    return _RAILS[terrain]
+
+def rail_point(road, node, dist):
+    """World (x, y, z) `dist` metres past `node` along `road` (dict from rails_for)."""
+    nodes = road['nodes']
+    n = len(nodes)
+    i = node % n
+    j = (i + 1) % n
+    x0, y0, z0, c0 = nodes[i]; x1, y1, z1, c1 = nodes[j]
+    seg = (c1 - c0) if c1 > c0 else max(1.0, math.hypot(x1 - x0, y1 - y0))
+    t = max(0.0, min(1.0, dist / seg))
+    return (x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, z0 + (z1 - z0) * t), seg
+
+def build_train_record(st, onumber, nation, loco_cls, road, node, dist, wagons, direction=0):
+    hdr = bytearray(TRAIN_HEADER_SIZE)
+    hdr[0] = (TRAIN_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    hdr[1] = loco_cls & 0xff
+    hdr[2] = 0x04 if direction else 0x00
+    hdr[3] = road & 0xff
+    struct.pack_into('<H', hdr, 4, node & 0xffff)
+    struct.pack_into('<f', hdr, 6, float(dist))
+    p = 10
+    for cls, cnt in wagons[:32]:
+        struct.pack_into('<H', hdr, p, (cls & 0xff) | ((cnt & 0xff) << 8)); p += 2
+    rec = bytes(hdr) + struct.pack('<HH', st & 0xffff, onumber & 0xffff) + bytes(9)
+    return rec
+
+def pack_train_state(x, y, z, camp, speed_mps, road, node, dist, direction=0, mask=0, state=0):
+    """v615f5 flag byte (field-probed 09-10): bits0-2 = CAMP (a change re-arms the client's train
+    controller), bits4-5 = state (FUN_00692370), bit6 = direction."""
+    body = _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
+    body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+    body += bytes([(camp & 0x07) | ((state & 0x03) << 4) | (0x40 if direction else 0)])
+    body += struct.pack('<H', max(0, min(65535, int(round(speed_mps / TRAIN_SPEED_UNIT)))))
+    body += bytes([road & 0xff]) + struct.pack('<H', node & 0xffff) + struct.pack('<f', float(dist))
+    body += struct.pack('<I', mask & 0xffffffff)
+    assert len(body) == TRAIN_UPDATE_SIZE, len(body)
+    return body
+
+def train_broadcast_state(onum):
+    tr = TRAINS.get(onum)
+    if tr is None or not tank_consts_ok():
+        return 0
+    rails = rails_for(_probe_terrain_for_room(tr['room']))
+    if not rails:
+        return 0
+    road = rails['roads'][tr['road']]
+    (x, y, z), _seg = rail_point(road, tr['node'], tr['dist'])
+    pl = pack_train_state(x, y, z, tr['camp'], tr['mps'], tr['road'], tr['node'], tr['dist'], tr.get('dir', 0),
+                          tr.get('mask', 0), state=tr.get('state', TRAIN_STATE_MOVING if tr['mps'] > 0 else TRAIN_STATE_STOPPED))
+    n = 0
+    for p in get_sessions_in_room(tr['room']):
+        if getattr(p, 'addr', None) in tr['peers'] and _send_unrel_frame_to(p, onum, pl):
+            n += 1
+    tr['last_sent'] = time.time()
+    return n
+
+def spawn_train(rid, camp, road_idx, node_idx, n_wagons=3, dist=0.0, reason=''):
+    if not SPAWN_TRAINS or not tank_consts_ok():
+        log('TRAIN', 'spawn refused - trains off or tank constants missing'); return None
+    rails = rails_for(_probe_terrain_for_room(rid))
+    if not rails or road_idx >= len(rails['roads']):
+        log('TRAIN', f'spawn refused - no rail map / road {road_idx}'); return None
+    road = rails['roads'][road_idx]
+    node_idx %= len(road['nodes'])
+    onum = next_obj_number()
+    if n_wagons > 0:
+        _mix_total = sum(k for _c, k in TRAIN_WAGON_MIX)
+        if n_wagons >= _mix_total:
+            wagons = list(TRAIN_WAGON_MIX) + ([(TRAIN_WAGON_CLASS, n_wagons - _mix_total)] if n_wagons > _mix_total else [])
+        else:
+            wagons, _left = [], n_wagons
+            for _c, _k in TRAIN_WAGON_MIX:
+                if _left <= 0:
+                    break
+                wagons.append((_c, min(_k, _left))); _left -= min(_k, _left)
+    else:
+        wagons = []
+    loco = TRAIN_LOCO_BY_CAMP.get(int(camp) & 7, TRAIN_LOCO_CLASS)
+    TRAINS[onum] = {'room': rid, 'camp': int(camp) & 7, 'road': road_idx, 'node': node_idx, 'dist': float(dist),
+                    'dir': 0, 'mps': 0.0, 'peers': set(), 'last_sent': 0.0, 'wagons': wagons, 'mask': 0,
+                    'created': time.time()}
+    n = 0
+    for p in get_sessions_in_room(rid):
+        if not getattr(p, 'entered_game', False):
+            continue
+        body = bytearray([0x02]) + _ensure_ai_client_on(p)
+        body += build_train_record(AI_CLIENT_ST, onum, camp, loco, road_idx, node_idx, dist, wagons)
+        TRAINS[onum]['peers'].add(getattr(p, 'addr', None))
+        _submit_send(send_rel, p, build_msg13(bytes(body)), f'<- CreateObject 2 TRAIN 0x{onum:04x} {reason}', to=3.0)
+        n += 1
+    (x, y, z), _ = rail_point(road, node_idx, dist)
+    log('TRAIN', f'room {rid}: train 0x{onum:04x} camp {camp} loco {loco} + {wagons} on road {road_idx} '
+                 f'node {node_idx} (+{dist:.0f} m) at {tc_grid(x, y)} ({x:.0f},{y:.0f},{z:.0f}) -> {n} session(s) {reason}')
+    threading.Timer(0.5, train_broadcast_state, args=(onum,)).start()
+    return onum
+
+def delete_train(onum, reason=''):
+    tr = TRAINS.pop(onum, None)
+    if tr is None:
+        return 0
+    raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    pkt = build_msg13(raw)
+    n = 0
+    for p in get_sessions_in_room(tr['room']):
+        if getattr(p, 'addr', None) in tr['peers']:
+            _submit_send(send_rel, p, pkt, f'<- delete TRAIN 0x{onum:04x} {reason}', to=3.0); n += 1
+    log('TRAIN', f'room {tr["room"]}: delete train 0x{onum:04x} -> {n} session(s) {reason}')
+    return n
+
+def _trains_tick(dt):
+    """Advance every rolling train along its road (both directions); keep-alive when stopped;
+    supply AI per train."""
+    now = time.time()
+    for onum, tr in list(TRAINS.items()):
+        terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
+        rails = rails_for(terrain)
+        if not rails:
+            continue
+        road = rails['roads'][tr['road']]
+        nn = len(road['nodes']) - 1
+        if tr['mps'] > 0:
+            step = tr['mps'] * dt
+            if tr.get('dir', 0) == 0:
+                tr['dist'] += step
+                while True:
+                    (_pt, seg) = rail_point(road, tr['node'], 0.0)
+                    if tr['dist'] < seg:
+                        break
+                    tr['dist'] -= seg
+                    nxt = tr['node'] + 1
+                    if nxt >= nn:
+                        if road.get('loop'):
+                            nxt = 0
+                        else:
+                            tr['mps'] = 0.0; tr['dist'] = seg - 1.0; tr['node'] = nn - 1
+                            tr['stop_until'] = now                # end of an open line: the AI turns round
+                            break
+                    tr['node'] = nxt
+            else:
+                tr['dist'] -= step
+                while tr['dist'] < 0.0:
+                    prv = tr['node'] - 1
+                    if prv < 0:
+                        if road.get('loop'):
+                            prv = nn - 1
+                        else:
+                            tr['mps'] = 0.0; tr['dist'] = 0.0; tr['node'] = 0
+                            tr['stop_until'] = now
+                            break
+                    (_pt, seg) = rail_point(road, prv, 0.0)
+                    tr['node'] = prv; tr['dist'] += seg
+            train_broadcast_state(onum)
+        elif now - tr.get('last_sent', 0.0) >= TANK_IDLE_S:
+            train_broadcast_state(onum)
+        try:
+            _train_ai_tick(onum, tr, rails, rail_stations(terrain), now)
+        except Exception:
+            logx('TRAIN', 'train AI tick failed')
+
+def _recreate_near_pilots():
+    """v627f5, 1 Hz: the client drops AI objects beyond its distance cull (~38 km) and never asks
+    for them again - after a TAB reposition or a long flight the trains 'disappear'. Any tank /
+    soldier / train the client doesn't hold that is now within REJOIN_RADIUS_M of the pilot is
+    re-created for him (at most RECREATE_CHUNK per second)."""
+    for s in list(get_all_sessions()):
+        if not getattr(s, 'entered_game', False) or getattr(s, 'addr', None) is None:
+            continue
+        pos = s.__dict__.get('_pos_xy')
+        rid = s.current_room
+        if pos is None or rid is None:
+            continue
+        near_any = False
+        for onum, tr in TRAINS.items():
+            if tr['room'] == rid and not tr.get('dead') and s.addr not in tr['peers']:
+                rails = rails_for(tr.get('terrain') or _probe_terrain_for_room(rid))
+                if rails:
+                    (x, y, _z), _ = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
+                    if math.hypot(x - pos[0], y - pos[1]) <= REJOIN_RADIUS_M:
+                        near_any = True; break
+        if not near_any:
+            for onum, t in TANKS.items():
+                if t['room'] == rid and not t.get('dead') and s.addr not in t['peers'] \
+                        and math.hypot(t['pos'][0] - pos[0], t['pos'][1] - pos[1]) <= REJOIN_RADIUS_M:
+                    near_any = True; break
+        if not near_any:
+            for onum, sd in SOLDIERS.items():
+                if sd['room'] == rid and s.addr not in sd['peers'] \
+                        and math.hypot(sd['pos'][0] - pos[0], sd['pos'][1] - pos[1]) <= REJOIN_RADIUS_M:
+                    near_any = True; break
+        if near_any:
+            try:
+                tank_recreate_for(s, reason='(back in range)', near_xy=pos, radius=REJOIN_RADIUS_M)
+            except Exception:
+                logx('TANK', 're-create near pilot failed')
+
+REJOIN_RADIUS_M = 30000.0
 
 def is_transport_plane(plane_id):
     try:
@@ -10596,6 +11327,12 @@ def tc_para_landed(s, onum, ent):
         return
     if not is_transport_plane(getattr(s, 'plane_type', None)):
         return
+    # v609f5: troop chutes and CARGO chutes are the same Type-2 objects - what tells them apart is
+    # whether the plane has troops aboard (msg 113/114). No troops -> it's cargo (msg 105 follows).
+    if int(s.__dict__.get('_troops_aboard', 0) or 0) <= 0:
+        log('PARA', f'{s.current_pilot}: chute 0x{onum:04x} landed with no troops aboard -> cargo chute (msg 105 will credit it)')
+        return
+    s._troops_aboard = int(s._troops_aboard) - 1
     pos = ent.get('pos')
     if pos is None:
         log('PARA', f'{s.current_pilot}: paratroop chute 0x{onum:04x} landed without a known position - ignored')
@@ -10968,15 +11705,20 @@ def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
     warned[key] = time.time()
     tc_say(room_id, f'Your {tc_scene_kind_word(txy[2])} at {tc_grid(txy[0], txy[1])} is about to be triggered!', camp=tcamp)
 
-def tank_recreate_for(s, reason=''):
+def tank_recreate_for(s, reason='', near_xy=None, radius=None):
     """v563f5/v570f5/v604f5: after a (re)spawn, create every tank of the room this session
     doesn't hold - batched, but never more than RECREATE_CHUNK records per msg-2: the live
     48-tank batch (1,057 B) at 09-09 17:15 was silently not applied by the client (16 x 21 B +
-    client record = 385 B is field-proven), leaving invisible tanks that went on capturing."""
-    if not SPAWN_TANKS or not TANKS:
+    client record = 385 B is field-proven), leaving invisible tanks that went on capturing.
+    v627f5: near_xy/radius restrict it to objects within reach of the pilot (the client culls
+    beyond ~38 km, so creating far objects only feeds a create/cull loop)."""
+    if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS):
         return 0
     rid = getattr(s, 'current_room', None)
-    todo = [(onum, t) for onum, t in list(TANKS.items()) if t['room'] == rid and getattr(s, 'addr', None) not in t['peers']]
+    def _near(x, y):
+        return near_xy is None or math.hypot(x - near_xy[0], y - near_xy[1]) <= (radius or REJOIN_RADIUS_M)
+    todo = [(onum, t) for onum, t in list(TANKS.items()) if t['room'] == rid and getattr(s, 'addr', None) not in t['peers']
+            and not t.get('dead') and _near(t['pos'][0], t['pos'][1])]
     n = 0
     for i in range(0, len(todo), RECREATE_CHUNK):
         chunk = todo[i:i + RECREATE_CHUNK]
@@ -10993,7 +11735,8 @@ def tank_recreate_for(s, reason=''):
     if n:
         log('TANK', f'{s.current_pilot}: re-created {n} tank(s) in {(n + RECREATE_CHUNK - 1) // RECREATE_CHUNK} msg-2(s) {reason}')
     # v590f5/v604f5: soldiers the same way, same chunking
-    stodo = [(onum, sd) for onum, sd in list(SOLDIERS.items()) if sd['room'] == rid and getattr(s, 'addr', None) not in sd['peers']]
+    stodo = [(onum, sd) for onum, sd in list(SOLDIERS.items()) if sd['room'] == rid and getattr(s, 'addr', None) not in sd['peers']
+             and _near(sd['pos'][0], sd['pos'][1])]
     sn = 0
     for i in range(0, len(stodo), RECREATE_CHUNK):
         chunk = stodo[i:i + RECREATE_CHUNK]
@@ -11008,7 +11751,32 @@ def tank_recreate_for(s, reason=''):
                      f'<- CreateObject 2 SOLDIER x{len(chunk)} (re-create {reason})', to=3.0)
     if sn:
         log('PARA', f'{s.current_pilot}: re-created {sn} soldier(s) {reason}')
-    return n + sn
+    # v627f5: trains too (a TAB reposition made the client cull them; ServerConfirm re-creates)
+    ttodo = []
+    for onum, tr in list(TRAINS.items()):
+        if tr['room'] != rid or tr.get('dead') or getattr(s, 'addr', None) in tr['peers']:
+            continue
+        if near_xy is not None:
+            rails = rails_for(tr.get('terrain') or _probe_terrain_for_room(rid))
+            if not rails:
+                continue
+            (x, y, _z), _ = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
+            if not _near(x, y):
+                continue
+        ttodo.append((onum, tr))
+    tn = 0
+    for onum, tr in ttodo:
+        body = bytearray([0x02])
+        if n == 0 and sn == 0 and tn == 0:
+            body += _ensure_ai_client_on(s)
+        loco = TRAIN_LOCO_BY_CAMP.get(int(tr['camp']) & 7, TRAIN_LOCO_CLASS)
+        body += build_train_record(AI_CLIENT_ST, onum, tr['camp'], loco, tr['road'], tr['node'], tr['dist'], tr.get('wagons', []))
+        tr['peers'].add(s.addr); tr['last_sent'] = 0.0
+        _submit_send(send_rel, s, build_msg13(bytes(body)), f'<- CreateObject 2 TRAIN 0x{onum:04x} (re-create {reason})', to=3.0)
+        tn += 1
+    if tn:
+        log('TRAIN', f'{s.current_pilot}: re-created {tn} train(s) {reason}')
+    return n + sn + tn
 
 def preload_squadron_list(s, reason=''):
     """Push the 0xce squadron list to a client so it has the list loaded in-session. Once per
@@ -14039,6 +14807,12 @@ def relay_telemetry(src, data, _split_obj=None):
     # form (v591f5 read that and put every landing at the take-off field).
     if len(pl) >= 18 and PLANE_POS_SCALE:
         _co_onum = int.from_bytes(pl[7:9], 'little')
+        if _co_onum == getattr(src, 'my_obj_number', None):
+            try:
+                _ox, _oy, _oz = unpack_plane_pos9(pl[9:18])         # v612f5: the pilot's own position
+                src._pos_xy = (_ox, _oy); src._pos_z = _oz
+            except Exception:
+                pass
         _crew_ent = (src.__dict__.get('crew_para_objs') or {}).get(_co_onum)
         if _crew_ent is not None:
             try:
@@ -14655,6 +15429,8 @@ def handle_leave_arena(s):
         _t['peers'].discard(getattr(s, 'addr', None))
     for _sd in SOLDIERS.values():                  # v598f5: soldiers too (rejoin re-creates them)
         _sd['peers'].discard(getattr(s, 'addr', None))
+    for _tr in TRAINS.values():                    # v613f5
+        _tr['peers'].discard(getattr(s, 'addr', None))
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -15658,9 +16434,84 @@ def scene_snapshot_entries(terrain):
         return []
     return [(camps.get(i, 7), SCENE_STATE_NORMAL) for i in range(max(camps) + 1)]
 
+# --- v610f5 TERRITORY ASSIGNMENT (GAME_DEF -> scene camps) ---------------------------------
+# SCENE_CAMP_BY_TERRAIN holds each scene's TERRAIN TERRITORY (0..4). The arena's GAME_DEF maps
+# those territories to CAMPS ('Assign 5 territories': param[0x31..0x38], the 8 dwords before
+# the terrain byte) and camps to NATIONS (the camps block: AllianceVar '01' = active camps 0,1
+# + one (code, abbrev, fullname, extra) cstring group per active camp). The server used to
+# send the raw territory numbers, so a 2-nation arena showed five colours online while the
+# same GAME_DEF showed two offline ('Mediterran test II', Taurus 2026-09-09).
+SCENE_TERRITORY_BY_TERRAIN = {t: dict(v) for t, v in SCENE_CAMP_BY_TERRAIN.items()}   # frozen originals
+ROOM_TERRITORIES_APPLIED = {}    # room_id -> (terrain, tmap tuple)
+CAMP_NAMES_BY_TERRAIN = {}       # terrain -> {camp: (code2, abbrev3, fullname)}
+
+def parse_gamedef_territories(game_def_raw):
+    """(camp_names {camp: (code, abbrev, full)}, territory_map [8 ints]) from a room's GAME_DEF."""
+    d = decompress_gamedef(game_def_raw)
+    if not d or len(d) < 14:
+        return None, None
+    block_len = d[13]
+    camps = bytes(d[14:14 + block_len])
+    av_end = camps.index(0)
+    av = camps[:av_end]
+    mask = _camp_mask_from_av(av)
+    active = [i for i in range(8) if mask & (1 << i)]
+    groups, consumed = _split_camp_groups(camps[av_end + 1:], len(active))
+    names = {}
+    for ci, g in zip(active, groups):
+        parts = g.split(b'\x00')
+        names[ci] = tuple(p.decode('latin1', 'replace') for p in parts[:3])
+    p = 20 + block_len
+    for _ in range(3):                       # NAME, COMMENT, PASSWORD
+        p = d.index(0, p) + 1
+    p += 1                                   # Type byte
+    p = d.index(0, p) + 1                    # LobbyType
+    p += 4                                   # 2 ushorts
+    tmap = list(struct.unpack_from('<8i', d, p))
+    return names, tmap
+
+def apply_room_territories(room_id, reason=''):
+    """Rewrite the terrain's scene camps from the room's territory assignment (once per room;
+    captures then mutate the table as before)."""
+    if room_id is None or room_id in ROOM_TERRITORIES_APPLIED:
+        return False
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT game_def_raw, terrain FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return False
+        names, tmap = parse_gamedef_territories(row[0])
+        if tmap is None:
+            return False
+        terrain = int(row[1]) if row[1] is not None else DEFAULT_TERRAIN
+        tkey = _probe_terrain_for_room(room_id)                     # v629f5: the room's OWN key
+        base = SCENE_TERRITORY_BY_TERRAIN.get(terrain)
+        if not base:
+            return False
+        newtab = {}
+        for sidx, terr in base.items():
+            c = tmap[terr] if 0 <= terr < 8 else -1
+            newtab[sidx] = int(c) if 0 <= c <= 7 else 7
+        SCENE_CAMP_BY_TERRAIN[tkey] = newtab
+        if names:
+            CAMP_NAMES_BY_TERRAIN[tkey] = names
+            globals()['_CAMP_NAMES_ACTIVE'] = names
+        ROOM_TERRITORIES_APPLIED[room_id] = (tkey, tuple(tmap))
+        counts = {}
+        for c in newtab.values():
+            counts[c] = counts.get(c, 0) + 1
+        _summary = ', '.join('camp %d (%s) x%d' % (c, (names or {}).get(c, ('?',))[0], n) for c, n in sorted(counts.items()))
+        log('SCENE42', f'room {room_id}: territories {tmap[:5]} -> camps applied to ownership key {tkey} ({_summary}) {reason}')
+        return True
+    except Exception:
+        logx('SCENE42', 'territory assignment failed')
+        return False
+
 
 def send_scene_snapshot_42_to(s, reason=''):
     """v580f5: one msg-42 scene snapshot to a single session (entry-time ownership)."""
+    apply_room_territories(s.current_room, reason='(first entry)')     # v610f5
     trn = _probe_terrain_for_room(s.current_room)
     entries = scene_snapshot_entries(trn)
     if not entries:
@@ -16253,6 +17104,7 @@ _TRN_TABLES = {}          # terrain -> parsed json dict (or None = tried, missin
 
 def trn_tables(trn):
     """Load (once) and return the dumped table set for a terrain, or None."""
+    trn = _tbase(trn)                       # v629f5: ownership keys -> base terrain
     if trn in _TRN_TABLES:
         return _TRN_TABLES[trn]
     d = None
@@ -16490,18 +17342,51 @@ PROBE_LOCK = threading.Lock()
 PROBE_WINDOW = 2.5            # seconds to collect ev=0x00 after each destroy
 PROBE_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'objscene_map.json')
 
+# v629f5 [PER-ROOM OWNERSHIP]: scene ownership (SCENE_CAMP_BY_TERRAIN and everything keyed by
+# 'terrain' that is really per-arena state: captures, territories, rail stations, names) was
+# shared by every room on the same terrain - 'Mediterran test II' showed the other arena's
+# five nations and its captures. Each additional room on an occupied terrain now gets a private
+# OWNERSHIP KEY (an alias = room_id * 1000 + terrain, >= 1000); the static terrain data (scene
+# tables, profiles, rails, types) is read through _tbase(), which strips the alias. The first
+# room on a terrain keeps the plain terrain key, so all existing behaviour is unchanged for it.
+_ROOM_TKEY = {}                 # room_id -> ownership key
+_TERRAIN_OWNER_ROOM = {}        # base terrain -> room_id holding the plain key
+
+def _tbase(t):
+    """Base terrain id for any ownership key."""
+    try:
+        t = int(t)
+    except (TypeError, ValueError):
+        return t
+    return t % 1000 if t >= 1000 else t
+
 def _probe_terrain_for_room(room_id):
-    """Terrain id for a room, from the rooms table (defaults to DEFAULT_TERRAIN). Used to pick
-    the right scene->camp table so msg-36 names the target instead of printing 'a bridge'."""
+    """Ownership key for a room (the terrain id for the first room on a terrain, an alias for
+    further rooms on the same terrain). Pass through _tbase() to read static terrain data."""
+    if room_id in _ROOM_TKEY:
+        return _ROOM_TKEY[room_id]
+    base = DEFAULT_TERRAIN
     try:
         conn = sqlite3.connect(DB_PATH)
         row = conn.execute("SELECT terrain FROM rooms WHERE room_id=?", (room_id,)).fetchone()
         conn.close()
         if row and row[0] is not None:
-            return int(row[0])
+            base = int(row[0])
     except Exception:
         pass
-    return DEFAULT_TERRAIN
+    if room_id is None:
+        return base
+    owner = _TERRAIN_OWNER_ROOM.get(base)
+    if owner is None or owner == room_id:
+        _TERRAIN_OWNER_ROOM[base] = room_id
+        key = base
+    else:
+        key = int(room_id) * 1000 + base
+        if key not in SCENE_CAMP_BY_TERRAIN and base in SCENE_TERRITORY_BY_TERRAIN:
+            SCENE_CAMP_BY_TERRAIN[key] = dict(SCENE_TERRITORY_BY_TERRAIN[base])   # fresh copy of the map defaults
+            log('SCENE42', f'room {room_id}: private ownership key {key} (terrain {base} already owned by room {owner})')
+    _ROOM_TKEY[room_id] = key
+    return key
 
 def probe_arm(room, scene, window=PROBE_WINDOW):
     with PROBE_LOCK:
@@ -17650,13 +18535,19 @@ _SUPPLY_LOCK = threading.Lock()
 #     economy stays conserved rather than double-counted.
 # All three knobs are marked TUNABLE and centralised here for later calibration against a live
 # TC arena's Production Complex panel (the authoritative source now).
-_SUPPLY_UNITS = {}                       # (room_id, camp) -> {'aircraft':n,'tank':n,'ship':n}
+_SUPPLY_UNITS = {}                       # (room_id, camp) -> {'aircraft':n,'tank':n,'ship':n} (legacy aggregate)
+_SCENE_UNITS  = {}                       # v621f5: (room_id, scene) -> units HELD at that scene
+UNIT_CAP_PER_SCENE = 20                  # v621f5: max built-not-deployed units of a kind held at one scene
 _SUPPLY_UNITS_LOCK = threading.Lock()
 UNITS_MODEL        = True                # master switch for the v429f5 units layer
 SPAWN_SPENDS_UNITS = True                # v602f5: a spawn spends an aircraft unit (tank unit + narration when none)
-UNIT_METAL_COST    = 2000                # TUNABLE: stored metal consumed to build one unit
+UNIT_METAL_COST    = 500                 # TUNABLE: stored metal consumed to build one unit (v622f5: 2000 -> 500; at 2000
+                                         # an airfield making 1000 kg/min and building 1 unit/min ticked DOWN 1000/min)
 UNIT_CAP_PER_CAMP  = 99                  # TUNABLE: max built-not-deployed units of a type per camp
-UNITS_PER_TICK_MAX = 4                   # TUNABLE: units of a type a camp can build in one step
+UNITS_PER_TICK_MAX = 1                   # TUNABLE: units of a type a camp can build in one step (v618f5: was 4 -
+                                         # 4 x 3 kinds x 2000 kg = 24 t metal/min per camp, above any camp's production)
+UNITS_METAL_RESERVE = 0.30               # v618f5: build only while the camp's metal stock is above this share of capacity
+UNITS_PRODUCTION_SHARE = 0.5             # v619f5: units may consume at most this share of the camp's metal production per step
 
 # v430f5: SUPPLY-LINK TOPOLOGY, learned LIVE from the client. The scene positions needed to
 # compute link ranges geometrically are not in any data we have (data00_scenes.json carries a
@@ -17676,7 +18567,10 @@ _SCENE_LINKS_LOCK = threading.Lock()
 
 def scene_type_for(terrain, scene_id):
     """Scene TYPE string ('Front Line Airfield', 'FAB', ...) for a terrain+scene id, else None."""
-    return _SCENES['terrains'].get(str(terrain), {}).get(str(scene_id))
+    return _SCENES['terrains'].get(str(_tbase(terrain)), {}).get(str(scene_id))
+
+SUPPLY_CAP_MULT = 3.0   # v612f5/v617f5: multiplier on every profile's storage caps (user: bases drain too fast;
+                        # 1.0 = the wiki-derived volumes). Applied where caps are read.
 
 def scene_profile(terrain, scene_id, allow_default=False):
     """{'caps':{ammo,fuel,metal}, 'rates':{...}} for a scene, or None if unknown/no economy.
@@ -17703,6 +18597,17 @@ def scene_profile(terrain, scene_id, allow_default=False):
                         break
     if not p or not any(p['caps'].values()):
         return None                        # AA sites, substations etc. hold nothing
+    if SUPPLY_CAP_MULT != 1.0:
+        key = id(p)
+        cache = globals().setdefault('_PROFILE_MULT_CACHE', {})
+        q = cache.get(key)
+        if q is None:
+            q = {'caps': {k: int(v * SUPPLY_CAP_MULT) for k, v in p['caps'].items()}, 'rates': dict(p.get('rates', {}))}
+            for k, v in p.items():
+                if k not in q:
+                    q[k] = v
+            cache[key] = q
+        return q
     return p
 
 
@@ -17812,11 +18717,13 @@ def supply_take(room_id, terrain, scene_id, ammo_kg, fuel_kg, allow_default=True
 # log as AFRAW for the eventual start-place mapping work.
 SUPPLY_CAMP_POOL = True
 
-def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg):
+def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg, prefer_xy=None):
     """v424f5: draw up to ammo_kg / fuel_kg from every profiled scene the camp owns, airfield-
-    typed scenes first. Returns (ammo_got, fuel_got, stored_after, n_scenes) where stored_after
-    sums the camp's remaining {'ammo','fuel'} - or None when the terrain has no camp table or
-    the camp owns nothing profiled (the caller falls back to the per-scene path)."""
+    typed scenes first. v612f5: when prefer_xy (the pilot's position) is known, the NEAREST
+    airfield to it is drawn first, then the other scenes by distance - the old fixed index order
+    drained the camp's lowest-numbered airfield for every spawn anywhere ('field depleted after
+    4-5 planes' while the camp pool sat at 380 t). Returns (ammo_got, fuel_got, stored_after,
+    n_scenes) or None when the terrain has no camp table / the camp owns nothing profiled."""
     table = SCENE_CAMP_BY_TERRAIN.get(terrain)
     if not table:
         return None
@@ -17826,7 +18733,13 @@ def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg):
     def _is_af(sidx):
         t = scene_type_for(terrain, sidx) or ''
         return 'airfield' in t.lower()
-    own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, sidx))
+    if prefer_xy is not None:
+        def _dist(sidx):
+            xy = tc_scene_xy(terrain, sidx)
+            return math.hypot(xy[0] - prefer_xy[0], xy[1] - prefer_xy[1]) if xy else 1e12
+        own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, _dist(sidx)))
+    else:
+        own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, sidx))
     need = {'ammo': ammo_kg, 'fuel': fuel_kg}
     got = {'ammo': 0, 'fuel': 0}
     after = {'ammo': 0, 'fuel': 0}
@@ -17877,6 +18790,35 @@ def _camp_metal_debit(room_id, terrain, camp, want_metal):
     own = [sidx for sidx, c in table.items() if c == camp]
     if not own:
         return 0
+    # v619f5: spread the debit PROPORTIONALLY over every scene's metal stock (was: producers first,
+    # lowest index first - scene 5 lost 6 t/min while it produced 1 t/min, 'metal ticks down')
+    states = []
+    for sidx in own:
+        st, p = supply_state(room_id, terrain, sidx)
+        if st is not None and st.get('metal', 0) > 0:
+            states.append(st)
+    total = sum(st['metal'] for st in states)
+    if total <= 0:
+        return 0
+    want = min(int(want_metal), total)
+    spent = 0
+    with _SUPPLY_LOCK:
+        for st in states:
+            share = int(want * st['metal'] / total)
+            take = max(0, min(st['metal'], share))
+            st['metal'] -= take
+            spent += take
+        # rounding remainder from the richest scene
+        rem = want - spent
+        if rem > 0:
+            richest = max(states, key=lambda s: s['metal'])
+            take = max(0, min(richest['metal'], rem))
+            richest['metal'] -= take; spent += take
+    return spent
+
+def _camp_metal_debit_legacy(room_id, terrain, camp, want_metal):
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    own = [sidx for sidx, c in table.items() if c == camp]
     # producers (nonzero metal rate) drained first; pure-storage scenes last
     def _metal_rate(sidx):
         p = scene_profile(terrain, sidx)
@@ -17896,16 +18838,43 @@ def _camp_metal_debit(room_id, terrain, camp, want_metal):
     return spent
 
 
-def camp_units_take(room_id, camp, kind, n):
-    """v575f5: consume up to n built units of a kind for a camp. Returns the number taken."""
-    key = (room_id, int(camp))
+def camp_units_take(room_id, camp, kind, n, prefer_xy=None):
+    """v575f5 / v621f5: consume up to n built units of a kind for a camp, from the SCENE that holds
+    them - the one nearest prefer_xy (the pilot's field / the tank factory) first. Returns taken."""
+    terrain = _probe_terrain_for_room(room_id)
+    holders = [(sidx, u) for (rid, sidx), u in _SCENE_UNITS.items()
+               if rid == room_id and scene_camp(terrain, sidx) == int(camp) and u.get(kind, 0) > 0]
+    if prefer_xy is not None:
+        def _d(item):
+            xy = tc_scene_xy(terrain, item[0])
+            return math.hypot(xy[0] - prefer_xy[0], xy[1] - prefer_xy[1]) if xy else 1e12
+        holders.sort(key=_d)
+    got = 0
     with _SUPPLY_UNITS_LOCK:
-        u = _SUPPLY_UNITS.setdefault(key, {'aircraft': 0, 'tank': 0, 'ship': 0})
-        got = max(0, min(int(n), int(u.get(kind, 0))))
-        u[kind] = int(u.get(kind, 0)) - got
+        for sidx, u in holders:
+            if got >= n:
+                break
+            take = min(int(n) - got, int(u.get(kind, 0)))
+            u[kind] = int(u.get(kind, 0)) - take
+            got += take
     return got
 
 def camp_units_state(room_id, camp):
+    """Built-not-deployed unit counts for a camp = the sum over its scenes (v621f5 per-scene stock)."""
+    terrain = _probe_terrain_for_room(room_id)
+    tot = {'aircraft': 0, 'tank': 0, 'ship': 0}
+    with _SUPPLY_UNITS_LOCK:
+        for (rid, sidx), u in _SCENE_UNITS.items():
+            if rid == room_id and scene_camp(terrain, sidx) == int(camp):
+                for k in tot:
+                    tot[k] += int(u.get(k, 0))
+    return tot
+
+def scene_units_state(room_id, sidx):
+    with _SUPPLY_UNITS_LOCK:
+        return dict(_SCENE_UNITS.get((room_id, int(sidx)), {'aircraft': 0, 'tank': 0, 'ship': 0}))
+
+def camp_units_state_legacy(room_id, camp):
     """Current built-not-deployed unit counts for a camp, {'aircraft','tank','ship'}."""
     key = (room_id, int(camp))
     with _SUPPLY_UNITS_LOCK:
@@ -17968,14 +18937,63 @@ def complex_totals(room_id, scene_id):
         if c is not None and c != SCENE_CAMP_NEUTRAL:
             seen_camps.add(c)
     units = {'aircraft': 0, 'tank': 0, 'ship': 0}
-    for c in seen_camps:
-        u = camp_units_state(room_id, c)
+    for sid in members:                                  # v621f5: units held at the member scenes
+        su = scene_units_state(room_id, sid)
         for k in units:
-            units[k] += u[k]
+            units[k] += su[k]
     return stored, capacity, units
 
 
 def _camp_build_units(room_id, terrain, camp):
+    """v429f5 / v620f5: convert METAL into UNITS at the scenes that produce them (wiki unit
+    producers: an airfield builds aircraft units, a tank/metal factory tank units, a port ship
+    units), each from ITS OWN metal stock, at most UNITS_PER_TICK_MAX per kind per step, and only
+    while that scene keeps UNITS_METAL_RESERVE of its own metal capacity. No other scene is
+    touched (v618/v619 debited the whole camp and every scene ticked down)."""
+    if not UNITS_MODEL:
+        return None
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain)
+    if not table:
+        return None
+    key = (room_id, int(camp))
+    with _SUPPLY_UNITS_LOCK:
+        u = _SUPPLY_UNITS.setdefault(key, {'aircraft': 0, 'tank': 0, 'ship': 0})
+    producers = {'aircraft': [], 'tank': [], 'ship': []}
+    for sidx, c in table.items():
+        if c != camp:
+            continue
+        t = (scene_type_for(terrain, sidx) or '').lower()
+        if 'airfield' in t:
+            producers['aircraft'].append(sidx)
+        if 'tank factory' in t or 'metal factory' in t:
+            producers['tank'].append(sidx)
+        if 'port' in t:
+            producers['ship'].append(sidx)
+    for kind, scenes in producers.items():
+        if not scenes:
+            continue
+        for sidx in scenes:
+            st, p = supply_state(room_id, terrain, sidx)
+            if st is None or not p:
+                continue
+            with _SUPPLY_UNITS_LOCK:
+                su = _SCENE_UNITS.setdefault((room_id, int(sidx)), {'aircraft': 0, 'tank': 0, 'ship': 0})
+                if su[kind] >= UNIT_CAP_PER_SCENE:
+                    continue
+            cap = int(p['caps'].get('metal', 0))
+            made = 0
+            with _SUPPLY_LOCK:
+                reserve = int(cap * UNITS_METAL_RESERVE)
+                for _i in range(UNITS_PER_TICK_MAX):
+                    if st['metal'] - UNIT_METAL_COST >= reserve:
+                        st['metal'] -= UNIT_METAL_COST
+                        made += 1
+            if made:
+                with _SUPPLY_UNITS_LOCK:
+                    su[kind] = min(UNIT_CAP_PER_SCENE, su[kind] + made)
+    return camp_units_state(room_id, camp)
+
+def _camp_build_units_legacy(room_id, terrain, camp):
     """v429f5 stages 3-5: convert the camp's stored METAL into UNITS for each type it can build.
     Runs once per production step per camp. Metal is debited from the camp's scenes so the
     resource economy stays conserved. Returns the units dict after building, or None if the camp
@@ -17988,12 +19006,43 @@ def _camp_build_units(room_id, terrain, camp):
     key = (room_id, int(camp))
     with _SUPPLY_UNITS_LOCK:
         u = _SUPPLY_UNITS.setdefault(key, {'aircraft': 0, 'tank': 0, 'ship': 0})
+    # v618f5: metal reserve - the camp keeps UNITS_METAL_RESERVE of its metal capacity before it
+    # spends any on units, so stores can actually accumulate and trains have something to move
+    try:
+        _tot, _cap = 0, 0
+        for _sidx, _c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).items():
+            if _c != int(camp):
+                continue
+            _st, _p = supply_state(room_id, terrain, _sidx)
+            if _st and _p:
+                _tot += int(_st.get('metal', 0)); _cap += int(_p['caps'].get('metal', 0))
+        if _cap > 0 and _tot < _cap * UNITS_METAL_RESERVE:
+            return camp_units_state(room_id, camp)
+    except Exception:
+        pass
     for kind in kinds:
         with _SUPPLY_UNITS_LOCK:
             room_for_units = UNIT_CAP_PER_CAMP - u[kind]
         if room_for_units <= 0:
             continue
         buildable = min(UNITS_PER_TICK_MAX, room_for_units)
+        # v619f5: units may consume at most UNITS_PRODUCTION_SHARE of the camp's metal PRODUCTION
+        # per step, so stores still grow: budget = share x sum(metal rates) spread over the kinds
+        _budget = globals().get('_UNITS_BUDGET_TMP')
+        if _budget is None or _budget[0] != (room_id, int(camp), _SUPPLY_TICK_N):
+            _prod = 0.0
+            for _sidx, _c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).items():
+                if _c == int(camp):
+                    _p = scene_profile(terrain, _sidx)
+                    if _p:
+                        _prod += float(_p['rates'].get('metal', 0)) * scene_efficiency(room_id, _sidx)
+            _budget = [(room_id, int(camp), _SUPPLY_TICK_N), _prod * UNITS_PRODUCTION_SHARE]
+            globals()['_UNITS_BUDGET_TMP'] = _budget
+        _afford = int(_budget[1] // UNIT_METAL_COST)
+        buildable = min(buildable, max(0, _afford))
+        if buildable <= 0:
+            continue
+        _budget[1] -= buildable * UNIT_METAL_COST
         # spend metal for as many whole units as the camp can afford, up to buildable
         spent = _camp_metal_debit(room_id, terrain, camp, buildable * UNIT_METAL_COST)
         made = spent // UNIT_METAL_COST if UNIT_METAL_COST else 0
@@ -18100,7 +19149,15 @@ def _supply_chain_step(rid):
         if _c <= 7:
             by_camp.setdefault(_c, []).append(_sidx)
     delivered_total = 0
+    # v617f5: visible supply trains replace the abstract deliveries for the camps that have them
+    try:
+        ensure_camp_trains(rid)
+    except Exception:
+        logx('TRAIN', 'ensure_camp_trains failed')
+    _camps_with_trains = {tr['camp'] for tr in TRAINS.values() if tr['room'] == rid and tr.get('supply') and not tr.get('dead')}
     for _camp, _scenes in sorted(by_camp.items()):
+        if TRAIN_SUPPLY and _camp in _camps_with_trains:
+            continue
         # split once per camp: producers (donors) vs storage scenes (train destinations)
         donors, dests = [], []
         for _sidx in _scenes:
@@ -18298,15 +19355,17 @@ PACKED_INFO_SIZE = 83
 # unique. C/E/H are single bytes on the wire so they cannot be tagged; the scan disambiguates them
 # by requiring the whole nine-array stride pattern rather than any one family.
 PRODINFO_PROBE = {
-    'A': (0xA1BE0001, 0xA1BE0002, 0xA1BE0003),
-    'B': (0xB2BE0001, 0xB2BE0002, 0xB2BE0003),
-    'C': (0xC3, 0xC4, 0xC5),
-    'D': (0xD4BE0001, 0xD4BE0002, 0xD4BE0003),
-    'E': (0xE5, 0xE6, 0xE7),
-    'F': (0xF6BE0001, 0xF6BE0002, 0xF6BE0003),
-    'G': (0x67BE0001, 0x67BE0002, 0x67BE0003),
-    'H': (0x8B, 0x8C, 0x8D),
-    'I': (0x99BE0001, 0x99BE0002, 0x99BE0003),
+    # v628f5: READABLE markers - `panelprobe` on, hover a scene, Ctrl-L: every panel column shows
+    # which array feeds it (thousands = array, units = resource slot 1..3)
+    'A': (1001, 1002, 1003),
+    'B': (2001, 2002, 2003),
+    'C': (11, 12, 13),
+    'D': (4001, 4002, 4003),
+    'E': (21, 22, 23),
+    'F': (6001, 6002, 6003),
+    'G': (7001, 7002, 7003),
+    'H': (31, 32, 33),
+    'I': (9001, 9002, 9003),
 }
 
 def build_packed_info_71(scene_id, arrays):
@@ -19003,6 +20062,7 @@ SUPPLY_TC_SPAWN_AMMO_BOMBER_KG  = 6500
 # under one minute of production; a Lancaster carries ~6,000 kg, a fighter ~400-600 kg).
 SUPPLY_TC_SPAWN_FUEL_FIGHTER_KG = 500
 SUPPLY_TC_SPAWN_FUEL_BOMBER_KG  = 5000
+SPAWN59_USE_CLIENT_WEIGHTS = True   # v612f5: debit what the client's msg-59 ask says the plane weighs
 
 def _tc_pool_draw(s, ammo_ask, fuel_ask):
     """v443f5: THE 'CHECK SUPPLY FIRST' PRIMITIVE shared by every TC grant path. Draws up to
@@ -19024,7 +20084,7 @@ def _tc_pool_draw(s, ammo_ask, fuel_ask):
             _have_pool = False               # camp owns nothing profiled -> per-scene fallback
     if _have_pool:
         _got_a, _got_f, _after, _n = camp_supply_take(s.current_room, _trn, s.nation,
-                                                      ammo_ask, fuel_ask)
+                                                      ammo_ask, fuel_ask, prefer_xy=getattr(s, '_pos_xy', None))
         return _got_a, _got_f, _after['ammo'], _after['fuel'], f'camp{s.nation} pool ({_n} scenes)'
     if _af is None or supply_state(s.current_room, _trn, _af, True)[0] is None:
         return None                          # unmapped terrain / no per-scene data either
@@ -19372,6 +20432,10 @@ def _grant_spawn_supply(s):
     _bomber = bool(is_bomber_plane(_pt))
     _ask_a = SUPPLY_TC_SPAWN_AMMO_BOMBER_KG if _bomber else SUPPLY_TC_SPAWN_AMMO_FIGHTER_KG
     _ask_f = SUPPLY_TC_SPAWN_FUEL_BOMBER_KG if _bomber else SUPPLY_TC_SPAWN_FUEL_FIGHTER_KG   # v603f5
+    _q59 = s.__dict__.get('_ask59')
+    if SPAWN59_USE_CLIENT_WEIGHTS and _q59 and (_q59['fuel'] > 0 or _q59['ammo'] > 0):
+        _ask_f = _q59['fuel'] if _q59['fuel'] > 0 else _ask_f                 # v612f5: the plane's own weights
+        _ask_a = _q59['ammo']
     _draw = _tc_pool_draw(s, _ask_a, _ask_f)
     if _draw is None:
         # unmapped terrain: serve arcade-style rather than deny (same rationale as the poll)
@@ -19391,8 +20455,8 @@ def _grant_spawn_supply(s):
     # one AIRCRAFT unit of the camp per spawn; when none is built, spend a TANK unit and narrate.
     _unit_note = ''
     if UNITS_MODEL and SPAWN_SPENDS_UNITS:
-        if camp_units_take(s.current_room, s.nation, 'aircraft', 1) < 1:
-            if camp_units_take(s.current_room, s.nation, 'tank', 1) >= 1:
+        if camp_units_take(s.current_room, s.nation, 'aircraft', 1, prefer_xy=getattr(s, '_pos_xy', None)) < 1:
+            if camp_units_take(s.current_room, s.nation, 'tank', 1, prefer_xy=getattr(s, '_pos_xy', None)) >= 1:
                 _flags |= 0x08; _unit_note = ' [no aircraft unit - TANK unit spent, narrated]'
             else:
                 _unit_note = ' [no units built at all - spawned anyway]'
@@ -19444,6 +20508,17 @@ def _handle_ask_resources_59(s, pl):
             log('RELBUDGET', f'{s.current_pilot} EXIT-TO-HQ at reliable total={_rtot}{_wall} :: {_brk}')
         return
     now = time.time()
+    # v612f5 [REAL LOADOUT WEIGHTS]: the ask carries the plane's own numbers (live 09-09, after the
+    # [3b][u16 ident][u16 scene|flags] head): [u16 0][u16 fuel][u16 ammo][u16 fuel][u16 ammo-alt]
+    # [u16 fuel/2][u16 ammo-alt/2] - fighter 363/1258, Lancaster-class 1156/4257, Dakota 315/0;
+    # the later pairs are the GetFuel/AmmoWhenLim 50% fallbacks. These are the wiki's 'physical
+    # weight of the fuel and ammunition' and replace the per-class guesses in the draw.
+    try:
+        if len(pl) >= 23:
+            _q = struct.unpack_from('<7H', bytes(pl), 9)
+            s._ask59 = {'fuel': int(_q[1]), 'ammo': int(_q[2]), 'fuel_alt': int(_q[3]), 'ammo_alt': int(_q[4])}
+    except Exception:
+        s._ask59 = None
     # AIRBORNE GUARD only - see the block comment above for why there is no spawn grace here.
     try:
         _mv = plane_movement(s)
@@ -20043,6 +21118,15 @@ def handle_post_auth(s, cmd, pl):
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
             if sub in (0xce, 0xca, 0xcb):
                 if sub == 0xce:
+                    # v611f5 [LOBBY RE-INIT]: 0xce (squadron list) is the first request of a lobby
+                    # (re)initialisation - the client has just wiped its room table. Drop the
+                    # per-session 212 GAME_DEF cache so the next 0xd2 primes every room again;
+                    # with the cache kept, Taurus (live 09-09 19:44) got list rows with no
+                    # GAME_DEF behind them and could not enter any arena (no traffic on click).
+                    if getattr(s, '_gamedef_sent', None):
+                        log('ARENALIST', f'{s.current_pilot}: lobby re-init (0xce) - GAME_DEF cache cleared '
+                                         f'({len(s._gamedef_sent)} room(s) will be re-primed)')
+                        s._gamedef_sent = {}
                     sqns = db_get_approved_squadrons(s.current_pilot)
                     resp = build_squadronlist(sqns)
                     raw_len = len(resp) - 4
@@ -21009,7 +22093,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
@@ -21024,6 +22108,8 @@ def handle_post_auth(s, cmd, pl):
                 _handle_para_request_113(s, stored)     # v589f5: paratroop load/unload request
             elif sub == 0x6a:
                 _handle_cargo_request_106(s, stored)    # v606f5: cargo pick-up / drop
+            elif sub == 0x69:
+                _handle_give_rsc_105(s, stored)         # v609f5: air-dropped cargo chutes
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
