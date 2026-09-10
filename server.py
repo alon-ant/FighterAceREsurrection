@@ -325,7 +325,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v630f5'
+VERSION = 'v632f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9730,10 +9730,13 @@ def tc_scene_xy(terrain, sidx):
         return float(g[sidx]['x']), float(g[sidx]['y']), g[sidx].get('type_name') or 'scene'
     return None
 
-def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty):
-    """Nearest scene of `camp` whose type is a tank producer, as (sidx, x, y, dist) or None."""
+def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty, n_want=0):
+    """Nearest scene of `camp` whose type is a tank producer, as (sidx, x, y, dist) or None.
+    v631f5 (wiki 'Reaction To Triggers'): with n_want > 0, the nearest factory holding ALL n_want
+    tank units wins; if none holds that many, the nearest with the MOST (> 0); factories with no
+    stock are skipped. A trigger no longer drains one factory while the others sit full."""
     table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
-    best = None
+    cands = []
     for sidx, c in table.items():
         if c != camp:
             continue
@@ -9744,9 +9747,24 @@ def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty):
         if not sxy:
             continue
         d = math.hypot(sxy[0] - tx, sxy[1] - ty)
-        if best is None or d < best[3]:
-            best = (sidx, sxy[0], sxy[1], d)
-    return best
+        units = scene_units_state(room_id, sidx)['tank'] if UNITS_MODEL else n_want
+        cands.append((d, sidx, sxy[0], sxy[1], units))
+    if not cands:
+        return None
+    cands.sort()
+    if n_want > 0 and UNITS_MODEL:
+        full = [c for c in cands if c[4] >= n_want]
+        if full:
+            d, sidx, x, y, _u = full[0]
+            return (sidx, x, y, d)
+        some = [c for c in cands if c[4] > 0]
+        if some:
+            d, sidx, x, y, _u = max(some, key=lambda c: (c[4], -c[0]))
+            return (sidx, x, y, d)
+        d, sidx, x, y, _u = cands[0]
+        return (sidx, x, y, d)
+    d, sidx, x, y, _u = cands[0]
+    return (sidx, x, y, d)
 
 def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
     """Wiki rule: the camp's nearest tank producer to the target raises as many fully loaded
@@ -9770,7 +9788,7 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
             tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
             return None
-    fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1])
+    fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1], n_want=n_want)
     if fac is None or fac[3] > TC_TANK_LINK_RADIUS_M:
         # v602f5 film wording (the wiki's TankProducerLinkRadius rule)
         tc_say(room_id, f'AI: The scene {tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2].strip()} at '
@@ -9799,8 +9817,8 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         tc_mission_lines(room_id, camp, tcamp, purpose, (lx, ly), txy, trigger_pilot)
         log('TC', f'room {room_id}: column {gid} re-tasked ({purpose} scene {target_sidx}) - switch strategy')
         return gid
-    # units: what the camp has built; loadout: what the pool can equip
-    have = camp_units_state(room_id, camp)['tank'] if UNITS_MODEL else n_want
+    # units: what THIS factory holds (v631f5 per-scene stock); loadout: what the pool can equip
+    have = scene_units_state(room_id, fsidx)['tank'] if UNITS_MODEL else n_want
     n = min(n_want, have)
     if n <= 0:
         tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
@@ -11071,7 +11089,12 @@ def _recreate_near_pilots():
     soldier / train the client doesn't hold that is now within REJOIN_RADIUS_M of the pilot is
     re-created for him (at most RECREATE_CHUNK per second)."""
     for s in list(get_all_sessions()):
+        # v632f5 [CTD FIX - live 09-10 messages68 'Assertion failed (Me)' Network.cpp:190]: a
+        # create arrived at a client that had just left the world (out 67) - his _pos_xy was the
+        # last in-flight position. Only sessions with a CONFIRMED live plane are served.
         if not getattr(s, 'entered_game', False) or getattr(s, 'addr', None) is None:
+            continue
+        if not getattr(s, 'flying', False) or not getattr(s, 'obj_confirmed', False) or getattr(s, 'my_obj_number', None) is None:
             continue
         pos = s.__dict__.get('_pos_xy')
         rid = s.current_room
@@ -15316,6 +15339,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     # next out-4 (the plane-change flow still re-arms ServerConfirm correctly).
     if not getattr(s, 'flying', False):
         s.obj_confirmed = False; s.flying = False   # new spawn -> re-ServerConfirm on its out 4
+        s.__dict__.pop('_pos_xy', None)             # v632f5: no stale in-flight position
     else:
         s.sp_regrant_pending = True   # alive landed-TAB: keep world flags; defer to next out-4
     # v416f5: mark the grant->ServerConfirm window. Between this grant and CONFIRM5 the client
