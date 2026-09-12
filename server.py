@@ -292,6 +292,8 @@ TODO list:
       (slot 2). 'Aircraft/Tank/Ship units' on Ctrl-L / HQ are 'value of deployed units', not a
       stock (10,417 = a loco + 8 wagons; 1,562 = one Tempest). Authentic 2009 behaviour; the
       resources rows are ours. Nothing to feed.
+  [ ] (UI, 2026-09-12) SCOREBOARD CUSTOM MESSAGE - a server text on the Ctrl-L Country Scores board
+      (event title / winner line). Feed unknown - the panel draws only the 22 rows + production.
   [ ] (TC, 2026-09-10) CONSOLE + MULTI-ROOM - `tc` / `train` console verbs act on the FIRST in-game
       room; with two arenas up they need a room argument (supply <room> <scene> already has one).
   [ ] (TC, 2026-09-10) TRAINS - NetTrain Type 4 (74B header, 21B update) + rail network.
@@ -325,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v638f5'
+VERSION = 'v664f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1159,6 +1161,53 @@ def pilot_name_vulgar(name):
 
 _PILOT_CREATE_LOCK = threading.Lock()
 
+def pilot_create_validate(s, new_name, stored, label='create-pilot refusal'):
+    """v639f5: ONE validator for every create framing (direct 0x22, prefixed, compound-wrapped).
+    Returns True when the create may proceed; otherwise the refusal has been sent (chat line +
+    the client's result dialog) and the caller must return without creating."""
+    if not new_name:
+        return True
+    if is_reserved_name(new_name):
+        log('MODERATOR', f'REFUSED reserved pilot name "{new_name}" (staff tag) - not created')
+        send_rel(s, build_chat_broadcast('Server', f'The name "{new_name}" is reserved for staff and cannot be used.'),
+                 '<- reserved-name refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, label); return False
+    if pilot_name_invalid(new_name):
+        log('PILOT', f'REFUSED pilot name "{new_name}" - prohibited characters')
+        send_rel(s, build_chat_broadcast('Server', 'Pilot names may only use letters, digits, - and _.'),
+                 '<- invalid-name refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_INVALID, label); return False
+    if pilot_name_vulgar(new_name):
+        log('PILOT', f'REFUSED pilot name "{new_name}" - vulgar (server list)')
+        lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, label + ' (vulgar)'); return False
+    if db_pilot_name_taken(new_name):
+        log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
+        send_rel(s, build_chat_broadcast('Server', f'A pilot named "{new_name}" already exists. Choose another name.'),
+                 '<- duplicate-name refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_NAME_TAKEN, label); return False
+    if db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT:
+        log('PILOT', f'REFUSED pilot "{new_name}" - account {s.account} already has {MAX_PILOTS_PER_ACCOUNT} pilots')
+        send_rel(s, build_chat_broadcast('Server', f'This account already has {MAX_PILOTS_PER_ACCOUNT} pilots. Delete one to create another.'),
+                 '<- pilot-limit refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, label); return False
+    return True
+
+def pilot_create_commit(s, new_name):
+    """Count + insert under the lock; a same-name create within 3 s is the client's retry.
+    Returns True when a pilot was created (or the retry was absorbed), False when refused."""
+    with _PILOT_CREATE_LOCK:
+        _last = s.__dict__.get('_last_create')
+        if _last and _last[0] == new_name and time.time() - _last[1] < 3.0:
+            log('PILOT', f'duplicate create of "{new_name}" within 3 s ignored (retry framing)')
+            return True
+        if db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT or db_pilot_name_taken(new_name):
+            log('PILOT', f'REFUSED pilot "{new_name}" at commit (locked re-check)')
+            return False
+        s._last_create = (new_name, time.time())
+        slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
+        log('PILOT', f'created "{new_name}" for account {s.account} slot={slot}')
+        return True
+
 def lobby_reply_with_result(s, stored, code, label):
     """Answer a lobby request with the server->client RESPONSE form (type 0x42, bc=2, 33 B data:
     [sub][result][0][0][name...]) - the layout the delete-success reply uses - carrying the
@@ -1245,6 +1294,16 @@ def db_credit_kill(killer_name, victim_name, points, victim_is_bomber=False, los
         if sets:
             conn.execute(f"UPDATE pilots SET {', '.join(sets)} WHERE pilot_name=?", (victim_name,))
     conn.commit(); conn.close()
+    # v651f5: Country Scores rows (per room/camp)
+    try:
+        if killer_name:
+            camp_stat_for_pilot(killer_name, 'bombers_destroyed' if victim_is_bomber else 'fighters_destroyed', 1)
+        if victim_name:
+            camp_stat_for_pilot(victim_name, 'planes_lost_to_ai' if lost_to_ai else 'planes_lost', 1)
+            if count_pilot_death:
+                camp_stat_for_pilot(victim_name, 'pilots_lost', 1)
+    except Exception:
+        pass
     # v545f5: mirror onto the squadrons each party is flying under (1:1 with the pilot credits)
     if killer_name:
         db_squadron_score_add(killer_name, dscore=points, dkills=1)
@@ -3912,6 +3971,122 @@ def console_handler():
                 if len(parts) < 2: log('CONSOLE', 'Usage: gen <account_name>')
                 else: cmd_gen_ticket(parts[1].strip())
             # --- v301 moderator management (CONSOLE ONLY - no network path writes these) ---
+            elif cmd == 'campscore':
+                # v651f5: campscore [room]  - push the Country Scores (msg 43 + 40) now; 'campscore reset <room>';
+                # v652f5: 'campscore probe <pilot>' - msg 43 with slot markers (slot i -> 1001+i, extras 2001/2002/2003)
+                # for every camp, so the Ctrl-L rows read back which dword feeds them
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    if _a and _a[0] == 'probe2':
+                        # float markers in the unclaimed slots: slot i -> float (i + 0.5) x 10 -> the score rows read
+                        # back which slot feeds them (65 = slot 6, 75 = slot 7, 85 = 8, 95 = 9, 145, 195, 205, 215)
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'campscore probe2: pilot {_a[1]!r} not online')
+                        else:
+                            _tkey = _probe_terrain_for_room(_t.current_room)
+                            _camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(_tkey) or {}).values() if c is not None and c <= 7}) or [0, 1, 2, 3, 4]
+                            for _c in _camps:
+                                _raw = bytearray(22 * 4)
+                                for _i in (6, 7, 8, 9, 14, 19, 20, 21):
+                                    struct.pack_into('<f', _raw, _i * 4, (_i + 0.5) * 10 + 1000 * _c)
+                                _body = bytes([0x2b, _c & 0xff]) + bytes(_raw) + struct.pack('<iii', 0, 0, 0)
+                                send_rel(_t, build_ingame_pkt(_body), f'<- CAMPSCORE PROBE2 camp {_c}', to=3.0)
+                            log('CONSOLE', f'campscore probe2 -> {_a[1]}: score rows show (slot+0.5)*10 (+1000c). Press Ctrl-L.')
+                    elif _a and _a[0] == 'probe':
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'campscore probe: pilot {_a[1]!r} not online')
+                        else:
+                            _tkey = _probe_terrain_for_room(_t.current_room)
+                            _camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(_tkey) or {}).values() if c is not None and c <= 7}) or [0, 1, 2, 3, 4]
+                            for _c in _camps:
+                                _vals = [1001 + i + 100 * _c for i in range(22)]
+                                _body = bytes([0x2b, _c & 0xff]) + struct.pack('<22i', *_vals) + struct.pack('<iii', 2001 + 100 * _c, 2002 + 100 * _c, 2003 + 100 * _c)
+                                send_rel(_t, build_ingame_pkt(_body), f'<- CAMPSCORE PROBE camp {_c}', to=3.0)
+                            log('CONSOLE', f'campscore probe -> {_a[1]}: camp c rows show 1001+i+100c (i = dword index 0..21), extras 2001/2002/2003 (+100c). Press Ctrl-L.')
+                    elif _a and _a[0] == 'reset':
+                        _rid = int(_a[1], 0)
+                        with _CAMP_STATS_LOCK:
+                            for k in [k for k in CAMP_STATS if k[0] == _rid]:
+                                CAMP_STATS.pop(k, None)
+                        log('CONSOLE', f'campscore: room {_rid} counters cleared')
+                    else:
+                        _rooms = [int(_a[0], 0)] if _a else sorted(_active_ingame_rooms())
+                        for _rid in _rooms:
+                            _n = broadcast_camp_scores(_rid, reason='(console)')
+                            broadcast_production_40(_rid, reason='(console campscore)', force=True)
+                            log('CONSOLE', f'campscore: room {_rid} -> {_n} msg-43 send(s); stats {dict((k[1], v) for k, v in CAMP_STATS.items() if k[0] == _rid)}')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: campscore [room] | campscore reset <room>')
+            elif cmd == 'kick':
+                # v649f5/v650f5: kick <pilot> [87|74|47|48] [text]  - 87 (default) = graceful remove to the lobby
+                # (FA MISSION::ShutDown 'game reset' path, session stays connected); 74 = 'AI client has
+                # finished the game, please choose another game' (events). 47/48 = custom-text variants,
+                # STILL UNSAFE (47 CTD 09-12) - handlers to be defined before use.
+                _a = (parts[1].split(None, 2) if len(parts) > 1 else [])
+                try:
+                    _name = _a[0]; _m = int(_a[1]) if len(_a) > 1 else 87; _txt = _a[2] if len(_a) > 2 else 'You have been removed from the arena'
+                    _t = next((x for x in get_all_sessions() if x.current_pilot == _name), None)
+                    if _t is None:
+                        log('CONSOLE', f'kick: pilot {_name!r} not online')
+                    else:
+                        if _m in (47, 48):
+                            log('CONSOLE', f'kick: msg {_m} is unsafe (47 CTD 09-12) - not sent'); raise IndexError('unsafe')
+                        if _m == 74:
+                            _body = bytes([0x4a, 0x00])
+                        elif _m == 87:
+                            _body = bytes([0x57])
+                        else:
+                            _body = bytes([_m & 0xff]) + _txt.encode('latin1', 'replace')[:120] + b'\x00'
+                        _pkt = build_ingame_pkt(_body)
+                        send_rel(_t, _pkt, f'<- KICK probe msg {_m} to {_name}', to=3.0)
+                        log('CONSOLE', f'kick: msg {_m} sent to {_name} ({_body[:8].hex()}...) - watch the client')
+                except (IndexError, ValueError) as e:
+                    log('CONSOLE', f'usage: kick <pilot> <74|87|47|48> [text]  ({e})')
+            elif cmd == 'boot':
+                # v648f5: boot <pilot> [text]  - the 2009 soft boot: EShutDown with text (counter -> orderly exit)
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                try:
+                    _name = _a[0]; _txt = _a[1] if len(_a) > 1 else 'You have been removed from the arena'
+                    _t = next((x for x in get_all_sessions() if x.current_pilot == _name), None)
+                    if _t is None:
+                        log('CONSOLE', f'boot: pilot {_name!r} not online')
+                    else:
+                        send_shutdown(_t, _txt); log('CONSOLE', f'boot: EShutDown sent to {_name}')
+                except IndexError:
+                    log('CONSOLE', 'usage: boot <pilot> [text]')
+            elif cmd == 'say':
+                # v646f5: say <room|all> <text>  - yellow server system message (vcnc 0xc9)
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                try:
+                    _tgt, _txt = _a[0], _a[1]
+                    if _tgt == 'all':
+                        _n = sum(1 for p in get_all_sessions() if send_system_msg(p, _txt))
+                        log('CONSOLE', f'say: -> {_n} session(s)')
+                    else:
+                        room_system_msg(int(_tgt, 0), _txt)
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: say <room|all> <text>')
+            elif cmd == 'vcnc':
+                # v645f5 PROBE: vcnc <pilot> <cmd hex> [payload hex]  - send a control packet (type 0x40,
+                # command word) to one client. Candidates from FA.exe FUN_007e7450 (Conductor notifications):
+                # 0x8028 FATALSHUTDOWN, 0x8029 FATALTIMEOUT, 0x802c FATALLOSTCONNECTION, 0x8046 SUSPEND,
+                # 0x8047 RESUME, 0x805a..0x805d -> app event callback 0..3 (user/appspace events), 0x806e.
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    _name = _a[0]; _c = int(_a[1], 16)
+                    _t = next((x for x in get_all_sessions() if x.current_pilot == _name), None)
+                    if _t is None:
+                        log('CONSOLE', f'vcnc: pilot {_name!r} not online')
+                    else:
+                        _pl = bytearray(80); _pl[0] = 0x00; _pl[1] = 0x40; _pl[2] = (_c >> 8) & 0xff; _pl[3] = _c & 0xff
+                        if len(_a) > 2:
+                            _extra = bytes.fromhex(_a[2]); _pl[4:4 + len(_extra)] = _extra
+                        send_rel(_t, bytes(_pl), f'<- VCNC probe cmd 0x{_c:04x} to {_name}', to=3.0)
+                        log('CONSOLE', f'vcnc: cmd 0x{_c:04x} sent to {_name} - watch the client')
+                except (IndexError, ValueError) as e:
+                    log('CONSOLE', f'usage: vcnc <pilot> <cmd hex> [payload hex]  ({e})')
             elif cmd == 'mod':
                 if len(parts) < 2:
                     log('CONSOLE', f'Usage: mod <pilot_name> [rights]   (default {MOD_RIGHTS_DEFAULT}; any non-zero = full mod)')
@@ -4030,6 +4205,33 @@ def console_handler():
                 n = cleanup_custom_arenas(force=True, by=f'console:{_src}')
                 log('CONSOLE', f'cleanup: {n} custom arena(s) removed '
                                f'(empty + not persistent; persistent/occupied/official kept)')
+            elif cmd == 'modact':
+                # v642f5: modact <pilot> explode|disarm|engine|crash  - the client's native msg-127 actions
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _subs = {'explode': 1, 'disarm': 2, 'engine': 3, 'crash': 4}
+                try:
+                    _name, _what = _a[0], _a[1].lower()
+                    _t = next((x for x in get_all_sessions() if x.current_pilot == _name), None)
+                    if _t is None or getattr(_t, 'player_index', None) is None:
+                        log('CONSOLE', f'mod: pilot {_name!r} not online / no player index')
+                    elif _what not in _subs:
+                        log('CONSOLE', 'usage: modact <pilot> explode|disarm|engine|crash')
+                    else:
+                        _npkt = bytes([0x00, 0x42, 0x00, 0x00, 0x7f]) + struct.pack('<H', _t.player_index & 0xffff) + bytes([_subs[_what]])
+                        send_rel(_t, _npkt, f'<- MOD {_what} (127 sub {_subs[_what]}) to {_name}', to=3.0)
+                        log('CONSOLE', f'mod: {_what} sent to {_name}')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: modact <pilot> explode|disarm|engine|crash')
+            elif cmd == 'reset':
+                # v640f5: reset <room> [winner_camp]  - announce, count down, boot everyone, rebuild
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    _rid = int(_a[0], 0)
+                    _w = int(_a[1], 0) if len(_a) > 1 else None
+                    arena_reset(_rid, winner_camp=_w, by='console')
+                    log('CONSOLE', f'reset: room {_rid} winner {_w} - running')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: reset <room> [winner_camp]')
             elif cmd == 'train':
                 # v613f5: train <road> <node> [wagons] [camp] | train speed <onum> <mps> | train del <onum> | train list
                 global TRAIN_LOCO_CLASS, TRAIN_WAGON_CLASS, TRAIN_STATE_MOVING, TRAIN_SPEED_UNIT
@@ -11203,6 +11405,330 @@ def _recreate_near_pilots():
 
 REJOIN_RADIUS_M = 30000.0
 
+# --- v640f5 ARENA RESET ------------------------------------------------------------------
+# Console `reset <room> [winner_camp]`, the web 'Reset' button, or the TC WIN CHECK (room setting
+# tc_win_mode: 'off' | 'all' = a camp owns every ownable scene | 'wipeout' = a camp that had
+# scenes has none left) -> announce ('<Country> has won!' when there is a winner, then 'Arena
+# reset, please leave the arena.'), a 3-2-1 'You will be disconnected in N' countdown, then every
+# session is booted: a flying pilot's plane is ended through the native moderator action (msg
+# 127 sub 1 = the client runs its own death -> HQ), then the 0xDA lobby attach (msg 218, what the
+# client processes on every back-to-lobby) + the server-side leave. Finally the room state is
+# rebuilt: ownership from the GAME_DEF territories, stores re-seeded, units cleared, every AI
+# object (tanks, soldiers, trains, columns, sticks, triggers) removed, destroyed objects cleared.
+RESET_COUNTDOWN_S = 3
+RESET_EMPTY_WAIT_S = 25          # v650f5: wait for the msg-87 leavers (10 s client countdown + exit) before rebuilding
+RESET_END_FLIGHT_SUB = None   # v641f5: msg-127 sub used to end a flight before the boot; 1 = EXPLODE (seen
+                              # 09-11 'You have blown up') - disabled until the handler (0x4f4370) names a
+                              # clean one. With None the 0xDA attach alone is sent.
+
+RESET_USE_EXIT_APPSPACE = False  # v643f5: tried 09-11 - the transport swallowed cmd 5 with no reaction
+RESET_DISCONNECT = False         # v643f5: True = after the countdown, DISCONNECT the sessions immediately
+RESET_LEAVE_GRACE_S = 60         # v644f5: keep-in mode: grace announced after the reset
+RESET_GRACE_DISCONNECT = False   # v647f5: OFF (user) - the raw transport teardown is hard on the client
+RESET_SHUTDOWN_TEXT = None       # v648f5: when set (e.g. 'Arena reset - returning to the lobby'), stragglers get
+                                 # the vcnc EShutDown (0xc8) WITH this text: the client's FM_SHUTDOWN counter shows
+                                 # it, then the client runs its orderly mission exit and quits; the LAUNCHER is what
+                                 # brings the player back to the lobby (2009 loader behaviour: relaunch on exit).
+
+def send_shutdown(s, text=''):
+    """vcnc EShutDown (class-0 cmd 0xc8): FM_SHUTDOWN on the client with our text (messages17
+    09-11: empty text -> 26 s counter -> orderly exit -> 'please restart your game')."""
+    body = bytearray(80)
+    body[0] = 0x00; body[1] = 0x40; body[2] = 0x00; body[3] = 0xc8
+    tb = (text or '').encode('latin1', 'replace')[:74] + b'\x00'
+    body[4:4 + len(tb)] = tb
+    return send_rel(s, bytes(body), f'<- SHUTDOWN: {text[:60]!r}', to=3.0)
+
+def send_game_reset_87(s, reason=''):
+    """v650f5 THE GRACEFUL REMOVE (field-verified 09-12): msg 87 [0x57] -> the client's
+    MISSION::ShutDown(string 0xe0 'game reset', 0, 1): a dialog + 10 s countdown while a plane is
+    alive, then the mission is torn down, VNET reset and the client goes to its LOBBY state on
+    its own - the session stays connected. (msg 74 [0x4a][0] = 'AI client has finished the game,
+    please choose another game' - the events variant.)"""
+    return send_rel(s, build_ingame_pkt(bytes([0x57])), f'<- GAME RESET 87 {reason}', to=3.0)
+
+def send_game_over_74(s, reason=''):
+    return send_rel(s, build_ingame_pkt(bytes([0x4a, 0x00])), f'<- GAME OVER 74 {reason}', to=3.0)
+
+def arena_boot_session(s, reason=''):
+    """Send one in-world session back to the lobby as cleanly as the protocol allows. There is no
+    server-driven lobby exit in this client (msg 63 skips the local player, msg 127 is damage only,
+    0xDA does not switch screens from inside the world, vcnc cmd 5 is ignored) - so either a hard
+    disconnect (RESET_DISCONNECT) or nothing beyond the announcements."""
+    try:
+        if RESET_END_FLIGHT_SUB is not None and getattr(s, 'flying', False) and getattr(s, 'player_index', None) is not None:
+            _npkt = bytes([0x00, 0x42, 0x00, 0x00, 0x7f]) + struct.pack('<H', s.player_index & 0xffff) + bytes([RESET_END_FLIGHT_SUB & 0xff])
+            send_rel(s, _npkt, f'<- RESET: native end-of-flight (sub {RESET_END_FLIGHT_SUB}) for {s.current_pilot}', to=3.0)
+            time.sleep(0.5)
+        if RESET_USE_EXIT_APPSPACE:
+            _xp = bytearray(80); _xp[0] = 0x00; _xp[1] = 0x40; _xp[2] = 0x00; _xp[3] = 0x05
+            send_rel(s, bytes(_xp), f'<- RESET: vcnc ExitAppSpace (cmd 5) to {s.current_pilot}', to=3.0)
+            time.sleep(0.5)
+        if RESET_DISCONNECT:
+            log('RESET', f'{s.current_pilot} disconnected {reason}')
+            _teardown_session(s, why='(arena reset)')
+            return
+        # keep-in mode: the client stays in the world, so the server keeps its session in-world too
+        log('RESET', f'{s.current_pilot} stays in the arena {reason} (no server-driven lobby exit exists)')
+        return
+        try:
+            pkt = build_da_session_safe(rights=getattr(s, 'rights', 0) or 0, squadron_id=getattr(s, 'squadron_id', 0) or 0)
+        except Exception:
+            pkt = build_da_session(0, 0)
+        send_rel(s, pkt, f'<- RESET: 0xDA lobby attach for {s.current_pilot}', to=3.0)
+        handle_leave_arena(s)
+        log('RESET', f'{s.current_pilot} booted to the lobby {reason}')
+    except Exception:
+        logx('RESET', f'boot of {getattr(s, "current_pilot", "?")} failed')
+
+def arena_reset_state(room_id):
+    """Rebuild the room's world state from the GAME_DEF (ownership, stores, units, AI objects)."""
+    tkey = _probe_terrain_for_room(room_id)
+    for onum in [o for o, t in list(TANKS.items()) if t['room'] == room_id]:
+        delete_tank(onum, reason='(arena reset)')
+    for gid in [g for g, c in list(COLUMNS.items()) if c['room'] == room_id]:
+        COLUMNS.pop(gid, None)
+    delete_soldiers([o for o, sd in list(SOLDIERS.items()) if sd['room'] == room_id], reason='(arena reset)')
+    for sid in [k for k, st in list(STICKS.items()) if st['room'] == room_id]:
+        STICKS.pop(sid, None)
+    for onum in [o for o, tr in list(TRAINS.items()) if tr['room'] == room_id]:
+        delete_train(onum, reason='(arena reset)')
+    for key in [k for k in list(TRIGGERS) if k[0] == room_id]:
+        TRIGGERS.pop(key, None)
+    for key in [k for k in list(_TRAIN_LOST_AT) if k[0] == room_id]:
+        _TRAIN_LOST_AT.pop(key, None)
+    # ownership back to the GAME_DEF assignment
+    ROOM_TERRITORIES_APPLIED.pop(room_id, None)
+    base = SCENE_TERRITORY_BY_TERRAIN.get(_tbase(tkey))
+    if base:
+        SCENE_CAMP_BY_TERRAIN[tkey] = dict(base)
+    apply_room_territories(room_id, reason='(arena reset)')
+    # destroyed objects + repair clocks + stores + units
+    with _OBJ_REPAIR_LOCK:
+        for key in [k for k in list(_SCENE36_DESTROYED) if k[0] == room_id]:
+            _SCENE36_DESTROYED.discard(key)
+        for d in (_OBJ_DEAD_AT, _OBJ_ARMED_AT):
+            for key in [k for k in list(d) if k[0] == room_id]:
+                d.pop(key, None)
+    for key in [k for k in list(GROUND_HP) if k[0] == room_id]:
+        GROUND_HP.pop(key, None)
+    for key in [k for k in list(SCENE_HP) if k[0] == room_id]:
+        SCENE_HP.pop(key, None)
+    with _SUPPLY_LOCK:
+        for key in [k for k in list(_SUPPLY) if k[0] == room_id]:
+            _SUPPLY.pop(key, None)
+    with _SUPPLY_UNITS_LOCK:
+        for key in [k for k in list(_SCENE_UNITS) if k[0] == room_id]:
+            _SCENE_UNITS.pop(key, None)
+        for key in [k for k in list(_SUPPLY_UNITS) if k[0] == room_id]:
+            _SUPPLY_UNITS.pop(key, None)
+    try:
+        seed_room_economy(room_id)
+    except Exception:
+        logx('RESET', 'economy re-seed failed')
+    with _CAMP_STATS_LOCK:                                 # v651f5: Country Scores back to zero
+        for key in [k for k in list(CAMP_STATS) if k[0] == room_id]:
+            CAMP_STATS.pop(key, None)
+    log('RESET', f'room {room_id}: world state rebuilt from the GAME_DEF')
+
+def send_system_msg(s, text):
+    """v646f5: vcnc ESystemMsg (class-0 command 0xc9, vcncNet OnPacketRecv -> FA notification
+    0x8032): the client prints the text in YELLOW on its server channel. Field-verified 09-11."""
+    try:
+        body = bytearray(80)
+        body[0] = 0x00; body[1] = 0x40; body[2] = 0x00; body[3] = 0xc9
+        tb = text.encode('latin1', 'replace')[:74] + b'\x00'
+        body[4:4 + len(tb)] = tb
+        return send_rel(s, bytes(body), f'<- SYSMSG: {text[:60]}', to=3.0)
+    except Exception:
+        logx('SYSMSG', 'send failed'); return False
+
+def room_system_msg(room_id, text, camp=None):
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if camp is not None and getattr(p, 'nation', None) != camp:
+            continue
+        if send_system_msg(p, text):
+            n += 1
+    log('SYSMSG', f'room {room_id}{"" if camp is None else f" camp {camp}"}: {text} -> {n}')
+    return n
+
+def arena_reset(room_id, winner_camp=None, reason='', by='console'):
+    """Announce, count down, boot everyone, rebuild. Runs in its own thread."""
+    def _run():
+        sessions = [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]
+        log('RESET', f'room {room_id}: ARENA RESET by {by} {reason} - winner camp {winner_camp}, {len(sessions)} session(s) in-game')
+        if winner_camp is not None:
+            tc_say(room_id, f'AI: {tc_camp_full(winner_camp)} has won!')
+            room_system_msg(room_id, f'{tc_camp_full(winner_camp)} has won!')
+            time.sleep(2.0)
+        tc_say(room_id, 'AI: Arena reset, please leave the arena.')
+        room_system_msg(room_id, 'Arena reset, please leave the arena.')
+        time.sleep(1.5)
+        for n in range(RESET_COUNTDOWN_S, 0, -1):
+            room_system_msg(room_id, f'Arena reset in {n}')
+            time.sleep(1.0)
+        # v650f5: msg 87 to everyone in the world - the client leaves to the lobby by itself (its own
+        # 10 s countdown while flying). The reset only proceeds on an EMPTY arena.
+        for s in sessions:
+            send_game_reset_87(s, reason='(arena reset)')
+            s._reset_kicked_at = time.time()
+        deadline = time.time() + RESET_EMPTY_WAIT_S
+        while time.time() < deadline:
+            still = [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]
+            if not still:
+                break
+            time.sleep(1.0)
+        for s in [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]:
+            # the client is on its way out (or gone) but no leave reached us: close the room side
+            log('RESET', f'{s.current_pilot}: no leave seen {RESET_EMPTY_WAIT_S}s after msg 87 - closing his arena state server-side')
+            try:
+                handle_leave_arena(s)
+            except Exception:
+                logx('RESET', 'forced leave failed')
+        arena_reset_state(room_id)
+        log('RESET', f'room {room_id}: reset complete (arena empty)')
+        return
+        for s in sessions:
+            arena_boot_session(s, reason='(arena reset)')
+        time.sleep(1.0)
+        arena_reset_state(room_id)
+        if not RESET_DISCONNECT:
+            # players are still in the world: push the rebuilt ownership so their maps/HQ agree,
+            # then give them RESET_LEAVE_GRACE_S to leave on their own before the disconnect
+            for s in [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]:
+                try:
+                    send_scene_snapshot_42_to(s, reason='(after arena reset)')
+                except Exception:
+                    pass
+            if RESET_GRACE_DISCONNECT or RESET_SHUTDOWN_TEXT:
+                room_system_msg(room_id, f'The arena has been reset. Leave the arena within {RESET_LEAVE_GRACE_S} seconds or you will be disconnected.')
+                time.sleep(max(0, RESET_LEAVE_GRACE_S - 10))
+                still = [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]
+                if still:
+                    room_system_msg(room_id, 'You will be disconnected in 10 seconds - leave the arena now.')
+                    time.sleep(10)
+                for s in [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]:
+                    if RESET_SHUTDOWN_TEXT:
+                        log('RESET', f'{s.current_pilot} did not leave within {RESET_LEAVE_GRACE_S}s - EShutDown with text')
+                        send_shutdown(s, RESET_SHUTDOWN_TEXT)
+                        continue
+                    log('RESET', f'{s.current_pilot} did not leave within {RESET_LEAVE_GRACE_S}s - disconnected')
+                    try:
+                        _teardown_session(s, why='(arena reset - did not leave)')
+                    except Exception:
+                        logx('RESET', 'grace disconnect failed')
+            else:
+                room_system_msg(room_id, 'The arena has been reset. Please leave the arena and re-enter.')
+    threading.Thread(target=_run, daemon=True).start()
+
+def tc_check_win(room_id):
+    """Once a minute (supply tick): the room's tc_win_mode setting decides."""
+    try:
+        mode = str((db_get_room_settings(room_id) or {}).get('tc_win_mode', 'off')).lower()
+    except Exception:
+        mode = 'off'
+    if mode in ('off', '0', 'none', ''):
+        return
+    tkey = _probe_terrain_for_room(room_id)
+    table = SCENE_CAMP_BY_TERRAIN.get(tkey) or {}
+    owned = {}
+    for sidx, c in table.items():
+        if c is None or c > 7:
+            continue
+        owned[c] = owned.get(c, 0) + 1
+    if not owned:
+        return
+    if globals().setdefault('_RESET_IN_PROGRESS', set()) and room_id in globals()['_RESET_IN_PROGRESS']:
+        return
+    start = globals().setdefault('_TC_START_CAMPS', {})
+    if room_id not in start:
+        start[room_id] = dict(owned)                # camps that had scenes when the check began
+        return
+    winner = None
+    if mode in ('all', 'all_scenes', '1'):
+        if len(owned) == 1:
+            winner = next(iter(owned))
+    elif mode in ('wipeout', 'wipe', '2'):
+        alive = [c for c in start[room_id] if owned.get(c, 0) > 0]
+        if len(alive) == 1 and len(start[room_id]) > 1:
+            winner = alive[0]
+    if winner is not None:
+        globals()['_RESET_IN_PROGRESS'].add(room_id)
+        start.pop(room_id, None)
+        arena_reset(room_id, winner_camp=winner, reason=f'(tc_win_mode={mode})', by='TC win check')
+        threading.Timer(30.0, lambda: globals()['_RESET_IN_PROGRESS'].discard(room_id)).start()
+
+# --- v651f5 COUNTRY SCORES (Ctrl-L) ------------------------------------------------------
+# FA.exe FUN_004f6c90 = msg 43 (0x2b) CAMP SCORE: [0x2b][camp u8][22 x int32 @+2][int32 @+0x5a]
+# [int32 @+0x5e][int32 @+0x62] = 102 B, copied into CAMP_SCORE_PRODUCTION_DATA[camp] (+0x00..)
+# and setting the 'valid' flags; msg 40 fills units/stored/capacity. The 22 dwords are the panel
+# rows in display order (Player vs Player x8, Human vs AI x8, then Scenes, Players + spares).
+# Per-room, per-camp counters accumulated from the events we already book; broadcast every
+# CAMPSCORE_PERIOD_S and at entry.
+# PROBE-VERIFIED 09-12 (campscore probe): dword index -> row: 0 pilots lost, 1 fighters destroyed,
+# 2 bombers destroyed, 3 planes lost, 4 fighter assists, 5 bomber assists, 10 AI fighters, 11 AI
+# bombers, 12 planes lost to AI, 15 ship assists, 16 tanks, 17 ground units, 18 buildings;
+# extra1 (@+0x5a) = Scenes, extra3 (@+0x62) = Players. Score rows are DOUBLES (FLD qword, FA.exe
+# 0x465156/0x465382/0x4665a4): fighter @+0x18 (slots 6-7), bomber @+0x20 (8-9), AI @+0x50 (20-21).
+CAMPSCORE_SLOT = {'pilots_lost': 0, 'fighters_destroyed': 1, 'bombers_destroyed': 2, 'planes_lost': 3,
+                  'fighter_assists': 4, 'bomber_assists': 5, 'ai_fighters_destroyed': 10,
+                  'ai_bombers_destroyed': 11, 'planes_lost_to_ai': 12, 'ship_assists': 15,
+                  'tanks_destroyed': 16, 'ground_units_destroyed': 17, 'buildings_destroyed': 18}
+CAMPSCORE_DOUBLE_OFF = {'fighter_score': 0x18, 'bomber_score': 0x20, 'ai_score': 0x50}
+CAMPSCORE_ROWS = list(CAMPSCORE_SLOT) + list(CAMPSCORE_DOUBLE_OFF) + ['scenes', 'players']
+CAMPSCORE_PERIOD_S = 30.0
+CAMP_STATS = {}                 # (room_id, camp) -> {row: int}
+_CAMP_STATS_LOCK = threading.Lock()
+
+def camp_stat_add(room_id, camp, row, n=1):
+    if room_id is None or camp is None or camp > 7 or row not in CAMPSCORE_ROWS:
+        return
+    with _CAMP_STATS_LOCK:
+        d = CAMP_STATS.setdefault((room_id, int(camp)), {})
+        d[row] = int(d.get(row, 0)) + int(n)
+
+def camp_stat_for_pilot(pilot_name, row, n=1):
+    s = next((x for x in get_all_sessions() if x.current_pilot == pilot_name), None)
+    if s is not None:
+        camp_stat_add(getattr(s, 'current_room', None), getattr(s, 'nation', None), row, n)
+
+def build_camp_score_43(room_id, camp):
+    with _CAMP_STATS_LOCK:
+        d = dict(CAMP_STATS.get((room_id, int(camp)), {}))
+    tkey = _probe_terrain_for_room(room_id)
+    d['scenes'] = sum(1 for c in (SCENE_CAMP_BY_TERRAIN.get(tkey) or {}).values() if c == int(camp))
+    d['players'] = sum(1 for x in get_sessions_in_room(room_id) if getattr(x, 'nation', None) == int(camp))
+    raw = bytearray(22 * 4)
+    for row, i in CAMPSCORE_SLOT.items():
+        struct.pack_into('<i', raw, i * 4, int(d.get(row, 0)))
+    for row, off in CAMPSCORE_DOUBLE_OFF.items():
+        struct.pack_into('<d', raw, off, float(d.get(row, 0)))
+    body = bytes([0x2b, int(camp) & 0xff]) + bytes(raw) + struct.pack('<iii', int(d['scenes']), 0, int(d['players']))
+    return build_ingame_pkt(body)
+
+def broadcast_camp_scores(room_id, reason='', to=None):
+    tkey = _probe_terrain_for_room(room_id)
+    camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(tkey) or {}).values() if c is not None and c <= 7})
+    targets = [to] if to is not None else [x for x in get_sessions_in_room(room_id) if getattr(x, 'entered_game', False)]
+    n = 0
+    for camp in camps:
+        pkt = build_camp_score_43(room_id, camp)
+        for s in targets:
+            _submit_send(send_rel, s, pkt, f'<- CAMPSCORE 43 camp {camp} {reason}', to=3.0); n += 1
+    return n
+
+def _camp_scores_loop():
+    while running:
+        time.sleep(CAMPSCORE_PERIOD_S)
+        try:
+            for rid in _active_ingame_rooms():
+                broadcast_production_info_71_all(rid, reason='(periodic)')   # v660f5: the tally's inputs first
+                broadcast_camp_scores(rid, reason='(periodic)')
+                broadcast_production_40(rid, reason='(periodic, camp scores)', force=True)
+        except Exception:
+            logx('CAMPSCORE', 'periodic broadcast failed')
+
 def is_transport_plane(plane_id):
     try:
         return int(plane_id) in TRANSPORT_PLANE_IDS
@@ -13729,6 +14255,13 @@ def db_bump_pilot_counter(name, col, n=1):
     column (un-migrated DB) -> no-op. Returns the new value or None."""
     if not name or n == 0:
         return None
+    try:                                                   # v651f5: Country Scores rows
+        _row = {'ai_tanks': 'tanks_destroyed', 'ai_ground': 'ground_units_destroyed',
+                'ai_buildings': 'buildings_destroyed', 'assists': 'fighter_assists'}.get(col)
+        if _row:
+            camp_stat_for_pilot(name, _row, n)
+    except Exception:
+        pass
     conn = sqlite3.connect(DB_PATH)
     have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
     if col not in have:
@@ -13754,6 +14287,10 @@ def db_apply_score_delta(name, delta, bomber=False, mode=None):
     """
     if not name:
         return (0, 0, 0)
+    try:                                                   # v651f5: Country Scores score rows
+        camp_stat_for_pilot(name, 'bomber_score' if bomber else 'fighter_score', int(delta))
+    except Exception:
+        pass
     conn = sqlite3.connect(DB_PATH)
     have = {r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()}
     _col = 'bomber_score' if (bomber and 'bomber_score' in have) else 'score'
@@ -16113,28 +16650,13 @@ def handle_compound(s, outer_cmd, pl):
     if inner_type == 0x22 and inner_sub == 0xe2:
         name_raw = inner[6:] if len(inner) > 6 else b''
         new_name = name_raw.split(b'\x00')[0].decode('ascii', 'replace')
-        if new_name and is_reserved_name(new_name):
-            log('MODERATOR', f'REFUSED reserved pilot name "{new_name}" (staff tag) - not created')
-            send_rel(s, build_chat_broadcast('Server',
-                     f'The name "{new_name}" is reserved for staff and cannot be used.'),
-                     '<- reserved-name refusal', to=2.0)
-            # Do NOT echo the create back - without the create echo the client does not register
-            # the pilot, so the reserved name never comes into existence.
-            return
-        if new_name and db_pilot_name_taken(new_name):
-            # DUPLICATE. pilot_name is globally unique. Refusing the echo (as with reserved names)
-            # means the client's create never completes - this is what should surface the native
-            # "name already exists" feedback instead of the old silent select-time soft-block.
-            # A chat line is sent as a guaranteed-visible fallback in case the native box does not
-            # fire on echo-suppression alone.
-            log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
-            send_rel(s, build_chat_broadcast('Server',
-                     f'A pilot named "{new_name}" already exists. Choose another name.'),
-                     '<- duplicate-name refusal', to=2.0)
+        # v639f5: the compound-wrapped create had only two of the checks and refused silently -
+        # a refusal followed by a retry in this framing created the pilot
+        if not pilot_create_validate(s, new_name, inner, 'create-pilot refusal (compound)'):
             return
         if new_name and s.account:
-            slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
-            log('COMPOUND', f'Created "{new_name}" slot={slot}')
+            if not pilot_create_commit(s, new_name):
+                lobby_reply_with_result(s, inner, PILOT_ERR_LIMIT, 'create-pilot refusal (compound commit)'); return
         threading.Thread(target=lambda: send_rel(s, inner, '<- compound create echo', to=5.0), daemon=True).start()
         return
 
@@ -16613,6 +17135,11 @@ def apply_room_territories(room_id, reason=''):
 def send_scene_snapshot_42_to(s, reason=''):
     """v580f5: one msg-42 scene snapshot to a single session (entry-time ownership)."""
     apply_room_territories(s.current_room, reason='(first entry)')     # v610f5
+    try:
+        threading.Timer(2.0, lambda: broadcast_camp_scores(s.current_room, reason='(entry)', to=s)).start()   # v651f5
+        threading.Timer(3.0, lambda: broadcast_production_info_71_all(s.current_room, reason='(entry)', to=s)).start()   # v660f5
+    except Exception:
+        pass
     trn = _probe_terrain_for_room(s.current_room)
     entries = scene_snapshot_entries(trn)
     if not entries:
@@ -17420,6 +17947,10 @@ def _handle_ground_damage_31(s, body, via=''):
                 if _frac > 0:
                     log('AUTOPVE', f'scene {_sc} damage now {int(round(_frac * 100))}% '
                                    f'(destroyed value fraction; map/panel + production follow)')
+                try:
+                    supply_on_building_destroyed(s.current_room, _sc, obj)     # v657f5
+                except Exception:
+                    logx('SUPPLY', 'building loss failed')
                 if trn_scene_complete(s.current_room, _sc):
                     _lost = supply_on_scene_destroyed(s.current_room, _sc)
                     _si = trn_scene_info(s.current_room, _sc) or {}
@@ -18638,7 +19169,20 @@ _SUPPLY_LOCK = threading.Lock()
 # TC arena's Production Complex panel (the authoritative source now).
 _SUPPLY_UNITS = {}                       # (room_id, camp) -> {'aircraft':n,'tank':n,'ship':n} (legacy aggregate)
 _SCENE_UNITS  = {}                       # v621f5: (room_id, scene) -> units HELD at that scene
-UNIT_CAP_PER_SCENE = 20                  # v621f5: max built-not-deployed units of a kind held at one scene
+UNIT_CAP_PER_SCENE = 20                  # v621f5: max built-not-deployed units of a kind held at one scene (default)
+# v656f5: offline-arena startup stocks (user, 09-12): airfields 10 aircraft units, tank factories 27
+# tanks, seeded on the first touch of a room's economy and on arena reset.
+# v657f5: NO CAP on held units (user 09-12: offline the units keep climbing with no combat - constant
+# wartime production; only hits on the scene's buildings and deployments draw them down). UNIT_CAP
+# entries are honoured only if set to a positive number; None = unlimited.
+UNIT_SEED = {'aircraft': 10, 'tank': 27, 'ship': 10}
+UNIT_CAP  = {'aircraft': None, 'tank': None, 'ship': None}
+
+def unit_cap(kind):
+    c = UNIT_CAP.get(kind)
+    if c is None or int(c) <= 0:
+        return 10**9
+    return max(int(c), int(UNIT_SEED.get(kind, 0)))
 _SUPPLY_UNITS_LOCK = threading.Lock()
 UNITS_MODEL        = True                # master switch for the v429f5 units layer
 SPAWN_SPENDS_UNITS = True                # v602f5: a spawn spends an aircraft unit (tank unit + narration when none)
@@ -18672,12 +19216,58 @@ def scene_type_for(terrain, scene_id):
 
 SUPPLY_CAP_MULT = 3.0   # v612f5/v617f5: multiplier on every profile's storage caps (user: bases drain too fast;
                         # 1.0 = the wiki-derived volumes). Applied where caps are read.
+# v655f5 [PER-SCENE PROFILES FROM THE CLIENT'S TABLES]: fa_scene_profiles_trnNN.json (built by
+# fa_build_scene_profiles.py from the class table's production numbers + the RESOURCE_STORAGE /
+# RESOURCE_PRODUCER / UNIT_PRODUCER defs read out of FA.exe) gives every scene ITS OWN caps and
+# rates = the sum of its buildings, exactly what the offline arena runs. When the file for a
+# terrain exists it takes precedence over the per-type wiki profiles; the cap multiplier is NOT
+# applied to it (those volumes are the 2009 ones). SUPPLY_PER_SCENE=False falls back to the types.
+SUPPLY_PER_SCENE = True
+_SCENE_PROFILES = {}       # base terrain -> {'scenes': {sid: {...}}} or None (missing)
+
+def scene_profiles_for(terrain):
+    t = _tbase(terrain)
+    if t in _SCENE_PROFILES:
+        return _SCENE_PROFILES[t]
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'fa_scene_profiles_trn{int(t):02d}.json')
+    data = None
+    try:
+        if os.path.exists(path):
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            n = sum(1 for v in (data.get('scenes') or {}).values() if any((v.get('caps') or {}).values()))
+            log('SUPPLY', f'terrain {t}: per-scene profiles loaded from {os.path.basename(path)} ({n} scenes with storage)')
+    except Exception:
+        logx('SUPPLY', f'per-scene profiles for terrain {t} unreadable'); data = None
+    _SCENE_PROFILES[t] = data
+    return data
+
+def scene_profile_per_scene(terrain, scene_id):
+    data = scene_profiles_for(terrain)
+    if not data:
+        return None
+    sc = (data.get('scenes') or {}).get(str(int(scene_id)))
+    if not sc or not any((sc.get('caps') or {}).values()):
+        return None
+    key = (int(_tbase(terrain)), int(scene_id))
+    cache = globals().setdefault('_SCENE_PROFILE_CACHE', {})
+    p = cache.get(key)
+    if p is None:
+        p = {'caps': {k: int(sc['caps'].get(k, 0)) for k in ('ammo', 'fuel', 'metal')},
+             'rates': {k: int(sc.get('rates', {}).get(k, 0)) for k in ('ammo', 'fuel', 'metal')},
+             'unit_producers': list(sc.get('unit_producers') or []), 'per_scene': True}
+        cache[key] = p
+    return p
 
 def scene_profile(terrain, scene_id, allow_default=False):
     """{'caps':{ammo,fuel,metal}, 'rates':{...}} for a scene, or None if unknown/no economy.
     allow_default=True applies the generic airfield profile when the map isn't in fa_scenes.json -
     only pass that from paths where the scene is known to be a real spawn airfield."""
     st = scene_type_for(terrain, scene_id)
+    if SUPPLY_PER_SCENE:                                   # v655f5
+        pp = scene_profile_per_scene(terrain, scene_id)
+        if pp is not None:
+            return pp
     if not st:
         if allow_default and SUPPLY_UNKNOWN_FALLBACK:
             return _SCENES['profiles'].get(SUPPLY_DEFAULT_TYPE)
@@ -19018,13 +19608,58 @@ def linked_scenes_for(room_id, scene_id):
     return g if g else frozenset({int(scene_id)})
 
 
+LINK_UNIT_M = 500.0          # v662f5: GAME_DEF producer link radii are in 500 m units (panel 'Link
+                             # range 21' = 10.5 km circle on an airfield, 6 = 3 km on a tank factory)
+LINK_DEFAULTS = {'plane_producer_link': 21, 'tank_producer_link': 6, 'ship_producer_link': 21}
+
+def scene_link_radius_m(room_id, terrain, scene_id):
+    """v662f5: the link radius that applies to a scene = its own unit producer's kind (airfields ->
+    plane, tank/metal factories -> tank, ports -> ship); scenes without a producer link nothing."""
+    t = (scene_type_for(terrain, scene_id) or '').lower()
+    if 'airfield' in t:
+        key = 'plane_producer_link'
+    elif 'tank factory' in t or 'metal factory' in t:
+        key = 'tank_producer_link'
+    elif 'port' in t:
+        key = 'ship_producer_link'
+    else:
+        return 0.0
+    v = None
+    try:
+        v = db_get_room_settings(room_id).get(key)
+    except Exception:
+        v = None
+    if v is None:
+        v = TC_DEFAULTS.get(key, LINK_DEFAULTS.get(key))
+    try:
+        return float(v) * LINK_UNIT_M
+    except (TypeError, ValueError):
+        return float(LINK_DEFAULTS.get(key, 0)) * LINK_UNIT_M
+
+def complex_members_geometric(room_id, terrain, scene_id):
+    """v662f5: the scenes inside a producer scene's link circle (same camp, centre distance <= radius),
+    itself included. The client draws exactly this circle + lines on the map; the panel's Complex
+    block is the sum over these."""
+    r = scene_link_radius_m(room_id, terrain, scene_id)
+    me = tc_scene_xy(terrain, scene_id)
+    if r <= 0 or not me:
+        return frozenset({int(scene_id)})
+    camp = scene_camp(terrain, scene_id)
+    out = {int(scene_id)}
+    for sid in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}):
+        if int(sid) == int(scene_id) or scene_camp(terrain, sid) != camp:
+            continue
+        xy = tc_scene_xy(terrain, sid)
+        if xy and math.hypot(xy[0] - me[0], xy[1] - me[1]) <= r:
+            out.add(int(sid))
+    return frozenset(out)
+
 def complex_totals(room_id, scene_id):
-    """v430f5: Production Complex aggregate for the complex a scene belongs to - summed stored +
-    capacity resources over every LINKED scene, plus summed built units over the camps those
-    linked scenes belong to (deduped by camp). Falls back to the scene's own camp when no link
-    group has been observed. Returns (stored, capacity, units) dicts."""
+    """v430f5 / v662f5: Production Complex aggregate = sum over the scenes inside the scene's own
+    producer link circle (geometric, the client's rule); a scene without a producer is its own
+    complex. Returns (stored, capacity, units) dicts."""
     trn = _probe_terrain_for_room(room_id)
-    members = linked_scenes_for(room_id, scene_id)
+    members = complex_members_geometric(room_id, trn, scene_id)
     stored = {'metal': 0, 'fuel': 0, 'ammo': 0}
     capacity = {'metal': 0, 'fuel': 0, 'ammo': 0}
     seen_camps = set()
@@ -19079,7 +19714,7 @@ def _camp_build_units(room_id, terrain, camp):
                 continue
             with _SUPPLY_UNITS_LOCK:
                 su = _SCENE_UNITS.setdefault((room_id, int(sidx)), {'aircraft': 0, 'tank': 0, 'ship': 0})
-                if su[kind] >= UNIT_CAP_PER_SCENE:
+                if su[kind] >= unit_cap(kind):
                     continue
             cap = int(p['caps'].get('metal', 0))
             made = 0
@@ -19091,7 +19726,7 @@ def _camp_build_units(room_id, terrain, camp):
                         made += 1
             if made:
                 with _SUPPLY_UNITS_LOCK:
-                    su[kind] = min(UNIT_CAP_PER_SCENE, su[kind] + made)
+                    su[kind] = min(unit_cap(kind), su[kind] + made)
     return camp_units_state(room_id, camp)
 
 def _camp_build_units_legacy(room_id, terrain, camp):
@@ -19183,6 +19818,48 @@ def _active_ingame_rooms():
             if getattr(x, 'entered_game', False) and x.current_room is not None}
 
 
+def supply_on_building_destroyed(room_id, scene_id, obj_idx):
+    """v657f5: the 2009 loss model per BUILDING (user: hitting targets reduces stored supplies and
+    units). With the per-scene profile we know what the destroyed object was: a storage or
+    producer building loses its share of the scene's stored resource (its volume / the scene's
+    capacity), a unit producer (hangar, tank line) loses its share of the scene's held units.
+    Without a per-scene profile nothing changes here (the whole-scene loss still applies when
+    the last destructible dies)."""
+    trn = _probe_terrain_for_room(room_id)
+    data = scene_profiles_for(trn)
+    if not data:
+        return None
+    sc = (data.get('scenes') or {}).get(str(int(scene_id)))
+    if not sc:
+        return None
+    b = next((x for x in (sc.get('buildings') or []) if int(x.get('obj', -1)) == int(obj_idx)), None)
+    if not b:
+        return None
+    kind = b.get('kind')
+    lost = {}
+    if kind in (0, 1):
+        r = b.get('resource'); vol = int(b.get('max', 0) or 0)
+        cap = int((sc.get('caps') or {}).get(r, 0) or 0)
+        st = _SUPPLY.get((room_id, int(scene_id)))
+        if r in ('metal', 'fuel', 'ammo') and st is not None and cap > 0 and vol > 0:
+            with _SUPPLY_LOCK:
+                share = int(st.get(r, 0) * min(1.0, vol / cap))
+                st[r] = max(0, int(st.get(r, 0)) - share)
+            lost[r] = share
+    elif kind == 2:
+        ukind = {'plane': 'aircraft', 'aircraft': 'aircraft', 'tank': 'tank', 'ship': 'ship'}.get(str(b.get('unit')), None)
+        n_prod = max(1, sum(1 for x in (sc.get('buildings') or []) if x.get('kind') == 2 and x.get('unit') == b.get('unit')))
+        if ukind:
+            with _SUPPLY_UNITS_LOCK:
+                su = _SCENE_UNITS.get((room_id, int(scene_id)))
+                if su:
+                    share = int(round(su.get(ukind, 0) / n_prod))
+                    su[ukind] = max(0, int(su.get(ukind, 0)) - share)
+                    lost[ukind] = share
+    if lost:
+        log('SUPPLY', f'scene {scene_id}: {b.get("name")} (obj {obj_idx}) destroyed - lost {lost}')
+    return lost
+
 def seed_room_economy(room_id):
     """v429f5: ensure every profiled scene a room's terrain owns is seeded in _SUPPLY, so the
     production tick and the msg-40 panel have a full economy from the moment the room is active
@@ -19198,6 +19875,20 @@ def seed_room_economy(room_id):
         st, p = supply_state(room_id, trn, sidx)
         if st is not None:
             n += 1
+        # v656f5: seed the unit stocks like the offline arena at startup (user 09-12): every
+        # airfield starts with UNIT_SEED['aircraft'] aircraft units, every tank factory with
+        # UNIT_SEED['tank'] tank units. Only on first touch (the stock is then live).
+        t = (scene_type_for(trn, sidx) or '').lower()
+        with _SUPPLY_UNITS_LOCK:
+            if (room_id, int(sidx)) not in _SCENE_UNITS:
+                su = {'aircraft': 0, 'tank': 0, 'ship': 0}
+                if 'airfield' in t:
+                    su['aircraft'] = int(UNIT_SEED['aircraft'])
+                if 'tank factory' in t or 'metal factory' in t:
+                    su['tank'] = int(UNIT_SEED['tank'])
+                if 'port' in t:
+                    su['ship'] = int(UNIT_SEED['ship'])
+                _SCENE_UNITS[(room_id, int(sidx))] = su
     return n
 
 
@@ -19255,6 +19946,10 @@ def _supply_chain_step(rid):
         ensure_camp_trains(rid)
     except Exception:
         logx('TRAIN', 'ensure_camp_trains failed')
+    try:
+        tc_check_win(rid)                          # v640f5
+    except Exception:
+        logx('RESET', 'win check failed')
     _camps_with_trains = {tr['camp'] for tr in TRAINS.values() if tr['room'] == rid and tr.get('supply') and not tr.get('dead')}
     for _camp, _scenes in sorted(by_camp.items()):
         if TRAIN_SUPPLY and _camp in _camps_with_trains:
@@ -19501,6 +20196,41 @@ def build_production_info_71(records, hdr=None):
     return build_ingame_pkt(bytes(body))
 
 
+# v658f5: the client's per-camp AVERAGE UNIT COSTS (units / avg = the 'units' figure on the scene
+# panel and the HQ). Read from the client with fa_memdump.py v3 ('avg_unit_cost' in fa_memdump.json,
+# loaded here when present); the defaults are the 2004 value band until a dump replaces them.
+AVG_UNIT_COST_DEFAULT = {'aircraft': 1500, 'tank': 400, 'ship': 5000}
+_AVG_UNIT_COST = None
+
+def avg_unit_costs_for(camp):
+    global _AVG_UNIT_COST
+    if _AVG_UNIT_COST is None:
+        table = {}
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_memdump.json')
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    raw = (json.load(f).get('avg_unit_cost') or {})
+                for k, v in raw.items():
+                    try:
+                        table[int(str(k).replace('camp', ''))] = {'aircraft': int(v.get('plane', 0)),
+                                                                  'tank': int(v.get('tank', 0)),
+                                                                  'ship': int(v.get('ship', 0))}
+                    except (ValueError, AttributeError):
+                        pass
+                if table:
+                    log('SUPPLY', f'average unit costs per camp loaded from fa_memdump.json: {table}')
+        except Exception:
+            logx('SUPPLY', 'avg unit cost load failed')
+        _AVG_UNIT_COST = table
+    d = dict(AVG_UNIT_COST_DEFAULT)
+    got = _AVG_UNIT_COST.get(int(camp)) if camp is not None else None
+    if got:
+        for k, v in got.items():
+            if v > 0:
+                d[k] = v
+    return d
+
 def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
     """The nine arrays for one scene. Resource order is (metal, fuel, ammo) throughout.
 
@@ -19520,8 +20250,56 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
     caps = tuple(int(p['caps'].get(r, 0)) for r in order)
     rates = tuple(int(p['rates'].get(r, 0)) for r in order)
     pct = tuple(0 if c <= 0 else max(0, min(100, s * 100 // c)) for s, c in zip(stored, caps))
-    return {'A': stored, 'B': caps, 'C': pct, 'D': rates, 'E': pct,
-            'F': stored, 'G': caps, 'H': pct, 'I': rates}
+    # v659f5 THE MAPPING, READ BACK FROM THE PANEL (09-12 screenshots, Support Factory 5 + Bomber
+    # Airfield 30): COMPLEX block = A stored (sum over the link group), B UNITS in the cost domain
+    # (the panel shows B / the camp's average unit cost), C storage %; SINGLE SCENE = D produces
+    # per minute (+E %), F stored supplies, G storage capacity (+H %), I stored units (cost
+    # domain). Units x average cost because the client divides by its own per-camp averages
+    # (Game_Dat.cpp FUN_00423760; from fa_memdump.json when present).
+    # v661f5/v662f5: the client does NOT sum the link group itself (09-12 screenshots: Complex ==
+    # Single Scene when A/B/C carried per-scene values). A/B/C = the sum over the scene's own link
+    # circle (complex_totals, geometric), F/G/I per scene. B / I in the cost domain.
+    camp = scene_camp(terrain, scene_id)
+    avg = avg_unit_costs_for(camp)
+    ukinds = ('aircraft', 'tank', 'ship')
+    su = scene_units_state(room_id, scene_id)
+    held = tuple(int(su.get(k, 0)) * int(avg.get(k, 0)) for k in ukinds)
+    cstored, ccaps, cunits = complex_totals(room_id, scene_id)
+    c_stored = tuple(int(cstored.get(r, 0)) for r in order)
+    c_caps = tuple(int(ccaps.get(r, 0)) for r in order)
+    c_pct = tuple(0 if c <= 0 else max(0, min(100, s * 100 // c)) for s, c in zip(c_stored, c_caps))
+    c_units = tuple(int(cunits.get(k, 0)) * int(avg.get(k, 0)) for k in ukinds)   # kept for the log only
+    # B stays PER-SCENE: the client's 60 s camp task sums B over all scene nodes for the HQ / Ctrl-L
+    # units rows (complex sums there = GB 258 for 33 held, v660). Resources A/C are the link-circle sums.
+    return {'A': c_stored, 'B': held, 'C': c_pct, 'D': rates, 'E': pct,
+            'F': stored, 'G': caps, 'H': pct, 'I': held}
+
+
+def broadcast_production_info_71_all(room_id, reason='', to=None):
+    """v660f5: refresh EVERY profiled scene's msg-71 record (chunks of PRODINFO_MAX_SCENES). The
+    client's 60 s camp task sums the stored-units field over ALL its scene nodes for the HQ /
+    Country Scores 'units' rows (user 09-12: GB showed 258 aircraft units for 33 held - the
+    unrefreshed nodes still carried the pre-v659 layouts). Sent at entry and every
+    CAMPSCORE_PERIOD_S ahead of msg 40/43 so the tally has current inputs."""
+    trn = _probe_terrain_for_room(room_id)
+    camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+    sids = [sid for sid in sorted(camps) if scene_profile(trn, sid) is not None]
+    if not sids:
+        return 0
+    targets = [to] if to is not None else [s for s in get_all_sessions()
+                                           if getattr(s, 'entered_game', False) and s.current_room == room_id]
+    if not targets:
+        return 0
+    n = 0
+    for i in range(0, len(sids), PRODINFO_MAX_SCENES):
+        chunk = sids[i:i + PRODINFO_MAX_SCENES]
+        recs = [build_packed_info_71(sid, scene_prodinfo_arrays(room_id, trn, sid)) for sid in chunk]
+        pkt = build_production_info_71(recs)
+        for s in targets:
+            _submit_send(send_rel, s, pkt, f'<- PRODINFO 71 x{len(recs)} (all-scenes refresh)', to=3.0)
+        n += len(chunk)
+    log('PROD71', f'room {room_id}: all-scenes refresh, {n} scene(s) in {(n + PRODINFO_MAX_SCENES - 1) // PRODINFO_MAX_SCENES} packet(s) -> {len(targets)} session(s) {reason}')
+    return n
 
 
 def broadcast_production_info_71(room_id, scene_ids=None, probe=False, reason=''):
@@ -19556,25 +20334,54 @@ MSG_PRODUCTION_40 = 0x28
 # 2009 and the client ingests it all (in 40'38 / in 71'90 in messages45.log) - the ONLY remaining
 # variable is PACKED_INFO byte CONTENT (the array->column map). Resolve via memdump, not the wire.
 SEND_PRODUCTION_40 = False
+# v663f5: the client's 60 s camp task (GRND_send_msg40_camp_production_push -> FUN_00557310)
+# OVERWRITES the three unit slots of every camp record with its own object sums (constant per
+# nation here, unrelated to the stock). msg 40 writes them back, so the stock is re-sent every
+# PROD40_UNITS_PERIOD_S: the HQ page / Ctrl-L show the real units except for a few seconds after
+# each tick. 0 disables the fast cadence (the 30 s camp-score push remains).
+PROD40_UNITS_PERIOD_S = 5.0
 
-def build_production_40(camp, units, stored, capacity):
-    """Build FA msg 40 (0x28) PRODUCTION COMPLEX for one camp. Always 38 bytes.
+def _prod40_fast_loop():
+    while running:
+        time.sleep(max(1.0, PROD40_UNITS_PERIOD_S) if PROD40_UNITS_PERIOD_S > 0 else 30.0)
+        if PROD40_UNITS_PERIOD_S <= 0:
+            continue
+        try:
+            for rid in _active_ingame_rooms():
+                broadcast_production_40(rid, reason='(units keep-alive)', force=True, quiet=True)
+        except Exception:
+            logx('PROD40', 'fast loop failed')
 
-    units    = (aircraft, tank, ship)     -> the three scalars at +0x00/+0x04/+0x08
-    stored   = (metal, fuel, ammo)        -> D[3] at +0x0c
-    capacity = (metal, fuel, ammo)        -> E[3] at +0x18
+def build_production_40(camp, units, stored, capacity, scenes=0, players=0):
+    """Build FA msg 40 (0x28) CAMP PRODUCTION for one camp.
 
-    The camp byte is bounds-checked against 8 by the client, which logs a range assert and keeps
-    going, so an out-of-range camp is noisy rather than fatal - but we clamp anyway.
+    v664f5 THE REAL LAYOUT (FA.exe FUN_004f6e60): the handler copies 14 dwords from payload +2
+    into CAMP_SCORE_PRODUCTION_DATA[camp] + 0x58, so the message is 2 + 56 = 58 bytes:
+      d0  +0x58  scenes owned (the Ctrl-L 'Scenes' row; msg 43 writes it too)
+      d1  +0x5c  (unknown, 0)
+      d2-4  +0x60..+0x68  the client's own live-object sums (its 60 s task rewrites them; 0)
+      d5-7  +0x6c..+0x74  STORED metal / fuel / ammo
+      d8-10 +0x78..+0x80  UNITS aircraft / tank / ship in the COST DOMAIN - the HQ page
+                          (MnDlg_UpdateCampProductionPanel) and Ctrl-L divide these by the
+                          camp's average unit cost (0xc6e578 + camp*0x24)
+      d11-12 +0x84..+0x88 capacity metal / fuel (best guess - the panels don't read them)
+      d13 +0x8c  players (the Ctrl-L 'Players' row; msg 43 extra3 writes it too)
+    The old 38-byte form started 8 bytes early: 'units' landed in the score extras and the
+    capacities in the unit slots (GB 258 = metal cap 75000 / avg plane cost 291).
     """
     body = bytearray([MSG_PRODUCTION_40, camp & 0x07])
-    for v in units:
+    # v664f5 (b) EMPIRICAL ORDER (Ctrl-L after the first 58-byte send: our metal under Ammo, our
+    # fuel under Aircraft units -> the rows read two dwords earlier than the +0x58 arithmetic
+    # suggested). The 38-byte form's stored triplet (d3-d5) was right; its 'capacity' triplet
+    # (d6-d8) IS the units block. Scenes = d0, Players = d2 (the msg-43 extras land there too).
+    d = [int(scenes), 0, int(players),
+         int(stored[0]), int(stored[1]), int(stored[2]),
+         int(units[0]), int(units[1]), int(units[2]),
+         int(capacity[0]), int(capacity[1]), int(capacity[2]),
+         0, 0]
+    for v in d:
         body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
-    for v in stored:
-        body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
-    for v in capacity:
-        body += struct.pack('<I', max(0, int(v)) & 0xFFFFFFFF)
-    assert len(body) == 38, f'msg 40 must be 38 bytes, built {len(body)}'
+    assert len(body) == 58, f'msg 40 must be 58 bytes, built {len(body)}'
     return build_ingame_pkt(bytes(body))
 
 
@@ -19600,7 +20407,7 @@ def camp_economy_totals(room_id, terrain, camp):
     return stored, capacity
 
 
-def broadcast_production_40(room_id, reason='', force=False):
+def broadcast_production_40(room_id, reason='', force=False, quiet=False):
     """Send one msg 40 per active camp to everyone in-game in a room.
     `force=True` bypasses SEND_PRODUCTION_40 (the ambient-broadcast gate) so an explicit
     operator command / diagnostic always fires; the per-tick caller leaves it False."""
@@ -19623,18 +20430,25 @@ def broadcast_production_40(room_id, reason='', force=False):
         if not any(capacity.values()):
             continue
         # v429f5: real built-not-deployed units for this camp, in msg-40 order (aircraft,tank,ship)
+        # v663f5: in the COST DOMAIN - the HQ / Ctrl-L rows show units / the camp's average unit
+        # cost (Game_Dat.cpp), so 10 raw units displayed as 0; n x avg displays as n.
         _u = camp_units_state(room_id, camp)
-        _units = (_u['aircraft'], _u['tank'], _u['ship'])
+        _avg = avg_unit_costs_for(camp)
+        _units = (_u['aircraft'] * int(_avg.get('aircraft', 1)), _u['tank'] * int(_avg.get('tank', 1)),
+                  _u['ship'] * int(_avg.get('ship', 1)))
         pkt = build_production_40(
             camp, _units,
             (stored['metal'], stored['fuel'], stored['ammo']),
-            (capacity['metal'], capacity['fuel'], capacity['ammo']))
+            (capacity['metal'], capacity['fuel'], capacity['ammo']),
+            scenes=sum(1 for c in camps.values() if c == camp),
+            players=sum(1 for x in sess if getattr(x, 'nation', None) == camp))
         for s in sess:
             _submit_send(send_rel, s, pkt, f'<- PRODUCTION 40 camp={camp}', to=3.0)
         sent.append(f'c{camp}:{stored["metal"]}/{stored["fuel"]}/{stored["ammo"]}'
                     f' u={_units[0]}/{_units[1]}/{_units[2]}')
-    log('PROD40', f'room {room_id}: msg 40 x{len(sent)} camp(s) -> {len(sess)} session(s) '
-                  f'{reason} [{" ".join(sent)}]')
+    if not quiet:
+        log('PROD40', f'room {room_id}: msg 40 x{len(sent)} camp(s) -> {len(sess)} session(s) '
+                      f'{reason} [{" ".join(sent)}]')
     return len(sent)
 
 
@@ -19829,9 +20643,14 @@ def _panel_push(s, scene_ids):
             if not any(capacity.values()):
                 continue
             u = camp_units_state(rid, camp)
-            ok40 = send_rel(s, build_production_40(camp, (u['aircraft'], u['tank'], u['ship']),
+            _avg = avg_unit_costs_for(camp)                       # v664f5: cost domain, real layout
+            ok40 = send_rel(s, build_production_40(camp, (u['aircraft'] * int(_avg.get('aircraft', 1)),
+                                                          u['tank'] * int(_avg.get('tank', 1)),
+                                                          u['ship'] * int(_avg.get('ship', 1))),
                                             (stored['metal'], stored['fuel'], stored['ammo']),
-                                            (capacity['metal'], capacity['fuel'], capacity['ammo'])),
+                                            (capacity['metal'], capacity['fuel'], capacity['ammo']),
+                                            scenes=sum(1 for c in (SCENE_CAMP_BY_TERRAIN.get(trn) or {}).values() if c == camp),
+                                            players=sum(1 for x in get_sessions_in_room(rid) if getattr(x, 'nation', None) == camp)),
                      f'<- [panel] PRODUCTION 40 camp={camp}', to=3.0)
             n40 += 1
         sids = scene_ids[:PRODINFO_MAX_SCENES]
@@ -21224,6 +22043,14 @@ def handle_post_auth(s, cmd, pl):
                     time.sleep(0.005); send_rel(s,stored,'<- echo 0xde',to=5.0)
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
             if sub in (0xce, 0xca, 0xcb):
+                if getattr(s, 'entered_game', False) and sub == 0xce:
+                    # v650f5: a lobby (re)init from a session still in-world = the client left the arena
+                    # without a msg 64 (the msg-87 reset path) - close its arena state now
+                    log('LEAVE', f'{s.current_pilot}: lobby init while marked in-world -> implicit leave')
+                    try:
+                        handle_leave_arena(s)
+                    except Exception:
+                        logx('LEAVE', 'implicit leave failed')
                 if sub == 0xce:
                     # v611f5 [LOBBY RE-INIT]: 0xce (squadron list) is the first request of a lobby
                     # (re)initialisation - the client has just wiped its room table. Drop the
@@ -21804,53 +22631,11 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xe2 and s.account:
                 name_raw=pl[6:] if len(pl)>6 else b''
                 new_name=name_raw.split(b'\x00')[0].decode('ascii',errors='replace')
-                if new_name and is_reserved_name(new_name):
-                    log('MODERATOR', f'REFUSED reserved pilot name "{new_name}" (staff tag) - not created')
-                    send_rel(s, build_chat_broadcast('Server',
-                             f'The name "{new_name}" is reserved for staff and cannot be used.'),
-                             '<- reserved-name refusal', to=2.0)
-                    lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, 'create-pilot refusal')   # v635f5
+                # v639f5: shared validator + locked commit (same as the compound-wrapped path)
+                if not pilot_create_validate(s, new_name, stored, 'create-pilot refusal'):
                     return
-                if new_name and pilot_name_invalid(new_name):
-                    # v637f5: prohibited characters (. , / ; ! @ ^ ...) - the client does not filter them
-                    log('PILOT', f'REFUSED pilot name "{new_name}" - prohibited characters')
-                    send_rel(s, build_chat_broadcast('Server',
-                             'Pilot names may only use letters, digits, - and _.'),
-                             '<- invalid-name refusal', to=2.0)
-                    lobby_reply_with_result(s, stored, PILOT_ERR_INVALID, 'create-pilot refusal')
-                    return
-                if new_name and db_pilot_name_taken(new_name):
-                    log('PILOT', f'REFUSED duplicate pilot name "{new_name}" - not created')
-                    send_rel(s, build_chat_broadcast('Server',
-                             f'A pilot named "{new_name}" already exists. Choose another name.'),
-                             '<- duplicate-name refusal', to=2.0)
-                    lobby_reply_with_result(s, stored, PILOT_ERR_NAME_TAKEN, 'create-pilot refusal')   # v635f5
-                    return
-                if new_name and db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT:
-                    # v634f5: the 5-pilot account limit is now the server's, not the client's
-                    log('PILOT', f'REFUSED pilot "{new_name}" - account {s.account} already has {MAX_PILOTS_PER_ACCOUNT} pilots')
-                    send_rel(s, build_chat_broadcast('Server',
-                             f'This account already has {MAX_PILOTS_PER_ACCOUNT} pilots. Delete one to create another.'),
-                             '<- pilot-limit refusal', to=2.0)
-                    lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, 'create-pilot refusal')   # v635f5
-                    return
-                if new_name and pilot_name_vulgar(new_name):
-                    log('PILOT', f'REFUSED pilot name "{new_name}" - vulgar (server list)')
-                    lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, 'create-pilot refusal (vulgar)')   # code 3 = the client's 'vulgar' text
-                    return
-                if new_name:
-                    # v638f5: count + insert under one lock, and drop a duplicate create of the same
-                    # name within 3 s (the client's retry framings could both get through)
-                    with _PILOT_CREATE_LOCK:
-                        _last = s.__dict__.get('_last_create')
-                        if _last and _last[0] == new_name and time.time() - _last[1] < 3.0:
-                            log('PILOT', f'duplicate create of "{new_name}" within 3 s ignored (retry framing)')
-                            threading.Thread(target=lambda: send_rel(s, stored, '<- echo 0xe2 (dup)', to=5.0), daemon=True).start(); return
-                        if db_pilot_count(s.account) >= MAX_PILOTS_PER_ACCOUNT:
-                            log('PILOT', f'REFUSED pilot "{new_name}" - account {s.account} already has {MAX_PILOTS_PER_ACCOUNT} pilots (locked re-check)')
-                            lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, 'create-pilot refusal'); return
-                        s._last_create = (new_name, time.time())
-                        slot = db_next_slot(s.account); db_ensure_pilot(new_name, s.account, slot)
+                if new_name and not pilot_create_commit(s, new_name):
+                    lobby_reply_with_result(s, stored, PILOT_ERR_LIMIT, 'create-pilot refusal (commit)'); return
             threading.Thread(target=lambda:send_rel(s,stored,'<- echo 0xe2',to=5.0),daemon=True).start(); return
 
         if tb == 0x42 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
@@ -23212,7 +23997,8 @@ threading.Thread(
           extract_date_from_gamedef),
     kwargs={'scoring_ref_fn': web_scoring_reference,    # v404f5: /scoring page + ladder ranks
             'player_counts_fn': web_player_counts,      # v418f5: console player counter
-            'password_read_fn': arena_password_read},   # arena editor: current arena password
+            'password_read_fn': arena_password_read,    # arena editor: current arena password
+            'arena_reset_fn': lambda rid, winner, by: arena_reset(rid, winner_camp=winner, by=by)},   # v640f5
     daemon=True
 ).start()
 
@@ -23273,6 +24059,8 @@ threading.Thread(target=_stall_watch, daemon=True).start()
 threading.Thread(target=_ack_sender_loop, daemon=True).start()  # v357f5: delayed rel-ACK sender
 threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: ground-speed-0 auto-resupply
 threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
+threading.Thread(target=_camp_scores_loop, daemon=True).start()   # v651f5: Ctrl-L country scores (msg 43 + 40)
+threading.Thread(target=_prod40_fast_loop, daemon=True).start()   # v663f5: units keep-alive vs the client's 60 s overwrite
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive

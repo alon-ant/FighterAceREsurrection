@@ -34,6 +34,591 @@ they explain why a specific line is the way it is and must stay with it.
     limit, husk telemetry relay, canopy cull/collision polish.
 
 ==============================================================================
+*** BANKED 2026-09-07: v555f5 is the STABLE BANKING POINT (user-approved "bank it"). ***
+    Snapshot server.py -> 'old files\server_v555f5.py' at next convenience.
+    (Previous banked point: v543f5, 2026-09-04; v542f5, 2026-08-31.)
+    v545f5-v555f5: THE 2009-CONTRACT CHAPTER (2026-09-05 .. 2026-09-07) - kill announce,
+    chute telemetry and bomber bails rebuilt from messages04 + FA.exe instead of patched.
+    Method (user's rule, 2026-09-05): for any mechanism reread the 2009 log, compare
+    msg-by-msg to server.py, then confirm in FA.exe via Ghidra. Every item below was
+    user-verified live (SpUn + Taurus 09-05; Alon/Taurus/Starfighter/Mojo/Butterz 09-06).
+    NOTE: v541f5/v542f5 numbers were already taken by the cyan chapter; the kill-tail
+    work below is tagged v541f5 in code comments but belongs to THIS chapter.
+
+==============================================================================
+*** BANKED 2026-09-12 (d): v664f5 is the STABLE BANKING POINT (user-approved, DELIVERED).
+    Snapshot server.py -> 'old files\server_v664f5.py' at next convenience. (Previous: v660f5.)
+
+v661f5-v664f5 [TEAM UNIT TALLIES + COMPLEX BLOCK]
+    * msg 40 REAL LAYOUT (FA.exe FUN_004f6e60 copies 14 dwords from payload +2 into the camp
+      record; Ctrl-L FUN_00463c40 / HQ MnDlg_UpdateCampProductionPanel divide the units slots by
+      the per-camp average unit cost at 0xc6e578): 58 bytes = [0x28][camp] d0 scenes, d1 ?, d2
+      players, d3-5 stored metal/fuel/ammo, d6-8 UNITS aircraft/tank/ship IN THE COST DOMAIN,
+      d9-11 capacity, d12-13 0. The old 38-byte form put the capacities in the unit slots - the
+      constant 258/4767/230 on both pages were GB's caps / avg costs, not units. Order pinned by
+      two Ctrl-L probes (units-in-cost-domain x avg from fa_memdump.json v3 'avg_unit_cost').
+    * Units re-sent every 5 s (PROD40_UNITS_PERIOD_S) because the client's 60 s camp task
+      (GRND_send_msg40_camp_production_push -> FUN_00557310, live-object cost sums) rewrites the
+      same slots; 30 s score push and panel-open sends use the same builder.
+    * msg-71 Complex block (A/C) = the sum over the scene's own producer link circle (GAME_DEF
+      plane/tank/ship link radii x 500 m, same camp, centre distance) - the client does not sum
+      the link group itself; B kept per scene (it feeds nothing on the team pages). F/G/I per
+      scene. Every scene's record refreshed at entry + every 30 s.
+
+==============================================================================
+*** BANKED 2026-09-12 (c): v660f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v660f5.py' at next convenience. (Previous: v654f5, same day.)
+
+v655f5-v660f5 [THE 2009 PRODUCTION MODEL FROM THE CLIENT'S OWN TABLES]
+    * Building classes carry a PRODUCTION NUMBER (class+0xb8 = kind*1000+index, FA.exe
+      FUN_00568fe0): kind 0 RESOURCE_STORAGE_DEF [res][max], 1 RESOURCE_PRODUCER_DEF [res][max]
+      [rate/min][?], 2 UNIT_PRODUCER_DEF [unit][res][max][rate/min][cost][flags] (three files in
+      the VFS, read out of the running client by fa_memdump.py). fa_dump_trn_tables.py v2 dumps
+      prod_num/life/repair; fa_build_scene_profiles.py joins object -> class -> def -> scene into
+      fa_scene_profiles_trnNN.json (caps = sum of storage + producer stores, rates = sum of
+      producers, unit producers listed). VALIDATED on the offline training arena: the client's
+      per-camp stored totals sit just under the computed capacities (metal 72,450/75,000, ammo
+      514,180/536,000, fuel 235,000/342,000); the 'rate' arrays at 0xc87c60 are running counters.
+      Mediterrain: Support Factory 7500/33000/76000 @ 1000/1000/4980, Tank Factory 7500/36000|
+      42000/45000|63000 @ 1000/1000/4500 + a 250 units/min tank line, airfields storage only +
+      an 80 units/min hangar. Units are an AMOUNT (wiki): a tank/plane costs its object cost.
+    * Server: per-scene profiles take precedence over the wiki type profiles (SUPPLY_PER_SCENE,
+      no cap multiplier); unit stocks seeded like offline (airfields 10 aircraft units, tank
+      factories 27) with NO cap (constant wartime production); per-building losses on destruction
+      (a storage/producer loses its share of the stored resource, a hangar/tank line its share of
+      the held units).
+    * msg-71 PACKED_INFO MAPPING READ BACK FROM THE PANEL (v659f5): COMPLEX A stored (link
+      group), B units (COST DOMAIN - the client divides by its per-camp average unit cost,
+      Game_Dat.cpp FUN_00423760, dumped as 'avg_unit_cost' by fa_memdump.py v3), C storage %;
+      SINGLE SCENE D produces/min (+E %), F stored, G capacity (+H %), I stored units (cost
+      domain). Every scene's record refreshed at entry and every 30 s (v660f5) because the
+      client's 60 s camp task sums the per-node stored units for the HQ / Ctrl-L rows (GB read
+      258 aircraft units for 33 held from stale nodes).
+
+==============================================================================
+*** BANKED 2026-09-12 (b): v654f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v654f5.py' at next convenience. (Previous: v650f5, same day.)
+
+v651f5-v654f5 [COUNTRY SCORES (Ctrl-L)]  msg 43 (0x2b) CAMP SCORE decoded (FA.exe FUN_004f6c90 +
+    renderer FUN_00463c40 disassembly): [0x2b][camp u8][88 B block][int32 scenes @+0x5a][int32
+    @+0x5e][int32 players @+0x62]. Block = int32 slots 0 pilots lost, 1 fighters destroyed, 2
+    bombers destroyed, 3 planes lost, 4 fighter assists, 5 bomber assists, 10 AI fighters, 11 AI
+    bombers, 12 planes lost to AI, 15 ship assists, 16 tanks, 17 ground units, 18 buildings; and
+    DOUBLES fighter score @+0x18, bomber score @+0x20, AI score @+0x50 (probe-verified 09-12).
+    Per-room per-camp counters fed by the kill/score/counter paths; broadcast with msg 40 every
+    30 s, at entry, `campscore [room]`; zeroed by the arena reset. `campscore probe <pilot>`.
+
+==============================================================================
+*** BANKED 2026-09-12: v650f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v650f5.py' at next convenience. (Previous: v612f5, 2026-09-10.)
+    v613f5-v650f5: TRAINS, ECONOMY II, PER-ROOM OWNERSHIP, LOBBY ERRORS, ARENA RESET (09-10..09-12).
+
+v650f5 [ARENA RESET = THE 2009 SEQUENCE]  msg 87 [0x57] is the graceful remove: the client's
+    MISSION::ShutDown(string 0xe0, 0, 1) -> dialog + 10 s countdown while flying -> mission torn
+    down, VNET reset, next state LOBBY - session stays connected (Main.cpp mission-end with flag
+    A/B set). Reset: announce (yellow 0xc9 + AI chat) -> 3-2-1 -> 87 to everyone -> wait for an
+    EMPTY arena (25 s; a lobby init from an in-world session = implicit leave) -> rebuild.
+    `kick <pilot>` = the ##Ban 0 soft boot; `kick <pilot> 74` = 'AI client has finished the game,
+    please choose another game' (events). 47/48 = custom-text variants, 47 CTD - unread, blocked.
+    Dead ends documented: msg 127 = damage only (explode/disarm/engine/crash -> `modact`), msg 63
+    skips the local player, 0xDA no screen switch in-world, vcnc cmd 5 ignored, 0x805a-d are
+    DLL-internal (hang), 0xc8 EShutDown = hard shutdown with counter (state 5 'removed', client
+    quits; the 2009 loader relaunched) - kept as `boot`/RESET_SHUTDOWN_TEXT; 0xc9 ESystemMsg =
+    yellow server channel (`say <room|all> <text>`).
+
+v640f5-v647f5 [RESET PLUMBING]  arena_reset (console `reset <room> [winner]`, web 'Reset arena
+    now' + winner variant, tc_win_mode off|all|wipeout checked per minute), state rebuild
+    (ownership from GAME_DEF, stores, units, all AI objects, triggers, destroyed/repair clocks).
+
+v634f5-v639f5 [LOBBY ERRORS]  5-pilot account limit enforced; lobby refusals answered with the
+    0x42 response form + result byte (2 exists, 3 vulgar, 4 limit, 1 invalid chars) instead of
+    silence (timeouts); prefixed create/delete/rename re-framed (retries were dropped); prohibited
+    characters and a server-side vulgar list (badwords.txt); ONE validator + locked commit for all
+    three create framings (a compound-wrapped retry had bypassed the checks).
+
+v629f5-v633f5 [PER-ROOM OWNERSHIP + FIXES]  second room on a terrain gets a private ownership
+    key (alias room*1000+terrain; static data via _tbase) - captures/territories no longer leak
+    between arenas; SESSIONS NameError; autopve on by default; units display = client's tally of
+    deployed object value (resolved, nothing to feed).
+
+v617f5-v628f5 [TRAIN SUPPLY + ECONOMY II]  stations = rail nodes within 900 m of a scene; each
+    camp up to 3 trains on lines serving >= 2 own scenes; 30 s stop per station, pick-up above 50%
+    at producers, top-up to 85%; abstract deliveries off for camps with trains; hits name the
+    railcar (victim = onum | car<<10), loco 3000 / wagon 1500 HP unarmoured, destroyed mask,
+    cargo lost, respawn 10 min; trains re-created at ServerConfirm and within 30 km after a TAB
+    (v627 near-pilot re-create; v632 only for confirmed live planes - 'Assertion (Me)' CTD).
+    Units built AT the producing scene from its own metal (500 kg, 30% reserve, 20 held), drawn
+    from the nearest holder; battalions from the nearest factory holding the full battalion (wiki).
+
+v613f5-v616f5 [TRAINS]  NetTrain create (74 B consist: loco class, road/node/dist, wagons
+    [class|count<<8]) and 21 B update (pos7, flags: camp bits0-2 / state bits4-5 / dir bit6,
+    u16 speed x 1/512 m/s, road, node, f32 dist, destroyed mask); rail map dumped from the
+    client's AI::ROADMAP (rails_trn02.json); locos 141..145 by nation, wagons 140/146/147/148.
+
+==============================================================================
+*** BANKED 2026-09-10: v612f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v612f5.py' at next convenience. (Previous: v584f5, 2026-09-08.)
+    v585f5-v612f5: PARATROOPS, CARGO, FILM CONTRACTS, TERRITORIES, ECONOMY (2026-09-08 .. 09-10).
+    Live-tested by Alon / Taurus / Moira / Starfighter / DBD on fa-re-srv; the film corpus
+    (102 FILM .Fa3 recordings, Shadow's find) decoded: framing [tag][size] with the size table
+    @0xaad790 (dumper v7) + the 214-entry handler table @0xc2c1c0; 42,814 text lines catalogued
+    (film_text_lines.txt) and used as the display contract for TC wording.
+    OPEN at bank: msg 104 mission-script lines unverified (needs a Script= arena), tank main gun
+    vs MG, tank class per camp (only 131), PPT classes for AI hunters (knobs), landed cargo
+    unload (msg 106 never seen on the wire yet), soldier hit report unverified (msg 51 assumed),
+    per-room ownership (captures/territories are per terrain), fighter-cover credit, trains.
+
+v612f5 [ECONOMY - DRAW WHERE YOU ARE, WHAT YOU WEIGH]  The camp pool debited the camp's lowest-
+    numbered airfield for every spawn anywhere ('field depleted after 4-5 planes' with 380 t in
+    the pool). Now: the airfield nearest the pilot's decoded position first (the server reads
+    the pilot's own 9-byte packed position from telemetry), then by distance. The debit is the
+    plane's own weights from its msg-59 ask ([u16 0][fuel][ammo][fuel][ammo-alt][fuel/2]
+    [ammo-alt/2]: fighter 363/1258, heavy bomber 1156/4257, Dakota 315/0; the later pairs are
+    the GetFuel/AmmoWhenLim 50% fallbacks) instead of per-class guesses. SUPPLY_CAP_MULT=1.5 on
+    the wiki-derived storage volumes (knob).
+
+v611f5 [LOBBY RE-INIT - COULD NOT ENTER ANY ARENA]  A second exit made the client re-initialise
+    its lobby (206/210/203 like at login), wiping its room table; the per-session 212 GAME_DEF
+    cache (v476) then skipped the re-prime, leaving arena rows with no GAME_DEF behind them - a
+    click produced no traffic (Taurus live 09-09 19:44, '~DLIS 9 elements remain' at exit).
+    0xce now clears the cache so the next 0xd2 primes every room again.
+
+v610f5 [TERRITORY ASSIGNMENT]  SCENE_CAMP_BY_TERRAIN held terrain TERRITORIES (0..4) sent as
+    camps; a 2-nation arena showed five colours online (Taurus 'Mediterran test II'). The room's
+    GAME_DEF is read once at first entry: territory->camp (the 8 dwords param[0x31..0x38]) and
+    camp->nation names (camps block groups); the terrain's scene table is rewritten and the AI
+    lines use the arena's own codes/names.
+
+v609f5 [AIR-DROPPED CARGO = msg 105]  FUN_004f7aa0 'GiveRscToScene': [0x69][ident u16][flight s]
+    [dist/100][PI u32] + N x [7-byte packed landing pos][u8 metal][u8 fuel][u8 ammo] (kg), sent
+    5 s after the chutes land; each chute credited to the nearest scene within
+    PARA_RESOURCE_RADIUS (2 km), answered with 107 (zeros = all delivered, negatives = missed)
+    and 108 [ident][ok][total] when some missed. Troop vs cargo chutes are identical Type-2
+    objects: the plane's troops-aboard count (msg 113/114) decides - no troops = cargo.
+
+v608f5 [TANK ARMOUR BANDS]  Reported hit damage scaled by band (MG <100 x0.03, 20 mm 100-400
+    x0.20, 30-40 mm 400-700 x0.60, >=700 full): 20 mm ~20 hits, 40 mm 3-4, a bomb still one.
+
+v607f5 [PARATROOP CREDIT]  Objects the dropper's troops destroy are booked to him like his own
+    ground kills (+Buildings); CAPTURE_ASSIST_BONUS=1000 to the dropper when his stick captures
+    and he is not the trigger pilot.
+
+v606f5 [CARGO msg 106/107]  Msn_Prod.cpp: 106 [0x6a][ident][scene|bit15 pick-up|bit14 bonus]
+    [metal][fuel][ammo][PI][dist/100][flight s]; 107 = the shortfall per kind. Drop: stores +
+    metal REPAIRS the scene (CARGO_REPAIR_KG_PER_VALUE=5 kg per value point, cheapest first,
+    normal repair path); pick-up from own-camp stores; delivery scores 0.10/0.05/0.05 per kg.
+    (Landed unload never seen on the wire yet - air-drops go via 105.)
+
+v605f5 [INFANTRY CAPTURE LIKE TANKS]  Presence inside the ring+100 m is enough (no 'arrived'
+    precondition), PARA_CAPTURE_MIN=2, DEFENCE_DPS 10 -> 3 (two batteries had killed a 13-man
+    stick in 55 s), presence radius = perimeter ring + 100 m for tanks and soldiers alike.
+
+v604f5 [INVISIBLE TANKS + POPULATION]  A 48-tank re-create (1,057 B msg-2) was silently not
+    applied by the client -> server-only tanks captured a base (Taurus/Moira live 09-09).
+    RECREATE_CHUNK=16 records per msg-2 (385 B proven) for tanks and soldiers; defenders stand
+    down after TC_DEFEND_IDLE_S=1200 s without contact; TC_MAX_TANKS_PER_ROOM=32.
+
+v603f5 [FULL TANK AT SPAWN]  fuel draw by class (500/5000) instead of the flat 300 kg top-up.
+
+v602f5 [UNITS PER SPAWN + FILM WORDING]  A TC spawn spends an AIRCRAFT unit; none built -> a
+    TANK unit + msg-60 bit 3 (the films' 'Insufficient aircraft units... / taking from tank
+    production' pair, ALWAYS about units). 'AI: The scene X at <grid> is out of range of any
+    tanks units' when no tank producer within TC_TANK_LINK_RADIUS_M.
+
+v601f5 [REAL TC MESSAGES]  msg 41 (0x29) CaptureScene [scene u16][camp u8] -> the client's own
+    SCENE::Capture (event line, map, eviction). msg 104 (0x68) Trigger [sub 1 defence|2 attack]
+    [camp][scene u16][pilot\0] -> the client's MISSION SCRIPT events defense_scene/attack_scene
+    (the films' blue lines, siren, markers; needs a Script= arena). Chat fallback kept.
+
+v600f5 [FILM CONTRACTS]  Wording from the 102 films: capture 'AI: GE Tank Factory at 72,BN has
+    been captured by Great Britain!'; 'No tanks available to attack/defend ...'; 'switch strategy
+    to attack/defend' = idle-column reuse (TC_REUSE_RADIUS 20 km) and the capturing column's
+    garrison line; trigger sequence ('Your airbase at X is about to be triggered!' at
+    TC_WARN_PERCENT=40 to the owners, 'You have triggered tank attack on the ...' to the pilot,
+    'The airbase at X has been triggered!' broadcast, 'Your hit helps capture scene ...' per
+    hit); PPT class knobs (tc ppt) for AI hunters; scene-defence kills carry the AA class.
+    ('AI: <camp> owns N scenes.' is event-mode only - 4/102 films - left out.)
+
+v599f5 [SOLDIER AIM + SCENE DEFENCES]  Aim = (A,B,+-sqrt(1-A^2-B^2)): zeros pointed UP; now the
+    direction to the target. Scene defence objects (tower/AA/flak/bunker/MG/pillbox) deal
+    DEFENCE_DPS to enemy soldiers within DEFENCE_RANGE=250.
+
+v598f5 [SOLDIERS ON REJOIN]  lobby-leave forgets the session as a soldier peer too.
+
+v597f5 [SOLDIER LIFE]  msg-51 hits on soldiers (assumed same reporter as tanks): SOLDIER_HP=60,
+    +20 and Ground counter, kill-entry delete (cyan line), stick strength drops.
+
+v596f5 [PERIMETER = SCENE EXTENT + 150 m; LOOK-AHEAD]  Rings sized to the scene (farthest object
+    from the centre + TC_RING_PAD) so units stay off the runway; sent positions carry one
+    interval of look-ahead (tanks 0.25 s, soldiers 0.3 s) against rubber-band; soldiers 2.4 m/s.
+
+v595f5 [TANK END BEHAVIOUR = INFANTRY'S]  Engaged: formation released, each tank claims its own
+    target, drives to TC_TANK_STAND_OFF=180 m, stops and fires, next target, then the perimeter.
+
+v594f5 [SOLDIER BEHAVIOUR + FRIEND-OR-FOE]  Walk animation byte (A) = 1 walking / 0 firing;
+    planner with SOLDIER_OBST_MARGIN=1.5; defenders on a ring, attackers close to 60 m of their
+    soft target and stand to fire; tank defenders/garrisons deploy on a ring too. Side change:
+    every AI object deleted on that client and re-created at ServerConfirm (the client's gun AI
+    fixes friend/foe at create time).
+
+v593f5 [ALL CHUTES GET A SOLDIER; 4 Hz]  SOLDIER_MAX_PER_STICK 8 -> 32; throttle/state knobs
+    (tc soldier); 4 Hz walking.
+
+v592f5 [CHUTE LANDING POSITION]  The plane family packs its position in NINE bytes (FUN_007cca00:
+    X s25 | Y s25 | Z u22, x plane_pos_scale 0.016, Z-500), not the tank's 7 - every landing had
+    been placed at the take-off field. unpack_plane_pos9; dumper v5 adds the scale.
+
+v591f5 [SOLDIER RULES]  Spawn each soldier the moment its chute lands; closest scene of ANY camp
+    (friendly -> defend until killed / life timer, hostile -> attack); soldiers only chew SOFT
+    targets (value < SOLDIER_HARD_VALUE=150) and never past SOLDIER_DAMAGE_CAP=30%; each walks
+    individually; enemy soldiers make a scene contested.
+
+v590f5 [NETSOLDIER OBJECTS]  Normal clients ignore msg 112 (handler only under DAT_00c6e8a4 =
+    the offline / 2009 AI-client flag) -> sticks are server-owned NetSoldiers: create Type 7
+    [7|nation<<4][class][s16 group] + trailer (classes 170..174), 24-byte update (FUN_0068ebc0),
+    re-created at ServerConfirm, delete notifies honoured.
+
+v589f5 [PARATROOP LOADING msg 113/114]  113 [0x71][s8 count][ident u16][scene|bit15 refund];
+    114 [0x72][ident][s8 given]; 15 s client timeout ('Not receive cargo answer') dumped the
+    troops before. Per-scene stock PARA_SCENE_STOCK=40 regenerating 2/min.
+
+v588f5 [PARATROOPS - FIRST CUT]  Transport (C-47A/Dakota/Li-2/Ju-52) human-bit-clear chutes =
+    troops; stick model; msg 112 [0x70][nation][s16 target][u32] + 7-byte positions (kept for AI
+    clients); msg 111 = GroupDynamicMissionCB, msg 143 = mission-line text ('[kind]"CC,TTT,
+    text"') identified.
+
+v587f5 [DEFENCE GATE]  TC_ATTACK_PERCENT=60, TC_DEFEND_PERCENT=80: the defending column is
+    raised only once damage reaches 80% (plane or tank fire), one per trigger.
+
+v586f5 [NO GHOST TANKS]  Refuse spawns/battalions without tank_tables.json (live 09-08: 32 tanks
+    without updates, culled by every client).
+
+v585f5 [DEFENDERS AT THE TARGET]  TC_DEFEND_AT_TARGET: the defence forms beside the scene.
+
+==============================================================================
+*** BANKED 2026-09-08: v584f5 is the STABLE BANKING POINT (user-approved "bank before any
+    other changes"). Snapshot server.py -> 'old files\server_v584f5.py' at next convenience.
+    (Previous banked point: v555f5, 2026-09-07; v543f5, 2026-09-04.)
+    v556f5-v584f5: THE TERRITORIAL COMBAT CHAPTER (2026-09-07 .. 2026-09-08) - ground-object
+    repair, the corrected msg-36/30 contract, ground-kill scoring, NetTanks (create, 26B
+    update, client-side physics, pathing, columns), tank damage, triggers/battalions/AI
+    chat, engagement + capture. Every mechanism read from FA.exe (Ghidra, functions defined
+    by the user) and verified live solo by the user: repair timers good; spawn/drive/refly;
+    columns; tank kills with the cyan line; trigger -> two columns from the right
+    factories with grid refs; capture flip incl. spawn list. Unverified at bank: v583f5's
+    advance-to-next-object and garrison hold-fire. Also in this chapter: v584f5 (the online
+    Network.cpp:167 telemetry-split CTD), deployed online separately on 2026-09-08.
+    OPEN (rolled to the next chapter): defend battalions spawn AT the target (user: do it),
+    trains / paratroop capture / fighter-cover credit (user: get into it), tank class per
+    camp (only GB=131 Cromwell mapped), the blue name-less mission-line message, capture
+    persistence (by design none: map resets once one nation holds it all).
+
+v584f5 [TELEMETRY-SPLIT CTD FIX - online 09-07 Taurus/Jayse/Bigalon + Butterz]
+    Network.cpp:167 Length=-49/-2 on every peer: the v547f5 multi-record tiler sliced a
+    bomber's frame plane(81)+chute(34) as 34+81 when the plane's fresh post-respawn ONumber
+    had no learned size (00:10:22 FG_BoogDog -> [0x03a2:34][0x1200:83]) and a two-plane
+    frame 83+83 as 81+85 (20:40:42 DBD_GCEXTREME -> [0x0324:81][0x6248:85]); the short
+    slice went out under the plane's number and each peer consumed a full plane record
+    from it. Now: the sender's own plane is never tried at chute size, and a tiling is
+    accepted only when every slice's ONumber is one of the sender's objects; otherwise the
+    frame is dropped (one lost tick). Confirmed against the online run log with the token.
+
+v583f5 [ATTACKERS ADVANCE / GARRISON HOLDS FIRE]
+    A stalled assault (41->48% for 10 min: everything in gun range dead, the rest across
+    the airfield) now drives to a clear spot short of the nearest remaining valuable
+    object; decorations are no longer targets. An attack column whose target is already
+    its own camp becomes a garrison; garrisons carry flags bit0 (hold fire) so the client's
+    gun AI stops shooting the captured field; bit0 drops when an enemy tank comes in range.
+
+v582f5 [COLUMNS OF 8]  TC_TANKS_ATTACK/DEFEND 8 (= TANK_COL_MAX).
+
+v581f5 [tc assault]  console: `tc assault <scene> [n] [camp]` spawns an ATTACK column on
+    the target already engaged (test shortcut; no units/pool accounting).
+
+v580f5 [CAPTURE-RUN CTD + SPAWN LIST]  Fa3_ParticleSystemCreator.cpp:942 after ~25 animated
+    destroy forms in 90 s: AI-fire kills now use the msg-30 age-61 form (wreck only, no
+    explosion/fire particles); a join snapshot lets at most SNAPSHOT_MAX_BURNING=6 wrecks
+    arrive burning. The msg-42 scene snapshot is sent at room ENTRY (2009: 'in 42'108'
+    right after the client id) so the HQ spawn list reflects captured fields on a fresh join.
+
+v579f5 [MAP GRID]  tc_grid = the inverse of MapCoord.cpp FUN_00495530: X = col*2048 - half
+    + 1024, Y = half - (row-1)*2048 - 1024, letters (L1-'A')*26+(L2-'A')+26, half = 131072 on
+    trn02; verified 73,AW / 67,AS / 95,AM. (The '68,AE' hover was another Front Airfield;
+    scene 46 is 68,AX.)
+
+v578f5 [CAPTURE GEOMETRY / CONTESTED SCENES / TURRET AIM]  Engaged columns drive on to
+    TC_ASSAULT_RADIUS=120 m (a clear spot) instead of parking at the 350 m engage radius;
+    TC_CAPTURE_RADIUS=400 (>= engage). A scene with a live enemy tank inside it is
+    CONTESTED: no repairs (the 300 s clocks were restoring buildings under the tanks).
+    The update's turret direction now points at the object the server is damaging.
+
+v577f5 [AI CHAT = ROSTER PLAYER 'AI']  FUN_004f6030 drops any msg 20 whose PlayerIndex is
+    not a roster player and prints channels 3/4 as '<name>: <text>' - the 2009 'AI: ...'
+    lines were chat from a player named AI. ensure_ai_roster_on adds one (PI 0x1fe, side 7)
+    per client per world; tc_say uses channel 3 without the prefix. User-verified.
+
+v576f5 [ENGAGEMENT + CAPTURE - TC step 4]  A NetTank's fire is client-side eyecandy (no
+    msg 31/51 for it) so the server books it: attackers within TC_TANK_GUN_RANGE=300 of a
+    valuable scene object wear flags bit2 and deal TC_TANK_DPS=120/s into the per-object HP
+    rule (kills via the 30 destroy form to all, repair clocks start); enemy tanks in range
+    trade TC_TANK_VS_TANK_DPS=60/s and die through the kill-entry delete with the shooter
+    tank as hunter; capture when damage >= the room's capture_percent (fallback 50) with an
+    attacker inside the radius: SCENE_CAMP_BY_TERRAIN flips (production/pool/map follow),
+    +CAPTURE_SCENE_BONUS to the trigger pilot, 42 re-push, AI line, 10-min garrison.
+
+v575f5 [TRIGGERS + BATTALIONS - TC step 3]  Scene damage >= TC_ATTACK_PERCENT=90 by an enemy
+    pilot (checked on the msg-31 kill path) triggers it: +TRIGGER_SCENE_BONUS, 300 s lockout.
+    Wiki rule (TC Production and Supply, 'Reaction To Triggers'): the camp's nearest tank
+    producer to the target raises as many fully loaded tanks as it can - units from the
+    camp's built tank units (new camp_units_take), fuel/ammo per tank from the pool - and
+    the column drives to the target; the defender's camp does the same. AI chat + per-side
+    mission lines. Console `tc status|trigger|reset`. User-verified: two columns from the
+    right factories, 4/4 each.
+
+v574f5 [TANK KILL = KILL-ENTRY DELETE]  The tank's NET::OBJECT shares the generic
+    ExitDataArrive (FUN_004f8f20): MEC 5 on a non-plane non-chute -> FUN_00478640 'X has
+    destroyed Y' (cyan + sound on the hunter's client) and, for object type 3, FUN_004a02a0
+    = the tank explosion. tank_killed now deletes with [id][0x53][kill_tail_hunter] - no
+    chat hack, no wreck timer. User-verified ("worked well").
+
+v573f5 [msg-51 hooks landed]  The v572f5 dispatch edits had been rejected as a batch;
+    the handler now runs and 0x33 is in NO_ECHO_SUBS.
+
+v572f5 [TANK DAMAGE - TC step 2]  msg 51 (0x33) = NetTank HIT report from the shooter's
+    client to the owner station: 6B records [victim ONumber][attacker ONumber][damage]
+    (40 mm 220..1156, 910 lb bomb 2919/17470). Tank HP = class pCTI+0x38 (1000 Cromwell;
+    +0x30/+0x34 = 70/30 armour mm). Kill: TANK_KILL_SCORE=150 into fighter/bomber score,
+    ai_tanks counter (msg-25 'Tanks'), stat push.
+
+v571f5 [COLUMN FIXES]  dist-0 follower crash; re-plan churn (TANK_REPLAN_DRIFT_M=40, failed
+    plans retry every 2 s, 'no route' logged once/10 s); boxed-in starts (planner frees a
+    12 m disc around the tank).
+
+v570f5 [TANK COLUMNS - TC step 1]  spawn_column/COLUMNS: up to 8 tanks in a staggered file
+    (18 m, +-8 m), leader on goto/A*, followers hold live slots with slot-distance speed
+    regulation, own A* (re-plan on >15 m drift), leader promotion. Column and ServerConfirm
+    re-creates batched as ONE msg-2 with concatenated records per client. Console `tank
+    column|cgoto|cstop|cdel`.
+
+v569f5 [WINDOWED A* PATHING]  Replaces the greedy deflection (figure-8s): 6 m occupancy grid
+    in a +-120 m window to a sub-goal <= 400 m ahead, padded obstacle circles, no corner
+    cutting, string-pulled waypoints, re-plan at sub-goal / new goto / 20 s. User-verified:
+    no objects hit.
+
+v568f5 [OBSTACLE AVOIDANCE v1]  goi objects in a 100 m grid with padded radii (got radius or
+    18 m buildings / 6 m trees + 6 m margin); greedy tangent deflection (superseded by
+    v569f5); tank_clear_spot for spawning beside a scene centre.
+
+v567f5 [TANK PHYSICS UNITS]  Class +0x74 max speed is metres per 1/50 s physics tick
+    ('move_dt' 0xa282b4 = 50): Cromwell 0.2222*50 = 11.1 m/s (40 km/h); the speed seed
+    (+0x2f8, s16/16384) is in the same unit. Smooth drive user-verified.
+
+v566f5 [THROTTLE/STEER CONTROLLER]  Probe results: aux[1] +0x320 steering (+ right), aux[2]
+    +0x31c throttle, aux[3] +0x2f8 speed seed, flags bit2 fire / bit0 hold fire - INPUTS to
+    the client's own tank physics (FUN_00617f40), which drives the tank between updates. The
+    driver sends throttle/steer/seed and integrates the same motion; fa_dump_tank_tables v3
+    dumps each class's physics block + TankSpeedMult.
+
+v565f5 [tank aux/flags knobs]  console experiment knobs for the five aux s16 fields and the
+    flags byte.
+
+v564f5 [CLIENT KEEPS TANKS ACROSS HQ RE-ENTRY]  Assertion !Objects[no->Number()] on refly:
+    the client keeps NetTanks unless its distance cull (~38 km on a far airfield change) or
+    the 28 s no-update cull removes them, and says so in the msg-3 notify (mixed list:
+    planes [id][exit][tail], tanks bare [id]). The FLY23 drop is gone; the notify is the
+    only truth. User-verified.
+
+v563f5 [TANK PERSISTENCE]  Client msg-3 delete notify -> peer dropped; tank_recreate_for at
+    ServerConfirm; camp defaults to the pilot's side. First placement had gone to
+    (+52479,+63744): the client's 'Dist to player' is player MINUS tank - the user's Bomber
+    Airfield (scene 30) is at (-52518,-62477).
+
+v560f5-v562f5 [TANK UPDATE PAYLOAD]  26B decoded from FUN_0061dcf0: s24 X, s24 Y, u8 Z
+    (FUN_007ccb20: xy 0.032 m/count, Z = u8*25-500), forward unit vector (FUN_007ccf90,
+    s14*0.0002, dropped-axis code), turret A/B s16, flags, five aux s16. The scale constants
+    are DOUBLES in .rdata (v561f5 loader fix); fa_dump_tank_tables v2 dumps them. Driver
+    thread 4 Hz moving / 2 s idle keep-alive (client culls at ~28 s).
+
+v559f5 [NETTANK CREATE]  Type-3 record = 8B header + 13B trailer: [3|nation<<4][class][gun
+    flags x3][pad][s16 group][St][ONumber][9x0]; classes 131..137 from AIUNITS\*.tki (131 =
+    Cromwell); tanks owned by an 'AI' station (Type-0 client record St=0x1f0). The create
+    header table @0xa30c98 and the class list live-dumped by fa_dump_tank_tables.py (on
+    fa_memdump.py). User-verified: 'Create NetTank (cromwell). St=496, ONumber=257'.
+
+v558f5 [GROUND-KILL SCORE SERVER-SIDE]  The msg-36 f32 only credits the client-local score,
+    which the next msg-25 push overwrites: points now booked via db_apply_score_delta (by
+    what the killer flies) + new db_bump_pilot_counter('ai_buildings') + stat push. The
+    client's 'You have destroyed X. Score:%i' number is uninitialised-vararg garbage
+    (FUN_004f9d90 -> FUN_00416580 vsprintf, 2 args for 3 slots) - ignore it.
+
+v557f5 [msg 36 = KILLER ONLY, SCORE FLOAT]  FUN_004f9d90: msg 36 is unconditionally 'YOU
+    destroyed <owner> <name>' for its recipient, applies FUN_00568eb0(obj,1,0) (animated
+    wreck, no blast) and its f32 is SCORE credited to the recipient. So 36 -> the killer
+    with value*SCENE36_SCORE_PCT/100; everyone else gets the msg-30 destroy form (age 1).
+    The 30-form value = AGE in ~1.024 s units (<2 explosion, fire 60-age s, non-zero arms
+    the 10 s detonation on destroy_mode-1 objects). Join snapshot carries real ages.
+
+v556f5 [GROUND-OBJECT REPAIR MODEL]  Field-confirmed: the 2-byte bit15-clear msg-30 record
+    we sent after every 36 was the client RESTORE (FUN_004f6880 -> vtable+0x54 FUN_00567370)
+    - the 'buildings repair in moments' bug; the client has NO self-repair timer. Server
+    repair model: per-object clocks max(300, value*3) s capped 1800 (decorations 300),
+    hard floor 30 s (a restore inside 10 s of a destroy leaves +0x188 Destroyer set ->
+    Trn_Obj.cpp:415 CTD on the next kill), registry entry dropped + GROUND_HP zeroed +
+    SCENE_HP recomputed + batched restore; dead-object snapshot at ServerConfirm; console
+    `repair status|<obj>|all`; `autopve reset` now really clears the destroyed set.
+    User-verified ("repair timer is good").
+
+v555f5 [BOMBER BAIL: CREW CHUTE vs PILOT CHUTE + SHAPE-BASED TELEMETRY SPLIT]
+    A bomber bail registers MORE THAN ONE parachuter: the crew first with the out-4
+    record tag's HUMAN bit (0x80) CLEAR ('12 80 2e 01..'), the pilot's own chute after it
+    with the bit SET ('92 80 32 01..'). 2009 shows the same pair (messages04 7451/7462:
+    Number=243 'B-17G(2)(p)' then Number=249 'AC2E_Bigalon'; St=47's B-17 put out four
+    crew chutes 143/145/148/152, deleted on peers with MEC=2). We treated EVERY parachute
+    out-4 as the pilot's bail: (a) DAMAGED BOMBER - the crew chute booked the kill and
+    fired the v537 crumble/death notification at a pilot still in the cockpit; his client
+    killed him and blew the plane 150ms later (run_20260906_210637 21:53:43: tag 0x12 ->
+    BAILCRUMBLE -> StartPlace + delete exit=0xb3) - the 'pilot killed / plane explodes on
+    bail, attacker sees him despawn' report; (b) CLEAN BOMBER BAIL - the second
+    registration overwrote para_obj_number, the crew chute became an orphan the splitter
+    dropped, and after the husk died the client sent a 75B TWO-CHUTE frame (34+34, bc=4)
+    that sat UNDER the bc>5 multi-record guard and was relayed raw -> both peers CTD
+    (21:54:41, ticks frozen 3s later; Mojo-Jojo had never been given 0x0133).
+    FIX: crew chutes (human bit clear) get their own path - ServerConfirm, atomic
+    predel+create on peers (send_crew_parachuter_create_for), telemetry relayed and gated
+    like the pilot's canopy (crew_para_objs feeds the splitter's known 34B sizes and the
+    per-peer gate), re-created on rebuilt peers, delete relayed when they land - and NO
+    bail semantics (no para_obj_number, no BAILKILL, no crumble). Only the tag-0x8x/0x9x
+    registration is the pilot's bail. The multi-record split now triggers on frame SHAPE
+    (single record = 34 or 77..86 bytes), not on bc>5; unknown single shapes (the 99B
+    bombsight form) fall through unchanged as before.
+
+v554f5 [CLEAN ENTRY WITH A CHUTE-ONLY BAILER - the 2009 'in 2'65' client+parachuter]
+    A pilot entering the arena while a bailer's plane is already down has NO NET::CLIENT
+    station for that bailer, and a canopy create on a missing station is the
+    GamerClientScore CTD, so v550 declined it - the entrant never saw the chute.
+    messages04 13631-13636 is the host's form for exactly this: ONE msg-2 = client record
+    (41) + parachuter record (23): 'Create client 310' then 'Create NetParachuter. St=310',
+    with the msg-25 score block AFTER the create (13639). Added as the with_client form of
+    send_parachuter_create_for (0x02 skip byte + client record + canopy, score block
+    post-create). Three re-create paths now: peer has it -> nothing; peer rebuilt but has
+    the station -> atomic predel+create; peer has no station -> client+parachuter.
+
+v553f5 [CHUTE GATE MOVED AFTER THE CREATE HOOK] - the v548 chute-peer filter was applied
+    to `peers` BEFORE the per-peer loop, so a peer that had been forgotten from the
+    canopy's created-set (correctly, at its own world rebuild) was removed from the loop
+    and the create hook inside it never ran - the create could only fire for peers who
+    already had the chute (run_20260906_205208 20:59:21). Gate is now a per-peer skip
+    after the hook.
+
+v552f5 [CANOPY RE-CREATE = ATOMIC PREDEL+CREATE] - a same-arena respawn does NOT rebuild the
+    peer's world: the client DelObject's only its own plane and keeps every peer object, so
+    a second create for a live canopy number trips 'Assertion failed (!Objects[no->
+    Number()])' (messages31 20:46:53 -> CTD, twice). The chute re-create is now delete-
+    then-create in one msg-13, the form the plane re-create has always used; the delete is
+    a no-op after a true HQ rebuild.
+
+v551f5 [CANOPY RE-CREATE KEYED ON THE RIGHT SIGNAL] - v550 keyed 'peer needs the chute' on
+    _created_peers, which is a PLANE signal also cleared at the owner's own plane death;
+    the husk-down at 20:41:24 re-sent a live canopy to peers that already had it, with an
+    owner-plane reference deleted 170ms earlier -> Alon CTD. New _forget_canopies_on()
+    (called from the HQ-reentry/airfield-change block and the bail-respawn block) is the
+    ONLY thing that marks a peer as not holding a canopy; the hook re-creates only when
+    the peer is absent from _para_created_peers.
+
+v550f5 [CANOPY ONTO A PEER THAT REBUILT ITS WORLD] - a pilot who respawns/re-enters gets
+    every peer's PLANE re-created through the relay's create-on-first-telemetry hook, but
+    the parachuter was only ever created at the bail to whoever was present
+    (run_20260906_202419 20:34:20: Alon got Bama/Taurus/Starfighter's planes back, not
+    Starfighter's chute 0x010b). The hook now also (re)creates src's canopy on the peer,
+    delayed RELAY_CREATE_SETTLE_S+0.2 behind the plane create so the owner-plane
+    reference and score prime land on an existing station. Also: the plane create fires
+    only while the plane is alive - after the husk comes down my_obj_number still names
+    the dead plane and (since v548) chute-only frames reach the hook, which would have
+    raised a ghost husk on the rebuilding peer.
+
+v549f5 [CLIENT-AUTHORITATIVE CHUTE HEALTH] - SERVER_CHUTE_KILL=False (user request). The
+    canopy's health / hit registration and the pilot-kill verdict are on the CLIENT, as in
+    2009: the server relays every HitToParachuter (msg-29) frame verbatim and the victim's
+    own client decides and reports the death (v248/swallow-guard path). messages04 has no
+    host hit-counter; chute deaths come down as ordinary victim-reported deletes. The
+    _para_hits tally is kept LOG-ONLY. Revert rationale on record: v519 went server-side
+    because the victim's client was seen to report only at respawn - if a killed canopy
+    lingers on peers until the victim respawns, that is the report-timing issue, not this
+    switch.
+
+v548f5 [RELAY WHILE UNDER CANOPY] - the RX router only relayed datagrams while s.flying;
+    the husk-down delete clears flying (its normal death reset), so the moment the empty
+    plane hit the ground the bailer's chute frames went nowhere: STALE-TICK 3s later,
+    peers culled the canopy ~28s on (run_20260906_195355 19:57:57 -> 19:58:00 FROZEN).
+    This WAS the '30-second parachute life' - a client stale-object cull, never a timer.
+    Router now relays while flying OR para_obj_number is set; the chute-peer gate also
+    applies to single-record chute-only frames.
+
+v547f5 [MULTI-RECORD TELEMETRY: SPLIT, DON'T DROP - why chutes never steered]
+    Decoded from FA.exe: the client packs ONE coordinate message per frame for ALL objects
+    it owns (ConductorInterface.cpp FUN_007e6d00/FUN_007e6c80): [0x07][tick u16] then N x
+    [ONumber u16][body], no per-record opcode/tick/length; the receiver resolves each
+    ONumber to its object and lets the object's unpacker consume its own size (Pln_Net.cpp
+    FUN_004c8930 reads a plane record to +0x50 = 81/83 bytes; the parachuter record is the
+    first 0x22 = 34 bytes of the same layout: +2 pos, +9 DirUp, +0x12 vel, +0x18 angvel,
+    +0x1e/1f flags, +0x20). A peer lacking any one object mis-walks the rest - the
+    'relay = CTD' finding - so v351 dropped every bc>5 frame, which is EVERY frame a
+    bailed client sends (chute + husk in one datagram). Live proof: Tomcat's 122B frame =
+    07 | tick | 0x0266+32B | 0x0264+79B, two positions metres apart; every multi-record
+    size in the logs is 7 + 34k + 81/83; v255's 'Get coord for missing object 0' was this
+    same rule from the other side (an 81B plane record cloned under the chute's ONumber
+    made the receiver consume 34 and read the next object out of the leftover). The v256
+    'a real chute gets no telemetry / free-falls locally' claim came from a debug log that
+    never records telemetry. _telem_split_records() tiles the frame (known plane/chute
+    sizes first, exact-fit over 34/81/83/85) and each single-record frame goes through the
+    untouched per-peer path; the chute record only to peers recorded in _para_created_peers
+    (populated by send_parachuter_create_for); other ONumbers dropped with a once-per-
+    object TELEM-SPLIT log. Side finding banked: the +34/bail growth in FG_BoogDog's frames
+    (86->256 across three bails) = old parachuter objects the owner's client never dropped.
+    Multi-record 0x08 frames still take the old drop (the 9B extra block's per-frame vs
+    per-record placement is not established). Flag TELEM_SPLIT_MULTI.
+
+v546f5 [BAIL: NO DELETE AT THE BAIL] - messages04 8137-8148: at a bail the 2009 host sends
+    the killer 88/33/76/25 and removes NOTHING; the husk keeps falling in every peer's view
+    and the silent 'in 3'12' delete arrives only when it hits the ground. v541 kept v536's
+    delete-at-bail (only ever needed so the old 0x53 line could draw while bound) - that
+    despawned the husk for the attacker while the victim watched it explode. The existing
+    husk-down / abandoned-bail-husk deletes remove it at the right moment.
+
+v545f5 [KILL ANNOUNCE ON THE 2009 CONTRACT - tagged v541f5 in code; flag KILL_MODEL_2009]
+    12B kill tail decoded from FA.exe (FUN_004f8d10, shared by the msg-3 ExitDataArrive
+    kill branch FUN_004f8f20 and the msg-33 handler FUN_004f9b0f): +3 u16 hunter OBJECT;
+    +5 u16 hunter NETWORK CLIENT number (ARR<NET::CLIENT*,512> - our s.client_number/'St',
+    NOT PlayerIndex); +7 u32 hunter PlayerIndex, must == CLIENT+0x24 (NET::CLIENT ctor
+    FUN_00441110: +0x20 name, +0x24 PlayerIndex, +0x28 squadron); +11 low 5 bits PPT class
+    (2 = plane), TOP 3 BITS = hunter NATION (FUN_00478640 prints the killer's nation as
+    FUN_0044e550(actor+4) = tail[+11]>>5; entity+0x11c is the nation). Resolution: default
+    'unknown plane' (native 2009 behaviour, messages04 6814); the object path returns
+    early unless the owner CLIENT.PlayerIndex == +7; with no owner bound it needs nation
+    == +11>>5 and station == +5. The old layout (+5=PI, +11=0x02) printed 'USA' on every
+    synth kill and 'unknown plane' for every non-USA killer through an object-only create;
+    0x42 in the chute tail was plane class 2 + nation 2, not a canopy class.
+    2009 contract (messages04): PLAIN kill = ONE in 3'21 (0x53+hunter), no msg-76; BAIL =
+    msg-33 [Number=VICTIM PLANE OBJECT][type 0x13][hunter tail] + msg-76 'has destroyed
+    plane of' + msg-25, plane delete SILENT. kill_tail_hunter()/kill_tail_ppt()/
+    build_bail_credit_33() pack the decoded layout for the synth 0x53 tail, the chute 0x55
+    tail and build_kill_banner_33; plain synth kills no longer arm banner-76 (the
+    killer's duplicate line); bail-at-bail sends credit-33 + banner-76 (synth only when no
+    native out-76 relay). This closed the FFA 'double destroyed line' and 'USA unknown
+    plane destroyed X' reports (messages89). Verified 09-05: regular kill single line +
+    correct scoring, chute kill, bomber pilot kill, bail 'has destroyed plane of' single
+    line, camps correct, no 'unknown plane'. CLIENT-NATIVE, do not chase: killer name
+    sometimes rank-less while the victim shows 'Cdt' (2009 line 15004 - client-number path
+    yields name only); the own-death 'X has destroyed You' EVENT is replayed at the next
+    InsertPlayer (2009 8881-8882), so a cockpit kill shows it twice.
+    Also settled this chapter: DAMAGE28 (msg-28 hit) relay was ALREADY reliable
+    (send_rel + _rel_keeper; no RELKEEP/RELCAP for a peer = delivered and ACKed) - the
+    Taurus-vs-Shadow 'hits not registered' report was a scores-screen aggregation artifact,
+    not loss. Arena 'Force TC values' also switches the camp-pool resource economy on
+    (spawn-59 TC grants drain the pool -> 'no fuel', TC-flagged msg-60 = cold engine) -
+    label or decouple it; the GAME_DEF itself was identical across the toggle.
+
+==============================================================================
 *** BANKED 2026-09-04: v543f5 is the STABLE BANKING POINT (user-approved "Looks stable. lets bank!"). ***
     Snapshot server.py -> 'old files\server_v543f5.py' and web_server.py ->
     'old files\web_server_v543f5.py' at next convenience.
