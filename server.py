@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v670f5'
+VERSION = 'v672f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8376,20 +8376,8 @@ def send_rel(s, payload, label='', to=5.0):
         sock.sendto(pkt,s.addr)
         _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5
     except OSError: s.rme(seq); return False
-    # v486f5 [RELIABLE-BUDGET MAP]: tally this reliable send (it advances the client's ~32
-    # array). Per-session/per-connection - NOT reset on respawn or HQ re-entry, which mirrors
-    # the client's array (that only resets on a NEW connection). Logs the running total + a
-    # per-category breakdown every +8, and flags the ~32 overrun wall. Read-only diagnostic.
-    _rt = s.__dict__.setdefault('_rel_tally', {})
-    _rc = _rel_budget_cat(label)
-    _rt[_rc] = _rt.get(_rc, 0) + 1
-    _rtot = sum(_rt.values())
-    if _rtot >= s.__dict__.get('_rel_tally_next', 8):
-        s.__dict__['_rel_tally_next'] = _rtot + 8
-        _pn = getattr(s, 'current_pilot', '?')
-        _wall = '  *** PAST ~32 WALL (exit-to-HQ overrun risk) ***' if _rtot >= 32 else ''
-        _brk = ', '.join(f'{k}={v}' for k, v in sorted(_rt.items(), key=lambda kv: -kv[1]))
-        log('RELBUDGET', f'{_pn} reliable total={_rtot}{_wall} :: {_brk}')
+    # v671f5: the v486f5 RELBUDGET tally (client ~32-reliable array / exit-to-HQ overrun) removed -
+    # the overrun was fixed at the source long ago and the counter only cost log lines per send.
     _txseq(s, 'REL', payload, label)   # v487f5: join-seq transcript
     bc=payload[0]
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
@@ -9309,8 +9297,11 @@ AI_TELEMETRY_FAR_M   = 25000.0
 AI_TELEMETRY_MID_HZ  = 1.0
 AI_TELEMETRY_FAR_HZ  = 0.05     # one keep-alive per 20 s beyond FAR: keeps the object alive on the
                                 # client (its silence cull is ~28 s) so no re-create is ever needed
+# v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
+# steer / speed seed; these are corrections). Column followers correct at the follower rate.
+AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 1.0}
 
-def _ai_peer_send_ok(obj, p, x, y, now):
+def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
     """True if this peer should receive this object's state now (tiered by distance + cadence)."""
     pos = p.__dict__.get('_pos_xy')
     if pos is None:
@@ -9318,8 +9309,11 @@ def _ai_peer_send_ok(obj, p, x, y, now):
     else:
         d = math.hypot(x - pos[0], y - pos[1])
     if d <= AI_TELEMETRY_NEAR_M:
-        return True
-    hz = AI_TELEMETRY_MID_HZ if d <= AI_TELEMETRY_FAR_M else AI_TELEMETRY_FAR_HZ
+        hz = AI_TELEMETRY_NEAR_HZ.get(kind, 2.0)
+    elif d <= AI_TELEMETRY_FAR_M:
+        hz = min(AI_TELEMETRY_MID_HZ, AI_TELEMETRY_NEAR_HZ.get(kind, 2.0))
+    else:
+        hz = AI_TELEMETRY_FAR_HZ
     pl = obj.setdefault('_peer_last', {})
     if now - pl.get(p.addr, 0.0) < 1.0 / hz:
         return False
@@ -9347,6 +9341,8 @@ def tank_broadcast_state(onum):
     n = 0
     now = time.time()
     hold = t.get('hold_until') or {}
+    _col = COLUMNS.get(t.get('column'))
+    _is_follower = _col is not None and _col.get('leader') != onum      # v672f5
     for p in get_sessions_in_room(t['room']):
         if getattr(p, 'addr', None) in t['peers']:
             # v666f5 [CREATE-BEFORE-TELEMETRY for tanks]: a create batch is instantiated by the client
@@ -9356,7 +9352,8 @@ def tank_broadcast_state(onum):
             # 8-tank column, only the last record created; hits on ghosts -> particle assert CTD).
             if hold.get(p.addr, 0.0) > now:
                 continue
-            if not _ai_peer_send_ok(t, p, t['pos'][0], t['pos'][1], now):      # v668f5
+            if not _ai_peer_send_ok(t, p, t['pos'][0], t['pos'][1], now,
+                                    kind='follower' if _is_follower else 'tank'):      # v668f5/v672f5
                 continue
             if send_tank_update(onum, p, pl):
                 n += 1
@@ -11325,7 +11322,7 @@ def train_broadcast_state(onum):
     n = 0
     now = time.time()
     for p in get_sessions_in_room(tr['room']):
-        if getattr(p, 'addr', None) in tr['peers'] and _ai_peer_send_ok(tr, p, x, y, now) \
+        if getattr(p, 'addr', None) in tr['peers'] and _ai_peer_send_ok(tr, p, x, y, now, kind='train') \
                 and _send_unrel_frame_to(p, onum, pl):
             n += 1
     tr['last_sent'] = time.time()
@@ -11826,7 +11823,8 @@ def _camp_scores_loop():
             logx('CAMPSCORE', 'paced broadcast failed')
         time.sleep(PACE_71_S)
 
-PACE_71_S = 3.0      # v669f5: one 8-scene msg-71 packet every 3 s (60 scenes -> ~24 s per full pass)
+PACE_71_S = 10.0     # v672f5: one 8-scene msg-71 packet every 10 s (60 scenes -> ~80 s per full pass);
+                     # the panel still gets scene data ON DEMAND (hover / panel open) as before
 PACE_43_S = 1.0      # v669f5: one camp-score message per second
 
 def is_transport_plane(plane_id):
@@ -11937,7 +11935,7 @@ def soldier_broadcast_state(onum):
     n = 0
     _now = time.time()
     for p in get_sessions_in_room(sd['room']):
-        if getattr(p, 'addr', None) in sd['peers'] and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now) \
+        if getattr(p, 'addr', None) in sd['peers'] and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now, kind='soldier') \
                 and _send_unrel_frame_to(p, onum, pl):
             n += 1
     sd['last_sent'] = time.time()
@@ -20470,7 +20468,7 @@ SEND_PRODUCTION_40 = False
 # nation here, unrelated to the stock). msg 40 writes them back, so the stock is re-sent every
 # PROD40_UNITS_PERIOD_S: the HQ page / Ctrl-L show the real units except for a few seconds after
 # each tick. 0 disables the fast cadence (the 30 s camp-score push remains).
-PROD40_UNITS_PERIOD_S = 5.0
+PROD40_UNITS_PERIOD_S = 10.0   # v672f5: 5 -> 10 s
 
 def _prod40_fast_loop():
     while running:
@@ -21548,15 +21546,6 @@ def _handle_ask_resources_59(s, pl):
     if len(pl) >= 23 and bytes(pl[-8:]) == b'\xff' * 8:
         log('RESUPPLY', f'{s.current_pilot} msg-59 is the DEATH/EXIT form (plane fields '
                         f'0xFF) -> ignored, no grant scheduled (v440f5)')
-        # v486f5 [RELIABLE-BUDGET MAP]: snapshot the reliable tally this client carried INTO its
-        # exit-to-HQ - the client's ~32 array overruns silently and only detonates on the exit
-        # wipe's heap-free, so THIS is the number that matters for the CTD correlation.
-        _rt = s.__dict__.get('_rel_tally')
-        if _rt:
-            _rtot = sum(_rt.values())
-            _wall = '  *** >=32: exit-to-HQ CTD risk ***' if _rtot >= 32 else ''
-            _brk = ', '.join(f'{k}={v}' for k, v in sorted(_rt.items(), key=lambda kv: -kv[1]))
-            log('RELBUDGET', f'{s.current_pilot} EXIT-TO-HQ at reliable total={_rtot}{_wall} :: {_brk}')
         return
     now = time.time()
     # v612f5 [REAL LOADOUT WEIGHTS]: the ask carries the plane's own numbers (live 09-09, after the
