@@ -46,6 +46,23 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-12 (f): v666f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v666f5.py' at next convenience. (Previous: v665f5.)
+
+v666f5 [GHOST TANKS -> PARTICLE CTD: CREATE-BEFORE-TELEMETRY FOR TANKS]  Taurus messages78 /
+    Moira messages76 (09-12): an 8-record tank create batch (in 2'169) is instantiated by the
+    client ONE record per ~0.33 s, last-to-first (LOAD OBJECT -> Create NetTank -> out 6). Our
+    state updates (0.5 s after a column spawn, immediately on re-create) reached the peer before
+    records 1-7 existed -> the client stubbed the slots ('Get coord for missing object 356..363'
+    every frame for 35 min), the pending creates were dropped, and hits on the ghosts during an
+    La-7 fight tripped Fa3_NewParticleSystemParticles.cpp:387 (logical error) = the runtime error.
+    Fix (the v485 plane rule, for tanks): per-peer hold of tank telemetry after a create
+    (TANK_CREATE_SETTLE_S 1.0 + 0.45 s per record still ahead in the batch) in
+    tank_broadcast_state - the only sender - and the column's first broadcast waits for the
+    batch. Noted: 'NET::MESSAGE Unknown Type 104' - msg 104 has no handler in this client build
+    (dispatch slot empty); TC_USE_MSG104 to be switched off (noise, not a crash).
+
+==============================================================================
 *** BANKED 2026-09-12 (e): v665f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v665f5.py' at next convenience. (Previous: v664f5.)
 

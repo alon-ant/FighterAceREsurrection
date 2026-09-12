@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v665f5'
+VERSION = 'v666f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9313,11 +9313,30 @@ def tank_broadcast_state(onum):
             log('TANK', f'pack failed for 0x{onum:04x}: {_e} (logged once)')
         return 0
     n = 0
+    now = time.time()
+    hold = t.get('hold_until') or {}
     for p in get_sessions_in_room(t['room']):
-        if getattr(p, 'addr', None) in t['peers'] and send_tank_update(onum, p, pl):
-            n += 1
+        if getattr(p, 'addr', None) in t['peers']:
+            # v666f5 [CREATE-BEFORE-TELEMETRY for tanks]: a create batch is instantiated by the client
+            # ONE record per ~0.33 s (LOAD OBJECT -> Create NetTank -> out 6); a state update that
+            # arrives first stubs the slot ('Get coord for missing object'), the pending create is then
+            # dropped and the tank stays a ghost until the next world rebuild (Taurus/Moira 09-12:
+            # 8-tank column, only the last record created; hits on ghosts -> particle assert CTD).
+            if hold.get(p.addr, 0.0) > now:
+                continue
+            if send_tank_update(onum, p, pl):
+                n += 1
     t['last_sent'] = time.time()
     return n
+
+TANK_CREATE_SETTLE_S  = 1.0    # v666f5: base hold of a peer's tank telemetry after its create
+TANK_CREATE_PER_REC_S = 0.45   # v666f5: + per record position in the batch (client ~0.33 s each)
+
+def _tank_hold_peer(onum, addr, index=0):
+    t = TANKS.get(onum)
+    if t is None:
+        return
+    t.setdefault('hold_until', {})[addr] = time.time() + TANK_CREATE_SETTLE_S + TANK_CREATE_PER_REC_S * int(index)
 
 # --- v570f5 TANK COLUMNS (step 1 of the TC layer) ---------------------------------------
 # A column = one leader driven by the normal goto/A* logic + followers that hold formation
@@ -9365,14 +9384,15 @@ def spawn_column(room_id, camp, class_id, n, x, y, group_id=None, reason=''):
         if not getattr(p, 'entered_game', False):
             continue
         body = bytearray([0x02]) + _ensure_ai_client_on(p)
-        for on in onums:
+        for _i, on in enumerate(onums):
             body += build_tank_record(AI_CLIENT_ST, on, camp, class_id, group_id)
             TANKS[on]['peers'].add(getattr(p, 'addr', None))
+            _tank_hold_peer(on, getattr(p, 'addr', None), len(onums) - 1 - _i)   # v666f5: the client pops LIFO
         _submit_send(send_rel, p, build_msg13(bytes(body)),
                      f'<- CreateObject 2 TANK x{len(onums)} column {group_id} {reason}', to=3.0)
     if tank_consts_ok():
         for on in onums:
-            threading.Timer(0.5, tank_broadcast_state, args=(on,)).start()
+            threading.Timer(TANK_CREATE_SETTLE_S + TANK_CREATE_PER_REC_S * len(onums), tank_broadcast_state, args=(on,)).start()
     COLUMNS[group_id] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
                          'leader': onums[0], 'members': onums, 'created': time.time()}
     log('TANK', f'room {room_id}: column {group_id} = {len(onums)} x class {class_id} camp {camp} '
@@ -12352,9 +12372,10 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None):
         if i == 0:
             body += _ensure_ai_client_on(s)
         ids = []
-        for onum, t in chunk:
+        for _i, (onum, t) in enumerate(chunk):
             body += build_tank_record(AI_CLIENT_ST, onum, t['camp'], t['class'], t['group'])
             t['peers'].add(s.addr); t['last_sent'] = 0.0
+            _tank_hold_peer(onum, s.addr, len(chunk) - 1 - _i)      # v666f5
             ids.append(f'0x{onum:04x}'); n += 1
         _submit_send(send_rel, s, build_msg13(bytes(body)),
                      f'<- CreateObject 2 TANK x{len(chunk)} {ids} (re-create {reason})', to=3.0)
