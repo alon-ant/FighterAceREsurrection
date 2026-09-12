@@ -46,6 +46,19 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-12 (e): v665f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v665f5.py' at next convenience. (Previous: v664f5.)
+
+v665f5 [HQ CHANGE-PLANES MENU TRUNCATED TO 7 - FRAMING]  Moira, messages76 13:37: after a
+    death-to-HQ the client batches its plane-catalog upload (msg 58/0x3a, 21 one-byte ids = 22 B)
+    in a COMPOUND packet with 32/102; that path fell to the verbatim compound echo, and the
+    client decodes the reply as 3-byte records -> (22-1)/3 = 7 planes (the first seven ids).
+    The standalone/prefixed form was already re-encoded (64 B = 21 x 3). The compound path now
+    re-encodes with the same side/staff trim. (Investigated and ruled out on the way: placement
+    - AF 12 was her own TAB choice; rank - none exists here; msg 26 = GROUP_INFO_MESSAGE,
+    14-byte records; msg 52 = timed event record; the field's aircraft units.)
+
+==============================================================================
 *** BANKED 2026-09-12 (d): v664f5 is the STABLE BANKING POINT (user-approved, DELIVERED).
     Snapshot server.py -> 'old files\server_v664f5.py' at next convenience. (Previous: v660f5.)
 

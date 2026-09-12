@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v664f5'
+VERSION = 'v665f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -16770,6 +16770,34 @@ def handle_compound(s, outer_cmd, pl):
         return
 
     # -- LEAVE ARENA / BACK TO LOBBY, compound-wrapped (inner sub=0x40) ---------
+    # v665f5 [PLANE CATALOG, compound-wrapped (inner sub=0x3a)] The HQ's Change Planes list is
+    # the client's decode of our msg-58 echo as 3-BYTE records ((Size-1)/3). The standalone /
+    # prefixed catalog is re-encoded by the POST-AUTH filter; the compound-batched form (the
+    # client sends 58/32/102 together after a death-to-HQ) fell to the verbatim compound echo:
+    # 22 bytes = 21 one-byte ids -> (22-1)/3 = SEVEN records = the seven-plane menu (Moira,
+    # messages76 13:37:51 'in 58'22' vs the complete 'in 58'64'). Re-encode here too, with the
+    # same side / staff trim.
+    if inner_sub == 0x3a:
+        try:
+            _size = inner[0] * 16 + (inner[1] >> 4)
+            _ids = list(inner[5:4 + _size]) if 1 <= _size and 4 + _size <= len(inner) else []
+        except Exception:
+            _ids = []
+        if _ids:
+            _have_side_c = s.nation is not None and 0 <= s.nation < 8
+            _hide_c = hidden_plane_ids_for(s) if STAFF_HIDE_VIA_CATALOG else frozenset()
+            if PLANE_FILTER_VIA_CATALOG and (_have_side_c or _hide_c):
+                _sc = _session_slot_camp(s) if _have_side_c else {}
+                _kept = [i for i in _ids if (not _have_side_c or _sc.get(i, 0) == s.nation) and i not in _hide_c]
+            else:
+                _kept = _ids
+            if _kept:
+                _rec = b''.join(struct.pack('<BH', i & 0xff, CATALOG_RECORD_USHORT & 0xffff) for i in _kept)
+                _fpkt = build_ingame_pkt(bytes([0x3a]) + _rec)
+                log('COMPOUND', f'inner sub=0x3a catalog -> re-encoded {len(_ids)}->{len(_kept)} (3-byte recs, {1 + 3 * len(_kept)}B)', level='INFO')
+                threading.Thread(target=lambda p=_fpkt: send_reply(s, p, 'compound echo 0x3a (3B)', to=5.0), daemon=True).start()
+                return
+        log('COMPOUND', f'inner sub=0x3a catalog could not be parsed ({len(inner)}B) - verbatim echo')
     # msg 64 = the back button. No inbound handler -> must NOT be echoed.
     if inner_sub == 0x40:
         log('COMPOUND', 'inner sub=0x40 -> leave-arena (back to lobby), NOT echoed')
