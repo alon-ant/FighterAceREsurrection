@@ -1644,6 +1644,41 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             """
             self.send_html(content)
 
+        elif self.path.startswith('/admin/arena_reset'):
+            # v640f5: reset an arena now (admins, or the arena's creator); ?winner=<camp> announces
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                room_id = int(qs.get('room', ['0'])[0])
+            except (ValueError, TypeError):
+                room_id = 0
+            if not user_can_edit_arena(user, room_id):
+                return self.send_error(403)
+            wq = qs.get('winner', [''])[0].strip()
+            if wq == 'ask':
+                opts = ''.join(f'<option value="{c}">camp {c}</option>' for c in range(8))
+                self.send_html(f"""<div class="card"><h2>Announce a winner and reset arena {room_id}</h2>
+                    <form method="get" action="/admin/arena_reset"><input type="hidden" name="room" value="{room_id}">
+                    <label>Winning camp (0 = first assigned country, 1 = second, ...)<br><select name="winner">{opts}</select></label>
+                    <div style="margin-top:14px;"><button type="submit" class="btn-red">Announce &amp; reset</button>
+                    &nbsp; <a href="/admin/arena_settings?room={room_id}" style="color:#666;">Cancel</a></div></form></div>""")
+                return
+            winner = None
+            if wq != '':
+                try:
+                    winner = max(0, min(7, int(wq)))
+                except ValueError:
+                    winner = None
+            fn = SRV.get('arena_reset')
+            if fn:
+                try:
+                    fn(room_id, winner, f'web:{user}')
+                    SRV['log']('WEB', f'{user} reset arena {room_id} (winner {winner})')
+                except Exception as e:
+                    SRV['log']('WEB', f'arena reset failed: {e!r}')
+            self.send_response(302)
+            self.send_header('Location', '/admin/arena_settings?room=%d' % room_id)
+            self.end_headers()
+
         elif self.path.startswith('/admin/arena_settings'):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             try:
@@ -1793,6 +1828,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _sm_opt('events', 'Force Events board')
                 + _sm_opt('none', 'Force NO global scoring')
                 + '</select></label>')
+            # TC WIN / RESET (v640f5): tc_win_mode + a Reset button (calls the game server's arena_reset)
+            _wm = str(overrides.get('tc_win_mode', 'off') or 'off').lower()
+            def _wm_opt(v, label):
+                s = ' selected' if _wm == v else ''
+                return '<option value="' + v + '"' + s + '>' + label + '</option>'
+            winmode_html = (
+                '<label style="display:block; margin:12px 0;">Win condition<br>'
+                '<select name="s_tc_win_mode" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + _wm_opt('off', 'Off - the arena runs until reset by hand')
+                + _wm_opt('all', 'One country owns every scene -> it has won, arena resets')
+                + _wm_opt('wipeout', 'Only one country still owns scenes -> it has won, arena resets')
+                + '</select></label>'
+                '<div style="margin:8px 0 16px;"><a href="/admin/arena_reset?room=' + str(room_id) + '" '
+                'onclick="return confirm(\'Reset this arena now? Everyone in it is sent back to the lobby after a 3 s countdown.\');" '
+                'class="btn-red" style="padding:8px 18px;">Reset arena now</a>'
+                ' &nbsp; <a href="/admin/arena_reset?room=' + str(room_id) + '&winner=ask" style="color:#666;">announce a winner first...</a></div>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
@@ -1857,6 +1908,13 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     category for this arena only. See the <a href="/scoring">Scoring Reference</a>
                     for the tables. Takes effect on the next death in the arena.</p>
                     {scoring_html}
+                    <h3>Win condition &amp; reset</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Territorial Combat: when the
+                    chosen condition is met the server announces the winner, then <em>Arena reset, please
+                    leave the arena</em>, counts down and sends everyone to the lobby, and rebuilds the
+                    arena from its GAME_DEF (ownership, stores, units, AI units). The button does the
+                    same immediately, without a winner.</p>
+                    {winmode_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -2866,6 +2924,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _sm = qs.get('s_scoring_mode', [''])[0].strip().lower()
             if _sm in ('ffa', 'tc', 'none', 'events'):
                 settings['scoring_mode'] = _sm
+            _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
+            if _wm in ('off', 'all', 'wipeout'):
+                settings['tc_win_mode'] = _wm
             for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
                 _wv = qs.get('s_' + _wk, [''])[0].strip()
                 if _wv != '':
@@ -3197,7 +3258,7 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
-                     password_read_fn=None):
+                     password_read_fn=None, arena_reset_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -3211,6 +3272,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['scoring_ref'] = scoring_ref_fn              # v404f5: web_scoring_reference() -> dict
     SRV['player_counts'] = player_counts_fn          # v418f5: web_player_counts() -> dict
     SRV['password_read'] = password_read_fn          # arena_password_read(blob) -> plaintext pw / ''
+    SRV['arena_reset'] = arena_reset_fn              # v640f5: arena_reset(room_id, winner_camp, by)
 
     migrate_web_db()
     _start_httpd_thread()
