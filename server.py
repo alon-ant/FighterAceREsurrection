@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v666f5'
+VERSION = 'v670f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8926,7 +8926,7 @@ TANK_DIR_SCALE    = None
 TANK_S16_SCALE    = None
 TANK_UPDATE_HZ    = 4.0            # moving cadence
 TANK_IDLE_S       = 2.0            # keep-alive cadence when stationary (client culls at ~28 s)
-TANK_DEFAULT_MPS  = 8.0            # 'goto' speed in world units (m) per second
+TANK_DEFAULT_MPS  = 16.0           # 'goto' speed in world units (m) per second (v667f5: 8 -> 16)
 # v566f5 [CLIENT-SIDE TANK PHYSICS - field-mapped 2026-09-07 with the aux knobs]:
 #   aux[1] (+0x320, s16/32767)  = STEERING  (+ = turn right)
 #   aux[2] (+0x31c, s16/32767)  = THROTTLE  (drives forward)
@@ -9048,8 +9048,12 @@ def pack_tank_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, aux=(0, 0, 0, 0, 
     assert len(body) == TANK_UPDATE_SIZE, len(body)
     return body
 
+TANK_SPEED_SCALE = 2.0     # v667f5: user - tanks at twice the previous speed (goto/column speeds
+                           # and the per-class ceiling all scale; the client's physics still
+                           # integrates from our throttle/speed seed)
+
 def tank_max_mps(t):
-    return TANK_CLASS_MAX_MPS.get(t.get('class'), TANK_FALLBACK_MAX_MPS)
+    return TANK_CLASS_MAX_MPS.get(t.get('class'), TANK_FALLBACK_MAX_MPS) * TANK_SPEED_SCALE
 
 # --- v568f5 OBSTACLE AVOIDANCE (server-side; the client's ttgoto pathing only runs for
 # locally simulated tanks, a NetTank goes exactly where the host steers it) ---------------
@@ -9294,6 +9298,34 @@ def _tank_controls(t):
     seed = (t.get('_speed_mps', 0.0) / TANK_TICK_HZ) if TANK_SPEED_SEED else 0.0
     return flags, (0, _s16c(steer * 32767), _s16c(thr * 32767), _s16c(seed * 16384), 0)
 
+# --- v668f5 AI TELEMETRY RELEVANCE (pilots reported ~10 kB/s inbound flying together) -------
+# Every moving tank / train / soldier was sent to every peer in the room at the 4 Hz driver rate:
+# 15 trains + two columns + sticks ~ 8-10 kB/s per client. Tiers by distance from the peer's own
+# plane: near = full rate, mid = AI_TELEMETRY_MID_HZ, beyond AI_TELEMETRY_FAR_M nothing (the
+# client culls at ~38 km and the 1 Hz re-create brings the object back when in range). A peer with
+# no known position (HQ) gets the mid rate. Idle keep-alives (TANK_IDLE_S) are unaffected.
+AI_TELEMETRY_NEAR_M  = 8000.0
+AI_TELEMETRY_FAR_M   = 25000.0
+AI_TELEMETRY_MID_HZ  = 1.0
+AI_TELEMETRY_FAR_HZ  = 0.05     # one keep-alive per 20 s beyond FAR: keeps the object alive on the
+                                # client (its silence cull is ~28 s) so no re-create is ever needed
+
+def _ai_peer_send_ok(obj, p, x, y, now):
+    """True if this peer should receive this object's state now (tiered by distance + cadence)."""
+    pos = p.__dict__.get('_pos_xy')
+    if pos is None:
+        d = AI_TELEMETRY_NEAR_M + 1.0                  # unknown -> mid rate
+    else:
+        d = math.hypot(x - pos[0], y - pos[1])
+    if d <= AI_TELEMETRY_NEAR_M:
+        return True
+    hz = AI_TELEMETRY_MID_HZ if d <= AI_TELEMETRY_FAR_M else AI_TELEMETRY_FAR_HZ
+    pl = obj.setdefault('_peer_last', {})
+    if now - pl.get(p.addr, 0.0) < 1.0 / hz:
+        return False
+    pl[p.addr] = now
+    return True
+
 def tank_broadcast_state(onum):
     """Send the tank's current state to every flying session in its room. Returns count."""
     t = TANKS.get(onum)
@@ -9323,6 +9355,8 @@ def tank_broadcast_state(onum):
             # dropped and the tank stays a ghost until the next world rebuild (Taurus/Moira 09-12:
             # 8-tank column, only the last record created; hits on ghosts -> particle assert CTD).
             if hold.get(p.addr, 0.0) > now:
+                continue
+            if not _ai_peer_send_ok(t, p, t['pos'][0], t['pos'][1], now):      # v668f5
                 continue
             if send_tank_update(onum, p, pl):
                 n += 1
@@ -9411,6 +9445,8 @@ def column_goto(group_id, gx, gy, mps=None):
         col['leader'] = col['members'][0]; lead = TANKS[col['leader']]
         log('TANK', f'column {group_id}: leader gone, 0x{col["leader"]:04x} promoted')
     lead['goal'] = (float(gx), float(gy))
+    col['dest'] = (float(gx), float(gy))             # v670f5: remembered for leader promotion
+    lead['_col_dest'] = col['dest']
     if mps:
         lead['mps'] = float(mps)
     for on in col['members']:
@@ -9441,19 +9477,33 @@ def column_delete(group_id, reason=''):
 def _columns_tick():
     """Refresh follower goals from the leader's pose (called each driver tick)."""
     for gid, col in list(COLUMNS.items()):
+        # v670f5: a DEAD leader (still in TANKS as a wreck, goal cleared by the kill) is 'gone' too -
+        # the column used to freeze in its tracks (user 09-12). Promote the first live member and
+        # hand it the column's destination so the advance continues.
         col['members'] = [o for o in col['members'] if o in TANKS]
-        if not col['members']:
+        live = [o for o in col['members'] if not TANKS[o].get('dead')]
+        if not live:
             COLUMNS.pop(gid, None); continue
-        if col['leader'] not in TANKS:
-            col['leader'] = col['members'][0]
-            log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted')
+        if col['leader'] not in TANKS or TANKS[col['leader']].get('dead'):
+            old = TANKS.get(col['leader'])
+            dest = col.get('dest') or (old.get('_col_dest') if old else None) or (old.get('goal') if old else None)
+            col['leader'] = live[0]
+            lead = TANKS[col['leader']]
+            lead['_col_park'] = None
+            if dest is not None and not col.get('deployed'):
+                lead['goal'] = (float(dest[0]), float(dest[1]))
+                lead['_wps'] = None
+                if old and old.get('mps'):
+                    lead['mps'] = old['mps']
+            log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted'
+                        f'{" -> continues to (%.0f,%.0f)" % (dest[0], dest[1]) if dest is not None else ""}')
         lead = TANKS[col['leader']]
         if col.get('deployed'):
             continue                                  # v594f5: on a perimeter - per-tank goals, no formation
         moving = lead.get('goal') is not None
         slot = 0
         for on in col['members']:
-            if on == col['leader']:
+            if on == col['leader'] or TANKS[on].get('dead'):
                 continue
             slot += 1
             t = TANKS[on]
@@ -9922,7 +9972,7 @@ TC_TANKS_ATTACK      = 8
 TC_TANKS_DEFEND      = 8
 TC_TANK_FUEL_KG      = 300      # loadout drawn from the camp pool per tank
 TC_TANK_AMMO_KG      = 200
-TC_COLUMN_MPS        = 9.0
+TC_COLUMN_MPS        = 18.0     # v667f5: 9 -> 18 (user: twice the speed)
 TC_DEFEND_AT_TARGET  = True     # v585f5: defenders form AT the threatened scene (user), units/pool
                                 # still drawn as if produced by the camp's nearest tank producer
 TC_AI_CHAT           = True
@@ -11273,8 +11323,10 @@ def train_broadcast_state(onum):
     pl = pack_train_state(x, y, z, tr['camp'], tr['mps'], tr['road'], tr['node'], tr['dist'], tr.get('dir', 0),
                           tr.get('mask', 0), state=tr.get('state', TRAIN_STATE_MOVING if tr['mps'] > 0 else TRAIN_STATE_STOPPED))
     n = 0
+    now = time.time()
     for p in get_sessions_in_room(tr['room']):
-        if getattr(p, 'addr', None) in tr['peers'] and _send_unrel_frame_to(p, onum, pl):
+        if getattr(p, 'addr', None) in tr['peers'] and _ai_peer_send_ok(tr, p, x, y, now) \
+                and _send_unrel_frame_to(p, onum, pl):
             n += 1
     tr['last_sent'] = time.time()
     return n
@@ -11739,15 +11791,43 @@ def broadcast_camp_scores(room_id, reason='', to=None):
     return n
 
 def _camp_scores_loop():
+    """v669f5: PACED. The 30 s cycle used to fire 8 reliable msg-71 packets (60 scenes, ~5 kB) plus
+    5 x msg 43 and 5 x msg 40 in one instant - a burst the client reported as loss (reliable
+    window stall) with a single pilot online. Now one msg-71 chunk every PACE_71_S, one camp
+    score per PACE_43_S; msg 40 is left to its own 5 s loop. Every scene is still refreshed within
+    ~CAMPSCORE_PERIOD_S."""
+    chunk_i = {}
     while running:
-        time.sleep(CAMPSCORE_PERIOD_S)
         try:
-            for rid in _active_ingame_rooms():
-                broadcast_production_info_71_all(rid, reason='(periodic)')   # v660f5: the tally's inputs first
-                broadcast_camp_scores(rid, reason='(periodic)')
-                broadcast_production_40(rid, reason='(periodic, camp scores)', force=True)
+            rooms = sorted(_active_ingame_rooms())
+            if not rooms:
+                time.sleep(2.0); continue
+            for rid in rooms:
+                trn = _probe_terrain_for_room(rid)
+                camps = SCENE_CAMP_BY_TERRAIN.get(trn, {})
+                sids = [sid for sid in sorted(camps) if scene_profile(trn, sid) is not None]
+                if sids:
+                    i = chunk_i.get(rid, 0) % max(1, (len(sids) + PRODINFO_MAX_SCENES - 1) // PRODINFO_MAX_SCENES)
+                    chunk = sids[i * PRODINFO_MAX_SCENES:(i + 1) * PRODINFO_MAX_SCENES]
+                    chunk_i[rid] = i + 1
+                    if chunk:
+                        broadcast_production_info_71(rid, scene_ids=chunk, reason='(paced refresh)')
+                    if i == 0:
+                        # start of a cycle: the camp scores, one camp per PACE_43_S in a side thread
+                        def _scores(rid=rid):
+                            tkey = _probe_terrain_for_room(rid)
+                            for camp in sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(tkey) or {}).values() if c is not None and c <= 7}):
+                                pkt = build_camp_score_43(rid, camp)
+                                for s in [x for x in get_sessions_in_room(rid) if getattr(x, 'entered_game', False)]:
+                                    _submit_send(send_rel, s, pkt, f'<- CAMPSCORE 43 camp {camp} (paced)', to=3.0)
+                                time.sleep(PACE_43_S)
+                        threading.Thread(target=_scores, daemon=True).start()
         except Exception:
-            logx('CAMPSCORE', 'periodic broadcast failed')
+            logx('CAMPSCORE', 'paced broadcast failed')
+        time.sleep(PACE_71_S)
+
+PACE_71_S = 3.0      # v669f5: one 8-scene msg-71 packet every 3 s (60 scenes -> ~24 s per full pass)
+PACE_43_S = 1.0      # v669f5: one camp-score message per second
 
 def is_transport_plane(plane_id):
     try:
@@ -11855,8 +11935,10 @@ def soldier_broadcast_state(onum):
     except Exception:
         return 0
     n = 0
+    _now = time.time()
     for p in get_sessions_in_room(sd['room']):
-        if getattr(p, 'addr', None) in sd['peers'] and _send_unrel_frame_to(p, onum, pl):
+        if getattr(p, 'addr', None) in sd['peers'] and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now) \
+                and _send_unrel_frame_to(p, onum, pl):
             n += 1
     sd['last_sent'] = time.time()
     return n

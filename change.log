@@ -46,6 +46,21 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-12 (g): v669f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v669f5.py' at next convenience. (Previous: v666f5.)
+
+v667f5-v669f5 [TANK SPEED x2, TELEMETRY FLOOD]
+    * v667f5: TC_COLUMN_MPS 9 -> 18, TANK_DEFAULT_MPS 8 -> 16, TANK_SPEED_SCALE 2.0 on the
+      per-class ceiling (user).
+    * v668f5: pilots measured ~10 kB/s inbound flying together - every moving tank / train /
+      soldier went to every peer at the 4 Hz driver rate regardless of distance (15 trains alone
+      ~3 kB/s). AI telemetry is now tiered per peer by distance from his plane: <= 8 km full rate,
+      <= 25 km 1 Hz, beyond that a keep-alive every 20 s (stays alive on the client, no re-create).
+    * v669f5: the remaining spikes (single pilot) were our own bursts: every 30 s eight reliable
+      msg-71 packets (~5 kB) + 5 x 43 + 5 x 40 at once -> reliable-window stall reported as loss.
+      Paced: one 8-scene msg-71 every 3 s, one msg 43 per second at the start of a pass.
+
+==============================================================================
 *** BANKED 2026-09-12 (f): v666f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v666f5.py' at next convenience. (Previous: v665f5.)
 
