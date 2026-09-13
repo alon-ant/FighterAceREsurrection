@@ -46,6 +46,35 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-14: v692f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v692f5.py' at next convenience. (Previous: v669f5, 2026-09-12.)
+
+v670f5-v692f5 [TC POLISH, TRAINS AFTER TAB, CRATERS, DEV-BUILD CTDs] (09-13 .. 09-14)
+    * Columns: a killed LEADER hands the column's destination to the promoted tank on both kill
+      paths (v670/v673) - it used to keep its follower slot beside the wreck and stall.
+    * Tanks at the client's ceiling: Cromwell +0x74 = 11.1 m/s; a server speed above it rubber-
+      bands on every correction (v673, TANK_SPEED_SCALE back to 1.0).
+    * Repairs x2 (`repair mult <x>`), no repair under an engaged assault (73,BC oscillated 8..32%),
+      per-building capacity + stock loss and restore on repair (v677), 'helps capture' line at the
+      capture only (v678), planes lost to AI booked for kills by our AI objects (v677).
+    * Trains: 3 per camp spread rear/mid/front on the best line (v679); the client's msg-6 state
+      request after a create is answered with the live frame (v691).
+    * THE TAB CHAIN (v680..v692): cull notify parsed on the compound path (v681), before the plane
+      delete handler's 'neither its own' swallow (v682), and BEFORE the in-world gate - the cull
+      list arrives ~150 ms after the own-plane delete, when the session is already 'left world'
+      (v692, the last gap); train/soldier create-hold vs telemetry (v681); AI station
+      re-registered after the client's VIRTUAL delete (v682); re-create radius 30 km (v688);
+      world-wipe forget only on real deaths MEC 1/2/4/5 (v689/v691 - MEC 10 ESC-to-HQ keeps the
+      world, forgetting there CTD'd the refly); rails file per terrain (fa_make_rails.py - Circle
+      has none).
+    * Telemetry: AI tiers by distance/side, plane relay tiers never silent (the 0.1 Hz far tier
+      looped cull/re-create on peers), periodic 40/71/43 unreliable (reliable HOL blocking made
+      chat 2-3 s late), `broadcast` = the v413 announce, PERF line carries rss/threads/objects.
+    * Dev-build CTDs (Taurus/Moira run 'Developer version'): soldier kill entry off (particle
+      assert), craters patch by exact signature only (the v686 shape scan corrupted a GAME_DEF ->
+      WORLD_SIZE2 assert). Craters: 10 min / 40 (web knob), msg-52 crater records relayed.
+
+==============================================================================
 *** BANKED 2026-09-12 (g): v669f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v669f5.py' at next convenience. (Previous: v666f5.)
 
