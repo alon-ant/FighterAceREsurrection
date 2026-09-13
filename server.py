@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v672f5'
+VERSION = 'v676f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4056,6 +4056,14 @@ def console_handler():
                         send_shutdown(_t, _txt); log('CONSOLE', f'boot: EShutDown sent to {_name}')
                 except IndexError:
                     log('CONSOLE', 'usage: boot <pilot> [text]')
+            elif cmd == 'broadcast':
+                # v676f5: broadcast <text>  - the v413f5 SERVER-WIDE ANNOUNCE (broadcast_everyone): in-game
+                # clients get msg-20 channel 4 = the uppercased chat line + the ~10 s on-screen banner,
+                # lobby clients the 'Server:' named chat. (`say` stays the yellow 0xc9 system channel.)
+                if len(parts) > 1 and parts[1].strip():
+                    broadcast_everyone(parts[1].strip(), src='console')
+                else:
+                    log('CONSOLE', 'usage: broadcast <text>')
             elif cmd == 'say':
                 # v646f5: say <room|all> <text>  - yellow server system message (vcnc 0xc9)
                 _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
@@ -4636,7 +4644,14 @@ def console_handler():
                 else:
                     _rooms = sorted(_active_ingame_rooms())
                     _rid = _rooms[0] if _rooms else None
-                if not _a or _a[0] == 'status':
+                if _a and _a[0] == 'mult':                        # v673f5: repair mult <x>
+                    global OBJ_REPAIR_TIME_MULT
+                    try:
+                        OBJ_REPAIR_TIME_MULT = float(_a[1])
+                        log('CONSOLE', f'repair: time multiplier now x{OBJ_REPAIR_TIME_MULT:g} (applies to objects destroyed from now on)')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: repair mult <x>')
+                elif not _a or _a[0] == 'status':
                     with _OBJ_REPAIR_LOCK:
                         _items = sorted(_OBJ_DEAD_AT.items())
                     if not _items:
@@ -8914,7 +8929,7 @@ TANK_DIR_SCALE    = None
 TANK_S16_SCALE    = None
 TANK_UPDATE_HZ    = 4.0            # moving cadence
 TANK_IDLE_S       = 2.0            # keep-alive cadence when stationary (client culls at ~28 s)
-TANK_DEFAULT_MPS  = 16.0           # 'goto' speed in world units (m) per second (v667f5: 8 -> 16)
+TANK_DEFAULT_MPS  = 11.0           # 'goto' speed in world units (m) per second (v673f5: the Cromwell ceiling)
 # v566f5 [CLIENT-SIDE TANK PHYSICS - field-mapped 2026-09-07 with the aux knobs]:
 #   aux[1] (+0x320, s16/32767)  = STEERING  (+ = turn right)
 #   aux[2] (+0x31c, s16/32767)  = THROTTLE  (drives forward)
@@ -9036,9 +9051,10 @@ def pack_tank_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, aux=(0, 0, 0, 0, 
     assert len(body) == TANK_UPDATE_SIZE, len(body)
     return body
 
-TANK_SPEED_SCALE = 2.0     # v667f5: user - tanks at twice the previous speed (goto/column speeds
-                           # and the per-class ceiling all scale; the client's physics still
-                           # integrates from our throttle/speed seed)
+TANK_SPEED_SCALE = 1.0     # v673f5: back to 1.0 - the CLIENT integrates the tank with its own class
+                           # physics (Cromwell +0x74 = 11.1 m/s / 40 km/h); a server speed above
+                           # that rubber-bands on every correction (user 09-13). To go faster the
+                           # column needs a class with a higher ceiling, not a bigger number here.
 
 def tank_max_mps(t):
     return TANK_CLASS_MAX_MPS.get(t.get('class'), TANK_FALLBACK_MAX_MPS) * TANK_SPEED_SCALE
@@ -9297,20 +9313,28 @@ AI_TELEMETRY_FAR_M   = 25000.0
 AI_TELEMETRY_MID_HZ  = 1.0
 AI_TELEMETRY_FAR_HZ  = 0.05     # one keep-alive per 20 s beyond FAR: keeps the object alive on the
                                 # client (its silence cull is ~28 s) so no re-create is ever needed
+# v674f5: peer PLANE telemetry relay tiers (each peer's stream is ~400 B/s at the client's 4 Hz)
+PLANE_RELAY_NEAR_M   = 12000.0  # inside: every frame (the visual / combat range)
+PLANE_RELAY_FAR_M    = 40000.0
+PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
+PLANE_RELAY_FAR_HZ   = 0.1      # beyond 40 km: one frame per 10 s (keeps the object alive)
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
 AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 1.0}
 
 def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
-    """True if this peer should receive this object's state now (tiered by distance + cadence)."""
+    """True if this peer should receive this object's state now (tiered by distance + cadence).
+    v675f5: beyond the near tier an ENEMY object drops straight to the keep-alive rate - the
+    tactical map shows live positions of friendly units only (user 09-13)."""
     pos = p.__dict__.get('_pos_xy')
     if pos is None:
         d = AI_TELEMETRY_NEAR_M + 1.0                  # unknown -> mid rate
     else:
         d = math.hypot(x - pos[0], y - pos[1])
+    friendly = (getattr(p, 'nation', None) == obj.get('camp'))
     if d <= AI_TELEMETRY_NEAR_M:
         hz = AI_TELEMETRY_NEAR_HZ.get(kind, 2.0)
-    elif d <= AI_TELEMETRY_FAR_M:
+    elif d <= AI_TELEMETRY_FAR_M and friendly:
         hz = min(AI_TELEMETRY_MID_HZ, AI_TELEMETRY_NEAR_HZ.get(kind, 2.0))
     else:
         hz = AI_TELEMETRY_FAR_HZ
@@ -9915,13 +9939,25 @@ def tank_killed(onum, killer, reason=''):
     if t is None or t.get('dead'):
         return
     t['dead'] = True
-    t['goal'] = None
     col = COLUMNS.get(t.get('column'))
+    # v673f5: capture the column's destination BEFORE the goal is cleared and hand it to the new
+    # leader - the promoted tank used to keep its follower-slot goal (a point beside the wreck),
+    # drive there and stop: the whole column stalled (user 09-12/13).
+    _dest = None
+    if col is not None:
+        _dest = col.get('dest') or t.get('_col_dest') or (tuple(t['goal']) if t.get('goal') else None)
+    t['goal'] = None
     if col is not None and onum in col['members']:
         col['members'].remove(onum)
         if col['leader'] == onum and col['members']:
             col['leader'] = col['members'][0]
-            log('TANK', f'column {t["column"]}: leader 0x{onum:04x} killed, 0x{col["leader"]:04x} promoted')
+            _nl = TANKS.get(col['leader'])
+            if _nl is not None and _dest is not None and not col.get('deployed'):
+                _nl['goal'] = (float(_dest[0]), float(_dest[1])); _nl['_wps'] = None
+                _nl['_col_park'] = None; _nl['mps'] = t.get('mps') or _nl.get('mps')
+                col['dest'] = (float(_dest[0]), float(_dest[1])); _nl['_col_dest'] = col['dest']
+            log('TANK', f'column {t["column"]}: leader 0x{onum:04x} killed, 0x{col["leader"]:04x} promoted'
+                        f'{" -> continues to (%.0f,%.0f)" % (_dest[0], _dest[1]) if _dest is not None else " (no destination)"}')
     kname = getattr(killer, 'current_pilot', None) if killer is not None else None
     log('TANK', f'tank 0x{onum:04x} class {t["class"]} camp {t["camp"]} DESTROYED by {kname or "?"} {reason}')
     if killer is not None and kname and GROUND_KILL_SCORE:
@@ -9969,7 +10005,7 @@ TC_TANKS_ATTACK      = 8
 TC_TANKS_DEFEND      = 8
 TC_TANK_FUEL_KG      = 300      # loadout drawn from the camp pool per tank
 TC_TANK_AMMO_KG      = 200
-TC_COLUMN_MPS        = 18.0     # v667f5: 9 -> 18 (user: twice the speed)
+TC_COLUMN_MPS        = 11.0     # v673f5: the client's Cromwell ceiling (was 9; 18 rubber-banded)
 TC_DEFEND_AT_TARGET  = True     # v585f5: defenders form AT the threatened scene (user), units/pool
                                 # still drawn as if produced by the camp's nearest tank producer
 TC_AI_CHAT           = True
@@ -10632,12 +10668,19 @@ def tank_killed_by_tank(onum, shooter_onum):
     t = TANKS.get(onum)
     if t is None or t.get('dead'):
         return
-    t['dead'] = True; t['goal'] = None
+    t['dead'] = True
     col = COLUMNS.get(t.get('column'))
+    _dest = (col.get('dest') or t.get('_col_dest') or (tuple(t['goal']) if t.get('goal') else None)) if col is not None else None
+    t['goal'] = None
     if col is not None and onum in col['members']:
         col['members'].remove(onum)
         if col['leader'] == onum and col['members']:
             col['leader'] = col['members'][0]
+            _nl = TANKS.get(col['leader'])                       # v673f5: same hand-over as tank_killed
+            if _nl is not None and _dest is not None and not col.get('deployed'):
+                _nl['goal'] = (float(_dest[0]), float(_dest[1])); _nl['_wps'] = None
+                _nl['_col_park'] = None; _nl['mps'] = t.get('mps') or _nl.get('mps')
+                col['dest'] = (float(_dest[0]), float(_dest[1])); _nl['_col_dest'] = col['dest']
     sh = TANKS.get(shooter_onum) or {}
     log('TC', f'tank 0x{onum:04x} (camp {t["camp"]}) destroyed by tank 0x{shooter_onum:04x} (camp {sh.get("camp")})')
     # v600f5: the tail's PPT class names the hunter in the client's line ('GBR tank destroyed GER
@@ -12374,7 +12417,9 @@ def _tc_para_capture_tick():
 #        camp, name): the blue mission lines, siren and map markers of the films come from the
 #        script. Needs a script-loaded client (DAT_00c89e80) - the chat fallback stays available.
 TC_USE_MSG41  = True
-TC_USE_MSG104 = True
+TC_USE_MSG104 = False             # v675f5: OFF - no handler in this client build (dispatch slot 104
+                                  # empty: 'NET::MESSAGE with Unknown Type 104' in every log); the
+                                  # AI-chat mission lines carry the trigger text
 TC_CHAT_MISSION_LINES = True      # keep the AI-chat mission lines while msg 104 is being verified
 
 def send_scene_capture_41(room_id, sidx, camp):
@@ -15629,7 +15674,22 @@ def relay_telemetry(src, data, _split_obj=None):
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
     _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
+    _src_pos = src.__dict__.get('_pos_xy')            # v674f5: distance tiers for peer plane telemetry
     for p in peers:
+        # v674f5 [PLANE RELAY TIERS] (user 09-13: live telemetry only near the player, tactical
+        # positions beyond): a peer farther than PLANE_RELAY_NEAR_M from the sender gets this
+        # plane's frames at PLANE_RELAY_MID_HZ, beyond PLANE_RELAY_FAR_M at PLANE_RELAY_FAR_HZ
+        # (still well inside the client's ~28 s silence cull). Unknown positions -> full rate.
+        _ppos = p.__dict__.get('_pos_xy')
+        if _src_pos is not None and _ppos is not None:
+            _dd = math.hypot(_src_pos[0] - _ppos[0], _src_pos[1] - _ppos[1])
+            if _dd > PLANE_RELAY_NEAR_M:
+                _friend = getattr(p, 'nation', None) == getattr(src, 'nation', None)
+                _hz = PLANE_RELAY_MID_HZ if (_dd <= PLANE_RELAY_FAR_M and _friend) else PLANE_RELAY_FAR_HZ   # v675f5: enemy -> keep-alive only
+                _rl = src.__dict__.setdefault('_relay_last', {})
+                if _now_relay - _rl.get(p.addr, 0.0) < 1.0 / _hz:
+                    continue
+                _rl[p.addr] = _now_relay
         if SEND_CREATE_OBJECT and src.my_obj_number is not None:
             _cp = src.__dict__.setdefault('_created_peers', set())
             if p.addr not in _cp:
@@ -17649,8 +17709,10 @@ OBJ_REPAIR_MODEL       = True
 OBJ_REPAIR_MIN_S       = 30.0
 OBJ_REPAIR_BASE_S      = 300.0
 OBJ_REPAIR_S_PER_VALUE = 3.0
-OBJ_REPAIR_MAX_S       = 1800.0
+OBJ_REPAIR_MAX_S       = 3600.0    # v673f5: 1800 -> 3600
 OBJ_REPAIR_DECOR_S     = 300.0
+OBJ_REPAIR_TIME_MULT   = 2.0       # v673f5: user - scenes repaired too quickly; x2 on every clock
+                                   # (AA 10 min, hangar 18, factory 20, bridge 60). Console: `repair mult <x>`
 OBJ_REPAIR_TICK_S      = 10.0      # scheduler cadence
 # v557f5: msg-30 destroy-form `value` = AGE of the destruction in ~1.024 s units (FUN_00568eb0:
 # value*1024 ms; <2 s plays the explosion, fire burns 60-age s, non-zero arms the destroy_mode-1
@@ -17683,7 +17745,7 @@ def obj_repair_seconds(oi):
     if oi is None or oi.get('value', 0) <= 0 or oi.get('destroy_mode') == 2:
         secs = OBJ_REPAIR_DECOR_S
     else:
-        secs = min(OBJ_REPAIR_MAX_S, max(OBJ_REPAIR_BASE_S, oi['value'] * OBJ_REPAIR_S_PER_VALUE))
+        secs = min(OBJ_REPAIR_MAX_S, max(OBJ_REPAIR_BASE_S, oi['value'] * OBJ_REPAIR_S_PER_VALUE) * OBJ_REPAIR_TIME_MULT)
     return max(OBJ_REPAIR_MIN_S, float(secs))
 
 def repair_objects(room_id, objs, reason='', force=False):
@@ -17763,7 +17825,18 @@ def obj_repair_due(room_id=None):
     return due
 
 def tc_scene_contested(room_id, sidx):
-    """True when a live tank of another camp sits within TC_CAPTURE_RADIUS of the scene."""
+    """True when a live tank of another camp sits within TC_CAPTURE_RADIUS of the scene.
+    v673f5: or when an ENGAGED attacking column targets it (73,BC 09-13: the attackers worked the
+    airfield from stand-off spots beyond the presence radius and the 5-min AA clock kept undoing
+    their kills - damage oscillated 8..32%)."""
+    try:
+        for col in COLUMNS.values():
+            if col.get('room') == room_id and col.get('purpose') == 'attack' and col.get('engaged') \
+                    and col.get('target') == sidx \
+                    and any(o in TANKS and not TANKS[o].get('dead') for o in col.get('members', [])):
+                return True
+    except Exception:
+        pass
     try:
         terrain = _probe_terrain_for_room(room_id)
         txy = tc_scene_xy(terrain, sidx)
