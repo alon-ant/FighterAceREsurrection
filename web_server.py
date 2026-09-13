@@ -1844,6 +1844,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 'onclick="return confirm(\'Reset this arena now? Everyone in it is sent back to the lobby after a 3 s countdown.\');" '
                 'class="btn-red" style="padding:8px 18px;">Reset arena now</a>'
                 ' &nbsp; <a href="/admin/arena_reset?room=' + str(room_id) + '&winner=ask" style="color:#666;">announce a winner first...</a></div>')
+            # RUNWAY CRATERS (v686f5): per-arena CratersVanishDelay (minutes) / CratersVanishNumber
+            _cvd = overrides.get('craters_vanish_min', '')
+            _cvn = overrides.get('craters_vanish_max', '')
+            _cv_def = (SRV.get('craters_defaults') or (lambda: (10, 40)))()
+            craters_html = (
+                '<label style="display:block; margin:10px 0;">Craters last (minutes)<br>'
+                '<input type="number" name="s_craters_vanish_min" min="1" max="120" value="' + hesc(str(_cvd), quote=True) + '" '
+                'placeholder="' + str(_cv_def[0]) + '" style="width:120px; padding:6px;"></label>'
+                '<label style="display:block; margin:10px 0;">Max craters kept<br>'
+                '<input type="number" name="s_craters_vanish_max" min="1" max="1000" value="' + hesc(str(_cvn), quote=True) + '" '
+                'placeholder="' + str(_cv_def[1]) + '" style="width:120px; padding:6px;"></label>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
@@ -1915,6 +1926,13 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     arena from its GAME_DEF (ownership, stores, units, AI units). The button does the
                     same immediately, without a winner.</p>
                     {winmode_html}
+                    <h3>Runway craters</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">How long bomb craters stay on the
+                    ground before they are filled in, and how many the arena keeps at once. The room template
+                    ships 1 minute / 10 craters, which makes runway bombing pointless; the server default is
+                    shown as the placeholder. Leave blank for the server default. Takes effect the next time the
+                    arena is entered.</p>
+                    {craters_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -2927,6 +2945,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
             if _wm in ('off', 'all', 'wipeout'):
                 settings['tc_win_mode'] = _wm
+            for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000)):   # v686f5
+                _cv = qs.get('s_' + _ck, [''])[0].strip()
+                if _cv == '':
+                    settings.pop(_ck, None)
+                else:
+                    try:
+                        _cvi = int(_cv)
+                        if _lo <= _cvi <= _hi:
+                            settings[_ck] = _cvi
+                    except ValueError:
+                        pass
             for _wk, _lo, _hi in (('war_year', 1935, 1955), ('war_month', 1, 12), ('war_day', 1, 31)):
                 _wv = qs.get('s_' + _wk, [''])[0].strip()
                 if _wv != '':
@@ -3258,7 +3287,7 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
-                     password_read_fn=None, arena_reset_fn=None):
+                     password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None):
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
@@ -3273,6 +3302,7 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
     SRV['player_counts'] = player_counts_fn          # v418f5: web_player_counts() -> dict
     SRV['password_read'] = password_read_fn          # arena_password_read(blob) -> plaintext pw / ''
     SRV['arena_reset'] = arena_reset_fn              # v640f5: arena_reset(room_id, winner_camp, by)
+    SRV['craters_defaults'] = craters_defaults_fn    # v686f5: () -> (minutes, max craters) server defaults
 
     migrate_web_db()
     _start_httpd_thread()
