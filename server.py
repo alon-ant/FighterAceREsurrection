@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v697f5'
+VERSION = 'v701f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11152,6 +11152,7 @@ def train_effective_damage(raw):
 TRAIN_KILL_SCORE      = 300
 TRAIN_RESPAWN_S       = 600.0
 TRAIN_PER_CAMP_MAX    = 3
+TRAIN_CHAT_EMPTY_STOPS = True   # v699f5: also report stops where nothing was exchanged
 TRAIN_WAGONS_DEFAULT  = 8
 WAGON_KIND = {146: 'metal', 147: 'fuel', 148: 'ammo', 140: 'units'}
 WAGON_CAP  = {146: 2000, 147: 2000, 148: 1500, 140: 1000}
@@ -11260,16 +11261,30 @@ def _train_stop_at(tr, onum, station):
     terrain = tr['terrain']
     txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
     moved = train_exchange(tr, sidx)
+    # v699f5 [TRAIN CHAT PER TEAM]: every stop is reported to the train's OWN camp only (tc_say
+    # camp=): what was loaded / unloaded, or 'nothing to exchange' - GB pilots see GB's trains and
+    # nobody else's. The train is named by its start slot (rear / front / mid) and the stop by the
+    # scene and its grid.
+    _tname = f'{tc_camp_tag(tr["camp"])} {tr.get("start", "supply")} train'
     if moved:
         parts = [f'{"+" if v > 0 else ""}{v}kg {k}' for k, v in moved.items() if v]
         log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) at scene {sidx} "{txy[2].strip()}" {tc_grid(txy[0], txy[1])}: '
                      f'{", ".join(parts)}; load now {tr["load"]}')
         drops = [f'{v}kg {k}' for k, v in moved.items() if v > 0]
-        if drops and TC_AI_CHAT:
-            tc_say(tr['room'], f'AI: Train supplied {tc_camp_tag(tr["camp"])} {txy[2].strip()} at {tc_grid(txy[0], txy[1])} '
-                               f'with {", ".join(drops)}', camp=tr['camp'])
+        picks = [f'{-v}kg {k}' for k, v in moved.items() if v < 0]
+        if TC_AI_CHAT:
+            _what = []
+            if drops:
+                _what.append('unloaded ' + ', '.join(drops))
+            if picks:
+                _what.append('loaded ' + ', '.join(picks))
+            tc_say(tr['room'], f'AI: {_tname} at {txy[2].strip()} {tc_grid(txy[0], txy[1])}: {"; ".join(_what)}',
+                   camp=tr['camp'])
     else:
         log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) at scene {sidx} "{txy[2].strip()}": nothing to exchange')
+        if TC_AI_CHAT and TRAIN_CHAT_EMPTY_STOPS:
+            tc_say(tr['room'], f'AI: {_tname} at {txy[2].strip()} {tc_grid(txy[0], txy[1])}: nothing to exchange',
+                   camp=tr['camp'])
 
 def _train_ai_tick(onum, tr, rails, stations, now):
     """Run / stop logic for a supply train."""
@@ -11333,8 +11348,22 @@ def spawn_supply_train(rid, camp, road_idx, reason='', start='rear'):
     if start == 'front' and front:
         ni, sidx = min(stations, key=lambda st: _dist_to(st[1], front))
     elif start == 'mid' and rear and front:
+        # v699f5: the mid train must not share a station with rear/front (GB: front and mid both
+        # resolved to node 34, Support Factory 0 - two trains on one spot, the 'invisible' 3rd
+        # train). Prefer the nearest-to-midpoint station that is NOT the rear or front station;
+        # with fewer than 3 distinct stations put it halfway along the rail between the two.
+        depots = [st for st in stations if _is_depot(st[1])] or stations
+        _rear_st = min(depots, key=lambda st: _dist_to(st[1], rear))
+        _front_st = min(stations, key=lambda st: _dist_to(st[1], front))
         mx = (rear[0][0] + front[0][0]) / 2.0; my = (rear[0][1] + front[0][1]) / 2.0
-        ni, sidx = min(stations, key=lambda st: _dist_to(st[1], [(mx, my)]))
+        others = [st for st in stations if st[0] not in (_rear_st[0], _front_st[0])]
+        if others:
+            ni, sidx = min(others, key=lambda st: _dist_to(st[1], [(mx, my)]))
+        else:
+            ni = (int(_rear_st[0]) + int(_front_st[0])) // 2
+            sidx = _rear_st[1]
+            if ni in (_rear_st[0], _front_st[0]):
+                ni = (ni + 1) % max(1, len((rails_for(terrain) or {}).get('roads', [{}])[road_idx].get('nodes', [])) or 1)
     else:
         depots = [st for st in stations if _is_depot(st[1])] or stations
         ni, sidx = min(depots, key=lambda st: _dist_to(st[1], rear))
@@ -11376,11 +11405,13 @@ def ensure_camp_trains(rid):
         cands.sort(reverse=True)
         if not cands:
             continue
-        # slots: one per (road, start) - the best road takes the three starts, extra roads one each
-        slots = []
-        for k, (n, r) in enumerate(cands):
-            for st in (starts if k == 0 else ('rear',)):
-                slots.append((n, r, st))
+        # slots (v698f5): ONE train per qualifying road first (the v617 rule - the US bomber base is
+        # served by road 8 alone, 5 km away, while the US main line is 35 km off; v679 gave all
+        # three starts to the main line and US pilots at BBB stopped seeing trains), then the
+        # extra starts (front, mid) on the best road up to TRAIN_PER_CAMP_MAX.
+        slots = [(n, r, 'rear') for n, r in cands]
+        for st in ('front', 'mid'):
+            slots.append((cands[0][0], cands[0][1], st))
         used = {(tr['road'], tr.get('start', 'rear')) for tr in have}
         for n, r, st in slots:
             if len(have) >= TRAIN_PER_CAMP_MAX:
@@ -14685,6 +14716,7 @@ def _vs_victim_rank(victim):
 
 GROUND_DEATH_WINDOW_S = 180.0   # v694f5: a kill within this long after a repair grant, with no climb since, is a ground death
 GROUND_DEATH_CLIMB_M  = 40.0
+STALE_EXIT_S          = 10.0    # v701f5: a hunter-named death within this of the plane's ServerConfirm, with no hit held, is the client's stale record
 KILL_FALLBACK_CREDIT  = False   # v695f5: OFF - 'most recent shooter in the window' handed Skyyr a kill on
                                 # MightyMax he never hit. The EXACT (hunter named) and LATCH (msg-28 hit
                                 # held on the object) paths are the only evidence-based ones.
@@ -18684,6 +18716,7 @@ def _fire_server_confirm(s, via='', ident=None):
         _isrc = 'counter fallback'   #       Counter kept only as fallback for a too-short out-4.
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
+    s.__dict__['_obj_confirmed_at'] = time.time()   # v701f5: fresh-plane guard for stale exit records
     s.spawn_pending = False   # v416f5: world rebuilt + player inserted -> refreshes are safe again
     s._sp_confirmed = True    # v479f5: this spawn completed - the SPAWN-WATCH watchdog stands down
     # v556f5: dead-object snapshot for a client whose world may not carry the room's current
@@ -19198,15 +19231,44 @@ def _ingame_own_object_removed(s, tb, stored):
         _esz0   = EXIT_EEC_ENTRY_SIZE.get(se, 3)
         scored  = (_esz0 >= 12 and len(stored) >= 5 + _esz0)
         is_death = mec_nib in DEATH_MEC_NIBBLES
-        # the AI cull list riding behind the own-plane entry (tank / soldier / train ids, 2 B each)
+        # v701f5 [STALE EXIT RECORD ON A FRESH PLANE]: online run 00:55:01 (SF_Spiderman) - shot
+        # down at 00:54:55 by 0x0274, respawned at 00:55:01.2, TABbed at 00:55:01.4: the client sent
+        # the NEW plane's delete with the OLD exit record (MEC 5, hunter 0x0274) -> a second kill
+        # to Skyyr and a second -570 within six seconds; same pairs for Taven and again at 02:00.
+        # A plane that dies with a hunter named less than STALE_EXIT_S after its own ServerConfirm,
+        # with no hit ever held against it, is that stale record: treat it as a clean exit.
+        _age = time.time() - s.__dict__.get('_obj_confirmed_at', 0.0)
+        if scored and is_death and _age < STALE_EXIT_S and PENDING_KILL.get(s.my_obj_number) is None:
+            log('DEATH', f'{s.current_pilot}: exit 0x{exitb:02x} (MEC {mec_nib}) on a plane confirmed '
+                         f'{_age:.1f}s ago with no hit held against it -> STALE exit record, '
+                         f'treated as a clean exit (no loss, no credit)')
+            scored = False; is_death = False
+            # the peers must not draw a kill line for it either: relay a clean 3-byte exit
+            exitb = 0x90; mec_nib = 9; se = 0
+            stored = bytearray(stored); stored[7] = 0x90; stored = bytes(stored)
+        # the cull list riding behind the own-plane entry: AI objects (tank / soldier / train, v697f5)
+        # AND PEER PLANES (v700f5: online run 02:02:29, tail = 0x03e9 BoogDog, 0x045b SilverFox ...
+        # - the client's far-peer cull at a TAB; unprocessed, those peers were not re-created for
+        # him until his next spawn). Peer ids re-arm the relay's create, exactly like a standalone
+        # PEERDEL notify.
         try:
             _tail0 = 5 + _esz0
             if len(stored) >= _tail0 + 2:
                 _tail_ids = [struct.unpack_from('<H', stored, i)[0] for i in range(_tail0, len(stored) - 1, 2)]
                 if any(i in TANKS or i in SOLDIERS or i in TRAINS for i in _tail_ids):
                     _tank_note_client_delete(s, bytes(stored[:5]) + bytes(stored[_tail0:]))
+                for _tid in _tail_ids:
+                    if _tid in TANKS or _tid in SOLDIERS or _tid in TRAINS or _tid in (0, 0xffff):
+                        continue
+                    _peer_t, _byc = _peer_owning_object(s, _tid)
+                    if _peer_t is not None and _peer_t is not s:
+                        _cp_t = _peer_t.__dict__.get('_created_peers')
+                        if _cp_t is not None and s.addr in _cp_t:
+                            _cp_t.discard(s.addr)
+                            log('PEERDEL', f'{s.current_pilot} culled PEER object 0x{_tid:04x} ({_peer_t.current_pilot}) '
+                                           f'in his TAB delete -> re-arm create for that peer')
         except Exception:
-            logx('TANK', 'AI cull tail behind own-plane delete failed')
+            logx('TANK', 'cull tail behind own-plane delete failed')
         # v229: the client's delete-notify is [.. sub=0x03][id u16][exit][tail...] starting at
         # stored[4], so the ExitDataArrive ENTRY (id + exit + tail, with the HUNTER at +3) is
         # exactly stored[5:5+size]. Relay it VERBATIM - zero-filling that tail is what stopped

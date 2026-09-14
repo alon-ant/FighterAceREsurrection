@@ -46,6 +46,43 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-14 (b): v701f5 is the STABLE BANKING POINT (user-approved via the online-log
+    review). Snapshot server.py -> 'old files\server_v701f5.py'. (Previous: v692f5.)
+
+v693f5-v701f5 [ONLINE-LOG REVIEW OF THE 09-12..09-14 BUGS] (runs v664..v697 read via /admin/log_download)
+    VERIFIED against the online server logs:
+    * !Objects[N] CTDs (Moira/Taurus/SilverFox, 5 logs) = MY v689/v691 'forget AI peers on death'
+      -> re-create at ServerConfirm onto objects the client still had (22:32:37 forget, 22:32:45
+      re-created 22 tanks). A death respawn KEEPS the client's world. Removed (v693).
+    * Crater CTDs in the HQ (messages14/24) = MY v686 msg-52 relay to a pilot with no world
+      (relays logged at the crash seconds). Gated to flying+confirmed pilots (v693).
+    * Taurus particle CTD #2 = soldier 0x0125 killed by AA at the crash second; soldier kill entry
+      off (v684). #1 (09-12 14:04) unexplained server-side; the create-hold (v666) stays a guess.
+    * Clean TAB booked as a death: 31 in the v692 run (SF_Spiderman 8, RGP_JOLLY 6, Taven 4,
+      CHARGER 4 ...; exit 0x90/0xa0 + a cull list >= 14 B). v697 (entry size, not length): 0 on
+      the v697 run. Scores NOT readjusted (user).
+    * Plane list of 7 (Moira): the 22 B replies were the PREFIXED catalog form (cmd=0x01f2 PFX),
+      handled by the compound-inner handler since v665 ('re-encoded 23->23' on v692). Correct fix,
+      wrong label in the v665 note.
+    * Telemetry: PERF tx per flying pilot 2.2-2.4 KB/s (v666/v672) -> 0.75-0.85 KB/s (v676/v692).
+    * Double kills / kills without a hit (Skyyr, Gibson): 16 FALLBACK credits per run; the
+      Skyyr pairs were a STALE EXIT RECORD - victim shot down (00:54:55), respawned (00:55:01.2),
+      TABbed (00:55:01.4) and the client sent the NEW plane's delete with the OLD MEC-5/hunter
+      record; EXACT failed, FALLBACK credited the last shooter again. v695 (fallback OFF, EXACT
+      consumes the latch) + v701 (hunter-named death < STALE_EXIT_S=10 s after ServerConfirm with
+      no hit held = clean exit, clean tail relayed). v700: peer-plane ids in a TAB delete re-arm
+      the relay create (they were unprocessed).
+    * v694 ground-death rule (no credit within 180 s of a repair grant, no climb): the reported
+      instance (messages86 = VF10_flakmagic, not Moira) got NO server credit anyway (hunter
+      unresolvable) - the cyan line was client-side; rule kept.
+    NOT ESTABLISHED: the 'peer cull/re-create loop' (v683 note) was Taurus's own two respawns;
+    the chat 2-3 s delay is not logged on those builds (v683 unreliable periodic pushes remains a
+    reasonable guess); Dutchwing's 'jumping' has no server-side explanation.
+    Also: v696 SCENE36 camp = live owner; v698 one train per qualifying road first (US road 8 by
+    BBB); v699 distinct stations for rear/front/mid + per-team train chat; v692 cull-notify before
+    the in-world gate (the last TAB gap, field-verified).
+
+==============================================================================
 *** BANKED 2026-09-14: v692f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v692f5.py' at next convenience. (Previous: v669f5, 2026-09-12.)
 
