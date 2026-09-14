@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v692f5'
+VERSION = 'v697f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14683,6 +14683,12 @@ def _vs_victim_rank(victim):
         pass
     return 0
 
+GROUND_DEATH_WINDOW_S = 180.0   # v694f5: a kill within this long after a repair grant, with no climb since, is a ground death
+GROUND_DEATH_CLIMB_M  = 40.0
+KILL_FALLBACK_CREDIT  = False   # v695f5: OFF - 'most recent shooter in the window' handed Skyyr a kill on
+                                # MightyMax he never hit. The EXACT (hunter named) and LATCH (msg-28 hit
+                                # held on the object) paths are the only evidence-based ones.
+
 def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilot_lost=True):
     """Persist a death into the DB and apply the LIVE ace rule (server-authoritative).
 
@@ -14716,7 +14722,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                      f'(category {_room_category(getattr(victim, "current_room", None))!r}) '
                      f'-> no career changes')
         return None, False
-    scored = len(death_payload) >= 14        # long form = shot down by someone
+    scored = (EXIT_EEC_ENTRY_SIZE.get((death_payload[7] & 0xf) if len(death_payload) > 7 else 0, 3) >= 12
+              and len(death_payload) >= 5 + 12)     # v697f5: long (hunter) form by EEC entry size, not message length
     killer = None
     # v249: capture the victim's object and whether they BAILED **before** the attribution step pops
     # the latch. A bail costs the plane only - the pilot walked away - whereas dying in the cockpit
@@ -14746,6 +14753,13 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                 killer = _hp
                 log('KILL', f'attribution: EXACT - victim named hunter obj 0x{hunter_obj:04x} '
                             f'-> {_hp.current_pilot} [resolved via retired-Number history]')
+        if killer is not None:
+            # v695f5: the EXACT credit CONSUMES the latch too. It used to leave PENDING_KILL in place
+            # and the husk-down delete / respawn-despawn credited the same kill a second time
+            # (Skyyr 09-13: two cyan lines and 4 points for one kill on SF_Spiderman and on Taven).
+            _vo_x = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+            if _vo_x is not None and PENDING_KILL.pop(_vo_x, None) is not None:
+                log('KILL', f'latch for obj 0x{_vo_x:04x} consumed by the EXACT credit (no second credit later)')
 
     # 2) v247: THE LATCH - the victim's own client already told us who hit it (msg 28), and we held
     # that against the OBJECT. This is the path that credits a BAILOUT, and it has NO clock: the
@@ -14794,7 +14808,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     #    still has took_damage set and is caught by the latch (path 2) anyway.
     _clean_bail_husk = (getattr(victim, 'para_obj_number', None) is not None
                         and not bool(getattr(victim, 'took_damage', False)))
-    if killer is None and not _clean_bail_husk:
+    if killer is None and not _clean_bail_husk and KILL_FALLBACK_CREDIT:
         now = time.time(); best = 0.0
         for p in get_sessions_in_room(victim.current_room):
             if p is victim:
@@ -14805,6 +14819,24 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         if killer is not None:
             log('KILL', f'attribution: FALLBACK - nothing named a hunter, crediting the most recent '
                         f'shooter {killer.current_pilot} (within {KILL_CREDIT_WINDOW}s)')
+
+    # v694f5 [GROUND DEATH DURING REPAIR - NO KILL CREDIT]: a parked plane still carrying damage
+    # dies from a building blast at its own field (messages86 00:38:49 'in 30'3', then 'HitFrom
+    # 757 ... MissExitCode=5' 1.1 s later); the client credits the LAST HITTER of the fight before
+    # the landing. If the victim was granted a repair within GROUND_DEATH_WINDOW_S and has not
+    # climbed GROUND_DEATH_CLIMB_M since, nobody gets the kill - the loss is booked as a crash.
+    if killer is not None:
+        try:
+            _ga = victim.__dict__.get('_repair_grant_at')
+            _gz = victim.__dict__.get('_repair_grant_z'); _cz = victim.__dict__.get('_pos_z')
+            _climbed = (_gz is not None and _cz is not None and (_cz - _gz) > GROUND_DEATH_CLIMB_M)
+            if _ga is not None and time.time() - _ga < GROUND_DEATH_WINDOW_S and not _climbed:
+                log('DEATH', f'{victim.current_pilot} destroyed ON THE GROUND during repair '
+                             f'({time.time() - _ga:.0f}s after the grant, no climb since) - '
+                             f'{killer.current_pilot} was the last hitter but gets NO kill; booked as a crash')
+                killer = None
+        except Exception:
+            logx('DEATH', 'ground-death check failed')
 
     # ---- VICTIM: always dies. Count it and break the ace streak. ----
     victim.k_deaths = getattr(victim, 'k_deaths', 0) + 1
@@ -17790,6 +17822,8 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
     log('SUPPLY60', f'{getattr(sess, "current_pilot", "?")}: msg 60 [{_desc}] {reason}')
+    sess.__dict__['_repair_grant_at'] = time.time()                  # v694f5: ground-death rule
+    sess.__dict__['_repair_grant_z'] = sess.__dict__.get('_pos_z')
     return 1
 
 def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff,
@@ -18307,10 +18341,18 @@ def _handle_ground_damage_31(s, body, via=''):
     if destroyed:
         _trn = _probe_terrain_for_room(s.current_room)
         def _camp36(sidx):
+            # v696f5: the LIVE owner first (scene_camp follows captures). The static terrain table
+            # is the ORIGINAL nation: after a capture the 'destroyed' line named the old owner and
+            # a pilot attacking a base his side had just lost was signed negative as friendly
+            # damage (RAF71_GibsonXXI 09-14, scores tab). The AA lines were right because the
+            # client's own object camp follows the capture message.
+            _live = scene_camp(_trn, sidx)
+            if _live is not None and _live != SCENE_CAMP_NEUTRAL:
+                return int(_live)
             _si = trn_scene_info(s.current_room, sidx)
             if _si and _si.get('camp') is not None:
                 return int(_si['camp'])
-            return scene_camp(_trn, sidx)
+            return _live if _live is not None else 0
         # One msg-36 per killed OBJECT, carrying the owning scene's REAL camp (NEVER 0xff -
         # that value routes the client into the neutral/bridge path: every 0xff destroy in
         # the 2026-08-15 session rendered 'a bridge' regardless of index). v557f5: the f32 is
@@ -19114,17 +19156,19 @@ def _ingame_own_object_removed(s, tb, stored):
         # survived into the NEXT arena and died in its first Move (Access violation 0x148,
         # Main.cpp:2407 after switching arenas). Forget him on every AI object now; the next
         # ServerConfirm re-creates what is in range. The clean ESC exit-to-HQ keeps the world (v564).
+        # v693f5: the v689f5/v691f5 'forget AI peers on death' is REMOVED. Five dev-build CTDs
+        # (Moira/Taurus, messages84/06/85/82/04 - 'Assertion failed (!Objects[no->Number()])',
+        # Network.cpp:391) show a shot-down pilot (MissExitCode 5) respawning on the same field
+        # with every AI object still on his client; our ServerConfirm re-create of tank 356 /
+        # soldiers 517/519/696 then landed on occupied slots. A death respawn keeps the client's
+        # world exactly like the ESC exit does; the ONLY authority on what a client dropped is its
+        # own delete notify (v681/v682/v692), and that is now the only path that clears a peer.
         try:
             _mec_w = ((stored[7] >> 4) & 0xf) if len(stored) > 7 else None
-            if _mec_w is not None and _mec_w in WORLD_WIPE_MEC:
-                # v691f5: only the REAL deaths (shot down / crash / cockpit kill). The clean exits
-                # (9 landed, 10 ESC-to-HQ) KEEP the client's world - a refly on the same field
-                # re-uses the objects and a re-create asserts !Objects[N] (v564; the 23:01:27 CTD).
-                ai_peers_forget(s, reason=f'(death MEC {_mec_w} - world rebuilt at respawn)')
-            elif _mec_w is not None:
-                log('TC', f'{s.current_pilot}: exit MEC {_mec_w} -> world kept (no AI peer forget)')
+            if _mec_w is not None:
+                log('TC', f'{s.current_pilot}: exit MEC {_mec_w} -> AI objects kept on his client (no peer forget)')
         except Exception:
-            logx('TANK', 'AI peer forget on death failed')
+            pass
         # v536f5: if this object's kill was already booked AT THE BAIL (BAIL_KILL_AT_BAIL), the
         # plane was deleted on peers then and the killer already credited. This is the husk
         # finally coming down - relay a plain delete so any peer that somehow still holds it drops
@@ -19146,8 +19190,23 @@ def _ingame_own_object_removed(s, tb, stored):
         exitb = stored[7] if len(stored) > 7 else 0
         mec_nib = (exitb >> 4) & 0xf     # MissExitCode & 0xf  (Msn_Exit: (MEC << 4) | ScoreEvent)
         se      = exitb & 0xf            # ScoreEvent / exit form (0..5)
-        scored  = len(stored) >= 14      # long form = shot down by someone
+        # v697f5: 'scored' = the exit ENTRY is the long (shot-down, hunter-carrying) form, decided by
+        # the EEC's entry size - NOT by the message length. A TAB delete can carry the client's AI
+        # cull list in the SAME message ([0111][90] + seven train ids = 22 B, 07:14:18): the old
+        # 'len >= 14' read that as a shot-down and booked a plane + pilot loss (-520) on a clean exit,
+        # and the culled trains were never dropped from the peer set.
+        _esz0   = EXIT_EEC_ENTRY_SIZE.get(se, 3)
+        scored  = (_esz0 >= 12 and len(stored) >= 5 + _esz0)
         is_death = mec_nib in DEATH_MEC_NIBBLES
+        # the AI cull list riding behind the own-plane entry (tank / soldier / train ids, 2 B each)
+        try:
+            _tail0 = 5 + _esz0
+            if len(stored) >= _tail0 + 2:
+                _tail_ids = [struct.unpack_from('<H', stored, i)[0] for i in range(_tail0, len(stored) - 1, 2)]
+                if any(i in TANKS or i in SOLDIERS or i in TRAINS for i in _tail_ids):
+                    _tank_note_client_delete(s, bytes(stored[:5]) + bytes(stored[_tail0:]))
+        except Exception:
+            logx('TANK', 'AI cull tail behind own-plane delete failed')
         # v229: the client's delete-notify is [.. sub=0x03][id u16][exit][tail...] starting at
         # stored[4], so the ExitDataArrive ENTRY (id + exit + tail, with the HUNTER at +3) is
         # exactly stored[5:5+size]. Relay it VERBATIM - zero-filling that tail is what stopped
@@ -23560,7 +23619,11 @@ def handle_post_auth(s, cmd, pl):
                 _crpkt = build_appspace_pkt(bytes(stored[4:]))
                 _ncr = 0
                 for _p in get_sessions_in_room(s.current_room):
-                    if _p is not s and getattr(_p, 'entered_game', False):
+                    # v693f5: only to pilots IN THE WORLD - a crater record delivered to a client
+                    # sitting in the HQ (own plane deleted, model loading) crashed it in the
+                    # crater manager (messages14 00:33, Access violation 0x636BD8 after 'in 52'17')
+                    if (_p is not s and getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)
+                            and getattr(_p, 'obj_confirmed', False)):
                         _submit_send(send_rel, _p, _crpkt, f'<- CRATER 52 from {s.current_pilot}', to=3.0); _ncr += 1
                 if _ncr:
                     log('CRATER', f'{s.current_pilot}: crater record ({len(stored) - 4}B) relayed to {_ncr} peer(s)')
