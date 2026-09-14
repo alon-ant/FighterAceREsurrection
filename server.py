@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v701f5'
+VERSION = 'v703f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2841,29 +2841,32 @@ CRATERS_VANISH_MAX = 40
 
 def apply_craters_vanish(d, minutes=None, number=None):
     """In-place patch of CratersVanishDelay / CratersVanishNumber in a DECOMPRESSED GAME_DEF.
-    v687f5: EXACT-SEQUENCE locator only. The v686f5 shape scan matched the wrong dwords and
-    corrupted the blob (client CTD at arena entry: 'Assertion failed WORLD_SIZE2>=15 &&
-    WORLD_SIZE2<=20', Trn.cpp:110, messages52). The [Misc] tail of every client template reads
-    ChangeCampDelay=0, PlayerMissionsTime=5, GameEventsTime=2, CratersVanishDelay=1,
-    CratersVanishNumber=10 (messages44 dump) - patch only when that 20-byte sequence occurs
-    exactly once. Returns (offset_of_delay, old_delay, old_number) or None. Length-preserving."""
-    minutes = CRATERS_VANISH_MIN if minutes is None else int(minutes)
-    number = CRATERS_VANISH_MAX if number is None else int(number)
+    v703f5 - THE REAL WIRE LAYOUT (deserialiser FUN_0057bee0, tail section): after the plane and
+    ordinance blocks the [Misc] fields are
+        [OxygenLevel1 u32][OxygenLevel2 u32][ChangeCampDelay u8][PlayerMissionsTime u8]
+        [GameEventsTime u8][CratersVanishDelay u8][CratersVanishNumber u8]
+    followed by a FIXED 69-byte remainder (8 misc bytes, 11 flag bytes, 2 bytes, 3 x 16 physics
+    params) up to Source.End(). So CratersVanishDelay sits at len-71 and Number at len-70. The
+    v686/v687 dword locators could never match (bytes, not dwords) and the patch was a silent
+    no-op - online 09-14 16:27 Taurus's client still parsed CratersVanishDelay=1. Cross-checked:
+    the three delay bytes before must be small (0..120) and the two oxygen dwords sane.
+    Returns (offset_of_delay, old_delay, old_number) or None. Length-preserving."""
+    minutes = max(1, min(255, CRATERS_VANISH_MIN if minutes is None else int(minutes)))
+    number = max(1, min(255, CRATERS_VANISH_MAX if number is None else int(number)))
     try:
-        blob = bytes(d)
-        for old_delay, old_num in ((1, 10),):
-            sig = struct.pack('<IIIII', 0, 5, 2, old_delay, old_num)
-            first = blob.find(sig)
-            if first < 0 or blob.find(sig, first + 1) >= 0:
-                continue
-            off = first + 12
-            if (old_delay, old_num) == (minutes, number):
-                return None
-            struct.pack_into('<II', d, off, minutes, number)
-            return off, old_delay, old_num
-        # already patched to the target?
-        if blob.find(struct.pack('<IIIII', 0, 5, 2, minutes, number)) >= 0:
+        n = len(d)
+        if n < 100:
             return None
+        off = n - 71
+        ccd, pmt, get_, cvd, cvn = d[off - 3], d[off - 2], d[off - 1], d[off], d[off + 1]
+        ox1, ox2 = struct.unpack_from('<II', d, off - 11)
+        if not (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
+                and 100 <= ox1 <= 100000 and 100 <= ox2 <= 100000 and ox1 < ox2):
+            return None
+        if (cvd, cvn) == (minutes, number):
+            return None
+        d[off] = minutes & 0xff; d[off + 1] = number & 0xff
+        return off, cvd, cvn
     except Exception:
         pass
     return None
@@ -3295,10 +3298,10 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
         _cvm, _cvn = CRATERS_VANISH_MIN, CRATERS_VANISH_MAX
     _cr = apply_craters_vanish(d, _cvm, _cvn)
     if _cr:
-        log('GAMEDEF212', f'CratersVanishDelay @+{_cr[0]}: {_cr[1]} -> {_cvm} min, '
-                          f'CratersVanishNumber {_cr[2]} -> {_cvn}')
+        log('CRATERS', f'CratersVanishDelay @+{_cr[0]}: {_cr[1]} -> {_cvm} min, '
+                       f'CratersVanishNumber {_cr[2]} -> {_cvn}')          # v703f5: INFO tag (GAMEDEF212 is DEBUG-only)
     else:
-        log('GAMEDEF212', 'CratersVanish*: dwords not located (or already at the target); left as-is')
+        log('CRATERS', 'CratersVanish*: tail bytes not validated (or already at the target); left as-is')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -7679,6 +7682,15 @@ def send_arenalist_with_gamedefs(s, rooms, label):
                     blob_key = hash(bytes(r[6]))
                 except Exception:
                     blob_key = id(r[6])
+                # v702f5: the served 212 also depends on the arena's web SETTINGS (AA/flak sliders,
+                # craters, war date ...) which are patched in at serve time - a settings edit must
+                # re-serve even though game_def_raw is unchanged (online 09-14 16:15: AA edited to 3,
+                # pilots kept the old 212 until their lobby re-initialised).
+                try:
+                    _sj = json.dumps(db_get_room_settings(r[0]) or {}, sort_keys=True)
+                    blob_key = (blob_key, hash(_sj))
+                except Exception:
+                    pass
                 if sent_map.get(r[0]) == blob_key:
                     continue                              # this session already has this exact 212
                 pkt = build_gamedef_212(r, hide_planes=hidden_plane_ids_for(s))
@@ -10414,6 +10426,13 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     key = (room_id, int(sidx))
     now = time.time()
     prev = TRIGGERS.get(key)
+    # v702f5: a PARATROOP entry (a stick landed to attack the scene - it exists so the capture can
+    # be credited) is NOT an attack trigger: it must neither lock the damage trigger out for
+    # TC_ATTACK_TOGGLE_S nor silence the warning. Online 09-14 17:14: Moira's stick on scene 2
+    # (48,BC), Bama then bombed it to 74% - no warning, no trigger, no column. Only a real trigger
+    # (one that raised columns) locks the scene.
+    if prev and prev.get('para') and not prev.get('columns'):
+        prev = None
     if prev and now - prev['at'] < TC_ATTACK_TOGGLE_S:
         return False
     tcamp = scene_camp(terrain, sidx)
@@ -12362,7 +12381,7 @@ def tc_para_stick_close(s, st):
         key = (rid, int(sidx))
         if st['purpose'] == 'attack' and key not in TRIGGERS and st.get('by'):
             TRIGGERS[key] = {'at': time.time(), 'by': st['by'], 'camp': scene_camp(terrain, sidx), 'attacker': int(camp),
-                             'columns': [], 'defended': False}
+                             'columns': [], 'defended': False, 'para': True}     # v702f5: para entry, no lockout
 
 def tc_para_announce(rid, camp, sidx, pts, by=None):
     """Console/test entry: a whole stick at once (msg 112 + soldiers + AI line)."""
@@ -12671,7 +12690,9 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
         return
     try:
         frac = trn_scene_damage_frac(room_id, sidx)
-        if frac * 100.0 + 1e-6 >= TC_ATTACK_PERCENT:
+        # v702f5: compare the ROUNDED percent (what the map and the log show) - scene 43 read 60%
+        # at 16:35:55 online (59.9x underneath) and did not trigger at attack%=60
+        if int(round(frac * 100.0)) >= TC_ATTACK_PERCENT:
             tc_trigger_scene(room_id, sidx, pilot_sess, reason=f'(damage {frac * 100:.0f}% >= {TC_ATTACK_PERCENT}%)')
         else:
             tc_pretrigger_warn(room_id, sidx, pilot_sess, frac)                 # v600f5
@@ -12690,8 +12711,9 @@ TC_HELP_LINE_S  = 120.0   # v677f5: 'Your hit helps capture' at most once per pi
 
 def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
     key = (room_id, int(sidx))
-    if frac * 100.0 + 1e-6 < TC_WARN_PERCENT or key in TRIGGERS:
-        return
+    _tr = TRIGGERS.get(key)
+    if frac * 100.0 + 1e-6 < TC_WARN_PERCENT or (_tr and not (_tr.get('para') and not _tr.get('columns'))):
+        return                       # v702f5: a paratroop-only entry does not silence the warning
     warned = globals().setdefault('_TC_WARNED', {})
     if time.time() - warned.get(key, 0.0) < TC_ATTACK_TOGGLE_S:
         return
