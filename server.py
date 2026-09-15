@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v703f5'
+VERSION = 'v706f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4704,6 +4704,13 @@ def console_handler():
                         log('CONSOLE', f'repair: time multiplier now x{OBJ_REPAIR_TIME_MULT:g} (applies to objects destroyed from now on)')
                     except (IndexError, ValueError):
                         log('CONSOLE', 'usage: repair mult <x>')
+                elif _a and _a[0] == 'hp':                        # v704f5: repair hp <mult>  (building HP = class life x mult)
+                    global OBJ_HP_LIFE_MULT
+                    try:
+                        OBJ_HP_LIFE_MULT = float(_a[1])
+                        log('CONSOLE', f'building HP now class life x{OBJ_HP_LIFE_MULT:g} (AA {int(200 * OBJ_HP_LIFE_MULT)}, hangar {int(2000 * OBJ_HP_LIFE_MULT)}, factory {int(2100 * OBJ_HP_LIFE_MULT)})')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: repair hp <mult>')
                 elif not _a or _a[0] == 'status':
                     with _OBJ_REPAIR_LOCK:
                         _items = sorted(_OBJ_DEAD_AT.items())
@@ -10767,8 +10774,7 @@ def _tc_engagement_tick():
                     t['_aim'] = (best[2] - t['pos'][0], best[3] - t['pos'][1])
                     key = (room_id, obj)
                     GROUND_HP[key] = GROUND_HP.get(key, 0) + int(TC_TANK_DPS)
-                    need = (OBJ_HP_DECORATION if (oi['value'] <= 0 or oi['destroy_mode'] == 2)
-                            else max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE))
+                    need = obj_hp_needed(oi)                       # v704f5
                     if GROUND_HP[key] >= need:
                         tc_ai_destroy_object(room_id, obj, oi, by=f'column {gid}')
                         objs = [e for e in objs if e[0] != obj]
@@ -12057,7 +12063,7 @@ def _camp_scores_loop():
     chunk_i = {}
     while running:
         try:
-            rooms = sorted(_active_ingame_rooms())
+            rooms = sorted(_economy_rooms())                          # v706f5: TC arenas only
             if not rooms:
                 time.sleep(2.0); continue
             for rid in rooms:
@@ -12615,7 +12621,7 @@ def _tc_para_capture_tick():
                 sd['_aim'] = (best[2] - sd['pos'][0], best[3] - sd['pos'][1])
                 key = (rid, best[0])
                 GROUND_HP[key] = GROUND_HP.get(key, 0) + int(SOLDIER_DPS * per_soldier)
-                need = max(OBJ_HP_MIN, best[1]['value'] * OBJ_HP_PER_VALUE)
+                need = obj_hp_needed(best[1])                       # v704f5
                 if GROUND_HP[key] >= need:
                     tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}', credit_pilot=st.get('by'))   # v607f5
                     soft = [e for e in soft if e[0] != best[0]]
@@ -14883,10 +14889,14 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         try:
             _ga = victim.__dict__.get('_repair_grant_at')
             _gz = victim.__dict__.get('_repair_grant_z'); _cz = victim.__dict__.get('_pos_z')
-            _climbed = (_gz is not None and _cz is not None and (_cz - _gz) > GROUND_DEATH_CLIMB_M)
-            if _ga is not None and time.time() - _ga < GROUND_DEATH_WINDOW_S and not _climbed:
+            # v705f5: only with BOTH altitudes known - a spawn-time loadout grant recorded no
+            # altitude, 'no climb since' came out false for an airborne pilot, and Taurus's
+            # collision kill on SpUn (online 09-15 18:36:54) was refused. A grant with no
+            # altitude on record, or a plane that has since climbed, is not a ground death.
+            if _ga is not None and _gz is not None and _cz is not None \
+                    and time.time() - _ga < GROUND_DEATH_WINDOW_S and (_cz - _gz) <= GROUND_DEATH_CLIMB_M:
                 log('DEATH', f'{victim.current_pilot} destroyed ON THE GROUND during repair '
-                             f'({time.time() - _ga:.0f}s after the grant, no climb since) - '
+                             f'({time.time() - _ga:.0f}s after the grant, climb {_cz - _gz:.0f} m) - '
                              f'{killer.current_pilot} was the last hitter but gets NO kill; booked as a crash')
                 killer = None
         except Exception:
@@ -17630,11 +17640,12 @@ def apply_room_territories(room_id, reason=''):
 def send_scene_snapshot_42_to(s, reason=''):
     """v580f5: one msg-42 scene snapshot to a single session (entry-time ownership)."""
     apply_room_territories(s.current_room, reason='(first entry)')     # v610f5
-    try:
-        threading.Timer(2.0, lambda: broadcast_camp_scores(s.current_room, reason='(entry)', to=s)).start()   # v651f5
-        threading.Timer(3.0, lambda: broadcast_production_info_71_all(s.current_room, reason='(entry)', to=s)).start()   # v660f5
-    except Exception:
-        pass
+    if room_has_economy(s.current_room):                                # v706f5: economy pushes only in TC
+        try:
+            threading.Timer(2.0, lambda: broadcast_camp_scores(s.current_room, reason='(entry)', to=s)).start()   # v651f5
+            threading.Timer(3.0, lambda: broadcast_production_info_71_all(s.current_room, reason='(entry)', to=s)).start()   # v660f5
+        except Exception:
+            pass
     trn = _probe_terrain_for_room(s.current_room)
     entries = scene_snapshot_entries(trn)
     if not entries:
@@ -17683,6 +17694,25 @@ OBJ_HP_MIN       = 1500
 # HP so a short burst or a bomb splash takes them down. They award no value/score and do
 # not count toward scene completion (scene_objects lists value>0 only).
 OBJ_HP_DECORATION = 600
+# v704f5 [BUILDING HP FROM THE CLIENT'S CLASS TABLE]: the 2009 damage model kills a building when
+# the client's cumulative damage reaches the class LIFE (trn_tables v2 'life': AA battery 200,
+# Flak 300, hangar 2000, factories 2100, HQ 500 ...) x BuildingsLife% (100). Our value x 25
+# made an AA battery 2500 and a Fuel Factory 11250 - 5..12x the 2009 figure, which is why
+# scenes were so hard to trigger (multiple pilots, 09-15). OBJ_HP_LIFE_MULT scales it; the
+# value x 25 rule stays as the fallback for classes without a life field.
+OBJ_HP_USE_CLASS_LIFE = True
+OBJ_HP_LIFE_MULT = 1.0
+
+def obj_hp_needed(oi):
+    """Cumulative damage that destroys a goi object (oi = trn_obj_info record)."""
+    if oi is None:
+        return OBJ_HP_MIN
+    if oi.get('value', 0) <= 0 or oi.get('destroy_mode') == 2:
+        return OBJ_HP_DECORATION
+    life = int(oi.get('life') or 0)
+    if OBJ_HP_USE_CLASS_LIFE and life > 0:
+        return max(100, int(life * OBJ_HP_LIFE_MULT))
+    return max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE)
 
 # GATE: automatically decrement scene HP from msg 31 ev=0x05 and emit msg 36 on depletion.
 # OFF by default. STATUS (msgs23, 02-Jul): the camp-byte fix works (msg 36 now names a real
@@ -17876,8 +17906,11 @@ def send_supply_grant_60(sess, flags=0x04, amount=0xffff, amount2=0xffff,
         target=lambda _s=sess: send_rel(_s, pkt, f'<- SUPPLY_GRANT 60 [{_desc}] {reason}', to=3.0),
         daemon=True).start()
     log('SUPPLY60', f'{getattr(sess, "current_pilot", "?")}: msg 60 [{_desc}] {reason}')
-    sess.__dict__['_repair_grant_at'] = time.time()                  # v694f5: ground-death rule
-    sess.__dict__['_repair_grant_z'] = sess.__dict__.get('_pos_z')
+    # v694f5/v705f5: remember GROUND grants for the ground-death rule (not the spawn loadout - the
+    # plane is about to take off; and never without a known altitude)
+    if 'spawn' not in str(reason) and sess.__dict__.get('_pos_z') is not None:
+        sess.__dict__['_repair_grant_at'] = time.time()
+        sess.__dict__['_repair_grant_z'] = sess.__dict__.get('_pos_z')
     return 1
 
 def broadcast_supply_grant_60(room_id, flags=0x04, amount=0xffff, amount2=0xffff,
@@ -18019,8 +18052,7 @@ OBJ_REPAIR_BASE_S      = 300.0
 OBJ_REPAIR_S_PER_VALUE = 3.0
 OBJ_REPAIR_MAX_S       = 3600.0    # v673f5: 1800 -> 3600
 OBJ_REPAIR_DECOR_S     = 300.0
-OBJ_REPAIR_TIME_MULT   = 2.0       # v673f5: user - scenes repaired too quickly; x2 on every clock
-                                   # (AA 10 min, hangar 18, factory 20, bridge 60). Console: `repair mult <x>`
+OBJ_REPAIR_TIME_MULT   = 4.0       # v704f5: 2 -> 4 (pilots: repair still too fast; AA 20 min, hangar 36, factory 40, cap 60)
 OBJ_REPAIR_TICK_S      = 10.0      # scheduler cadence
 # v557f5: msg-30 destroy-form `value` = AGE of the destruction in ~1.024 s units (FUN_00568eb0:
 # value*1024 ms; <2 s plays the explosion, fire burns 60-age s, non-zero arms the destroy_mode-1
@@ -18295,7 +18327,8 @@ def trn_obj_info(room, obj):
     g = goi[obj]
     ty = got[g['type']] if 0 <= g.get('type', -1) < len(got) else {}
     return {'scene': g.get('scene'), 'name': ty.get('name') or f'type{g.get("type")}',
-            'value': int(ty.get('value') or 0), 'destroy_mode': int(ty.get('destroy_mode') or 0)}
+            'value': int(ty.get('value') or 0), 'destroy_mode': int(ty.get('destroy_mode') or 0),
+            'life': int(ty.get('life') or 0), 'repair': int(ty.get('repair') or 0)}    # v704f5
 
 def trn_scene_complete(room, scene):
     """True when EVERY destructible (value>0) object of a gsi scene has been destroyed
@@ -18384,7 +18417,7 @@ def _handle_ground_damage_31(s, body, via=''):
                 # fall to gunfire. Low flat HP; no value, no scene-completion contribution.
                 _hp_need = OBJ_HP_DECORATION
             else:
-                _hp_need = max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE)
+                _hp_need = obj_hp_needed(oi)                        # v704f5
             okey = (s.current_room, obj)
             if okey in _SCENE36_DESTROYED:
                 continue        # already dead - a second destroy is the Trn_Obj.cpp:415 CTD
@@ -18449,8 +18482,7 @@ def _handle_ground_damage_31(s, body, via=''):
                              f'(room {s.current_room} is outside the scored arena modes)')
         for obj, oi in destroyed:
             _sc = oi['scene']
-            _hp_need = (OBJ_HP_DECORATION if (oi['value'] <= 0 or oi['destroy_mode'] == 2)
-                        else max(OBJ_HP_MIN, oi['value'] * OBJ_HP_PER_VALUE))
+            _hp_need = obj_hp_needed(oi)                            # v704f5
             log('AUTOPVE', f'{s.current_pilot} destroyed obj {obj} "{oi["name"]}" '
                            f'(value {oi["value"]}, scene {_sc}) - damage crossed {_hp_need}')
             calib('SENT36', f'room={s.current_room} terrain={_trn} obj={obj} '
@@ -20438,6 +20470,19 @@ def _active_ingame_rooms():
     return {x.current_room for x in get_all_sessions()
             if getattr(x, 'entered_game', False) and x.current_room is not None}
 
+def room_has_economy(room_id):
+    """v706f5: only TERRITORIAL COMBAT arenas run the supply economy (production tick, trains,
+    msg 40/43/71 pushes, Country Scores). Dogfight / FFA / Events arenas have none - the loops
+    used to iterate every in-game room ('PROD40 room 53: no camp table for terrain 53005' every
+    10 s in an FFA arena, user 09-15)."""
+    try:
+        return scoring_mode_for_room(room_id) == 'tc'
+    except Exception:
+        return False
+
+def _economy_rooms():
+    return {r for r in _active_ingame_rooms() if room_has_economy(r)}
+
 
 _SCENE_CAP_LOSS_OBJ = {}   # v677f5: (room, scene) -> {obj: (res, vol)} - to give the capacity back on repair
 
@@ -20595,10 +20640,11 @@ def _supply_chain_step(rid):
             by_camp.setdefault(_c, []).append(_sidx)
     delivered_total = 0
     # v617f5: visible supply trains replace the abstract deliveries for the camps that have them
-    try:
-        ensure_camp_trains(rid)
-    except Exception:
-        logx('TRAIN', 'ensure_camp_trains failed')
+    if room_has_economy(rid):                                           # v706f5
+        try:
+            ensure_camp_trains(rid)
+        except Exception:
+            logx('TRAIN', 'ensure_camp_trains failed')
     try:
         tc_check_win(rid)                          # v640f5
     except Exception:
@@ -20687,7 +20733,7 @@ def _supply_tick_loop():
             time.sleep(SUPPLY_TICK)
             if not SUPPLY_MODEL:
                 continue
-            for _rid in _active_ingame_rooms():
+            for _rid in _economy_rooms():                              # v706f5: TC arenas only
                 try:
                     seed_room_economy(_rid)
                 except Exception:
@@ -21006,7 +21052,7 @@ def _prod40_fast_loop():
         if PROD40_UNITS_PERIOD_S <= 0:
             continue
         try:
-            for rid in _active_ingame_rooms():
+            for rid in _economy_rooms():                                # v706f5: TC arenas only
                 broadcast_production_40(rid, reason='(units keep-alive)', force=True, quiet=True, unrel=True)
         except Exception:
             logx('PROD40', 'fast loop failed')
