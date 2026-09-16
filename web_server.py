@@ -476,6 +476,12 @@ LADDER_TABS_ASSETS = """
                           background:#f1f3f5; color:#495057; border:1px solid #dee2e6; }
                   .ltab:hover { background:#e6e9ec; }
                   .ltab.lon { background:#0d6efd; color:#fff; border-color:#0d6efd; }
+                  /* v713f5: the Squadrons board grew to 13 columns - keep it inside the card:
+                     the panel scrolls sideways, cells stay on one line at a slightly smaller size */
+                  .lpanel { overflow-x:auto; }
+                  .lpanel table { width:100%; min-width:100%; }
+                  #lsqn { font-size:0.9em; }
+                  #lsqn th, #lsqn td { white-space:nowrap; padding:6px 8px; }
                 </style>
                 <script>
                 function lshow(tid){
@@ -1036,12 +1042,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     "SELECT s.name, COALESCE(s.tag,''), " + _sc('score') + ", " + _sc('kills')
                     + ", " + _sc('deaths') + ", "
                     "(SELECT COUNT(*) FROM squadron_members m WHERE m.squadron_id=s.squadron_id "
-                    " AND m.status='approved') "
+                    " AND m.status='approved'), "
+                    + _sc('ai_buildings') + ", " + _sc('ai_tanks') + ", " + _sc('ai_ground') + ", "
+                    + _sc('ai_trains') + ", " + _sc('captures') + " "          # v713f5: ground tallies
                     "FROM squadrons s WHERE s.status='approved'").fetchall()
                 conn.close()
                 srows = sorted(({'name': n, 'tag': t, 'score': sc, 'kills': k, 'deaths': d,
-                                 'members': m, 'kd': _kd(k, d)}
-                                for n, t, sc, k, d, m in sq),
+                                 'members': m, 'kd': _kd(k, d),
+                                 'bld': b, 'tanks': tk, 'ground': g, 'trains': tr, 'caps': cp}
+                                for n, t, sc, k, d, m, b, tk, g, tr, cp in sq),
                                key=lambda x: (x['score'], x['kd']), reverse=True)
                 sbody = ""
                 for pos, q in enumerate(srows, 1):
@@ -1051,10 +1060,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                               "<td>" + str(q['members']) + "</td>"
                               "<td><strong>" + str(q['score']) + "</strong></td>"
                               "<td>" + str(q['kills']) + "</td><td>" + str(q['deaths']) + "</td>"
-                              "<td>" + str(q['kd']) + "</td></tr>")
+                              "<td>" + str(q['kd']) + "</td>"
+                              "<td>" + str(q['bld']) + "</td><td>" + str(q['tanks']) + "</td>"
+                              "<td>" + str(q['ground']) + "</td><td>" + str(q['trains']) + "</td>"
+                              "<td>" + str(q['caps']) + "</td></tr>")
                 sths = ""
                 for i, h in enumerate(('#', 'Squadron', 'Tag', 'Members', 'Score',
-                                       'Kills', 'Deaths', 'K/D Ratio')):
+                                       'Kills', 'Deaths', 'K/D Ratio',
+                                       'Buildings', 'Tanks', 'Ground Units', 'Trains', 'Captures')):
                     sths += ('<th onclick="sortLadder(' + "'lsqn'," + str(i) + ')">'
                              + h + ' &#x21D5;</th>')
                 ladder_boards.append(('lsqn', 'sqn', sths, sbody))

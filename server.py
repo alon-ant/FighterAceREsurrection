@@ -327,7 +327,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v706f5'
+VERSION = 'v713f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -523,7 +523,8 @@ def init_db():
     # pilot who later quits takes nothing away. Feeds the web ladder's Squadrons board.
     try:
         _shave = {r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()}
-        for _c in ('score', 'kills', 'deaths'):
+        for _c in ('score', 'kills', 'deaths',
+                   'ai_buildings', 'ai_tanks', 'ai_ground', 'ai_trains', 'captures'):   # v713f5: ground tallies
             if _c not in _shave:
                 conn.execute(f"ALTER TABLE squadrons ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
                 log('DB', f'squadrons: added career column {_c}')
@@ -5794,6 +5795,25 @@ def db_pilot_squadron_id(pilot_name):
     except Exception:
         return 0
 
+def db_squadron_counter_add(pilot_name, col, n=1):
+    """v713f5 SQUADRON GROUND TALLIES: mirror a pilot's AI-kill / capture counter onto the squadron
+    they fly under right now (approved membership at credit time). Columns: ai_buildings,
+    ai_tanks, ai_ground (soldiers), ai_trains, captures. Best-effort like the score mirror."""
+    if not pilot_name or not n or col not in ('ai_buildings', 'ai_tanks', 'ai_ground', 'ai_trains', 'captures'):
+        return
+    try:
+        sid = db_pilot_squadron_id(pilot_name)
+        if not sid:
+            return
+        conn = sqlite3.connect(DB_PATH)
+        have = {r[1] for r in conn.execute("PRAGMA table_info(squadrons)").fetchall()}
+        if col in have:
+            conn.execute(f"UPDATE squadrons SET {col} = MAX(0, COALESCE({col},0) + ?) WHERE squadron_id=?", (int(n), int(sid)))
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        log('SQNSCORE', f'squadron counter mirror failed for {pilot_name}/{col}: {e}')
+
 def db_squadron_score_add(pilot_name, dscore=0, dkills=0, ddeaths=0):
     """v545f5 SQUADRON SCORES: mirror a pilot's scoring event onto the squadron they are flying
     under RIGHT NOW (approved membership at credit time - a later quit takes nothing away).
@@ -7983,7 +8003,9 @@ IDLE_REAP_SCAN_S = 15.0
 # back to False and compare before touching anything else.
 # ---------------------------------------------------------------------------
 SEND_POOL         = True
-SEND_POOL_WORKERS = 32
+SEND_POOL_WORKERS = 128     # v707f5: 32 -> 128. Each reliable send holds a worker up to 3 s for its ACK;
+                            # a bomb killing several buildings x every pilot in the room exhausted 32 and
+                            # the next destroy waited in the queue (pilots: 'blows up 5 s after the hit').
 _send_pool = concurrent.futures.ThreadPoolExecutor(
     max_workers=SEND_POOL_WORKERS, thread_name_prefix='sendpool')
 
@@ -8041,6 +8063,10 @@ def _perf_stats_loop():
         _mem_s = f' rss={_mem:.0f}MB' if _mem is not None else ''
         _mem_s += (f' threads={threading.active_count()} objs=T{len(TANKS)}/S{len(SOLDIERS)}/Tr{len(TRAINS)}'
                    f' gone={len(_SOLDIER_GONE)} rel_evts={sum(len(getattr(x, "_evts", ())) for x in list(sids.values()))}')
+        try:
+            _mem_s += f' sendq={_send_pool._work_queue.qsize()}'      # v707f5: send-pool backlog
+        except Exception:
+            pass
         log('PERF', 'window=%.0fs rx=%.1fpps/%.1fKBs tx=%.1fpps/%.1fKBs '
                     'rxthread_busy=%.1f%% disp_avg=%.2fms disp_max=%.2fms '
                     'relay_q_max=%d sessions=%d flying=%d'
@@ -9864,6 +9890,43 @@ def send_tank_update(onum, tick_for, payload26):
     except OSError:
         return False
 
+def _ai_cull_list(s, ids):
+    """v712f5: process a client cull list of 2-byte object ids: every id that is one of our AI
+    objects loses this session from its peer set (re-created when back in range); unknown ids
+    (already dead / removed) are skipped, never mis-parsed as exit entries."""
+    addr = getattr(s, 'addr', None)
+    n = 0
+    for onum in ids:
+        coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else None))
+        if coll is None:
+            # a PEER plane in the same list (mixed cull) -> re-arm the relay create, like PEERDEL
+            try:
+                if onum not in (0, 0xffff):
+                    _pp, _byc = _peer_owning_object(s, onum)
+                    _cp = _pp.__dict__.get('_created_peers') if (_pp is not None and _pp is not s) else None
+                    if _cp is not None and addr in _cp:
+                        _cp.discard(addr)
+                        log('PEERDEL', f'{s.current_pilot} culled PEER object 0x{onum:04x} ({_pp.current_pilot}) in a mixed cull list -> re-arm create')
+            except Exception:
+                pass
+            continue
+        if addr not in coll[onum]['peers']:
+            continue
+        coll[onum]['peers'].discard(addr); n += 1
+        _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else 'train')
+        log('TANK', f'{s.current_pilot} dropped {_kind} 0x{onum:04x} (client cull list) - re-created when back within {REJOIN_RADIUS_M / 1000:.0f} km')
+    try:
+        _rid = getattr(s, 'current_room', None)
+        _still = (any(t['room'] == _rid and addr in t['peers'] for t in TANKS.values())
+                  or any(sd['room'] == _rid and addr in sd['peers'] for sd in SOLDIERS.values())
+                  or any(tr['room'] == _rid and addr in tr['peers'] for tr in TRAINS.values()))
+        if not _still and s.__dict__.get('_ai_client_room') is not None:
+            s.__dict__.pop('_ai_client_room', None)
+            log('TANK', f'{s.current_pilot}: no AI object left on his client -> AI station will be re-registered with the next create')
+    except Exception:
+        pass
+    return n
+
 def _tank_note_client_delete(s, pl):
     """v563f5/v564f5: the client's msg-3 delete NOTIFY lists every object it dropped. Entries:
     a PLANE is [id u16][exit u8][tail by EEC] (EXIT_EEC_ENTRY_SIZE), a TANK is a bare [id u16]
@@ -10299,12 +10362,27 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         return None
     _alive = sum(1 for t in TANKS.values() if t['room'] == room_id and not t.get('dead'))
     if _alive >= TC_MAX_TANKS_PER_ROOM:
-        log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM - no new battalion (idle reuse only)')
         _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
         if _reuse is None:
-            tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
-                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
-            return None
+            # v711f5 (BanzaiBama 09-16: 'no tanks available, US owns half the map'): at the cap,
+            # RECALL the camp's least useful column - the oldest idle garrison / defender anywhere -
+            # to free its tanks for the new battalion, instead of refusing. Only if the camp has
+            # none at all does the message stand.
+            _victim = None
+            for _gid, _c in sorted(COLUMNS.items(), key=lambda kv: kv[1].get('held_at') or kv[1].get('created_at') or 0):
+                if _c.get('room') != room_id or _c.get('camp') != int(camp):
+                    continue
+                if _c.get('purpose') in ('hold', 'defend') and not _c.get('engaged'):
+                    _victim = _gid; break
+            if _victim is not None:
+                log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM - recalling idle column {_victim} '
+                          f'of camp {camp} to free tanks for the new battalion')
+                column_delete(_victim, reason='(recalled - tank cap, new battalion needed)')
+            else:
+                log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM and camp {camp} has no idle column to recall')
+                tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                                f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+                return None
     fac = tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1], n_want=n_want)
     if fac is None or fac[3] > TC_TANK_LINK_RADIUS_M:
         # v602f5 film wording (the wiki's TankProducerLinkRadius rule)
@@ -10517,7 +10595,7 @@ TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
 CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
-TC_MAX_TANKS_PER_ROOM = 32      # v604f5: no new battalion while this many tanks are alive in the room
+TC_MAX_TANKS_PER_ROOM = 48      # v604f5/v711f5: 32 -> 48; at the cap an idle column of the camp is recalled
 # v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
 # proven; the others are knobs (`tc ppt <tank> <soldier> <aa>`) - the client's kill line names the
 # hunter from this ('GBR tank destroyed GER tank', 'GBR anti-aircraft destroyed GER soldier').
@@ -10634,6 +10712,7 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
                 _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
                 _sc, _rk, _old = db_apply_score_delta(by_pilot, CAPTURE_SCENE_BONUS_2004, bomber=_bomber, mode=_mode)
                 log('SCORE', f'{by_pilot} +{CAPTURE_SCENE_BONUS_2004} = captured scene {sidx} | total {_sc} rank {_old}->{_rk}')
+                db_squadron_counter_add(by_pilot, 'captures', 1)            # v713f5: squadron capture tally
                 send_stat_block_25(sess, reason='(capture bonus)')
             except Exception:
                 logx('TC', 'capture bonus failed')
@@ -10871,6 +10950,7 @@ PARA_WALK_MPS         = 2.4     # v596f5: 1.5 -> 2.4 (user: faster)
 PARA_SOLDIERS_PER_CHUTE = 1
 PARA_STICK_LIFETIME_S = 1800.0
 PARA_CAPTURE_MIN      = 2       # v605f5: soldiers present at the scene for a capture (was 4)
+PARA_CAPTURE_HOLD_S   = 90.0    # v710f5: the soldiers must hold the scene this long (damage at capture% throughout)
 STICKS = {}                     # stick_id -> {'room','camp','pos','n','target','landed_at','by'}
 
 # --- v589f5 PARATROOP LOADING (msg 113 -> 114) --------------------------------------------
@@ -11465,6 +11545,7 @@ def train_killed(onum, killer, reason='', ai_hunter=None):
                 _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
                 _sc, _rk, _old = db_apply_score_delta(kname, TRAIN_KILL_SCORE, bomber=_bomber, mode=_mode)
                 _ng = db_bump_pilot_counter(kname, 'ai_ground', 1)
+                db_squadron_counter_add(kname, 'ai_trains', 1)              # v713f5: squadron train tally
                 log('SCORE', f'{kname} +{TRAIN_KILL_SCORE} = train kill (0x{onum:04x}) | total {_sc} rank {_old}->{_rk} ground={_ng}')
                 send_stat_block_25(killer, reason='(train kill)')
         except Exception:
@@ -12651,12 +12732,31 @@ def _tc_para_capture_tick():
                                    ai_hunter=(PPT_CLASS_AA, scene_camp(terrain, sidx)))
                     objs = [q for q in objs if q != o]
         # --- capture (v605f5: presence is enough - no 'arrived' precondition, like the tanks) ---
+        # v710f5 (Moira 09-15: 'captured while troops are still in the air, almost instant at 50%'):
+        # the stick must be COMPLETE (its drop window closed - every chute down) and its soldiers
+        # must HOLD the scene for PARA_CAPTURE_HOLD_S with the damage at capture% throughout.
+        if not st.get('closed'):
+            st['_hold_since'] = None
+            continue
         if tc_sticks_at_scene(rid, sidx, camp) < PARA_CAPTURE_MIN:
+            st['_hold_since'] = None
             continue
         cap_pct = tc_room_setting(rid, 'capture_percent', TC_CAPTURE_PERCENT)
         if frac * 100.0 + 1e-6 >= cap_pct:
+            if st.get('_hold_since') is None:
+                st['_hold_since'] = time.time()
+                try:
+                    _txy = tc_scene_xy(terrain, sidx)
+                    tc_say(rid, f'AI: {tc_camp_tag(camp)} paratroops are securing {tc_camp_tag(scene_camp(terrain, sidx))} '
+                                f'{_txy[2].strip()} at {tc_grid(_txy[0], _txy[1])}')
+                except Exception:
+                    pass
+            if time.time() - st['_hold_since'] < PARA_CAPTURE_HOLD_S:
+                continue
             trig = TRIGGERS.get((rid, int(sidx))) or {}
             tc_capture_scene(rid, sidx, camp, by_pilot=trig.get('by') or st.get('by'), assist_pilot=st.get('by'))   # v607f5
+        else:
+            st['_hold_since'] = None
 
 # --- v601f5 REAL TC MESSAGES (from FA.exe, film-verified effects) -----------------------
 #   msg 41 (0x29) CaptureScene  [0x29][u16 scene][u8 camp] -> FUN_0044e5c0 SCENE::Capture on
@@ -14666,6 +14766,11 @@ def db_bump_pilot_counter(name, col, n=1):
                 'ai_buildings': 'buildings_destroyed', 'assists': 'fighter_assists'}.get(col)
         if _row:
             camp_stat_for_pilot(name, _row, n)
+    except Exception:
+        pass
+    try:                                                   # v713f5: squadron ground tallies
+        if col in ('ai_buildings', 'ai_tanks', 'ai_ground', 'ai_trains', 'captures'):
+            db_squadron_counter_add(name, col, n)
     except Exception:
         pass
     conn = sqlite3.connect(DB_PATH)
@@ -17701,7 +17806,27 @@ OBJ_HP_DECORATION = 600
 # scenes were so hard to trigger (multiple pilots, 09-15). OBJ_HP_LIFE_MULT scales it; the
 # value x 25 rule stays as the fallback for classes without a life field.
 OBJ_HP_USE_CLASS_LIFE = True
-OBJ_HP_LIFE_MULT = 1.0
+# v708f5: hard targets take bomb/rocket (and tank) damage only; a plane's gun rounds are discarded
+# on them. Decided by class NAME keywords (the class table has no such flag) - anything not
+# listed is soft. Console: `hardlist` to print how the current terrain's classes were sorted.
+HARD_TARGET_KEYWORDS = ('factory', 'hangar', 'headquarter', 'hq', 'rail yard', 'railyard', 'station',
+                        'depot', 'warehouse', 'bridge', 'plant', 'refinery', 'dock', 'port',
+                        'bunker', 'pillbox', 'silo', 'power', 'mill', 'works')
+SOFT_TARGET_KEYWORDS = ('aa ', 'aa battery', 'flak', 'fuel tank', 'radar', 'tent', 'truck', 'searchlight',
+                        'gun', 'antenna', 'crate', 'car', 'jeep', 'artillery', 'howitzer',
+                        'storage', 'tower', 'barrack')    # v709f5: storage / towers / barracks are soft (user)
+HARD_TARGET_MIN_HIT = 1500      # a single msg-31 record below this is gunfire. The client batches damage per
+                                # 0.5 s, so a cannon burst arrives as ONE record of up to ~1100 (online 07:43:
+                                # 960 / 1103 on a fuel tank from a P-38); bombs land at 2100+ (250 lb) each.
+
+def _is_hard_target(oi):
+    nm = (oi.get('name') or '').lower()
+    if any(k in nm for k in SOFT_TARGET_KEYWORDS):
+        return False
+    return any(k in nm for k in HARD_TARGET_KEYWORDS)
+OBJ_HP_LIFE_MULT = 2.0     # v707f5: 1.0 -> 2.0 (pilots: 'some targets too soft' at the raw class life -
+                           # a factory died to one 250 lb bomb). x2 = two bombs / a longer strafe; the
+                           # old value x 25 was 5..12x. Console: `repair hp <mult>`.
 
 def obj_hp_needed(oi):
     """Cumulative damage that destroys a goi object (oi = trn_obj_info record)."""
@@ -18384,6 +18509,21 @@ def _handle_ground_damage_31(s, body, via=''):
         obj  = int.from_bytes(r[2:4], 'little')          # v445f5: FLAT u16 goi object index
         dmg  = int.from_bytes(r[4:6], 'little')
         key = (s.current_room, obj)
+        # v708f5 [HARD TARGETS ARE NOT STRAFEABLE] (user): factories, hangars, rail yards, HQs and the
+        # other structures only take BOMB / ROCKET damage from planes (tank fire has its own path).
+        # The msg-31 record carries no weapon id; a single record's damage does: bombs and rockets
+        # land as >= HARD_TARGET_MIN_HIT per record (250 lb ~ 2100), guns as 2..~400. Soft targets
+        # (AA / flak batteries, fuel tanks, radar, tents, trucks ...) take everything.
+        _hard = False
+        if dmg < HARD_TARGET_MIN_HIT:
+            try:
+                _oi = trn_obj_info(s.current_room, obj)
+                _hard = _oi is not None and _is_hard_target(_oi)
+            except Exception:
+                _hard = False
+        if _hard:
+            recs.append(f'atk={atk} obj={obj} dmg={dmg} (gunfire on a hard target - ignored)')
+            continue
         GROUND_HP[key] = GROUND_HP.get(key, 0) + dmg
         recs.append(f'atk={atk} obj={obj} dmg={dmg} (total={GROUND_HP[key]})')
         # live obj->scene probe: while a window is armed, EVERY record is a candidate
@@ -19149,6 +19289,19 @@ def _ingame_own_object_removed(s, tb, stored):
     # later (messages58 21:08:41.386 'out 3'4' then .533 'out 3'3'); the v682f5 check inside the
     # gated block never ran for it, the train kept the pilot in its peer set, and it was never
     # re-created ('Get coord for missing object 260' every 2 s from then on).
+    # v712f5: the list is a run of 2-byte ids; a stale FIRST id (a tank already dead server-side -
+    # online 01:50:10, Bama: 0x0424 led a list of 15 with eight LIVE tanks behind it) used to fail
+    # the 'first id is ours' test and the whole list was swallowed by the plane-delete handler -
+    # eight invisible tanks for 45 minutes. Any known AI id anywhere in an even-length list makes
+    # it a cull list, and every id is stepped at 2 bytes whether we still know it or not.
+    try:
+        _ids_pre = ([struct.unpack_from('<H', stored, i)[0] for i in range(5, len(stored) - 1, 2)]
+                    if len(stored) >= 7 and (len(stored) - 5) % 2 == 0 else [])
+        if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS for i in _ids_pre):
+            _ai_cull_list(s, _ids_pre)
+            return
+    except Exception:
+        logx('TANK', 'AI cull-list parse (pre-gate) failed')
     try:
         _onum_pre = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
         if _onum_pre is not None and (_onum_pre in TANKS or _onum_pre in SOLDIERS or _onum_pre in TRAINS):
