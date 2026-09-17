@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v741f5'
+VERSION = 'v743f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -426,6 +426,29 @@ SYN_OFF_AUTH = 56; SYN_OFF_F45 = 72; SYN_OFF_PID = 76; SYN_OFF_ACCT = 88
 TICKET_TEMPLATE = None
 
 import fa_logging as _falog
+
+# v742f5 [MAPDATA FOLDER]: the terrain / TC data files (rails, trn tables, scene profiles, the
+# client dumps and the probe maps) now live in 'mapdata\' next to server.py. mapdata_path() keeps
+# the old location working - a file still sitting in the server directory is used as before - so
+# nothing breaks on a server that has not moved them yet.
+SERVER_DIR  = os.path.dirname(os.path.abspath(__file__))
+MAPDATA_DIR = os.path.join(SERVER_DIR, 'mapdata')
+
+def mapdata_path(name, for_write=False):
+    r"""Preferred path for a map/TC data file: mapdata\<name>, falling back to the server directory
+    when the file only exists there. for_write=True always returns the mapdata path (and creates
+    the folder), so anything the server writes lands in the new place."""
+    _new = os.path.join(MAPDATA_DIR, name)
+    if for_write:
+        try:
+            os.makedirs(MAPDATA_DIR, exist_ok=True)
+        except Exception:
+            return os.path.join(SERVER_DIR, name)
+        return _new
+    if os.path.exists(_new):
+        return _new
+    _old = os.path.join(SERVER_DIR, name)
+    return _old if os.path.exists(_old) else _new
 # v321: single source of truth for the log directory. It used to be computed inline in the
 # init_logging() call, so the web server had no way to find it; the admin log browser needs
 # the same path. Note the deliberate os.path.dirname(os.path.abspath(__file__)) - resolving
@@ -5770,16 +5793,28 @@ def send_lobby_news(s, text=None, form=None, reason=''):
     _wel_unused = None
     # v732f5: the NEWS lines go first and the WELCOME last - a pane-1 line blanks the left pane
     # (probe 09-16), so a welcome sent before them is wiped.
+    # v743f5: the lines go out through the SEND POOL, not one blocking send_rel after another -
+    # each send waits for its own ACK, so 16 lines on a remote link took 5-6 s and the pane filled
+    # visibly line by line (user 09-17). They are dispatched together; the welcome (pane 0) is
+    # submitted last, after a short settle, because it must land after the lines that blank it.
+    _lines = []
     for line in (lobby_news_text() or '').replace('\r\n', '\n').split('\n'):
         if len(line) > LOBBY_NEWS_MAX_LINE:
             line = line[:LOBBY_NEWS_MAX_LINE]
-        send_rel(s, build_lobby_news_202(line, 11), '<- LOBBY NEWS 202 line', to=3.0); n += 1
-        if n > LOBBY_NEWS_MAX_LINES:
+        _lines.append(line)
+        if len(_lines) >= LOBBY_NEWS_MAX_LINES:
             break
+    for line in _lines:
+        _submit_send(send_rel, s, build_lobby_news_202(line, 11), '<- LOBBY NEWS 202 line', to=5.0); n += 1
     if _wel:
-        send_rel(s, build_lobby_news_202(_wel, 10), '<- LOBBY WELCOME 202 (pane 0)', to=3.0); n += 1
+        def _send_welcome(_s=s, _w=_wel):
+            time.sleep(LOBBY_NEWS_WELCOME_DELAY_S)
+            send_rel(_s, build_lobby_news_202(_w, 10), '<- LOBBY WELCOME 202 (pane 0)', to=5.0)
+        threading.Thread(target=_send_welcome, daemon=True).start(); n += 1
     log('NEWS', f'{getattr(s, "current_pilot", "?")}: lobby news sent - {n} line(s) {reason}')
     return n
+
+LOBBY_NEWS_WELCOME_DELAY_S = 1.0
 
 LOBBY_NEWS_MAX_LINE  = 120
 LOBBY_NEWS_MAX_LINES = 200
@@ -9324,7 +9359,7 @@ def _load_tank_consts():
     """Pull the telemetry scale constants out of tank_tables.json (written by the dumper)."""
     global TANK_POS_XY_SCALE, TANK_POS_Z_SCALE, TANK_POS_Z_OFF, TANK_DIR_SCALE, TANK_S16_SCALE, TANK_TICK_HZ, PLANE_POS_SCALE
     try:
-        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tank_tables.json')
+        _p = mapdata_path('tank_tables.json')
         _j = json.load(open(_p))
         fc = _j.get('float_consts') or {}
         def _g(prefix):
@@ -11963,7 +11998,7 @@ def rails_for(terrain):
     terrain = _tbase(terrain)               # v629f5
     if terrain in _RAILS:
         return _RAILS[terrain]
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'rails_trn{int(terrain):02d}.json')
+    path = mapdata_path(f'rails_trn{int(terrain):02d}.json')
     try:
         with open(path, 'r') as f:
             _RAILS[terrain] = json.load(f)
@@ -18749,7 +18784,7 @@ def calib(kind, msg):
 # Deliberately NOT seeded from objscene_map.json: that map is scene-space region data from the
 # ev=0x00 destroy-sweep and does not describe the weapon space (see v288 notes).
 WEAPON_MAP = {}                        # int obj -> int sceneIdx
-WEAPON_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weapon_map.json')
+WEAPON_MAP_PATH = mapdata_path('weapon_map.json')
 # When True, an obj with no anchor produces NO msg 36 at all. Turning this off restores the v287
 # and earlier behaviour of guessing identity, which is known to destroy the wrong building.
 AUTO_DESTROY_REQUIRE_MAP = True
@@ -19011,8 +19046,7 @@ def trn_tables(trn):
         return _TRN_TABLES[trn]
     d = None
     try:
-        _p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          f'trn_tables_trn{int(trn):02d}.json')
+        _p = mapdata_path(f'trn_tables_trn{int(trn):02d}.json')
         if os.path.exists(_p):
             d = json.load(open(_p))
             log('TRNTABLES', f'terrain {trn}: loaded {_p} - '
@@ -19269,7 +19303,8 @@ PROBE = {'active': False, 'scene': None, 'room': None, 'until': 0.0,
          'map': {}, 'sweep_thread': None, 'stop': False}
 PROBE_LOCK = threading.Lock()
 PROBE_WINDOW = 2.5            # seconds to collect ev=0x00 after each destroy
-PROBE_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'objscene_map.json')
+PROBE_MAP_PATH = mapdata_path('objscene_map.json')
+PROBE_MAP_WRITE = mapdata_path('objscene_map.json', for_write=True)    # v742f5: saves go to mapdata\
 
 # v629f5 [PER-ROOM OWNERSHIP]: scene ownership (SCENE_CAMP_BY_TERRAIN and everything keyed by
 # 'terrain' that is really per-arena state: captures, territories, rail stations, names) was
@@ -19346,8 +19381,8 @@ def probe_save():
         existing = {}
     existing.setdefault('by_scene', {}).update(by_scene)
     existing.setdefault('obj_to_scene', {}).update(inv)
-    json.dump(existing, open(PROBE_MAP_PATH, 'w'), indent=1, sort_keys=True)
-    return len(inv), PROBE_MAP_PATH
+    json.dump(existing, open(PROBE_MAP_WRITE, 'w'), indent=1, sort_keys=True)
+    return len(inv), PROBE_MAP_WRITE
 
 def probe_fire(room, scene):
     """Arm the window then fire a real destroy so the client reconciles.
@@ -19401,7 +19436,8 @@ def probe_sweep(room, lo, hi, gap=3.0):
 CORR = {'watch': False, 'weapon': {}, 'find_obj': None, 'find_thread': None,
         'stop': False, 'last05': {}}
 CORR_LOCK = threading.Lock()
-CORR_MAP_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weapon_map.json')
+CORR_MAP_PATH = mapdata_path('weapon_map.json')
+CORR_MAP_WRITE = mapdata_path('weapon_map.json', for_write=True)      # v742f5
 
 def corr_observe(room, obj, dmg):
     """Called for every msg-31 record. Tracks weapon targets + last-seen time while armed
@@ -19420,7 +19456,7 @@ def corr_map_save(obj, scene):
     except Exception:
         existing = {}
     existing.setdefault('weapon_obj_to_scene', {})[str(obj)] = scene
-    json.dump(existing, open(CORR_MAP_PATH, 'w'), indent=1, sort_keys=True)
+    json.dump(existing, open(CORR_MAP_WRITE, 'w'), indent=1, sort_keys=True)
     # v446f5: LIVE-RELOAD the in-memory map. Field case (run_20260815_230717): `corr map
     # 1229 33` at 23:10:52 wrote the file, `autopve on` printed '1 anchor(s)' (the STARTUP
     # load), and every 1229 hit at 23:15 was declined 'no weapon_map anchor' - WEAPON_MAP
@@ -20534,7 +20570,7 @@ SUPPLY_REPAIR_HP_PER_TICK = 0      # v450f5: 2009-authentic NO repair (Buildings
                                    # knobs together if an arena ever wants repair.
 SUPPLY_TICK_LOG   = True            # v430f5: emit a SUPPLYTICK heartbeat line each production step
 _SUPPLY_TICK_N    = 0               # v430f5: monotonic production-step counter (for the heartbeat)
-SUPPLY_JSON       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_scenes.json')
+SUPPLY_JSON       = mapdata_path('fa_scenes.json')
 
 _SCENES = {'terrains': {}, 'profiles': {}}
 try:
@@ -20629,7 +20665,7 @@ def scene_profiles_for(terrain):
     t = _tbase(terrain)
     if t in _SCENE_PROFILES:
         return _SCENE_PROFILES[t]
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'fa_scene_profiles_trn{int(t):02d}.json')
+    path = mapdata_path(f'fa_scene_profiles_trn{int(t):02d}.json')
     data = None
     try:
         if os.path.exists(path):
@@ -21665,7 +21701,7 @@ def avg_unit_costs_for(camp):
     if _AVG_UNIT_COST is None:
         table = {}
         try:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_memdump.json')
+            path = mapdata_path('fa_memdump.json')
             if os.path.exists(path):
                 with open(path, 'r', encoding='utf-8') as f:
                     raw = (json.load(f).get('avg_unit_cost') or {})

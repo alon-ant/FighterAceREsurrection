@@ -1,0 +1,9716 @@
+{
+ "tables": [
+  {
+   "off": 33649312,
+   "n": 17,
+   "near": null,
+   "near_off": null,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Planes Factory 01",
+     "h": 215.5,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory 01",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield",
+     "h": 1510.3,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Bomber Airfield",
+     "h": 1507.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield",
+     "h": 1504.4,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Figter AF",
+     "h": 658.4,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 2,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 4,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 33770800,
+   "n": 8,
+   "near": null,
+   "near_off": null,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 33771328,
+   "n": 9,
+   "near": null,
+   "near_off": null,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Airfield",
+     "h": 677.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield ",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 2,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Front Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 35663552,
+   "n": 10,
+   "near": "Mediterrain",
+   "near_off": 34910576,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 1510.3,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 1507.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 1504.4,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter AF",
+     "h": 658.4,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Port",
+     "h": 647.2,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 36222608,
+   "n": 4,
+   "near": "Two Islands",
+   "near_off": 36026752,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 36222896,
+   "n": 25,
+   "near": "Two Islands",
+   "near_off": 36026752,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Bomber Airfield ",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Airfield",
+     "h": 677.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 18,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Support Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 20,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 21,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 22,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "Substation",
+     "h": 0.0,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 24,
+     "name": "Anti-Aircraft",
+     "h": 38.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 37428528,
+   "n": 4,
+   "near": "Germany",
+   "near_off": 37100624,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 37888336,
+   "n": 19,
+   "near": "Germany",
+   "near_off": 37100624,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Front Line Airfield",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Bomber Airfield ",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Airfield For Export",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Port",
+     "h": 647.2,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 18,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 37889920,
+   "n": 4,
+   "near": "Germany",
+   "near_off": 37100624,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 677.3,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 40525168,
+   "n": 4,
+   "near": "English Channel",
+   "near_off": 39480032,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 40849856,
+   "n": 7,
+   "near": "English Channel",
+   "near_off": 39480032,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tank Factory",
+     "h": 259.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 35000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Aircraft Factory",
+     "h": 215.5,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 40850240,
+   "n": 7,
+   "near": "English Channel",
+   "near_off": 39480032,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Fuel Factory",
+     "h": 226.7,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 35000.0
+    },
+    {
+     "i": 1,
+     "name": "Support Factory",
+     "h": 407.9,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Substation",
+     "h": 135.7,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 3,
+     "name": "kursk",
+     "h": 3535.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Tank Factory",
+     "h": 291.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 35000.0
+    },
+    {
+     "i": 5,
+     "name": "Village",
+     "h": 689.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 35000.0
+    },
+    {
+     "i": 6,
+     "name": "berth",
+     "h": 159.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 42671296,
+   "n": 4,
+   "near": "Kursk",
+   "near_off": 42235600,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 42671968,
+   "n": 4,
+   "near": "Kursk",
+   "near_off": 42235600,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 1344.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 43092256,
+   "n": 4,
+   "near": "Kursk",
+   "near_off": 42235600,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 43092544,
+   "n": 10,
+   "near": "Kursk",
+   "near_off": 42235600,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 43093072,
+   "n": 10,
+   "near": "Kursk",
+   "near_off": 42235600,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 683.1,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 574.9,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 44202720,
+   "n": 7,
+   "near": "Guadalcanal",
+   "near_off": 43764272,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "As Sallum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Jaghbub",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Siwah",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Al Alamein",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Al Bawiti",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Al Minya",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Al Fayyum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 44203104,
+   "n": 22,
+   "near": "Guadalcanal",
+   "near_off": 43764272,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Suez",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Arish",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cairo",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tobruk",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Alexandria",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Port Said",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Port Said",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Front Line Airfield",
+     "h": 602.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 17,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Substation",
+     "h": 0.0,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 20,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 21,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 45178832,
+   "n": 17,
+   "near": "North Africa",
+   "near_off": 44778160,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Planes Factory 01",
+     "h": 215.5,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory 01",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield",
+     "h": 1510.3,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Bomber Airfield",
+     "h": 1504.6,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Bomber Airfield",
+     "h": 1507.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield",
+     "h": 1504.4,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Figter AF",
+     "h": 658.4,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 2,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 4,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 45281712,
+   "n": 4,
+   "near": "Midway",
+   "near_off": 45207072,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 45282864,
+   "n": 4,
+   "near": "Midway",
+   "near_off": 45207072,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Airfield For Export",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 2,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Front Line Airfield",
+     "h": 673.8,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 45738992,
+   "n": 5,
+   "near": "Midway",
+   "near_off": 45207072,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Tank Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield ",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 20000.0
+    },
+    {
+     "i": 4,
+     "name": "Objects from Midway",
+     "h": 96.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 46366544,
+   "n": 8,
+   "near": "Mountains",
+   "near_off": 46093296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Port_Old",
+     "h": 647.2,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield ",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 15000.0
+    },
+    {
+     "i": 2,
+     "name": "Objects from Midway",
+     "h": 96.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 6,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Objects for export",
+     "h": 96.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Tank Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 46956912,
+   "n": 5,
+   "near": "Midway",
+   "near_off": 46366653,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Tank Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield ",
+     "h": 1305.3,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Objects from Midway",
+     "h": 96.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 46957248,
+   "n": 4,
+   "near": "Midway",
+   "near_off": 46957117,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Forest",
+     "h": 506.6,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Forest",
+     "h": 504.0,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 48165008,
+   "n": 7,
+   "near": "North Cape",
+   "near_off": 47555776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "As Sallum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Jaghbub",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Siwah",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Al Alamein",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Al Bawiti",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Al Minya",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Al Fayyum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 48165392,
+   "n": 22,
+   "near": "North Cape",
+   "near_off": 47555776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Suez",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Arish",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cairo",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tobruk",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Alexandria",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Port Said",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Port Said",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Front Line Airfield",
+     "h": 602.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 17,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Substation",
+     "h": 0.0,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 20,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 21,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 49115696,
+   "n": 52,
+   "near": "Western Desert",
+   "near_off": 48682080,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Tank Factory",
+     "h": 193.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Airfield template",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Tank Medium",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Bellona",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Cape Esperance",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Torokina",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Arundel",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Goodeville",
+     "h": 562.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Grass Field Template",
+     "h": 567.6,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Turner Point",
+     "h": 567.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Tulagi",
+     "h": 567.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Shortland Island",
+     "h": 589.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Rendova",
+     "h": 567.9,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Russell Island",
+     "h": 663.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Tank Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "test texture",
+     "h": 475.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "Texture2",
+     "h": 567.6,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Tac Fuel Template",
+     "h": 549.7,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 18,
+     "name": "Paluka",
+     "h": 561.3,
+     "cls": 0,
+     "flag": 7,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Aloa Bay",
+     "h": 592.1,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 20,
+     "name": "Kieta",
+     "h": 590.2,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 21,
+     "name": "Kolombangara",
+     "h": 584.1,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 22,
+     "name": "Mikawa Bay",
+     "h": 619.5,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "Tac Metal Template",
+     "h": 533.3,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Nic Nic",
+     "h": 585.9,
+     "cls": 0,
+     "flag": 7,
+     "link": 10000.0
+    },
+    {
+     "i": 25,
+     "name": "Malaita",
+     "h": 587.9,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 26,
+     "name": "Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 27,
+     "name": "Buin",
+     "h": 533.3,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 28,
+     "name": "Vanguna",
+     "h": 580.8,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 30,
+     "name": "Slotsylvania",
+     "h": 565.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 31,
+     "name": "Front Line Airfield",
+     "h": 574.9,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 32,
+     "name": "Tac Ammo Template",
+     "h": 540.3,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    },
+    {
+     "i": 33,
+     "name": "Frasiers Hill",
+     "h": 587.8,
+     "cls": 0,
+     "flag": 7,
+     "link": 10000.0
+    },
+    {
+     "i": 34,
+     "name": "Kalamakua",
+     "h": 607.2,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 35,
+     "name": "Kahili",
+     "h": 575.7,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 36,
+     "name": "Vella Lavella",
+     "h": 585.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 37,
+     "name": "Sakai Point",
+     "h": 556.7,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 38,
+     "name": "Big Test",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 39,
+     "name": "Big Test 2",
+     "h": 1592.3,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 40,
+     "name": "Heavy AF Template",
+     "h": 1592.3,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 41,
+     "name": "San Christobol",
+     "h": 1580.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 42,
+     "name": "Henderson Field",
+     "h": 1615.1,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 43,
+     "name": "Bougainville",
+     "h": 1632.1,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 44,
+     "name": "New Georgia",
+     "h": 1595.5,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 45,
+     "name": "Santa Isabel",
+     "h": 1572.3,
+     "cls": 1,
+     "flag": 5,
+     "link": 10000.0
+    },
+    {
+     "i": 46,
+     "name": "Ship Medium",
+     "h": 558.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 47,
+     "name": "Rennell",
+     "h": 640.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 10000.0
+    },
+    {
+     "i": 48,
+     "name": "Fossboro",
+     "h": 560.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 49,
+     "name": "Buka",
+     "h": 607.7,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 50,
+     "name": "Choiseul",
+     "h": 616.3,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 51,
+     "name": "Carsons Landing",
+     "h": 625.6,
+     "cls": 0,
+     "flag": 3,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 50678832,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Radar Station",
+     "h": 153.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Bomber Airfield",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 27,
+     "name": "Walsh Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 50680368,
+   "n": 12,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 7,
+     "name": "Fighter Airfield",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Fighter Airfield",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 50681520,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Komachi Air Base",
+     "h": 1505.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Popkov Air Base",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Walsh Air Base",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Galland Air Base",
+     "h": 1451.4,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Caldwell Air Base",
+     "h": 1455.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Galland Industrial Center",
+     "h": 1082.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Pyramids",
+     "h": 848.4,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 50682000,
+   "n": 10,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Fighter Airfield",
+     "h": 507.3,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 1,
+     "name": "Fighter Airfield",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 2,
+     "name": "Fighter Airfield",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 3,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 4,
+     "name": "Grass Airfield",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 5,
+     "name": "Bomber Airfield",
+     "h": 1505.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 8,
+     "name": "Bomber Airfield",
+     "h": 1451.4,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 9,
+     "name": "Bomber Airfield",
+     "h": 1455.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    }
+   ]
+  },
+  {
+   "off": 50682528,
+   "n": 9,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Katoyuki",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 1,
+     "name": "Mount Nakajima",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 2,
+     "name": "Hakohiri",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 3,
+     "name": "Yamaguri",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 4,
+     "name": "Suzukiyama",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 5,
+     "name": "Satoban",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 6,
+     "name": "Miyozuma",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 7,
+     "name": "Kawashiwata",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Norozuki",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    }
+   ]
+  },
+  {
+   "off": 50683056,
+   "n": 9,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Kensfurt",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Mariaburg",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 2,
+     "name": "Glockendorf",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 3,
+     "name": "Vettelsleben",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 4,
+     "name": "Heidfeld",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 5,
+     "name": "Sutilheim",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 6,
+     "name": "Elrichshafen",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 7,
+     "name": "Schwantzingen",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Deutschow",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    }
+   ]
+  },
+  {
+   "off": 50683584,
+   "n": 10,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Gardner Grove",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Vangeburgh",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 2,
+     "name": "Richfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 3,
+     "name": "Gilmour Junction",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 4,
+     "name": "Masonbury",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 5,
+     "name": "Waterside Beach",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 6,
+     "name": "Wrightsbridge",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 7,
+     "name": "Rossi Vale",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Pixley",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 9,
+     "name": "Port Michael",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 50684112,
+   "n": 6,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Dagsford",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Earlimart",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 2,
+     "name": "Greendale",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 3,
+     "name": "Silver Springs",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 4,
+     "name": "Hayden Hills",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 5,
+     "name": "Douglas Dunes",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    }
+   ]
+  },
+  {
+   "off": 50684592,
+   "n": 4,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Maximograd",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Levinov",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 2,
+     "name": "Zvezdov",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 3,
+     "name": "Anatoliev",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    }
+   ]
+  },
+  {
+   "off": 50684832,
+   "n": 5,
+   "near": "Korea",
+   "near_off": 50676056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Sorokinograd",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 1,
+     "name": "Starykhskiya",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 2,
+     "name": "Efimoviev",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 3,
+     "name": "Tumpicograd",
+     "h": 662.6,
+     "cls": 0,
+     "flag": 1,
+     "link": 40000.0
+    },
+    {
+     "i": 4,
+     "name": "Teachov",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    }
+   ]
+  },
+  {
+   "off": 51420000,
+   "n": 7,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "As Sallum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Jaghbub",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Siwah",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Al Alamein",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Al Bawiti",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Al Minya",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Al Fayyum",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 51420384,
+   "n": 9,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Suez",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Al Arish",
+     "h": 576.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cairo",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tobruk",
+     "h": 1435.7,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Alexandria",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Port Said",
+     "h": 2018.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Fighter Airfield",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 51420912,
+   "n": 22,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Front Line Airfield",
+     "h": 602.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Halfaya",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Bir Hacheim",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Surad",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Giarabub",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mersa Matruh",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Ibyar",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 10,
+     "name": "Al Ashrak",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Sandala",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Sidi Barrani",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Tawil",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Qara",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 15,
+     "name": "Buhut",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Sangid",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Tell Rak",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 18,
+     "name": "Nub Tarif",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 19,
+     "name": "Damas",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "El Daba",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Barqin",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 51422064,
+   "n": 18,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Qarat el Himeimat",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Nakhi",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Suez",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "El Faiyum",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "El Alamein",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Romani",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Abousir",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Qarat el Mashrukha",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Bir Afandina",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Yi Allaq",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 10,
+     "name": "Aboukir",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Bir el Abd",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Widi Sidr",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Jabal Ukhshayn",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Zagazig",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 15,
+     "name": "Tayaria",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Alam el Halfa",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Minqar el Magabra",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 51423024,
+   "n": 18,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Umm Hileiqa",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Jabal az Zayt",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Abu Shar",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Lake Maghira",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Mallawi",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Ras Gharib",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Jebel Abu Gerfan",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Bawiti",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Qaryet Theiw",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "El Minya",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 10,
+     "name": "Abu Zenima",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Dairut",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Jebel Abu Marwa",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Khashm el Ragaba",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "Beni Suef",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 15,
+     "name": "Tutun",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Hangaliya",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Abu Ghusun",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 51423984,
+   "n": 20,
+   "near": "Two Islands",
+   "near_off": 50993296,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Siwa",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Abu Minqar",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Gharb Mawhub",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Gidida",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Qasr Farafra",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Qualamun",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Qattara",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Ezbet Muftah",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Bulaq",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Ain Dalla",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 10,
+     "name": "Sitra",
+     "h": 524.3,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Matana",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Isna",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Abu Simbel",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 14,
+     "name": "El Bahrein",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 15,
+     "name": "Samut",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Ain el Wadi",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Bir Um Hibal",
+     "h": 620.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 18,
+     "name": "Al Bayad",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 19,
+     "name": "El Arish",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 52561696,
+   "n": 9,
+   "near": "Western Desert",
+   "near_off": 52006848,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Tank Factory",
+     "h": 193.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Sakai Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Nishizawa Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Iwamoto Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Bong Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Caldwell Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "McGuire Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Village01",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 52562224,
+   "n": 10,
+   "near": "Western Desert",
+   "near_off": 52006848,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 52562752,
+   "n": 10,
+   "near": "Western Desert",
+   "near_off": 52006848,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 683.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 574.9,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 52913440,
+   "n": 4,
+   "near": "Pacific",
+   "near_off": 52800336,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 52913728,
+   "n": 10,
+   "near": "Pacific",
+   "near_off": 52800336,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 52914256,
+   "n": 10,
+   "near": "Pacific",
+   "near_off": 52800336,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 683.1,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 619.5,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 53341712,
+   "n": 4,
+   "near": "NAW",
+   "near_off": 53173088,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Planes Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Village",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Village01",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 53342000,
+   "n": 10,
+   "near": "NAW",
+   "near_off": 53173088,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 53342528,
+   "n": 10,
+   "near": "NAW",
+   "near_off": 53173088,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 683.1,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 1280.2,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 619.5,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 53869936,
+   "n": 8,
+   "near": "NAW",
+   "near_off": 53698039,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Radar",
+     "h": 153.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Walsh Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Galland Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Tank Factory",
+     "h": 270.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 149.8,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 53870464,
+   "n": 13,
+   "near": "NAW",
+   "near_off": 53698039,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Popkov Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Komachi Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Caldwell Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Walsh Field",
+     "h": 1476.0,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Caldwell Field",
+     "h": 1468.3,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Airfield",
+     "h": 658.5,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "Bomber Airfield ",
+     "h": 1468.3,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 7,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Front Airfield",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Galland Field",
+     "h": 1468.3,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 10,
+     "name": "Komachi Field",
+     "h": 1468.3,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Popkov Field",
+     "h": 1478.1,
+     "cls": 1,
+     "flag": 4,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 0,
+     "link": 20000.0
+    }
+   ]
+  },
+  {
+   "off": 55715584,
+   "n": 8,
+   "near": "Classic",
+   "near_off": 54999056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Old AA battery",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 55716016,
+   "n": 10,
+   "near": "Classic",
+   "near_off": 54999056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 56047456,
+   "n": 8,
+   "near": "Classic",
+   "near_off": 54999056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Old AA battery",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56047888,
+   "n": 10,
+   "near": "Classic",
+   "near_off": 54999056,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 56324064,
+   "n": 8,
+   "near": "Five Towers",
+   "near_off": 56186736,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Old AA battery",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Figter  Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56324496,
+   "n": 10,
+   "near": "Five Towers",
+   "near_off": 56186736,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bomber Airfield",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "AntiAircrafts II",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "AntiAircrafts",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Bomber Airfield ",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 8,
+     "name": "Mostiki",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Line Airfield",
+     "h": 0.0,
+     "cls": 0,
+     "flag": 3,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 56614304,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Radar Station",
+     "h": 153.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Bomber Airfield",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 27,
+     "name": "Walsh Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56615840,
+   "n": 12,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 7,
+     "name": "Fighter Airfield",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Fighter Airfield",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 56616992,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Komachi Air Base",
+     "h": 1505.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Popkov Air Base",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Walsh Air Base",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Galland Air Base",
+     "h": 1451.4,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Caldwell Air Base",
+     "h": 1455.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Galland Industrial Center",
+     "h": 1082.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Pyramids",
+     "h": 848.4,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56617616,
+   "n": 15,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hungnam Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Nampo Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Incheon Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Kunsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Pusan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Donggang Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Sunan Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Yangno Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Kusong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Kumya-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Yangdog-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Yu-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Kosong-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sariwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56618480,
+   "n": 8,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Araenmunjeong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Yongin Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bonghwa Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Guchon-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Angang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Namwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Gimhae Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 56618912,
+   "n": 19,
+   "near": "Korea",
+   "near_off": 56610904,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hamhung Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Sin-ni Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Anbyon-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Chunghwa-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Yeoncheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Yangyang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Yora-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Kaesong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Chungyn-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Cheonan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Gunwi Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Iksan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Taegu Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Sacheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Naju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Cheju-Do Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 17,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "TNBomberBaseA",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 60359440,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Radar Station",
+     "h": 153.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Bomber Airfield",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 27,
+     "name": "Walsh Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 60360976,
+   "n": 12,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Fighter Airfield",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Fighter Airfield",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 60362128,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Komachi Air Base",
+     "h": 1505.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Popkov Air Base",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Walsh Air Base",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Galland Air Base",
+     "h": 1451.4,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Caldwell Air Base",
+     "h": 1455.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Galland Industrial Center",
+     "h": 1082.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Pyramids",
+     "h": 848.4,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 60362752,
+   "n": 15,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hungnam Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Nampo Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Incheon Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Kunsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Pusan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Donggang Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Sunan Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Yangno Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Kusong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Kumya-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Yangdog-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Yu-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Kosong-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sariwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 60363616,
+   "n": 8,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Araenmunjeong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Yongin Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bonghwa Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Guchon-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Angang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Namwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Gimhae Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 60364048,
+   "n": 19,
+   "near": "Korea",
+   "near_off": 60356040,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hamhung Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Sin-ni Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Anbyon-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Chunghwa-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Yeoncheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Yangyang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Yora-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Kaesong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Chungyn-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Cheonan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Gunwi Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Iksan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Taegu Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Sacheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Naju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Cheju-Do Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 17,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "TNBomberBaseA",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 62654176,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Bomber Airfield",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "Radar Station",
+     "h": 153.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Bomber Airfield",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 60000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 30000.0
+    },
+    {
+     "i": 27,
+     "name": "Walsh Industrial Center",
+     "h": 1070.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 62655712,
+   "n": 12,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 60000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 20000.0
+    },
+    {
+     "i": 7,
+     "name": "Fighter Airfield",
+     "h": 494.1,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Fighter Airfield",
+     "h": 501.0,
+     "cls": 0,
+     "flag": 4,
+     "link": 40000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 62656864,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Komachi Air Base",
+     "h": 1505.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Popkov Air Base",
+     "h": 1576.7,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "Walsh Air Base",
+     "h": 1381.9,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "Galland Air Base",
+     "h": 1451.4,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "Caldwell Air Base",
+     "h": 1455.8,
+     "cls": 1,
+     "flag": 5,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "Galland Industrial Center",
+     "h": 1082.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Pyramids",
+     "h": 848.4,
+     "cls": 6,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 62657488,
+   "n": 15,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hungnam Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Nampo Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Incheon Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Kunsan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Pusan Port",
+     "h": 0.0,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Donggang Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Sunan Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Yangno Support Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Kusong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Kumya-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Yangdog-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Yu-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Kosong-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sariwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 62658352,
+   "n": 8,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Araenmunjeong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Yongin Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bonghwa Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Guchon-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Angang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Namwon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Gimhae Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 62658784,
+   "n": 19,
+   "near": "Korea",
+   "near_off": 62650776,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hamhung Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Sin-ni Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Anbyon-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Chunghwa-up Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Yeoncheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Yangyang Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Yora-dong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Kaesong Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Chungyn-ri Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Cheonan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Gunwi Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Iksan Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Taegu Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Sacheon Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Naju Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Cheju-Do Tank Factory",
+     "h": 0.0,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 16,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 17,
+     "name": "BBB",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "TNBomberBaseA",
+     "h": 0.0,
+     "cls": 1,
+     "flag": 0,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 64904896,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Airfield For Export",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "TestScene",
+     "h": 952.8,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Undefined",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 27,
+     "name": "K-8 Kunsan Air Base",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 64906432,
+   "n": 13,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Front Airfield",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Airfield",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "K-25 Wonsan Air Base",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 64907104,
+   "n": 4,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "K-10 Chinhae Air Base",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "K-12 Mangun Airdrome",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "K-20 Sinmak Airdrome",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "K-2 Taegu Air Base",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 64907536,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "K-22 Onjong-Ni Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "K-29 Sinanju Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "K-30 Sinuiju Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "K-40 Cheju-Do No. 2 Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "K-1 Pusan-West Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "K-13 Suwon Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "K-14 Kimpo Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 64908208,
+   "n": 15,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hungnam Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonsan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Nampo Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Incheon Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Kunsan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Pusan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Donggang Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Sunan Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Yangno Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Kusong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Kumya-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Yangdog-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Yu-dong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Kosong-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sariwon Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 64909072,
+   "n": 8,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Araenmunjeong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonju Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Yongin Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bonghwa Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Guchon-ri Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Angang Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Namwon Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Gimhae Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 64909504,
+   "n": 16,
+   "near": "Korea",
+   "near_off": 64902648,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hamhung Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Sin-ni Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Anbyon-up Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Chunghwa-up Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Yeoncheon Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Yangyang Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Yora-dong Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Kaesong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Chungyn-ri Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Cheonan Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Gunwi Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Iksan Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Taegu Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Sacheon Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Naju Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Cheju-Do Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 73070784,
+   "n": 31,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Mostiki",
+     "h": 201.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Tower Bridge",
+     "h": 178.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Cathedral",
+     "h": 134.4,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "London",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Village",
+     "h": 146.1,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Village",
+     "h": 123.5,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Aircraft Factory",
+     "h": 214.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1275.9,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Birmingem",
+     "h": 1950.3,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Airfield For Export",
+     "h": 1314.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 13,
+     "name": "Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sand Island",
+     "h": 1786.4,
+     "cls": 0,
+     "flag": 2,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 16,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 17,
+     "name": "Eastern Island",
+     "h": 1132.3,
+     "cls": 1,
+     "flag": 3,
+     "link": 10000.0
+    },
+    {
+     "i": 18,
+     "name": "TestScene",
+     "h": 952.8,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 19,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 20,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 21,
+     "name": "Front Line Airfield",
+     "h": 556.2,
+     "cls": 0,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 22,
+     "name": "Seoul",
+     "h": 1345.2,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 23,
+     "name": "K-55 Osan Air Base",
+     "h": 1546.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 24,
+     "name": "Undefined",
+     "h": 0.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 25,
+     "name": "Antung Air Base",
+     "h": 1404.7,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 26,
+     "name": "Big Factory",
+     "h": 404.4,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 27,
+     "name": "K-8 Kunsan Air Base",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 28,
+     "name": "Railyard",
+     "h": 284.4,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 29,
+     "name": "Substation",
+     "h": 65.8,
+     "cls": 4,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 30,
+     "name": "Anti-Aircraft",
+     "h": 37.0,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 73072320,
+   "n": 13,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Airfield",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "Westminster",
+     "h": 161.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Paris",
+     "h": 3779.9,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Tour Eiffel",
+     "h": 66.6,
+     "cls": 2,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Fighter Field",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 5,
+     "name": "Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Front Airfield",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 8,
+     "name": "Airfield",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 9,
+     "name": "Front Airfield",
+     "h": 669.9,
+     "cls": 0,
+     "flag": 4,
+     "link": 20000.0
+    },
+    {
+     "i": 10,
+     "name": "Bomber Airfield ",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 11,
+     "name": "Airfield",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 12,
+     "name": "K-25 Wonsan Air Base",
+     "h": 767.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 73072992,
+   "n": 4,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "K-10 Chinhae Air Base",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "K-12 Mangun Airdrome",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "K-20 Sinmak Airdrome",
+     "h": 679.1,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "K-2 Taegu Air Base",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 73073424,
+   "n": 7,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "K-22 Onjong-Ni Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 1,
+     "name": "K-29 Sinanju Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 2,
+     "name": "K-30 Sinuiju Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 3,
+     "name": "K-40 Cheju-Do No. 2 Airdrome",
+     "h": 735.9,
+     "cls": 0,
+     "flag": 1,
+     "link": 30000.0
+    },
+    {
+     "i": 4,
+     "name": "K-1 Pusan-West Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 5,
+     "name": "K-13 Suwon Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    },
+    {
+     "i": 6,
+     "name": "K-14 Kimpo Air Base",
+     "h": 1324.8,
+     "cls": 1,
+     "flag": 0,
+     "link": 30000.0
+    }
+   ]
+  },
+  {
+   "off": 73074096,
+   "n": 15,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hungnam Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonsan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Nampo Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Incheon Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Kunsan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Pusan Port",
+     "h": 428.8,
+     "cls": 5,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Donggang Support Factory",
+     "h": 284.6,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Sunan Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Yangno Support Factory",
+     "h": 462.2,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Kusong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Kumya-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Yangdog-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Yu-dong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Kosong-up Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Sariwon Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 73074960,
+   "n": 8,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Araenmunjeong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Wonju Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Yongin Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Bonghwa Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Guchon-ri Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Angang Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Namwon Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Gimhae Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  },
+  {
+   "off": 73075392,
+   "n": 16,
+   "near": "Korea",
+   "near_off": 73068536,
+   "scenes": [
+    {
+     "i": 0,
+     "name": "Hamhung Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 1,
+     "name": "Sin-ni Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 2,
+     "name": "Anbyon-up Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 3,
+     "name": "Chunghwa-up Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 4,
+     "name": "Yeoncheon Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 5,
+     "name": "Yangyang Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 6,
+     "name": "Yora-dong Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 7,
+     "name": "Kaesong Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 8,
+     "name": "Chungyn-ri Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 9,
+     "name": "Cheonan Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 10,
+     "name": "Gunwi Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 11,
+     "name": "Iksan Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 12,
+     "name": "Taegu Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 13,
+     "name": "Sacheon Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 14,
+     "name": "Naju Tank Factory",
+     "h": 232.3,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    },
+    {
+     "i": 15,
+     "name": "Cheju-Do Tank Factory",
+     "h": 234.8,
+     "cls": 3,
+     "flag": 4294967295,
+     "link": 10000.0
+    }
+   ]
+  }
+ ]
+}
