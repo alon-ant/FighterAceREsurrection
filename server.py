@@ -292,6 +292,16 @@ TODO list:
       (slot 2). 'Aircraft/Tank/Ship units' on Ctrl-L / HQ are 'value of deployed units', not a
       stock (10,417 = a loco + 8 wagons; 1,562 = one Tempest). Authentic 2009 behaviour; the
       resources rows are ours. Nothing to feed.
+  [ ] (TC, 2026-09-16) MISSIONS SCREEN (Offensive / Defensive Missions boxes + the map page's mission
+      arrows): client 'create mission' upload = msg 110 (0x6e), 90 B sample (US pilot, 'Attack US
+      tanks at 73,AW heading to US factory'):
+        6e 01 01 05 0000 f8c6 0000 88c6 0000 00 00 00 08 03 00 'Attack US tanks at %s heading to US
+        factory at ?,? (AC2E_Bigalon)\0'
+      = [type 1=Attack][camp][unit kind 5][..][i16 pos x/y in the GROUP_POS_SCALE units][..][target kind 8?]
+        [3][0][text]. Server side: store + announce, answer the list request with msg 143 records for
+      every open mission, and auto-generate them from triggers / drops so the boxes always show the AI.
+  [ ] (TC, 2026-09-16) 'Defensive Trigger' line on the scene panel (green) - a scene-state flag the
+      client renders; find the carrying message (msg 69 state byte likely) and set it from TRIGGERS.
   [ ] (UI, 2026-09-12) SCOREBOARD CUSTOM MESSAGE - a server text on the Ctrl-L Country Scores board
       (event title / winner line). Feed unknown - the panel draws only the 22 rows + production.
   [ ] (TC, 2026-09-10) CONSOLE + MULTI-ROOM - `tc` / `train` console verbs act on the FIRST in-game
@@ -327,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v713f5'
+VERSION = 'v741f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -563,7 +573,8 @@ def init_db():
     #    ai_buildings     f19  u16            Buildings
     for _c in ('kills_fighters', 'kills_bombers', 'planes_lost', 'planes_lost_ai',
                'kills_in_a_row', 'bomber_score', 'ai_fighters', 'ai_bombers',
-               'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings'):
+               'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings',
+               'ai_trains', 'captures'):                                  # v714f5: ladder tallies
         if _c not in pcols:
             conn.execute(f"ALTER TABLE pilots ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
             log('DB', f'pilots: added missing `{_c}` column (default 0) [msg-25 stat block]')
@@ -2840,6 +2851,40 @@ def apply_buildings_repair_rate(d, rate=None):
 CRATERS_VANISH_MIN = 10
 CRATERS_VANISH_MAX = 40
 
+SHOW_GROUND_OBJECTS_DEFAULT = True
+
+def apply_show_ground_objects(d, on=None):
+    """v719f5: set [UI] ShowGroundObjects in a DECOMPRESSED GAME_DEF. In the serialised blob the
+    Padlock distance section is a fixed run of 10 f32 (Information 15000, FighterPlane 3000,
+    BomberPlane 5000, Squadron 1000, PlaneTag 1000, OtherTag 1000, Padlock 3000, PadlockTank 500,
+    PadlockBuilding 5000, <one more>) followed by 2 bool dwords (Works=1, ApplyToLocalObjects=0),
+    the AlwaysVisibleRange f32, the RangeMultiplier f32, FriendsColored, EnemiesColored, then
+    SHOWGROUNDOBJECTS. We locate the fixed float run by its first three known values and step to
+    the flag. With it 0 the map's draw loop (FUN_004916be, gate GAME_DEF+0x1b6c) skips every
+    ground icon (offline arena ships 0). Returns (offset, old) or None. Length-preserving."""
+    on = SHOW_GROUND_OBJECTS_DEFAULT if on is None else bool(on)
+    try:
+        n = len(d)
+        if n < 100:
+            return None
+        # EXACT (deserialiser FUN_0057bee0 tail): [Misc] block = len-82; eleven packed flag bytes at
+        # +0x15..+0x1f; ShowGroundObjects = bit 0x08 of the byte at +0x1e = len-52 (Works 0x80,
+        # ApplyToLocalObjects 0x40, FriendsColored 0x20, EnemiesColored 0x10, ShowGroundObjects
+        # 0x08). Verified on room 49's blob: len 1196, byte 1144 = 0xa0 = Works+FriendsColored,
+        # matching the client's printed FriendsColored=yes / ShowGroundObjects=no. Sanity: the
+        # physics-model byte at len-50 is 0..2 and the craters bytes at len-71/-70 are 1..250.
+        off = n - 52
+        if not (d[n - 50] <= 2 and 1 <= d[n - 71] <= 240 and 1 <= d[n - 70] <= 250):
+            return None
+        old = 1 if (d[off] & 0x08) else 0
+        want = 1 if on else 0
+        if old == want:
+            return None
+        d[off] = (d[off] | 0x08) if on else (d[off] & ~0x08 & 0xff)
+        return off, old
+    except Exception:
+        return None
+
 def apply_craters_vanish(d, minutes=None, number=None):
     """In-place patch of CratersVanishDelay / CratersVanishNumber in a DECOMPRESSED GAME_DEF.
     v703f5 - THE REAL WIRE LAYOUT (deserialiser FUN_0057bee0, tail section): after the plane and
@@ -3303,6 +3348,15 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                        f'CratersVanishNumber {_cr[2]} -> {_cvn}')          # v703f5: INFO tag (GAMEDEF212 is DEBUG-only)
     else:
         log('CRATERS', 'CratersVanish*: tail bytes not validated (or already at the target); left as-is')
+    # v719f5 SHOW GROUND OBJECTS: the map draws tank/train/soldier icons only when this [UI] flag is
+    # set; the arena templates ship it 0. Default ON for TC arenas (web editor: show_ground_objects).
+    _sgo = (arena_settings or {}).get('show_ground_objects')
+    _sgo = SHOW_GROUND_OBJECTS_DEFAULT if _sgo is None else bool(int(_sgo))
+    _sg = apply_show_ground_objects(d, _sgo)
+    if _sg:
+        log('MAP57', f'ShowGroundObjects @+{_sg[0]}: {_sg[1]} -> {1 if _sgo else 0}')
+    else:
+        log('MAP57', f'ShowGroundObjects: not located or already {1 if _sgo else 0}; left as-is')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -4073,6 +4127,95 @@ def console_handler():
                             log('CONSOLE', f'campscore: room {_rid} -> {_n} msg-43 send(s); stats {dict((k[1], v) for k, v in CAMP_STATS.items() if k[0] == _rid)}')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: campscore [room] | campscore reset <room>')
+            elif cmd == 'gamedef':
+                # v719f5: gamedef dump <room>  - hexdump the decompressed GAME_DEF with every f32 that
+                # equals 3000.0 / 1.0 / 15000.0 marked, to locate ShowGroundObjects by eye
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    _rid = int(_a[1]) if len(_a) > 1 else None
+                    _row = next((r for r in db_get_open_rooms() if r[0] == _rid), None)
+                    if _row is None:
+                        log('CONSOLE', f'gamedef dump: room {_rid} not found'); raise IndexError
+                    _d = decompress_gamedef(bytes(_row[6]))
+                    if not _d:
+                        log('CONSOLE', 'gamedef dump: decompress failed'); raise IndexError
+                    _d = bytes(_d)
+                    log('CONSOLE', f'gamedef dump room {_rid}: {len(_d)} bytes; date offset={_gamedef_date_offset(bytearray(_d))}')
+                    _marks = []
+                    for _off in range(0, len(_d) - 3):
+                        _f = struct.unpack_from('<f', _d, _off)[0]
+                        if _f in (3000.0, 15000.0, 5000.0, 1000.0, 500.0):
+                            _marks.append((_off, _f))
+                    log('CONSOLE', f'  f32 anchors: {_marks[:40]}')
+                    _p = _gamedef_date_offset(bytearray(_d)) or 0
+                    for _o in range(max(0, _p - 16), min(len(_d), _p + 480), 32):
+                        log('CONSOLE', f'  +{_o:04x}: {_d[_o:_o + 32].hex()}')
+                    _t = max(0, len(_d) - 160)
+                    for _o in range(_t, len(_d), 32):
+                        log('CONSOLE', f'  +{_o:04x}: {_d[_o:_o + 32].hex()}   (tail)')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: gamedef dump <room>')
+            elif cmd == 'mapobj':
+                # v718f5: mapobj probe <pilot> <camp> <kind 0|1> [alt_m]  - one map icon 2 km NE of him
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    if _a and _a[0] == 'probe':
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'mapobj probe: pilot {_a[1]!r} not online'); raise IndexError
+                        _px = _t.__dict__.get('_pos_xy') or (0.0, 0.0)
+                        _camp = int(_a[2]); _kind = int(_a[3]); _alt = float(_a[4]) if len(_a) > 4 else 0.0
+                        _pkt, _n = build_map_message_57(_px[0], _px[1], [(_camp, _kind, _px[0] + 2000.0, _px[1] + 2000.0, _alt)])
+                        send_rel(_t, _pkt, '<- MAP 57 probe', to=3.0)
+                        log('CONSOLE', f'mapobj probe -> {_a[1]}: camp {_camp} kind {_kind} alt {_alt:.0f} m, 2 km NE. Open the map.')
+                    else:
+                        raise IndexError
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: mapobj probe <pilot> <camp> <kind 0|1> [alt_m]')
+            elif cmd == 'news':
+                # v731f5: news <pilot> [form] | news probe <pilot> [form] <text> | news reload
+                _a = (parts[1].split(None, 2) if len(parts) > 1 else [])
+                try:
+                    if _a and _a[0] == 'reload':
+                        log('CONSOLE', f'news: {len(lobby_news_text())} chars in {LOBBY_NEWS_FILE}')
+                    elif _a and _a[0] == 'probe':
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'news probe: pilot {_a[1]!r} not online'); raise IndexError
+                        _parts2 = (_a[2].split(None, 1) if len(_a) > 2 else [])
+                        _form = int(_parts2[0]) if _parts2 and _parts2[0].isdigit() else 1
+                        _txt = (_parts2[1] if len(_parts2) > 1 else 'FIGHTER ACE RESURRECTION\nLobby news test line.')
+                        send_lobby_news(_t, text=_txt, form=_form, reason='(console probe)')
+                    else:
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[0]), None)
+                        if _t is None:
+                            log('CONSOLE', f'news: pilot {_a[0]!r} not online'); raise IndexError
+                        send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'groups':
+                # v715f5: groups <pilot>  (send the live records) | groups probe <pilot> f0 f1 f2 f3 mission uc n
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    if _a and _a[0] == 'probe':
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'groups probe: pilot {_a[1]!r} not online'); raise IndexError
+                        _f = [int(v, 0) for v in _a[2:9]]
+                        _px = _t.__dict__.get('_pos_xy') or (0.0, 0.0)
+                        _rec = {'camp': _f[0], 'kind': _f[1], 'strategy': _f[2], 'f3': _f[3], 'mission': _f[4],
+                                'uc': _f[5], 'count': _f[6], 'x': _px[0] + 6000.0, 'y': _px[1] + 6000.0,   # objective
+                                'tx': _px[0] + 2000.0, 'ty': _px[1] + 2000.0, 'w6': 1}                     # drawn here
+                        send_rel(_t, build_group_info_26([_rec]), '<- GROUP_INFO 26 probe', to=3.0)
+                        log('CONSOLE', f'groups probe -> {_a[1]}: one record 2 km NE of him, objective 6 km NE: {_rec}. Open the map and hover the box.')
+                    else:
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[0]), None)
+                        if _t is None:
+                            log('CONSOLE', f'groups: pilot {_a[0]!r} not online'); raise IndexError
+                        _n = send_group_info_26(_t, reason='(console)')
+                        log('CONSOLE', f'groups -> {_a[0]}: {_n} record(s)')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: groups <pilot> | groups probe <pilot> f0 f1 f2 f3 mission uc n')
             elif cmd == 'kick':
                 # v649f5/v650f5: kick <pilot> [87|74|47|48] [text]  - 87 (default) = graceful remove to the lobby
                 # (FA MISSION::ShutDown 'game reset' path, session stays connected); 74 = 'AI client has
@@ -4296,11 +4439,18 @@ def console_handler():
                     log('CONSOLE', 'usage: reset <room> [winner_camp]')
             elif cmd == 'train':
                 # v613f5: train <road> <node> [wagons] [camp] | train speed <onum> <mps> | train del <onum> | train list
-                global TRAIN_LOCO_CLASS, TRAIN_WAGON_CLASS, TRAIN_STATE_MOVING, TRAIN_SPEED_UNIT
+                global TRAIN_LOCO_CLASS, TRAIN_WAGON_CLASS, TRAIN_STATE_MOVING, TRAIN_SPEED_UNIT, TRAIN_CLIENT_SPEED_MULT
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _rooms = sorted(_active_ingame_rooms())
                 try:
-                    if not _a or _a[0] == 'list':
+                    if _a and _a[0] == 'integrate':                        # v727f5
+                        global TRAIN_CLIENT_INTEGRATE
+                        TRAIN_CLIENT_INTEGRATE = (_a[1].lower() in ('on', '1', 'true', 'yes'))
+                        log('CONSOLE', f'train: client integration {"ON (packet speed)" if TRAIN_CLIENT_INTEGRATE else "OFF (server-positioned, speed 0)"}')
+                    elif _a and _a[0] == 'speedmult':                       # v723f5
+                        TRAIN_CLIENT_SPEED_MULT = float(_a[1])
+                        log('CONSOLE', f'train: client speed multiplier now {TRAIN_CLIENT_SPEED_MULT:g} (packet speed = model speed / mult)')
+                    elif not _a or _a[0] == 'list':
                         for _on, _tr in TRAINS.items():
                             log('CONSOLE', f'  train 0x{_on:04x} room {_tr["room"]} camp {_tr["camp"]} road {_tr["road"]} node {_tr["node"]} '
                                            f'+{_tr["dist"]:.0f} m {_tr["mps"]:.1f} m/s wagons {_tr["wagons"]} peers {len(_tr["peers"])}')
@@ -4447,7 +4597,8 @@ def console_handler():
                                 _ang = 2 * math.pi * _i / max(1, min(24, _n))
                                 _px, _py = tank_clear_spot(_trn, _txy[0] + 150 * math.cos(_ang), _txy[1] + 150 * math.sin(_ang))
                                 _pts.append((_px, _py, 0.0))
-                            _pil = _ing[0].current_pilot if _ing else None
+                            _pil = None      # v738f5: a console-spawned stick has no dropper (it used to
+                                             # take the first in-game pilot, who then got its kills)
                             _sid = tc_para_announce(_rid, _camp, _sidx, _pts, by=_pil)
                             log('CONSOLE', f'tc paradrop: stick {_sid} ({len(_pts)} x camp {_camp}) beside scene {_sidx} at {tc_grid(_txy[0], _txy[1])}')
                 elif _a[0] == 'ppt':
@@ -4471,6 +4622,13 @@ def console_handler():
                                        f'rate1={SOLDIER_WALK_RATE1} rate2={SOLDIER_WALK_RATE2}')
                     except (IndexError, ValueError):
                         log('CONSOLE', 'usage: tc soldier <throttle 0..1> [state] [rate1] [rate2]')
+                elif _a[0] == 'class':
+                    # v717f5: tc class <camp> <class id>  - set a camp's tank class live
+                    try:
+                        TANK_CLASS_BY_CAMP[int(_a[1])] = int(_a[2])
+                        log('CONSOLE', f'tc class: camp {int(_a[1])} -> tank class {int(_a[2])} (now {TANK_CLASS_BY_CAMP})')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc class <camp> <class id>   (US 133, GB 131, SU 132/135, GE 134/136, JP 137)')
                 elif _a[0] == 'trigger':
                     try:
                         _sidx = int(_a[1], 0)
@@ -5550,6 +5708,84 @@ def build_appspace_pkt(data_bytes):
     n = len(data_bytes); bc = 0 if n<=1 else (n-1+15)//16; size = bc*16+1
     pl = bytearray(4+size); pl[0]=bc&0xFF; pl[1]=0x12; pl[4:4+min(n,size)]=data_bytes[:size]
     return bytes(pl)
+
+# --- v731f5 LOBBY NEWS (msg 202 / 0xca) -------------------------------------------------------
+# FA.exe: the News page's constructor (FUN_00711050) loads the LOCAL docs 'Dlg_Helps\Lobby_News.doc'
+# and 'The News Tab.htm' for the left pane and the tip, then - ONLINE only (DAT_00c822d8, and the
+# connection flag DAT_00c822dc) - calls FUN_004f0380, which sends a ONE-BYTE 0xca: 'give me the
+# news'. Offline it never asks, which is why the right-hand News pane is empty. The reply format is
+# not yet proven; `news probe <pilot> <form>` sends each candidate so the pane can be watched.
+LOBBY_NEWS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lobby_news.txt')
+LOBBY_NEWS_FORM = 1        # 1 = [0xca][text\0], 2 = [0xca][u16 len][text], 3 = [0xca][u32 len][text]
+
+def lobby_news_text():
+    try:
+        with open(LOBBY_NEWS_FILE, 'r', encoding='utf-8', errors='replace') as f:
+            return f.read()
+    except Exception:
+        return ''
+
+def build_lobby_news_202(text, form=None):
+    form = LOBBY_NEWS_FORM if form is None else int(form)
+    b = (text or '').replace('\r\n', '\n').encode('latin-1', 'replace')
+    if form >= 10:
+        # v731f5 (probe-verified 09-16): [0xca][PANE byte][text\0] - the byte after 0xca selects the
+        # pane. form 10+n sends pane n. (form 2's length byte 0x15 landed in the LEFT pane; form 1's
+        # accidental 'H' in the right one.)
+        body = bytes([0xca, (form - 10) & 0xff]) + b + b'\x00'
+    elif form == 2:
+        body = bytes([0xca]) + struct.pack('<H', len(b)) + b + b'\x00'
+    elif form == 3:
+        body = bytes([0xca]) + struct.pack('<I', len(b)) + b + b'\x00'
+    else:
+        body = bytes([0xca]) + b + b'\x00'
+    return build_appspace_pkt(body)
+
+def send_lobby_news(s, text=None, form=None, reason=''):
+    """v731f5 (probe-verified 09-16): msg 202 = [0xca][pane][text\0]. pane 0 REPLACES the left
+    welcome pane (the 'you are in offline mode' text); pane non-zero APPENDS one line to the right
+    News pane. So the news file goes line by line, and lobby_welcome.txt (if present) replaces the
+    left pane. `news probe <pilot> 1n <text>` sends one line with pane byte n."""
+    if text is not None or form is not None:
+        send_rel(s, build_lobby_news_202(text or '', form), f'<- LOBBY NEWS 202 (probe form {form}) {reason}', to=3.0)
+        log('NEWS', f'{getattr(s, "current_pilot", "?")}: news probe form {form} {reason}')
+        return 1
+    n = 0
+    _wel = ''
+    try:
+        with open(os.path.join(os.path.dirname(LOBBY_NEWS_FILE), 'lobby_welcome.txt'), 'r',
+                  encoding='utf-8', errors='replace') as f:
+            _wel = f.read().strip()
+    except Exception:
+        pass
+    # v741f5: answer every request (silence makes the page fall back to 'offline'), but collapse
+    # BURSTS - the pilot-select push and the page's own 0xca a second later both appended, so the
+    # pane showed the news twice. A push within NEWS_MIN_INTERVAL_S of the last one is skipped;
+    # re-opening the page later re-sends as normal.
+    _last = s.__dict__.get('_news_sent_at', 0.0)
+    if time.time() - _last < NEWS_MIN_INTERVAL_S:
+        log('NEWS', f'{getattr(s, "current_pilot", "?")}: news pushed {time.time() - _last:.0f}s ago {reason} - skipped (duplicate)')
+        return 0
+    s.__dict__['_news_sent_at'] = time.time()
+    _wel_unused = None
+    # v732f5: the NEWS lines go first and the WELCOME last - a pane-1 line blanks the left pane
+    # (probe 09-16), so a welcome sent before them is wiped.
+    for line in (lobby_news_text() or '').replace('\r\n', '\n').split('\n'):
+        if len(line) > LOBBY_NEWS_MAX_LINE:
+            line = line[:LOBBY_NEWS_MAX_LINE]
+        send_rel(s, build_lobby_news_202(line, 11), '<- LOBBY NEWS 202 line', to=3.0); n += 1
+        if n > LOBBY_NEWS_MAX_LINES:
+            break
+    if _wel:
+        send_rel(s, build_lobby_news_202(_wel, 10), '<- LOBBY WELCOME 202 (pane 0)', to=3.0); n += 1
+    log('NEWS', f'{getattr(s, "current_pilot", "?")}: lobby news sent - {n} line(s) {reason}')
+    return n
+
+LOBBY_NEWS_MAX_LINE  = 120
+LOBBY_NEWS_MAX_LINES = 200
+NEWS_MIN_INTERVAL_S  = 1.5     # v741f5: collapse only near-simultaneous pushes (the pilot-select push
+                               # and the page's own 0xca). Anything longer would leave a re-opened
+                               # page blank, because the client clears the pane before it re-requests.
 
 def build_appspace_pkt_exact(data_bytes):
     """Like build_appspace_pkt but the payload is the EXACT length of data_bytes -
@@ -9449,7 +9685,19 @@ PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
 PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client, never re-created
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
-AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 1.0}
+AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 4.0}   # v720f5: trains 4 Hz near (smooth)
+AI_TELEMETRY_MID_HZ_KIND = {'train': 2.0}     # v723f5: trains 2 Hz in the mid tier (8-30 km) - a moving object
+                                              # corrected once a second showed the pull as a jump
+# v716f5 [TRAINS MAP-WIDE]: the client's map draws TRAINS from the NetTrain objects it holds (its
+# own 'Show Trains' option) - no group-record glyph exists for them. So every client keeps every
+# train: beyond the far tier a train still gets a keep-alive every TRAIN_FAR_KEEPALIVE_S (the
+# client's silence cull is ~28 s) and it is re-created at ANY distance after a cull (a TAB culls
+# beyond ~20 km; 15 creates of 74 B per TAB). Tanks / soldiers keep the 30 km rule.
+TRAIN_MAP_WIDE        = False   # v720f5: OFF - the client culls AI objects beyond ~20 km CONTINUOUSLY (not
+                                # only at spawn): 14 re-created at 17:08:11, 12 culled again at :12, and so
+                                # on - a create/cull loop that rubber-banded the trains and left 'spawns
+                                # that never render'. Map icons come from msg 57 records, not objects.
+TRAIN_FAR_KEEPALIVE_S = 20.0
 
 def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
     """True if this peer should receive this object's state now (tiered by distance + cadence).
@@ -9464,7 +9712,10 @@ def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
     if d <= AI_TELEMETRY_NEAR_M:
         hz = AI_TELEMETRY_NEAR_HZ.get(kind, 2.0)
     elif d <= AI_TELEMETRY_FAR_M:
-        hz = min(AI_TELEMETRY_MID_HZ if friendly else AI_TELEMETRY_ENEMY_MID_HZ, AI_TELEMETRY_NEAR_HZ.get(kind, 2.0))
+        _mid = AI_TELEMETRY_MID_HZ_KIND.get(kind, AI_TELEMETRY_MID_HZ)
+        hz = min(_mid if friendly else max(AI_TELEMETRY_ENEMY_MID_HZ, _mid / 2.0), AI_TELEMETRY_NEAR_HZ.get(kind, 2.0))
+    elif kind == 'train' and TRAIN_MAP_WIDE:
+        hz = 1.0 / TRAIN_FAR_KEEPALIVE_S                  # v716f5: map-wide trains stay alive everywhere
     else:
         return False                                   # v680f5: beyond the client's cull - silence
     pl = obj.setdefault('_peer_last', {})
@@ -10050,12 +10301,22 @@ def _handle_tank_hit_51(s, pl):
 # reporter is the NET::OBJECT twin of the tank's). SOLDIER_HP is a guess (one 40 mm round or a
 # short MG burst); the kill uses the same kill-entry delete, so every client prints the
 # 'has destroyed' line (cyan + sound for the shooter) and runs the object's death.
-SOLDIER_HP          = 60.0
+SOLDIER_HP          = 12.0    # v735f5: 60 -> 12. A plane's gun rounds arrive as msg-51 records of 2..6
+                              # each, so 60 meant a long burst per man (user 09-17: 'too many hits').
+                              # Tank fire (TC_TANK_VS_TANK_DPS) and AA still kill in about a second.
 SOLDIER_KILL_SCORE  = 20
+TC_CREDIT_PARA_GROUND_KILLS = True    # v739f5: ON (user, corrected) - objects destroyed by a pilot's
+                                      # paratroops DO score for the pilot who dropped them, as before.
+                                      # A console-spawned stick still has no dropper, so it credits
+                                      # nobody (that was the v738 report: it took the first in-game pilot).
 DEFENCE_NAME_KEYS   = ('tower', 'aa ', 'aa battery', 'flak', 'bunker', 'mg ', 'machine gun', 'pillbox')
 DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
-DEFENCE_DPS         = 3.0       # v605f5: per defence object per second (was 10: two batteries killed a
-                                # 13-man stick in 55 s before it could fire - live 09-09 18:25)
+DEFENCE_TTK_S       = 30.0      # v737f5: seconds for ONE defence object to kill ONE soldier. The damage
+                                # per second is derived from SOLDIER_HP, so lowering soldier HP for
+                                # aircraft fire (v735: 60 -> 12) no longer makes the AA lethal in 6 s.
+                                # Two guns on the same man halve it; the stick shoots back (v736).
+def defence_dps():
+    return max(0.1, float(SOLDIER_HP) / max(1.0, DEFENCE_TTK_S))
 
 def _handle_soldier_hit(s, victim, attacker, dmg):
     sd = SOLDIERS.get(victim)
@@ -10067,7 +10328,11 @@ def _handle_soldier_hit(s, victim, attacker, dmg):
     if sd['hp'] <= 0:
         soldier_killed(victim, s, reason='(msg-51 damage)')
 
-SOLDIER_KILL_ENTRY = False   # v684f5: see soldier_killed - dev-build particle assert on the soldier death effect
+SOLDIER_KILL_ENTRY = True    # v735f5: back ON for PLAYER kills - the kill entry is what makes the
+                             # client print the normal cyan 'has destroyed' line with its sound, as
+                             # tanks do; without it the kill only showed as the magenta AI chat line
+                             # (user 09-17). The dev-build particle assert (v684) came from an AI/AA
+                             # kill, so those still go out silently - see soldier_killed.
 _SOLDIER_GONE = {}           # v685f5: onum -> (when, why) for removed soldiers (hit diagnostics)
 
 def soldier_killed(onum, killer, reason='', ai_hunter=None):
@@ -10098,19 +10363,12 @@ def soldier_killed(onum, killer, reason='', ai_hunter=None):
         except Exception:
             logx('PARA', 'soldier kill credit failed')
     entry = None
-    # v684f5: SOLDIER_KILL_ENTRY=False (default) - a kill-entry delete makes the client play an
-    # explosion/death effect for a soldier object; on the DEVELOPER client build (Taurus, Moira)
-    # that path asserts in Fa3_NewParticleSystemParticles.cpp:367/387 ('logical error' CTD,
-    # messages92 13:23:28 right after 'ExitDataArrive ... (soldier)'). Silent removal + the kill
-    # line as an AI chat message instead.
+    # v735f5: a PLAYER kill carries the kill entry (cyan 'has destroyed' line + sound on every
+    # client, exactly like a tank kill). An AI / AA kill stays silent + AI chat line: that is the
+    # path the developer build asserted on (v684, Fa3_NewParticleSystemParticles.cpp).
     if SOLDIER_KILL_ENTRY and killer is not None and getattr(killer, 'my_obj_number', None) is not None:
         entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
-    elif SOLDIER_KILL_ENTRY and ai_hunter is not None:
-        _cls, _hc = ai_hunter
-        entry = (struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + struct.pack('<H', 0xffff)
-                 + struct.pack('<H', AI_CLIENT_ST) + struct.pack('<I', AI_CLIENT_PI & 0xffff)
-                 + bytes([(int(_cls) & 0x1f) | ((int(_hc) & 7) << 5)]))
-    if not SOLDIER_KILL_ENTRY:
+    if entry is None:
         try:
             _who = kname if kname else (f'{tc_camp_full(ai_hunter[1])} anti-aircraft' if ai_hunter is not None else 'Ground fire')
             tc_say(sd['room'], f'AI: {_who} destroyed {tc_camp_full(sd["camp"])} soldier')
@@ -10211,8 +10469,12 @@ TC_AI_CHAT_PI        = None     # PlayerIndex the AI lines are stamped with (Non
 AI_ROSTER_PI         = 0x1fe    # v577f5: the 'AI' ROSTER player (msg 62) the chat lines come from
 AI_ROSTER_NATION     = 7        # neutral slot
 TC_AI_CHANNEL        = 3        # FUN_004f6030: channels 3/4 print '<name>: <text>' in a fixed colour
-TANK_CLASS_BY_CAMP   = {1: 131} # camp -> tank class id; 131 = Cromwell (GB). Others: map with
-                                # `tank <class> scene N` and the client's 'Create NetTank (<name>)'
+# v717f5: camp -> tank class, read from the client's class table (tank_tables.json, class-info
+# +0x60 = nation): US 133, GB 131 (Cromwell), SU 132 / 135, GE 134 (Panther) / 136, JP 137.
+# Every column was Cromwell before (user 09-16). The second SU / GE class is the alternate
+# (`tc class <camp> <id>` to switch); the client's 'Create NetTank (<name>)' line names them.
+TANK_CLASS_BY_CAMP   = {0: 133, 1: 131, 2: 135, 3: 134, 4: 137}
+TANK_CLASS_ALT       = {2: 132, 3: 136}
 TANK_CLASS_DEFAULT   = 131
 TRIGGERS = {}                   # (room, scene) -> {'at', 'by', 'camp', 'attacker', 'columns': [...]}
 _TC_CAMP_TAGS = {0: 'US', 1: 'GB', 2: 'SU', 3: 'GE', 4: 'JP'}    # 2-letter (AI lines); 1=GB 2=SU observed, 0=US docs, 3/4 assumed
@@ -10346,6 +10608,36 @@ def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty, n_want=0):
     d, sidx, x, y, _u = cands[0]
     return (sidx, x, y, d)
 
+def tc_forward_staging_scene(room_id, terrain, camp, tx, ty, max_d=None):
+    """v740f5: the camp's nearest FORWARD BASE to the target that can supply a column - any own
+    scene (airfield, factory, depot...) with enough ammo+fuel in its own stores for one tank. The
+    tank UNITS still come from a factory (they are built there), but the column FORMS here, so a
+    trigger 22 km from the nearest factory no longer sends tanks on a 34-minute drive that the
+    scene's capture outlives (TSC_Dutchy, 47,CQ, online 09-16 19:52 -> captured 20:27).
+    Returns (sidx, x, y, dist) or None."""
+    table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
+    best = None
+    for sidx, c in table.items():
+        if c != camp or int(sidx) == int(-1):
+            continue
+        sxy = tc_scene_xy(terrain, sidx)
+        if not sxy:
+            continue
+        d = math.hypot(sxy[0] - tx, sxy[1] - ty)
+        if max_d is not None and d > max_d:
+            continue
+        st, _p = supply_state(room_id, terrain, sidx)
+        if st is None:
+            continue
+        if st.get('ammo', 0) < TC_TANK_AMMO_KG or st.get('fuel', 0) < TC_TANK_FUEL_KG:
+            continue                                   # this base cannot even arm one tank
+        if best is None or d < best[3]:
+            best = (sidx, sxy[0], sxy[1], d)
+    return best
+
+TC_STAGE_FROM_FORWARD_BASE = True    # v740f5 (user): form the column at the nearest SUPPLIED own scene
+TC_STAGE_MIN_GAIN_M        = 4000.0  # ... only when it is at least this much closer than the factory
+
 def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
     """Wiki rule: the camp's nearest tank producer to the target raises as many fully loaded
     tanks as it can (units from the camp's built tank units, fuel/ammo from the camp pool).
@@ -10436,6 +10728,27 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         return None
     if UNITS_MODEL:
         camp_units_take(room_id, camp, 'tank', loaded, prefer_xy=(fx, fy))    # v621f5: from the producing factory first
+    # v740f5: stage the column at the nearest SUPPLIED own scene when that is materially closer than
+    # the factory - the units are built at the factory, the battalion forms forward. The staging base
+    # pays the ammo/fuel for the tanks it launches (camp_supply_take already debited the pool, so the
+    # base's own stores are charged here to keep 'the airfield has the supplies for it' honest).
+    if TC_STAGE_FROM_FORWARD_BASE and purpose == 'attack':
+        _stage = tc_forward_staging_scene(room_id, terrain, camp, txy[0], txy[1], max_d=fd)
+        if _stage is not None and (fd - _stage[3]) >= TC_STAGE_MIN_GAIN_M:
+            _sst, _sp = supply_state(room_id, terrain, _stage[0])
+            _need_a = TC_TANK_AMMO_KG * loaded; _need_f = TC_TANK_FUEL_KG * loaded
+            if _sst is not None and _sst.get('ammo', 0) >= _need_a and _sst.get('fuel', 0) >= _need_f:
+                with _SUPPLY_LOCK:
+                    _sst['ammo'] = max(0, int(_sst['ammo']) - int(_need_a))
+                    _sst['fuel'] = max(0, int(_sst['fuel']) - int(_need_f))
+                log('TC', f'room {room_id}: staging the column at {scene_type_for(terrain, _stage[0])} {_stage[0]} '
+                          f'({_stage[3]:.0f} m from the target, factory {fsidx} was {fd:.0f} m) - '
+                          f'-{_need_a:.0f}kg ammo -{_need_f:.0f}kg fuel from its stores')
+                fsidx, fx, fy, fd = _stage
+                ftype = scene_type_for(terrain, fsidx) or 'base'
+            else:
+                log('TC', f'room {room_id}: forward base {_stage[0]} is {_stage[3]:.0f} m out but has no '
+                          f'supplies for {loaded} tank(s) - forming at the factory instead')
     cls = TANK_CLASS_BY_CAMP.get(int(camp), TANK_CLASS_DEFAULT)
     if purpose == 'defend' and TC_DEFEND_AT_TARGET:
         # v585f5: form on the far side of the target from the enemy's likely approach is not
@@ -10712,7 +11025,7 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
                 _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
                 _sc, _rk, _old = db_apply_score_delta(by_pilot, CAPTURE_SCENE_BONUS_2004, bomber=_bomber, mode=_mode)
                 log('SCORE', f'{by_pilot} +{CAPTURE_SCENE_BONUS_2004} = captured scene {sidx} | total {_sc} rank {_old}->{_rk}')
-                db_squadron_counter_add(by_pilot, 'captures', 1)            # v713f5: squadron capture tally
+                db_bump_pilot_counter(by_pilot, 'captures', 1)             # v714f5: pilot + squadron capture tally
                 send_stat_block_25(sess, reason='(capture bonus)')
             except Exception:
                 logx('TC', 'capture bonus failed')
@@ -11226,6 +11539,22 @@ TRAIN_LOCO_BY_CAMP = {0: 145, 1: 141, 2: 144, 3: 142, 4: 143}
 TRAIN_WAGON_CLASS = 146      # wagons: 140 (type1/1000kg), 146 (type0/2000), 147 (type2/2000), 148 (type2/1500)
 TRAIN_WAGON_MIX   = [(146, 2), (147, 2), (148, 2), (140, 2)]   # default 8-wagon consist: 2 x each kind
 TRAIN_SPEED_UNIT  = 1.0 / 512.0   # u16 speed x this = m/s (dump v9: c163ac = 0.001953125)
+# v723f5: the client rolls a NetTrain at (packet speed x the arena's TrainSpeedMult, 2.0 in every
+# template) - it ran AHEAD of our model between corrections and each update pulled it back (smooth
+# at 4 Hz = 5 m pulls, a visible 'jump' at 1 Hz = 22 m; the group box - our position - trailed it).
+# The packet carries speed / mult so the client's integration matches ours. `train speedmult <x>`.
+TRAIN_CLIENT_SPEED_MULT = 1.0   # v725f5: back to 1.0 - the client does NOT apply TrainSpeedMult to a
+                                # NetTrain (halving the packet speed made the 3D train fall behind the
+                                # box, map 20:40). The box lag that started this was the 30 s poll (v724).
+TRAIN_ALLOW_REVERSE = False   # v725f5: the client rolls a NetTrain FORWARD along the road only - a
+                              # shuttling train (dir=1, node numbers descending on an open line) drifted
+                              # against our model and every correction snapped it back (user 09-16, road 5).
+                              # At the end of an open line the train is re-created at the far end instead.
+TRAIN_CLIENT_INTEGRATE = True   # v728f5: back ON - with speed 0 the client parks the object at its create
+                                # node and ignores our positions (frozen train, moving box). The warp /
+                                # backwards roll is a ROAD DATA mismatch instead: rails_trn02.json predates
+                                # fa_make_rails.py and some roads' node order differs from the client's
+                                # live ROADMAP. Rebuild it from a fresh dump (see below).
 TRAIN_STATE_MOVING = 2       # train.cpp states: 0 stop, 1 brake, 2 roll at the given speed, 3 accelerate to max
 TRAIN_STATE_STOPPED = 0
 TRAIN_TICK_HZ     = 4.0
@@ -11287,6 +11616,13 @@ def rail_stations(terrain):
             out[r].sort()
     cache[terrain] = out
     n = sum(len(v) for v in out.values())
+    # v730f5: do NOT cache an empty result - rail_stations can run before the terrain's scene tables
+    # are loaded (a map poll now touches rails_for early), and the empty table was kept for the whole
+    # run: no stations -> no trains, no train chat (user 09-16, 'terrain 2: 0 rail station(s)').
+    if n == 0:
+        cache.pop(terrain, None)
+        log('TRAIN', f'terrain {terrain}: no rail stations yet (scene tables not loaded?) - will recompute')
+        return out
     log('TRAIN', f'terrain {terrain}: {n} rail station(s) on {len(out)} road(s): ' +
                  ' '.join(f'r{r}:{[s for _n, s in v]}' for r, v in sorted(out.items())))
     return out
@@ -11402,8 +11738,29 @@ def _train_ai_tick(onum, tr, rails, stations, now):
         tr['stop_until'] = None
         nxt = _train_next_station(tr, rails, stations)
         if nxt is None and not road.get('loop'):
-            tr['dir'] = 1 - tr.get('dir', 0)            # open line: shuttle back
-            nxt = _train_next_station(tr, rails, stations)
+            if TRAIN_ALLOW_REVERSE:
+                tr['dir'] = 1 - tr.get('dir', 0)            # open line: shuttle back
+                nxt = _train_next_station(tr, rails, stations)
+            else:
+                # v725f5: restart the run at the first own station of the line, forward. The client
+                # keeps its old object rolling, so re-create it there (delete + spawn at the node).
+                _own = [(ni, s) for ni, s in stations.get(tr['road'], []) if scene_camp(tr['terrain'], s) == tr['camp']]
+                if _own:
+                    _ni, _s = _own[0]
+                    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) reached the end of open line {tr["road"]} '
+                                 f'- restarting at node {_ni} (scene {_s}), forward')
+                    _camp, _road, _wag, _load, _start = tr['camp'], tr['road'], tr.get('wagons'), tr.get('load'), tr.get('start', 'rear')
+                    _rid = tr['room']
+                    delete_train(onum, reason='(end of line - restarting)')
+                    _new = spawn_train(_rid, _camp, _road, _ni, len(_wag or []) or TRAIN_WAGONS_DEFAULT,
+                                       reason='(open line restart)')
+                    if _new is not None:
+                        _t2 = TRAINS[_new]
+                        _t2.update({'supply': True, 'terrain': tr['terrain'], 'load': _load or {'metal': 0, 'fuel': 0, 'ammo': 0, 'units': 0},
+                                    'hp': TRAIN_HP, 'stop_until': time.time() + 5.0, '_last_station': None,
+                                    'target': None, 'start': _start, 'dir': 0})
+                    return
+                nxt = None
         if nxt is None:
             tr['stop_until'] = now + 60.0               # nothing of ours on this line right now
             return
@@ -11430,7 +11787,7 @@ def spawn_supply_train(rid, camp, road_idx, reason='', start='rear'):
     """start (v679f5): 'rear' = the depot nearest the camp's Bomber Airfield (the v623f5 rule),
     'front' = the station nearest the camp's Front Airfield(s), 'mid' = the station nearest the
     midpoint between the two - three trains per camp spread along the line (user 09-13:
-    quicker supply flow, and the players actually see them)."""
+    quicker supply flow, and the players actually see them). v726f5: never two on one node."""
     terrain = _probe_terrain_for_room(rid)
     stations = rails_stations_own(terrain, road_idx, camp)
     if not stations:
@@ -11461,14 +11818,19 @@ def spawn_supply_train(rid, camp, road_idx, reason='', start='rear'):
         _rear_st = min(depots, key=lambda st: _dist_to(st[1], rear))
         _front_st = min(stations, key=lambda st: _dist_to(st[1], front))
         mx = (rear[0][0] + front[0][0]) / 2.0; my = (rear[0][1] + front[0][1]) / 2.0
-        others = [st for st in stations if st[0] not in (_rear_st[0], _front_st[0])]
+        # v726f5: exclude by NODE, not by scene - two scenes can sit at the same rail node, and the
+        # mid train then spawned on top of the front one (road 5 node 34, both at 78,AR: overlapping
+        # objects, one vanished on the client). Also keep a minimum node gap between the three.
+        _busy = {int(_rear_st[0]), int(_front_st[0])}
+        others = [st for st in stations if int(st[0]) not in _busy]
         if others:
             ni, sidx = min(others, key=lambda st: _dist_to(st[1], [(mx, my)]))
         else:
+            _nn = max(1, len((rails_for(terrain) or {}).get('roads', [{}])[road_idx].get('nodes', [])) - 1)
             ni = (int(_rear_st[0]) + int(_front_st[0])) // 2
+            if ni in _busy:
+                ni = (ni + max(2, _nn // 8)) % _nn
             sidx = _rear_st[1]
-            if ni in (_rear_st[0], _front_st[0]):
-                ni = (ni + 1) % max(1, len((rails_for(terrain) or {}).get('roads', [{}])[road_idx].get('nodes', [])) or 1)
     else:
         depots = [st for st in stations if _is_depot(st[1])] or stations
         ni, sidx = min(depots, key=lambda st: _dist_to(st[1], rear))
@@ -11545,7 +11907,7 @@ def train_killed(onum, killer, reason='', ai_hunter=None):
                 _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
                 _sc, _rk, _old = db_apply_score_delta(kname, TRAIN_KILL_SCORE, bomber=_bomber, mode=_mode)
                 _ng = db_bump_pilot_counter(kname, 'ai_ground', 1)
-                db_squadron_counter_add(kname, 'ai_trains', 1)              # v713f5: squadron train tally
+                db_bump_pilot_counter(kname, 'ai_trains', 1)               # v714f5: pilot + squadron train tally
                 log('SCORE', f'{kname} +{TRAIN_KILL_SCORE} = train kill (0x{onum:04x}) | total {_sc} rank {_old}->{_rk} ground={_ng}')
                 send_stat_block_25(killer, reason='(train kill)')
         except Exception:
@@ -11605,6 +11967,23 @@ def rails_for(terrain):
     try:
         with open(path, 'r') as f:
             _RAILS[terrain] = json.load(f)
+        # v729f5 [PHANTOM CLOSING SEGMENT]: the ROADMAP dump appends node[0] again as the last node of
+        # EVERY road with the road's total length as its cumulative distance. On a loop that is the
+        # closure; on an OPEN line (loop=0) it is a straight 37 km jump back to the start - the train
+        # that 'spawned at 78,AW then warped to the BBB' (road 5: node 34 at -41360,-27378 then node 35
+        # back at -58736,-60724). Drop it, and clamp the road's length to the real last node.
+        _fixed = 0
+        for _r in (_RAILS[terrain] or {}).get('roads') or []:
+            _nd = _r.get('nodes') or []
+            if len(_nd) >= 3 and not _r.get('loop'):
+                _a, _b = _nd[0], _nd[-1]
+                if abs(_a[0] - _b[0]) < 1.0 and abs(_a[1] - _b[1]) < 1.0:
+                    _r['nodes'] = _nd[:-1]
+                    _r['length'] = float(_r['nodes'][-1][3])
+                    _fixed += 1
+        if _fixed:
+            log('TRAIN', f'terrain {terrain}: dropped the phantom closing node on {_fixed} open road(s) '
+                         f'(dump artefact - it warped trains back to the line start)')
     except Exception as e:
         log('TRAIN', f'no rail map for terrain {terrain} ({path}): {e}')
         _RAILS[terrain] = None
@@ -11638,10 +12017,12 @@ def build_train_record(st, onumber, nation, loco_cls, road, node, dist, wagons, 
 def pack_train_state(x, y, z, camp, speed_mps, road, node, dist, direction=0, mask=0, state=0):
     """v615f5 flag byte (field-probed 09-10): bits0-2 = CAMP (a change re-arms the client's train
     controller), bits4-5 = state (FUN_00692370), bit6 = direction."""
+    if not TRAIN_CLIENT_INTEGRATE:
+        speed_mps = 0.0; state = TRAIN_STATE_STOPPED; direction = 0     # v727f5: server-positioned
     body = _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
     body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
     body += bytes([(camp & 0x07) | ((state & 0x03) << 4) | (0x40 if direction else 0)])
-    body += struct.pack('<H', max(0, min(65535, int(round(speed_mps / TRAIN_SPEED_UNIT)))))
+    body += struct.pack('<H', max(0, min(65535, int(round((speed_mps / max(0.1, TRAIN_CLIENT_SPEED_MULT)) / TRAIN_SPEED_UNIT)))))
     body += bytes([road & 0xff]) + struct.pack('<H', node & 0xffff) + struct.pack('<f', float(dist))
     body += struct.pack('<I', mask & 0xffffffff)
     assert len(body) == TRAIN_UPDATE_SIZE, len(body)
@@ -11732,6 +12113,8 @@ def _trains_tick(dt):
     supply AI per train."""
     now = time.time()
     for onum, tr in list(TRAINS.items()):
+        if not TRAIN_ALLOW_REVERSE and tr.get('dir'):
+            tr['dir'] = 0                  # v725f5: never run a NetTrain backwards (client rolls forward)
         terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
         rails = rails_for(terrain)
         if not rails:
@@ -12175,6 +12558,205 @@ PACE_71_S = 10.0     # v672f5: one 8-scene msg-71 packet every 10 s (60 scenes -
                      # the panel still gets scene data ON DEMAND (hover / panel open) as before
 PACE_43_S = 1.0      # v669f5: one camp-score message per second
 
+# --- v715f5 GROUP INFO (msg 26 / 0x1a) - the tactical map's unit boxes -------------------------
+# FA.exe FUN_004fc320 (handler) + FUN_004f0d00 (record decode): [0x1a] + N x 14-byte PACKED_INFO:
+#   u16 @0  bits 12-15 mission code (item = value*2; 0xf = none), bits 9-11 f0 = CAMP,
+#           bits 6-8 f1 = KIND (1 tank group, 2 plane, 4 ship - the code looks 4 up in the ship
+#           list), bits 3-5 f2 = STRATEGY (3 = 'Defend' on a defending column, 2 seen on an AI
+#           plane), bits 0-2 f3 (1 on the tank group, 0 on the plane - unknown)
+#   u8  @2  UC = unit class id (134 Panther, 131 Cromwell, loco 141..145, soldier 170..174)
+#   u8  @3  count ('2 x Panther')
+#   i16 @4,@6  position (value << 10 x GROUP_POS_SCALE)   i16 @8,@10  objective (the scene the box
+#           names: 'GER Tank Factory at 59,AP')   i16 @12  w6 (1 on the tank group, 0 on the plane)
+# Field-read offline 09-16 with fa_dump_groups.py + the map hover. The client asks with 'out 26'1'
+# (msg 26 sub-request, 1 byte) whenever the map opens; the 2009 host answered with the room's groups.
+# `groups probe <pilot> f0 f1 f2 f3 mission uc n` sends one synthetic record to pin the codes.
+GROUP_POS_SCALE   = 0.01            # _DAT_00a23268 read from the client (f64): position = (i16 << 10) x 0.01
+                                    # = 10.24 m per unit, i16 covers +-335 km (v716f5: 1/32 was 3x off - 73,BC drew at 67,BI)
+# f2 STRATEGY codes, probe-verified 09-16: 0 none, 1 'Go to', 2 'Attack', 3 'Defend', 4 'Return', 5 blank
+GROUP_STRATEGY    = {'none': 0, 'goto': 1, 'attack': 2, 'defend': 3, 'defence': 3, 'hold': 3, 'return': 4}
+# f1 KIND codes, probe-verified 09-16 (3-bit): 0/4 destroyer, 1 tank, 2 fighter, 3 bomber, 5 soldier,
+# 6 submarine/carrier, 7 lorry. No train glyph exists - trains use the lorry (supply convoy).
+GROUP_KIND        = {'ship': 0, 'tank': 1, 'fighter': 2, 'bomber': 3, 'soldier': 5, 'sub': 6, 'lorry': 7, 'train': 7}
+GROUP_MISSION_NONE = 0xf
+TRAIN_GROUP_RECORDS = True     # v722f5: ON - the lorry box is the train's marker on both map scales (user)
+
+def _g16(v):
+    return max(-32768, min(32767, int(round(float(v) / (1024.0 * GROUP_POS_SCALE)))))
+
+def build_group_info_26(records):
+    """records: list of dicts {camp, kind, strategy, f3, mission, uc, count, x, y, tx, ty, w6}."""
+    body = bytearray([0x1a])
+    for r in records[:60]:
+        m = r.get('mission', GROUP_MISSION_NONE)
+        w0 = ((int(m) & 0xf) << 12) | ((int(r.get('camp', 0)) & 7) << 9) | ((int(r.get('kind', 1)) & 7) << 6) \
+             | ((int(r.get('strategy', 0)) & 7) << 3) | (int(r.get('f3', 0)) & 7)
+        body += struct.pack('<HBBhhhhh', w0, int(r.get('uc', 0)) & 0xff, max(0, min(255, int(r.get('count', 1)))),
+                            _g16(r.get('x', 0)), _g16(r.get('y', 0)), _g16(r.get('tx', r.get('x', 0))),
+                            _g16(r.get('ty', r.get('y', 0))), int(r.get('w6', 0)) & 0xffff)
+    return build_ingame_pkt(bytes(body))
+
+def room_group_records(room_id):
+    """The room's live AI groups as msg-26 records: tank columns (leader position, objective scene,
+    strategy from the column's purpose), paratroop sticks and supply trains."""
+    terrain = _probe_terrain_for_room(room_id)
+    out = []
+    for gid, col in list(COLUMNS.items()):
+        if col.get('room') != room_id:
+            continue
+        live = [o for o in col.get('members', []) if o in TANKS and not TANKS[o].get('dead')]
+        if not live:
+            continue
+        lead = TANKS.get(col.get('leader')) or TANKS[live[0]]
+        tx, ty = lead['pos'][0], lead['pos'][1]
+        tgt = col.get('target')
+        txy = tc_scene_xy(terrain, tgt) if isinstance(tgt, int) and tgt >= 0 else None
+        # pair 1 = the group's OBJECTIVE scene (the box text names the scene at this point),
+        # pair 2 = the group's LIVE position (the box is drawn here) - offline sample: a defending
+        # column keeps pair 1 on its factory while pair 2 crawls with the tanks; v715f5 first send
+        # had them swapped (box drawn on the target, text naming the departure factory).
+        out.append({'camp': col.get('camp', 0), 'kind': GROUP_KIND['tank'],
+                    'strategy': GROUP_STRATEGY.get(col.get('purpose') or 'none', 0), 'f3': 1,
+                    'uc': int(lead.get('class', 131)), 'count': len(live),
+                    'x': txy[0] if txy else tx, 'y': txy[1] if txy else ty,
+                    'tx': tx, 'ty': ty,
+                    'w6': 1 if lead.get('goal') is not None else 0})
+    for sid, st in list(STICKS.items()):
+        if st.get('room') != room_id:
+            continue
+        objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
+        if not objs:
+            continue
+        sx = sum(SOLDIERS[o]['pos'][0] for o in objs) / len(objs); sy = sum(SOLDIERS[o]['pos'][1] for o in objs) / len(objs)
+        tgt = st.get('target', -1)
+        txy = tc_scene_xy(terrain, tgt) if isinstance(tgt, int) and tgt >= 0 else None
+        out.append({'camp': st.get('camp', 0), 'kind': GROUP_KIND['soldier'],
+                    'strategy': GROUP_STRATEGY.get(st.get('purpose') or 'none', 0), 'f3': 1,
+                    'uc': int(SOLDIERS[objs[0]].get('class', 170)), 'count': len(objs),
+                    'x': txy[0] if txy else sx, 'y': txy[1] if txy else sy,
+                    'tx': sx, 'ty': sy, 'w6': 1})
+    rails = rails_for(terrain)
+    for onum, tr in (list(TRAINS.items()) if TRAIN_GROUP_RECORDS else []):
+        if tr.get('room') != room_id or tr.get('dead') or not rails:
+            continue
+        try:
+            (x, y, z), _seg = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
+        except Exception:
+            continue
+        tgt = tr.get('target')
+        # a supply train's target is (node, scene) - v715f5 fix: take the scene element
+        if isinstance(tgt, (tuple, list)):
+            tgt = tgt[1] if len(tgt) > 1 else None
+        txy = tc_scene_xy(terrain, tgt) if isinstance(tgt, int) and tgt >= 0 else None
+        out.append({'camp': tr.get('camp', 0), 'kind': GROUP_KIND['train'], 'strategy': 0, 'f3': 0,
+                    'uc': int(TRAIN_LOCO_BY_CAMP.get(tr.get('camp', 0), 141)),
+                    'count': 1 + sum(int(c) for _cls, c in (tr.get('wagons') or [])),    # loco + every wagon
+                    'x': txy[0] if txy else x, 'y': txy[1] if txy else y, 'tx': x, 'ty': y,
+                    'w6': 1 if tr.get('mps', 0) > 0 else 0})
+    return out
+
+def send_group_info_26(s, reason=''):
+    if getattr(s, 'current_room', None) is None:
+        return 0
+    recs = room_group_records(s.current_room)
+    pkt = build_group_info_26(recs)
+    send_rel(s, pkt, f'<- GROUP_INFO 26 x{len(recs)} {reason}', to=3.0)
+    log('GROUP26', f'{s.current_pilot}: msg 26 x{len(recs)} group record(s) {reason}')
+    s.__dict__['_group26_polled_at'] = time.time()      # v724f5: the push loop follows a poll
+    return len(recs)
+
+GROUP26_PUSH_S      = 5.0    # v724f5: unsolicited refresh of the group boxes while the map is in use
+GROUP26_PUSH_FOR_S  = 45.0   # ... for this long after the client's last poll (it polls every ~30 s)
+
+def _group26_push_loop():
+    """v724f5: the client polls msg 26 every ~30 s; a train covers ~650 m in that time and its box
+    trailed it. Between polls we push the records every GROUP26_PUSH_S to sessions that polled
+    within GROUP26_PUSH_FOR_S (i.e. have the map open). 15 records = 211 B per push."""
+    while running:
+        time.sleep(GROUP26_PUSH_S)
+        try:
+            now = time.time()
+            for s in list(get_all_sessions()):
+                if not getattr(s, 'entered_game', False) or getattr(s, 'current_room', None) is None:
+                    continue
+                if now - s.__dict__.get('_group26_polled_at', 0.0) > GROUP26_PUSH_FOR_S:
+                    continue
+                if not room_has_economy(s.current_room):
+                    continue
+                recs = room_group_records(s.current_room)
+                if recs:
+                    send_unrel(s, build_group_info_26(recs), f'<- GROUP_INFO 26 x{len(recs)} (push)')
+        except Exception:
+            logx('GROUP26', 'push loop failed')
+
+# --- v718f5 MAP OBJECTS (msg 57 / 0x39, MAP_MESSAGE) - the map's object ICONS ----------------
+# FA.exe dispatch slot 57 -> FUN_004fa480 -> OBJECT_MAP_INFO array (0xc7f6fc) drawn by
+# MAPI::DRAW_OBJECTS_TO_MAP_SCREEN. The client sends [0x39][f32 ox][f32 oy] (its map origin) and
+# the 2009 host answered [0x39][ox][oy] + N x u32 PACKED_INFO (FUN_0048ad40):
+#   bits 29-31 camp, bit 28 kind flag (-> info type 1 / 2), bits 18-27 X, bits 8-17 Y (signed
+#   10-bit, << 6 = 64 m steps, relative to the origin -> +-32 km), bits 0-7 altitude (<< 4, 16 m)
+# We echoed the request back (no records) - hence no tanks / trains / planes on the map beyond
+# the group boxes. `mapobj probe <pilot> <camp> <kind> [alt_m]` places one icon 2 km NE of him.
+MAP57_STEP_M   = 64.0
+MAP57_RANGE_M  = 511 * 64.0
+
+def build_map_message_57(ox, oy, items):
+    """items: list of (camp, kind, x, y, alt_m); only those within +-32 km of the origin fit."""
+    body = bytearray([0x39]) + struct.pack('<ff', float(ox), float(oy))
+    n = 0
+    for camp, kind, x, y, alt in items:
+        dx = int(round((float(x) - float(ox)) / MAP57_STEP_M)); dy = int(round((float(y) - float(oy)) / MAP57_STEP_M))
+        if not (-512 <= dx <= 511 and -512 <= dy <= 511):
+            continue
+        a = max(0, min(255, int(round(float(alt) / 16.0))))
+        w = ((int(camp) & 7) << 29) | ((1 if kind else 0) << 28) | ((dx & 0x3ff) << 18) | ((dy & 0x3ff) << 8) | (a & 0xff)
+        body += struct.pack('<I', w & 0xffffffff); n += 1
+        if n >= 250:
+            break
+    return build_ingame_pkt(bytes(body)), n
+
+def room_map_items(room_id, viewer):
+    """Everything a pilot's map should show as an icon: peer planes (their last position),
+    tanks, soldiers and trains of the room. kind: 0 = aircraft, 1 = ground (probe-verify)."""
+    out = []
+    for p in get_sessions_in_room(room_id):
+        if p is viewer or not getattr(p, 'flying', False):
+            continue
+        pos = p.__dict__.get('_pos_xy')
+        if pos:
+            out.append((getattr(p, 'nation', 0) or 0, MAP57_KIND_PLANE, pos[0], pos[1], p.__dict__.get('_pos_z') or 0.0))
+    for t in TANKS.values():
+        if t['room'] == room_id and not t.get('dead'):
+            out.append((t['camp'], MAP57_KIND_GROUND, t['pos'][0], t['pos'][1], t['pos'][2] if len(t['pos']) > 2 else 0.0))
+    for sd in SOLDIERS.values():
+        if sd['room'] == room_id and not sd.get('dead'):
+            out.append((sd['camp'], MAP57_KIND_GROUND, sd['pos'][0], sd['pos'][1], 0.0))
+    rails = rails_for(_probe_terrain_for_room(room_id))
+    for tr in TRAINS.values():
+        if tr['room'] != room_id or tr.get('dead') or not rails:
+            continue
+        try:
+            (x, y, z), _seg = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
+            out.append((tr['camp'], MAP57_KIND_GROUND, x, y, z))
+        except Exception:
+            continue
+    return out
+
+MAP57_KIND_PLANE  = 1     # v719f5: from the draw loop - kind 1 = altitude-tested (aircraft), kind 0 = ground
+MAP57_KIND_GROUND = 0     #          (drawn only with ShowGroundObjects set)
+MAP57_GROUND_ICONS = False   # v721f5: OFF until the map's train glyph / tactical layer is read from the EXE -
+                             # the generic ground dots for trains were off the tracks and drew for trains the
+                             # client does not hold (user). Peer planes still go out.
+
+def send_map_message_57(s, ox, oy, reason=''):
+    items = room_map_items(s.current_room, s)
+    if not (MAP57_GROUND_ICONS and room_has_economy(getattr(s, 'current_room', None))):
+        items = [i for i in items if i[1] == MAP57_KIND_PLANE]
+    pkt, n = build_map_message_57(ox, oy, items)
+    send_rel(s, pkt, f'<- MAP 57 x{n} {reason}', to=3.0)
+    log('MAP57', f'{s.current_pilot}: msg 57 origin ({ox:.0f},{oy:.0f}) -> {n} icon(s) of {len(items)} {reason}')
+    return n
+
 def is_transport_plane(plane_id):
     try:
         return int(plane_id) in TRANSPORT_PLANE_IDS
@@ -12191,7 +12773,9 @@ def is_transport_plane(plane_id):
 SOLDIER_OBJ_TYPE      = 7
 SOLDIER_HEADER_SIZE   = 4
 SOLDIER_UPDATE_SIZE   = 24
-SOLDIER_CLASS_BY_CAMP = {}      # camp -> class id (170..174); unmapped -> SOLDIER_CLASS_DEFAULT
+SOLDIER_CLASS_BY_CAMP = {0: 170, 1: 171, 2: 172, 3: 173, 4: 174}   # v722f5: from the class table's nation
+                                # field (+0x34): 170 US, 171 GB, 172 SU, 173 GE, 174 JP - every stick was 170
+                                # ('soldier-us' on GB boxes, user 09-16)
 SOLDIER_CLASS_DEFAULT = 170
 SOLDIER_MAX_PER_STICK = 32      # objects per stick (v593f5: was 8 - every dropped chute gets its soldier)
 SOLDIER_SPREAD_M      = 6.0
@@ -12683,7 +13267,14 @@ def _tc_para_capture_tick():
         frac = trn_scene_damage_frac(rid, sidx)
         # --- soft-target fire under the infantry cap ---
         if objs and frac < SOLDIER_DAMAGE_CAP:
-            soft = [e for e in tc_scene_objects(rid, terrain, sidx) if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE]
+            _all = tc_scene_objects(rid, terrain, sidx)
+            # v736f5: the scene's DEFENCES (AA / flak batteries, towers, bunkers, MG posts) are what
+            # kill the stick, and they were excluded from its target list by the SOLDIER_HARD_VALUE
+            # cut - the troops had no chance with the AA up (user 09-17). They are now valid targets
+            # whatever their value, and are taken FIRST; the soft targets follow once they are down.
+            _defs_t = [e for e in _all if e[4] and any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
+            soft = _defs_t + [e for e in _all if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE
+                              and not any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
             per_soldier = st['n'] / max(1, len(objs))
             for o in objs:
                 sd = SOLDIERS[o]
@@ -12691,7 +13282,10 @@ def _tc_para_capture_tick():
                 # goal); it fires once within gun range
                 tgt = sd.get('_tgt_obj')
                 if tgt is None or all(e[0] != tgt[0] for e in soft):
-                    tgt = min(soft, key=lambda e: math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1])) if soft else None
+                    # v736f5: a live defence within reach outranks anything else
+                    _cand = [e for e in _defs_t
+                             if math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1]) <= SOLDIER_GUN_RANGE * 2.0] or soft
+                    tgt = min(_cand, key=lambda e: math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1])) if _cand else None
                     sd['_tgt_obj'] = tgt
                 if tgt is None or math.hypot(tgt[2] - sd['pos'][0], tgt[3] - sd['pos'][1]) > SOLDIER_GUN_RANGE:
                     sd['flags'] &= ~0x04; sd['firing'] = False; sd['_aim'] = None
@@ -12704,7 +13298,8 @@ def _tc_para_capture_tick():
                 GROUND_HP[key] = GROUND_HP.get(key, 0) + int(SOLDIER_DPS * per_soldier)
                 need = obj_hp_needed(best[1])                       # v704f5
                 if GROUND_HP[key] >= need:
-                    tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}', credit_pilot=st.get('by'))   # v607f5
+                    tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}',
+                                         credit_pilot=(st.get('by') if TC_CREDIT_PARA_GROUND_KILLS else None))   # v607f5/v738f5
                     soft = [e for e in soft if e[0] != best[0]]
                     sd['_tgt_obj'] = None
                     frac = trn_scene_damage_frac(rid, sidx)
@@ -12725,7 +13320,7 @@ def _tc_para_capture_tick():
                     continue
                 o = min(near, key=lambda q: math.hypot(e[2] - SOLDIERS[q]['pos'][0], e[3] - SOLDIERS[q]['pos'][1]))
                 sd = SOLDIERS[o]
-                sd['hp'] = sd.get('hp', SOLDIER_HP) - DEFENCE_DPS
+                sd['hp'] = sd.get('hp', SOLDIER_HP) - defence_dps()      # v737f5
                 if sd['hp'] <= 0:
                     log('PARA', f'soldier 0x{o:04x} killed by {e[1]["name"]} (obj {e[0]}) of scene {sidx}')
                     soldier_killed(o, None, reason=f'(scene defence {e[1]["name"]})',
@@ -12883,7 +13478,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None):
     for onum, tr in list(TRAINS.items()):
         if tr['room'] != rid or tr.get('dead') or getattr(s, 'addr', None) in tr['peers']:
             continue
-        if near_xy is not None:
+        if near_xy is not None and not TRAIN_MAP_WIDE:          # v716f5: map-wide trains come back at any distance
             rails = rails_for(tr.get('terrain') or _probe_terrain_for_room(rid))
             if not rails:
                 continue
@@ -17303,6 +17898,7 @@ def handle_compound(s, outer_cmd, pl):
             log('COMPOUND', f'Pilot selected: "{pname}" slot={slot}')
             if _enforce_ban_on_select(s, pname): return
             push_myrights(s, '(compound pilot select)')   # v301: no-op for normal pilots
+            threading.Timer(1.5, lambda: send_lobby_news(s, reason='(compound pilot select)')).start()   # v732f5
             # v543f5: stamp the pilot's own SquadronId into the echo, EXACTLY like the appspace
             # 0x62/0xe4 path (the u32 at [6:10] -> FUN_004ee120 -> DAT_00cb06dc -> local plane's
             # squadron at the 201 grant + 'Your squadron'). This compound framing previously echoed
@@ -17344,6 +17940,16 @@ def handle_compound(s, outer_cmd, pl):
         return
 
     # -- LEAVE ARENA / BACK TO LOBBY, compound-wrapped (inner sub=0x40) ---------
+    # v715f5: GROUP INFO request (msg 26), compound-wrapped - the post-spawn batch carries it
+    if inner_sub == 0x1a and len(inner) <= 6:
+        try:
+            if room_has_economy(getattr(s, 'current_room', None)):
+                send_group_info_26(s, reason='(map request, compound)')
+            else:
+                send_rel(s, build_group_info_26([]), '<- GROUP_INFO 26 x0 (no economy)', to=3.0)
+        except Exception:
+            logx('GROUP26', 'group info reply (compound) failed')
+        return
     # v665f5 [PLANE CATALOG, compound-wrapped (inner sub=0x3a)] The HQ's Change Planes list is
     # the client's decode of our msg-58 echo as 3-BYTE records ((Size-1)/3). The standalone /
     # prefixed catalog is re-encoded by the POST-AUTH filter; the compound-batched form (the
@@ -22559,6 +23165,10 @@ def handle_post_auth(s, cmd, pl):
             log('REFRAME', f'{s.current_pilot} cmd=0x{cmd:04x} PREFIXED (inner type=0x{pl[5]:02x} '
                            f'sub=0x{_isub:02x} bc={pl[4]} len={len(pl)}) -> '
                            f'{"sub normalised to 0x00 for the pl[8] handlers" if PREFIXED_NORMALISE_SUB else "IGNORED"}')
+            if _isub == 0xca:                      # v731f5: LOBBY NEWS request (prefixed form)
+                log('NEWS', f'{s.current_pilot}: news request (prefixed 0xca, {len(pl)}B) - replying')
+                send_lobby_news(s, reason='(news request)')
+                return
             if 0xcf <= _isub <= 0xdf:   # TEMP squadron msg capture (prefixed path; remove once decoded)
                 log('SQNCAP', f'{s.current_pilot} PREFIXED sub=0x{_isub:02x} type=0x{pl[5]:02x} '
                               f'len={len(pl)} hex={bytes(pl).hex()}', level='INFO')
@@ -22620,6 +23230,12 @@ def handle_post_auth(s, cmd, pl):
     stored=bytes(pl)
     if sub in (0xcf, 0xd0, 0xd1, 0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xdb):  # TEMP squadron msg capture
         log('SQNCAP', f'{s.current_pilot} sub=0x{sub:02x} len={len(stored)} hex={stored.hex()}', level='INFO')
+    if sub == 0xca and not s.entered_game:
+        # v733f5: LOBBY NEWS request, counter-wrapped form (the News page's own poll). Answered here
+        # because the wrap is stripped after the earlier handlers have run.
+        log('NEWS', f'{s.current_pilot}: news request (0xca, unwrapped) - replying')
+        send_lobby_news(s, reason='(news request)')
+        return
     if sub == 0xd8 and len(stored) >= 9:   # SQUADRON CHANGE PASSWORD ([id][old][new]; challenge old)
         _sid, _old, _new = _sqn_change_fields(stored)
         if not handle_squadron_change_password(s, _sid, _old, _new):
@@ -22644,6 +23260,15 @@ def handle_post_auth(s, cmd, pl):
     log('RX/REL/PL', f'  [{_h4}|{_d4}] +{hx(stored[8:8+80]) if len(stored)>8 else ""}')
     _ingame_msg_instrument(s, sub, stored)     # v258: dump watched types while a parachuter is alive
     _supply_msg_instrument(s, sub, cmd, stored)  # v263: capture supply/repair msgs (59/60/40/73)
+    if sub == 0x39 and cmd == 0 and getattr(s, 'entered_game', False) and len(stored) >= 13:
+        # v718f5: msg 57 MAP_MESSAGE request ([0x39][f32 ox][f32 oy]) - answered here, at the
+        # first common in-game point (the deeper handlers never saw it: TRIM_ECHO_SUBS swallowed 0x39)
+        try:
+            _ox, _oy = struct.unpack_from('<ff', stored, 5)
+            send_map_message_57(s, _ox, _oy, reason='(map poll)')
+        except Exception:
+            logx('MAP57', 'map message reply failed')
+        return
     if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
         # v294: the scene supply query the client fires on every map open / scene select.
         _handle_scene_supply_query_69(s, stored)
@@ -23029,6 +23654,21 @@ def handle_post_auth(s, cmd, pl):
                 else:
                     log('POST-AUTH', 'sub=0x43 -> no room, not responding (avoids null crash)')
                 return
+            if sub == 0x39 and s.entered_game and len(pl) >= 13:
+                # v718f5: msg 57 MAP_MESSAGE request ([0x39][f32 ox][f32 oy], T=0x92) - answer with the
+                # room's object icons for the map instead of echoing the empty request
+                try:
+                    _ox, _oy = struct.unpack_from('<ff', pl, 5)
+                    send_map_message_57(s, _ox, _oy, reason='(map poll)')
+                except Exception:
+                    logx('MAP57', 'map message reply failed')
+                return
+            if (sub == 0xca or (len(pl) > 8 and pl[8] == 0xca)) and not s.entered_game:
+                # v731f5: the News page asks for the lobby news. It arrives BOTH bare (sub 0xca) and
+                # PREFIXED (cmd=0x0112, inner sub at pl[8]; the reframe normalises sub to 0x00).
+                log('NEWS', f'{s.current_pilot}: news request (0xca, {len(pl)}B) - replying')
+                send_lobby_news(s, reason='(news request)')
+                return
             if sub == 0x60 and s.entered_game:
                 # Bare 0x60 = client REQUESTS the SCORE_TABLE (msg 96). Sent right
                 # after the FLY 23 StartPlace grant (messages09.log 06:51:00.782).
@@ -23064,7 +23704,27 @@ def handle_post_auth(s, cmd, pl):
             # below swallowed msg 4 and ServerConfirm never fired -> same ~50s freeze.) The
             # first msg 4 after a StartPlace is the ServerConfirm (msg 5) trigger - the gate
             # that stamps the global Number onto the client's plane and starts the sim loop.
+            # v718f5: msg 57 MAP_MESSAGE request ([0x39][f32 ox][f32 oy]) - answer with the room's
+            # object icons for the map instead of echoing the empty request
+            if s.entered_game and sub == 0x39 and len(pl) >= 13:
+                try:
+                    _ox, _oy = struct.unpack_from('<ff', pl, 5)
+                    send_map_message_57(s, _ox, _oy, reason='(map poll)')
+                except Exception:
+                    logx('MAP57', 'map message reply failed')
+                return
             # msg 4/6 are the client's OWN state, never echoed.
+            # v715f5: msg 26 GROUP INFO request (1 byte -> 16k+1 -> T=0x12) lands in this block
+            # too; answer it here, ahead of the catch-all (the map polls it every 30 s).
+            if s.entered_game and sub == 0x1a and len(pl) <= 6:
+                try:
+                    if room_has_economy(getattr(s, 'current_room', None)):
+                        send_group_info_26(s, reason='(map poll)')
+                    else:
+                        send_rel(s, build_group_info_26([]), '<- GROUP_INFO 26 x0 (no economy)', to=3.0)
+                except Exception:
+                    logx('GROUP26', 'group info reply (T=0x12) failed')
+                return
             if s.entered_game and sub == 0x04:
                 _ident = struct.unpack_from('<H', pl, 5)[0] if len(pl) >= 7 else None   # v198: client's ident
                 # v201: PLANE TYPE. The client's out-4 spawn carries its selected plane's
@@ -23537,6 +24197,9 @@ def handle_post_auth(s, cmd, pl):
                     broadcast_player_join(pname, exclude_sess=s)
                 threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
                 threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
+                # v732f5: push the lobby news/welcome at pilot selection - the client only asks (0xca)
+                # when the News page is opened, so a pilot who never clicks the tab never saw it.
+                threading.Timer(1.5, lambda: send_lobby_news(s, reason='(pilot select)')).start()
             # v491f5 [PERSONA RESTORE - the wrong-aircraft/toggling fix] RE (FA.exe
             # FUN_004ee120 reply handler + FUN_004f88f0 VNET::JoinToGameAnswerCB): the 0xe4
             # reply layout is [4]=0xe4 [5]=status [6:10]=u32 LE selection id. The client
@@ -23876,6 +24539,17 @@ def handle_post_auth(s, cmd, pl):
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
         # 0x21 already sitting in NO_ECHO_SUBS. Guard the TYPE byte too.
         NO_ECHO_TYPES = {0x21}
+        # v715f5 [msg 26 GROUP INFO request]: the map asks ('out 26'1') - answer with the room's
+        # live groups instead of the empty echo (which cleared the list on the client).
+        if sub == 0x1a and len(stored) <= 6:
+            try:
+                if room_has_economy(getattr(s, 'current_room', None)):
+                    send_group_info_26(s, reason='(map request)')
+                else:
+                    send_rel(s, build_group_info_26([]), '<- GROUP_INFO 26 x0 (no economy)', to=3.0)
+            except Exception:
+                logx('GROUP26', 'group info reply failed')
+            return
         # v691f5 [msg 6 = OBJECT STATE REQUEST]: right after every create the client sends
         # [0x06][ONumber u16] to the owner ('out 6'3' after each 'Create NetTrain/Tank'): give me
         # this object's current state. The 2009 host answered with the object's update frame; we
@@ -24887,7 +25561,8 @@ threading.Thread(
             'player_counts_fn': web_player_counts,      # v418f5: console player counter
             'password_read_fn': arena_password_read,    # arena editor: current arena password
             'arena_reset_fn': lambda rid, winner, by: arena_reset(rid, winner_camp=winner, by=by),   # v640f5
-            'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX)},           # v686f5
+            'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX),           # v686f5
+            'server_py': os.path.abspath(__file__)},        # v731f5: the lobby-news editor writes next to it
     daemon=True
 ).start()
 
@@ -24950,6 +25625,7 @@ threading.Thread(target=_resupply_poll_loop, daemon=True).start()  # v272: groun
 threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b production step
 threading.Thread(target=_camp_scores_loop, daemon=True).start()   # v651f5: Ctrl-L country scores (msg 43 + 40)
 threading.Thread(target=_prod40_fast_loop, daemon=True).start()   # v663f5: units keep-alive vs the client's 60 s overwrite
+threading.Thread(target=_group26_push_loop, daemon=True).start()  # v724f5: map group boxes refreshed every 5 s while the map is open
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive

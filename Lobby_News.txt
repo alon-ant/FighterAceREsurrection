@@ -1,0 +1,34 @@
+FIGHTER ACE RESURRECTION - server update, 17 September
+This page is new: news now comes from the server, 
+and admins can post here.
+
+
+TERRITORIAL COMBAT
+Bases are easier to trigger: buildings now take their historical damage, 
+not 5x.
+Factories, hangars, HQs and bridges need bombs or rockets - 
+guns won't do it.
+AA, flak, fuel tanks, storage, towers and barracks can still be strafed.
+Craters last 10 minutes and everyone sees the same holes in the runway.
+Repairs take four times longer, and a base under assault does not 
+repair at all.
+Paratroops must land complete and hold a scene for 90 seconds to 
+capture it.
+Infantry now shoot back at AA and flak instead of walking into them.
+Tank columns form at the nearest supplied base, not a 
+factory 20 km away.
+Each nation now fields its own tanks and infantry.
+
+
+MAP
+Tanks, paratroops and supply trains now show on the map with 
+strength and orders.
+Three supply trains per nation run the rails - rear, middle and front.
+
+
+SCORES
+Squadron and pilot boards now tally buildings, tanks, ground units, 
+trains and captures.
+Kills are credited only on real evidence - no more phantom 
+or double kills.
+Repositioning with TAB no longer costs you a plane and a pilot.

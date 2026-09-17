@@ -480,8 +480,8 @@ LADDER_TABS_ASSETS = """
                      the panel scrolls sideways, cells stay on one line at a slightly smaller size */
                   .lpanel { overflow-x:auto; }
                   .lpanel table { width:100%; min-width:100%; }
-                  #lsqn { font-size:0.9em; }
-                  #lsqn th, #lsqn td { white-space:nowrap; padding:6px 8px; }
+                  #lsqn, #lcareer, #ltc { font-size:0.9em; }
+                  #lsqn th, #lsqn td, #lcareer th, #lcareer td, #ltc th, #ltc td { white-space:nowrap; padding:6px 8px; }
                 </style>
                 <script>
                 function lshow(tid){
@@ -978,7 +978,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                  + _gc('kills_ffa') + ", " + _gc('deaths_ffa') + ", "
                                  + _gc('kills_tc') + ", " + _gc('deaths_tc') + ", "
                                  + _gc('kills_events') + ", " + _gc('deaths_events') + ", "
-                                 "COALESCE(kills,0), COALESCE(deaths,0) FROM pilots").fetchall()
+                                 "COALESCE(kills,0), COALESCE(deaths,0), "
+                                 + _gc('ai_buildings') + ", " + _gc('ai_tanks') + ", " + _gc('ai_ground') + ", "
+                                 + _gc('ai_trains') + ", " + _gc('captures') + " FROM pilots").fetchall()   # v714f5
             conn.close()
 
             _ref = _scoring_ref()
@@ -986,7 +988,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 return round(k / d, 2) if d > 0 else float(k)
             pilots = []
             for (p_name, a_name, f_score, b_score, f_ffa, b_ffa, f_tc, b_tc, f_ev, b_ev,
-                 k_ffa, d_ffa, k_tc, d_tc, k_ev, d_ev, k, d) in stats:
+                 k_ffa, d_ffa, k_tc, d_tc, k_ev, d_ev, k, d, g_bld, g_tk, g_gr, g_tr, g_cp) in stats:
                 total = (f_score or 0) + (b_score or 0)
                 # Rank is ALWAYS the combined-ladder rank - it IS the pilot's rank (the server
                 # computes it from fighter+bomber, db_apply_score_delta), same on every tab.
@@ -999,7 +1001,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                                'tc_f': f_tc, 'tc_b': b_tc, 'tc_t': f_tc + b_tc,
                                'tc_k': k_tc, 'tc_d': d_tc, 'tc_kd': _kd(k_tc, d_tc),
                                'ev_f': f_ev, 'ev_b': b_ev, 'ev_t': f_ev + b_ev,
-                               'ev_k': k_ev, 'ev_d': d_ev, 'ev_kd': _kd(k_ev, d_ev)})
+                               'ev_k': k_ev, 'ev_d': d_ev, 'ev_kd': _kd(k_ev, d_ev),
+                               'bld': g_bld, 'tanks': g_tk, 'ground': g_gr, 'trains': g_tr, 'caps': g_cp})
 
             # v408f5: FFA / TC / Events are the MAIN boards (plus Career - the totals the game
             # client itself renders). Fighter and Bomber scores are COLUMNS inside every board,
@@ -1021,11 +1024,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                              "<td>" + str(p[fk]) + "</td><td>" + str(p[bk]) + "</td>"
                              "<td><strong>" + str(p[tk]) + "</strong></td>"
                              "<td>" + str(p[kk]) + "</td><td>" + str(p[dk]) + "</td>"
-                             "<td>" + str(p[kdk]) + "</td></tr>")
+                             "<td>" + str(p[kdk]) + "</td>"
+                             + (("<td>" + str(p['bld']) + "</td><td>" + str(p['tanks']) + "</td>"
+                                 "<td>" + str(p['ground']) + "</td><td>" + str(p['trains']) + "</td>"
+                                 "<td>" + str(p['caps']) + "</td>") if tid in ('lcareer', 'ltc') else "")
+                             + "</tr>")
                 ths = ""
-                for i, h in enumerate(('#', 'Pilot Name', 'Rank', 'Fighter Score',
-                                       'Bomber Score', 'Total', 'Kills', 'Deaths',
-                                       'K/D Ratio')):
+                _hdr = ['#', 'Pilot Name', 'Rank', 'Fighter Score', 'Bomber Score', 'Total',
+                        'Kills', 'Deaths', 'K/D Ratio']
+                if tid in ('lcareer', 'ltc'):          # v714f5: ground tallies (career counters) on Career + TC
+                    _hdr += ['Buildings', 'Tanks', 'Ground Units', 'Trains', 'Captures']
+                for i, h in enumerate(_hdr):
                     ths += ('<th onclick="sortLadder(' + "'" + tid + "'," + str(i) + ')">'
                             + h + ' &#x21D5;</th>')
                 ladder_boards.append((tid, prefix, ths, body))
@@ -1386,6 +1395,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 {ADMIN_TABS_ASSETS}
                 <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
                     <a href="/admin/logs" style="color:#17a2b8;">Live Console</a> |
+                    <a href="/admin/lobby_news" style="color:#6f42c1;">Lobby News</a> |
                     Logged in as <strong>{hesc(str(user))}</strong></div>
                 <h1>Server Administration</h1>
 
@@ -1816,6 +1826,16 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<input type="checkbox" name="s_exit_is_crash" value="1"'
                 + (' checked' if ec_on else '') + '> Exit while airborne counts as a crash'
                 + ec_edited + '</label>')
+            # SHOW GROUND OBJECTS (v719f5): the map draws tank / train / soldier icons only when this
+            # [UI] flag is set. The templates ship it OFF; default ON here (checked when unset).
+            _sgo_key = 'show_ground_objects'
+            _sgo_on = bool(int(overrides.get(_sgo_key, 1))) if _sgo_key in overrides else True
+            _sgo_edited = ' &bull; <span style="color:#c60;">edited</span>' if _sgo_key in overrides else ''
+            showground_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_show_ground_objects" value="1"'
+                + (' checked' if _sgo_on else '') + '> Show tanks / trains / soldiers on the map'
+                + _sgo_edited + '</label>')
             # SCORING (v404f5): per-arena override of the category-decided scoring mode.
             # '' / absent = decided by the Title/category; 'ffa'/'tc' force that value column;
             # 'none' turns global scoring off for this arena. The game server checks this key
@@ -1946,6 +1966,12 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     shown as the placeholder. Leave blank for the server default. Takes effect the next time the
                     arena is entered.</p>
                     {craters_html}
+                    <h3>Ground objects on the map</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Territorial Combat: tick to show
+                    tanks, supply trains and paratroops as icons on the in-game map (the arena templates ship
+                    this off, so ground objects were invisible on the map). Takes effect the next time the
+                    arena is entered.</p>
+                    {showground_html}
                     <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
@@ -2226,6 +2252,38 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif self.path.startswith('/admin/lobby_news'):
+            # v731f5: edit the lobby News page (msg 202): the right-hand news lines and the left
+            # welcome pane. Files live next to server.py so the game server picks them up live.
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><a href='/'>&larr; Back</a>"); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            def _rd(nm):
+                try:
+                    with open(os.path.join(_dir, nm), 'r', encoding='utf-8', errors='replace') as f:
+                        return f.read()
+                except Exception:
+                    return ''
+            _saved = 'saved' in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            content = f"""
+                <div class="nav"><a href="/">&larr; Back to Dashboard</a></div>
+                <h1>Lobby News</h1>
+                {'<p style="color:#198754;"><strong>Saved.</strong> Pilots see it when they open the News page (or on their next login).</p>' if _saved else ''}
+                <div class="card">
+                  <p style="color:#888; max-width:640px;">The <strong>News</strong> lines fill the right-hand pane of the
+                  lobby's News page, one line each, in order. The <strong>Welcome</strong> text replaces the left pane
+                  (the client's built-in "you are in offline mode" message). Plain text; keep lines under ~120
+                  characters or they are trimmed. Leave Welcome empty to keep the client's own text.</p>
+                  <form method="POST" action="/admin/lobby_news">
+                    <h3>News (right pane)</h3>
+                    <textarea name="news" rows="14" style="width:100%; font-family:monospace;">{hesc(_rd('lobby_news.txt'))}</textarea>
+                    <h3>Welcome (left pane)</h3>
+                    <textarea name="welcome" rows="8" style="width:100%; font-family:monospace;">{hesc(_rd('lobby_welcome.txt'))}</textarea>
+                    <p><button type="submit">Save</button></p>
+                  </form>
+                </div>"""
+            self.send_html(content)
+
         elif self.path == '/login':
             content = """
                 <h1>Server Login</h1>
@@ -2458,6 +2516,24 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(post_data)
         
         user = self.get_current_user()
+
+        if self.path == '/admin/lobby_news':
+            # v731f5: save the lobby News / Welcome text (admin only)
+            if not is_user_admin(user):
+                self.send_response(302); self.send_header('Location', '/'); self.end_headers(); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            for _key, _nm in (('news', 'lobby_news.txt'), ('welcome', 'lobby_welcome.txt')):
+                _txt = qs.get(_key, [''])[0].replace('\r\n', '\n')
+                try:
+                    with open(os.path.join(_dir, _nm), 'w', encoding='utf-8') as f:
+                        f.write(_txt)
+                except Exception as e:
+                    SRV['log']('WEB', f'lobby news save failed ({_nm}): {e!r}')
+            SRV['log']('WEB', f'{user} updated the lobby news '
+                              f'({len(qs.get("news", [""])[0].splitlines())} news line(s), '
+                              f'{len(qs.get("welcome", [""])[0].strip())} welcome chars)')
+            self.send_response(302); self.send_header('Location', '/admin/lobby_news?saved=1'); self.end_headers()
+            return
 
         if self.path == '/register':
             acct = qs.get('account_name', [''])[0].strip()
@@ -2950,6 +3026,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             # EXIT = CRASH (v400f5): checkbox only posts when ticked; absence means off (the
             # default - an undamaged airborne exit is a clean bug-out, not a death).
             settings['exit_is_crash'] = 1 if qs.get('s_exit_is_crash', [''])[0].strip() else 0
+            # SHOW GROUND OBJECTS (v719f5): default ON. Checkbox absence = off; a first save with it
+            # ticked stores 1. Stored explicitly so the default-on can be turned off per arena.
+            settings['show_ground_objects'] = 1 if qs.get('s_show_ground_objects', [''])[0].strip() else 0
             # SCORING MODE (v404f5): only stored when forced; '' (Default) leaves no key so the
             # category keeps deciding.
             _sm = qs.get('s_scoring_mode', [''])[0].strip().lower()
@@ -3300,7 +3379,9 @@ def _web_watchdog(interval=30.0, timeout=10.0):
 def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_read_fn=None,
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
-                     password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None):
+                     password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
+                     server_py=None):
+    SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn
