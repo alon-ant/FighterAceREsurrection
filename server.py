@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v744f5'
+VERSION = 'v745f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5818,7 +5818,9 @@ def send_lobby_news(s, text=None, form=None, reason=''):
     log('NEWS', f'{getattr(s, "current_pilot", "?")}: lobby news sent - {n} line(s) {reason}')
     return n
 
-LOBBY_NEWS_ACK_S = 0.05      # v744f5: per-line ACK window; the RELKEEP handles a loss
+LOBBY_NEWS_ACK_S = 0.0       # v745f5: no ACK wait at all - each line is transmitted and handed to the
+                             # RELKEEP immediately, so the whole pane lands in one RTT instead of one
+                             # per line (0.05 s x 16 lines was still ~1-2 s on a remote link).
 
 LOBBY_NEWS_MAX_LINE  = 120
 LOBBY_NEWS_MAX_LINES = 200
