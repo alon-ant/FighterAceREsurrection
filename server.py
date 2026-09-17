@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v743f5'
+VERSION = 'v744f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5797,6 +5797,9 @@ def send_lobby_news(s, text=None, form=None, reason=''):
     # each send waits for its own ACK, so 16 lines on a remote link took 5-6 s and the pane filled
     # visibly line by line (user 09-17). They are dispatched together; the welcome (pane 0) is
     # submitted last, after a short settle, because it must land after the lines that blank it.
+    # v744f5: ONE thread sends the lines IN ORDER, with a very short ACK window (the keeper
+    # retransmits anything unacked), so the pane fills in well under a second and keeps the file's
+    # order. v743's pool dispatch was fast but concurrent - the lines arrived scrambled (user).
     _lines = []
     for line in (lobby_news_text() or '').replace('\r\n', '\n').split('\n'):
         if len(line) > LOBBY_NEWS_MAX_LINE:
@@ -5804,17 +5807,18 @@ def send_lobby_news(s, text=None, form=None, reason=''):
         _lines.append(line)
         if len(_lines) >= LOBBY_NEWS_MAX_LINES:
             break
-    for line in _lines:
-        _submit_send(send_rel, s, build_lobby_news_202(line, 11), '<- LOBBY NEWS 202 line', to=5.0); n += 1
-    if _wel:
-        def _send_welcome(_s=s, _w=_wel):
-            time.sleep(LOBBY_NEWS_WELCOME_DELAY_S)
-            send_rel(_s, build_lobby_news_202(_w, 10), '<- LOBBY WELCOME 202 (pane 0)', to=5.0)
-        threading.Thread(target=_send_welcome, daemon=True).start(); n += 1
+    n = len(_lines) + (1 if _wel else 0)
+
+    def _push(_s=s, _ls=list(_lines), _w=_wel):
+        for _l in _ls:
+            send_rel(_s, build_lobby_news_202(_l, 11), '<- LOBBY NEWS 202 line', to=LOBBY_NEWS_ACK_S)
+        if _w:
+            send_rel(_s, build_lobby_news_202(_w, 10), '<- LOBBY WELCOME 202 (pane 0)', to=LOBBY_NEWS_ACK_S)
+    threading.Thread(target=_push, daemon=True).start()
     log('NEWS', f'{getattr(s, "current_pilot", "?")}: lobby news sent - {n} line(s) {reason}')
     return n
 
-LOBBY_NEWS_WELCOME_DELAY_S = 1.0
+LOBBY_NEWS_ACK_S = 0.05      # v744f5: per-line ACK window; the RELKEEP handles a loss
 
 LOBBY_NEWS_MAX_LINE  = 120
 LOBBY_NEWS_MAX_LINES = 200
