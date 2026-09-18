@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v757f5'
+VERSION = 'v761f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -21020,8 +21020,14 @@ def scene_profile_per_scene(terrain, scene_id):
              'rates': {k: int(sc.get('rates', {}).get(k, 0)) for k in ('ammo', 'fuel', 'metal')},
              'unit_producers': list(sc.get('unit_producers') or []), 'per_scene': True,
              'cap_mult': _mult}
+        # (v758f5's capacity floor is REMOVED in v759f5: every airfield does have fuel/ammo storage
+        # in the tables - the 'no fuel for the whole team' online was the SU Front Airfield with all
+        # six fuel tanks and both ammo storages bombed out at 15:19-15:21, i.e. the design working.
+        # A floor would have made a bombed-out field un-bombable.)
         cache[key] = p
     return p
+
+AIRFIELD_MIN_CAPS = {'ammo': 8000, 'fuel': 6000, 'metal': 2000}   # per airfield, before the type multiplier
 
 # type-name substring -> storage capacity multiplier (first match wins). v757f5: ALL airfields
 # 10x - bomber bases too (user).
@@ -21220,6 +21226,13 @@ def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg, prefer_xy=None):
         if SUPPLY_LOCAL_ONLY:
             _near = [s for s in own if _dist(s) <= SUPPLY_LOCAL_RADIUS_M]
             own = _near if _near else own[:1]          # the base he is at, else the nearest one only
+            # v760f5: say WHICH scene and how far - the 09-18 SU report ('no fuel at every field')
+            # cannot be checked without it
+            try:
+                log('SUPPLY', f'local draw camp {camp} from {[(int(s), (scene_type_for(terrain, s) or "?").strip(), int(_dist(s))) for s in own]} '
+                              f'(pilot at {int(prefer_xy[0])},{int(prefer_xy[1])} = {tc_grid(prefer_xy[0], prefer_xy[1])})')
+            except Exception:
+                pass
     else:
         own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, sidx))
     need = {'ammo': ammo_kg, 'fuel': fuel_kg}
@@ -21789,9 +21802,16 @@ def _supply_chain_step(rid):
     except Exception:
         logx('RESET', 'win check failed')
     _camps_with_trains = {tr['camp'] for tr in TRAINS.values() if tr['room'] == rid and tr.get('supply') and not tr.get('dead')}
+    # v761f5 (user: captured territory not joining the supply chain): the visible trains only
+    # serve RAIL STATIONS; a camp with trains used to skip the abstract deliveries entirely, so an
+    # off-rail scene it captured was supplied by nobody. Now only the rail stations are left to the
+    # trains; every other scene of the camp keeps the abstract per-minute delivery.
+    try:
+        _rail_scene_ids = {int(s) for _r, _lst in (rail_stations(trn) or {}).items() for _ni, s in _lst}
+    except Exception:
+        _rail_scene_ids = set()
     for _camp, _scenes in sorted(by_camp.items()):
-        if TRAIN_SUPPLY and _camp in _camps_with_trains:
-            continue
+        _served_by_trains = TRAIN_SUPPLY and _camp in _camps_with_trains
         # split once per camp: producers (donors) vs storage scenes (train destinations)
         donors, dests = [], []
         for _sidx in _scenes:
@@ -21803,6 +21823,8 @@ def _supply_chain_step(rid):
                 continue
             if any(p['rates'].get(r, 0) > 0 for r in ('ammo', 'fuel', 'metal')):
                 donors.append((_sidx, st, p))
+            elif _served_by_trains and int(_sidx) in _rail_scene_ids:
+                continue                                   # a rail station: the trains bring it
             else:
                 dests.append((_sidx, st, p))
         if not donors or not dests:
