@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v745f5'
+VERSION = 'v750f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10351,6 +10351,8 @@ TC_CREDIT_PARA_GROUND_KILLS = True    # v739f5: ON (user, corrected) - objects d
                                       # A console-spawned stick still has no dropper, so it credits
                                       # nobody (that was the v738 report: it took the first in-game pilot).
 DEFENCE_NAME_KEYS   = ('tower', 'aa ', 'aa battery', 'flak', 'bunker', 'mg ', 'machine gun', 'pillbox')
+SOLDIER_VS_SOLDIER_DPS = 2.0    # v746f5: infantry firefight (SOLDIER_HP 12 -> ~6 s per man)
+SOLDIER_VS_TANK_DPS    = 12.0   # v746f5: infantry AT fire on a tank holding the scene
 DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
 DEFENCE_TTK_S       = 30.0      # v737f5: seconds for ONE defence object to kill ONE soldier. The damage
                                 # per second is derived from SOLDIER_HP, so lowering soldier HP for
@@ -10724,11 +10726,15 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         return None
     fsidx, fx, fy, fd = fac
     ftype = scene_type_for(terrain, fsidx) or 'Tank Factory'
-    # v600f5 [FILM CONTRACT 'switch strategy']: an idle friendly column within TC_REUSE_RADIUS of
-    # the target is re-tasked instead of raising a new battalion
-    _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
-    if _reuse is not None:
-        gid, col = _reuse
+    # v748f5 [ONE COLUMN PER TRIGGER] (Duran 09-18: four triggers, one column chasing all four):
+    # re-tasking an idle column (v600f5 'switch strategy') is now the FALLBACK, taken only when a
+    # fresh battalion cannot be raised (no units built, pool empty, or the tank cap with nothing to
+    # recall). Each trigger therefore gets its own tanks while the camp can afford them.
+    def _reuse_idle(_why):
+        _r = tc_find_idle_column(room_id, camp, txy[0], txy[1])
+        if _r is None:
+            return None
+        gid, col = _r
         lead = TANKS.get(col['leader'])
         col['purpose'] = purpose; col['target'] = int(target_sidx)
         col['engaged'] = None; col['deployed'] = None; col['_ring_after_attack'] = False
@@ -10736,19 +10742,22 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
             if _o in TANKS:
                 TANKS[_o]['_tgt_obj'] = None; TANKS[_o]['flags'] = TANKS[_o].get('flags', 0) & ~0x05
         column_goto(gid, txy[0], txy[1], TC_COLUMN_MPS)
-        tcamp = scene_camp(terrain, target_sidx)
-        who = f' triggered by {trigger_pilot}' if (trigger_pilot and purpose == 'attack') else ''
         lx, ly = (lead['pos'][0], lead['pos'][1]) if lead else (txy[0], txy[1])
+        tcamp = scene_camp(terrain, target_sidx)
+        who = f' (triggered by {trigger_pilot})' if trigger_pilot else ''
         tc_say(room_id, f'AI: {tc_ordinal(col.get("army", 1))} Army {tc_ordinal(col.get("battalion", 1))} Battalion at '
                         f'{tc_grid(lx, ly)} switch strategy to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
                         f'{tc_grid(txy[0], txy[1])}{who}')
         tc_mission_lines(room_id, camp, tcamp, purpose, (lx, ly), txy, trigger_pilot)
-        log('TC', f'room {room_id}: column {gid} re-tasked ({purpose} scene {target_sidx}) - switch strategy')
+        log('TC', f'room {room_id}: column {gid} re-tasked ({purpose} scene {target_sidx}) - switch strategy [{_why}]')
         return gid
     # units: what THIS factory holds (v631f5 per-scene stock); loadout: what the pool can equip
     have = scene_units_state(room_id, fsidx)['tank'] if UNITS_MODEL else n_want
     n = min(n_want, have)
     if n <= 0:
+        _g = _reuse_idle('no tank units built')
+        if _g is not None:
+            return _g
         tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
                         f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         log('TC', f'room {room_id}: camp {camp} cannot raise a column - 0 tank units built')
@@ -10763,6 +10772,9 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
             break                                   # not 'fully loaded' - stop here
         loaded += 1
     if loaded <= 0:
+        _g = _reuse_idle('supply pool empty')
+        if _g is not None:
+            return _g
         tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
                         f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         log('TC', f'room {room_id}: camp {camp} cannot raise a column - pool empty')
@@ -10944,6 +10956,7 @@ TC_ASSAULT_RADIUS    = 120.0    # m: where the column drives to once engaged (a 
 TC_TANK_GUN_RANGE    = 300.0    # m, tank -> object / tank -> tank
 TC_TANK_DPS          = 120.0    # damage per second per tank on a scene object (plane 40 mm ~ 500/hit)
 TC_TANK_VS_TANK_DPS  = 60.0     # per second per shooter on an enemy tank (1000 HP -> ~17 s duel)
+TC_TANK_VS_SOLDIER_DPS = 6.0    # v746f5: a tank's fire on enemy infantry holding a scene
 TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent setting
 TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
@@ -11044,7 +11057,17 @@ def tc_ai_destroy_object(room_id, obj, oi, by='', credit_pilot=None):
 
 def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
     """assist_pilot (v607f5): the pilot whose paratroops made the capture, when he is not the
-    trigger pilot - booked CAPTURE_ASSIST_BONUS."""
+    trigger pilot - booked CAPTURE_ASSIST_BONUS.
+    v746f5: a scene DEFENDED by live enemy ground units (tanks or soldiers inside its presence
+    radius) cannot change hands, whatever the damage - the attackers must clear them first."""
+    _dt, _ds = tc_scene_defenders(room_id, sidx, int(camp))
+    if _dt or _ds:
+        _k = (room_id, int(sidx))
+        if time.time() - (_TC_CONTEST_LOG.get(_k) or 0.0) > 30.0:
+            _TC_CONTEST_LOG[_k] = time.time()
+            log('TC', f'room {room_id}: scene {sidx} NOT captured by camp {camp} - still defended by '
+                      f'{len(_dt)} tank(s) and {len(_ds)} soldier(s)')
+        return False
     terrain = _probe_terrain_for_room(room_id)
     old = scene_camp(terrain, sidx)
     if old == camp:
@@ -11085,6 +11108,14 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
         broadcast_scene_snapshot_42(room_id, reason=f'(scene {sidx} captured by camp {camp})')
     except Exception:
         logx('TC', 'snapshot after capture failed')
+    # v749f5: trains belong to the camp that owns their line. A capture can strand an enemy train
+    # (no own station left on that road) or leave one standing in captured territory - check every
+    # train of the room; ensure_camp_trains then spawns for the new owner on the next tick.
+    try:
+        for _on in list(TRAINS):
+            train_check_territory(_on)
+    except Exception:
+        logx('TRAIN', 'territory check after capture failed')
     # v678f5: 'Your hit helps capture scene ...' goes to the pilots whose hits contributed, AT the
     # capture (user: after the capture, not during the attack) - once each.
     try:
@@ -11146,8 +11177,40 @@ def _tc_engagement_tick():
                 if math.hypot(t2['pos'][0] - t['pos'][0], t2['pos'][1] - t['pos'][1]) <= TC_TANK_GUN_RANGE:
                     t['_target_tank'] = o2
                     break
+        # --- attackers: CLEAR THE DEFENDERS FIRST (v746f5, user) - live enemy tanks and soldiers
+        # holding the scene. Nothing is shot at the buildings and no capture happens while any
+        # remain; each tank drives at the nearest one and engages it in gun range.
+        _def_t, _def_s = tc_scene_defenders(room_id, sidx, col['camp']) if purpose == 'attack' else ([], [])
+        if _def_t or _def_s:
+            for _o, t in members:
+                _cands = ([(o2, TANKS[o2]['pos']) for o2 in _def_t if o2 in TANKS and not TANKS[o2].get('dead')]
+                          + [(o3, SOLDIERS[o3]['pos']) for o3 in _def_s if o3 in SOLDIERS and not SOLDIERS[o3].get('dead')])
+                if not _cands:
+                    break
+                _tgt = min(_cands, key=lambda e: math.hypot(e[1][0] - t['pos'][0], e[1][1] - t['pos'][1]))
+                _d = math.hypot(_tgt[1][0] - t['pos'][0], _tgt[1][1] - t['pos'][1])
+                if _d <= TC_TANK_GUN_RANGE:
+                    t['goal'] = None
+                    if _tgt[0] in TANKS:
+                        t['_target_tank'] = _tgt[0]        # handled by the firing loop below
+                    else:
+                        sd2 = SOLDIERS.get(_tgt[0])
+                        if sd2 is not None:
+                            sd2['hp'] = sd2.get('hp', SOLDIER_HP) - TC_TANK_VS_SOLDIER_DPS
+                            t['_aim'] = (_tgt[1][0] - t['pos'][0], _tgt[1][1] - t['pos'][1])
+                            t['flags'] = t.get('flags', 0) | 0x04
+                            if sd2['hp'] <= 0:
+                                soldier_killed(_tgt[0], None, reason='(tank fire)',
+                                               ai_hunter=(PPT_CLASS_TANK, t['camp']))
+                else:
+                    t['goal'] = tank_clear_spot(terrain, _tgt[1][0], _tgt[1][1])
+            if now - col.get('_def_logged', 0.0) > 30.0:
+                col['_def_logged'] = now
+                log('TC', f'column {gid}: scene {sidx} defended by {len(_def_t)} tank(s) / {len(_def_s)} soldier(s) '
+                          f'- clearing them before the buildings')
         # --- attackers: shoot the scene's objects (valuable ones only; decorations are left alone) ---
-        objs = [e for e in tc_scene_objects(room_id, terrain, sidx) if e[4]] if purpose == 'attack' else []
+        objs = ([] if (_def_t or _def_s) else
+                [e for e in tc_scene_objects(room_id, terrain, sidx) if e[4]]) if purpose == 'attack' else []
         # v595f5 (same end behaviour as the infantry): once engaged, every tank picks its own
         # target (nearest valuable object not already claimed by a column-mate), drives to
         # TC_TANK_STAND_OFF short of it, stops and fires; when it dies it takes the next; with
@@ -11668,6 +11731,24 @@ def rail_stations(terrain):
                  ' '.join(f'r{r}:{[s for _n, s in v]}' for r, v in sorted(out.items())))
     return out
 
+def train_check_territory(onum):
+    """v749f5 (Taurus 09-18: a GE train sat at a US tank factory forever): a train belongs to the
+    camp that owns the stations it serves. When its line no longer has ANY own-camp station - the
+    territory changed hands - the train is stranded: remove it, and let ensure_camp_trains spawn a
+    fresh one for whoever owns the line now. Also removes a train sitting in captured territory."""
+    tr = TRAINS.get(onum)
+    if tr is None or tr.get('dead'):
+        return False
+    terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
+    own = [s for _ni, s in (rail_stations(terrain).get(tr['road']) or []) if scene_camp(terrain, s) == tr['camp']]
+    if own:
+        return False
+    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) has no own station left on road {tr["road"]} '
+                 f'- territory changed hands, removing it')
+    _TRAIN_LOST_AT.pop((tr['room'], tr['camp'], tr['road'], tr.get('start', 'rear')), None)
+    delete_train(onum, reason='(stranded - line lost)')
+    return True
+
 def _train_next_station(tr, rails, stations):
     """The next own-camp station ahead of the train in its direction (node index), or None."""
     terrain = tr['terrain']
@@ -11777,6 +11858,8 @@ def _train_ai_tick(onum, tr, rails, stations, now):
         if now < tr['stop_until']:
             return
         tr['stop_until'] = None
+        if train_check_territory(onum):      # v749f5: its line was captured - the train is gone
+            return
         nxt = _train_next_station(tr, rails, stations)
         if nxt is None and not road.get('loop'):
             if TRAIN_ALLOW_REVERSE:
@@ -11953,17 +12036,38 @@ def train_killed(onum, killer, reason='', ai_hunter=None):
                 send_stat_block_25(killer, reason='(train kill)')
         except Exception:
             logx('TRAIN', 'train kill credit failed')
+    # v747f5 (Taurus 09-17: 'blue line, no explosion - the train just despawned'): the client only
+    # wrecks a railcar whose bit is set in the update's destroyed mask; a plain delete removes the
+    # object silently. So mark EVERY car destroyed, stop the train and push one last state - the
+    # client blows up the loco and the wagons - and delete it TRAIN_WRECK_S later.
+    try:
+        _ncars = 1 + sum(int(c) for _cls, c in (tr.get('wagons') or []))
+        tr['mask'] = (1 << max(1, _ncars - 1)) - 1
+        tr['mps'] = 0.0
+        tr['state'] = TRAIN_STATE_STOPPED
+        train_broadcast_state(onum)
+        log('TRAIN', f'train 0x{onum:04x}: consist wrecked (mask 0x{tr["mask"]:x}, {_ncars} car(s)) - '
+                     f'removing in {TRAIN_WRECK_S:.0f}s')
+    except Exception:
+        logx('TRAIN', 'train wreck broadcast failed')
     entry = None
     if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
         entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
-    tr2 = TRAINS.pop(onum, None)
-    if tr2 is None:
-        return
-    raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(entry) if entry else struct.pack('<H', onum & 0xFFFF))
-    pkt = build_msg13(raw)
-    for p in get_sessions_in_room(tr2['room']):
-        if getattr(p, 'addr', None) in tr2['peers']:
-            _submit_send(send_rel, p, pkt, f'<- delete TRAIN 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0)
+    _room = tr['room']; _peers = set(tr.get('peers') or ())
+    # the delete carries the kill entry (the blue line) after the wreck time, exactly as a dead
+    # tank's does (tank_killed wrecks, then deletes TANK_WRECK_S later).
+
+    def _remove(_onum=onum, _room=_room, _peers=_peers, _entry=entry, _reason=reason):
+        time.sleep(TRAIN_WRECK_S)
+        TRAINS.pop(_onum, None)
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(_entry) if _entry else struct.pack('<H', _onum & 0xFFFF))
+        pkt = build_msg13(raw)
+        for p in get_sessions_in_room(_room):
+            if getattr(p, 'addr', None) in _peers:
+                _submit_send(send_rel, p, pkt, f'<- delete TRAIN 0x{_onum:04x}{" (kill entry)" if _entry else ""} {_reason}', to=3.0)
+    threading.Thread(target=_remove, daemon=True).start()
+
+TRAIN_WRECK_S = TANK_WRECK_S    # v747f5: the wrecked consist stays as long as a dead tank does (20 s)
 
 def _handle_train_hit(s, victim, attacker, dmg, car=0):
     """v625f5/v626f5: the client's report names the railcar (car 0 = loco, 1..N wagons in consist
@@ -12789,10 +12893,17 @@ MAP57_GROUND_ICONS = False   # v721f5: OFF until the map's train glyph / tactica
                              # the generic ground dots for trains were off the tracks and drew for trains the
                              # client does not hold (user). Peer planes still go out.
 
+MAP57_PLANE_ICONS  = False   # v750f5: OFF - the client draws peer planes itself from live telemetry; our
+                             # msg-57 cross sat at the last poll position (15-30 s old), so every remote
+                             # plane had a 'ghost' marker trailing a mile behind and jumping to catch up
+                             # (Flakmagic / Duran 09-18). The poll is still answered, with no records.
+
 def send_map_message_57(s, ox, oy, reason=''):
     items = room_map_items(s.current_room, s)
     if not (MAP57_GROUND_ICONS and room_has_economy(getattr(s, 'current_room', None))):
         items = [i for i in items if i[1] == MAP57_KIND_PLANE]
+    if not MAP57_PLANE_ICONS:
+        items = [i for i in items if i[1] != MAP57_KIND_PLANE]
     pkt, n = build_map_message_57(ox, oy, items)
     send_rel(s, pkt, f'<- MAP 57 x{n} {reason}', to=3.0)
     log('MAP57', f'{s.current_pilot}: msg 57 origin ({ox:.0f},{oy:.0f}) -> {n} icon(s) of {len(items)} {reason}')
@@ -13308,6 +13419,43 @@ def _tc_para_capture_tick():
         frac = trn_scene_damage_frac(rid, sidx)
         # --- soft-target fire under the infantry cap ---
         if objs and frac < SOLDIER_DAMAGE_CAP:
+            # v746f5 (user): the stick kills the scene's DEFENDERS - enemy soldiers first, then enemy
+            # tanks - before it touches anything else; a defended scene cannot be captured either
+            # (tc_capture_scene refuses while any live enemy ground unit holds it).
+            _dt2, _ds2 = tc_scene_defenders(rid, sidx, camp)
+            if _ds2 or _dt2:
+                for o in objs:
+                    sd = SOLDIERS.get(o)
+                    if sd is None or sd.get('dead'):
+                        continue
+                    _cd = ([(x, SOLDIERS[x]['pos']) for x in _ds2 if x in SOLDIERS and not SOLDIERS[x].get('dead')]
+                           + [(x, TANKS[x]['pos']) for x in _dt2 if x in TANKS and not TANKS[x].get('dead')])
+                    if not _cd:
+                        break
+                    _tg = min(_cd, key=lambda e: math.hypot(e[1][0] - sd['pos'][0], e[1][1] - sd['pos'][1]))
+                    _dd = math.hypot(_tg[1][0] - sd['pos'][0], _tg[1][1] - sd['pos'][1])
+                    if _dd <= SOLDIER_GUN_RANGE:
+                        sd['goal'] = None
+                        sd['_aim'] = (_tg[1][0] - sd['pos'][0], _tg[1][1] - sd['pos'][1])
+                        sd['state'] = SOLDIER_STATE_FIRE
+                        if _tg[0] in SOLDIERS:
+                            v2 = SOLDIERS[_tg[0]]
+                            v2['hp'] = v2.get('hp', SOLDIER_HP) - SOLDIER_VS_SOLDIER_DPS
+                            if v2['hp'] <= 0:
+                                soldier_killed(_tg[0], None, reason='(infantry fire)',
+                                               ai_hunter=(PPT_CLASS_SOLDIER, camp))
+                        else:
+                            v3 = TANKS[_tg[0]]
+                            v3['hp'] = v3.get('hp', tank_hp_max(v3)) - SOLDIER_VS_TANK_DPS
+                            if v3['hp'] <= 0 and not v3.get('dead'):
+                                tank_killed(_tg[0], None, reason='(infantry fire)')
+                    else:
+                        sd['goal'] = (_tg[1][0], _tg[1][1]); sd['state'] = SOLDIER_STATE_WALK
+                if now - st.get('_def_logged', 0.0) > 30.0:
+                    st['_def_logged'] = now
+                    log('PARA', f'stick {sid}: scene {sidx} defended by {len(_dt2)} tank(s) / {len(_ds2)} soldier(s) '
+                                f'- clearing them first')
+                continue
             _all = tc_scene_objects(rid, terrain, sidx)
             # v736f5: the scene's DEFENCES (AA / flak batteries, towers, bunkers, MG posts) are what
             # kill the stick, and they were excluded from its target list by the SOLDIER_HARD_VALUE
@@ -18936,6 +19084,26 @@ def obj_repair_due(room_id=None):
                     continue
             due.append((rid, obj))
     return due
+
+_TC_CONTEST_LOG = {}       # v746f5: rate limit for the 'still defended' line
+
+def tc_scene_defenders(room_id, sidx, attacker_camp):
+    """v746f5: the enemy GROUND UNITS holding a scene - live tanks and soldiers of any camp other
+    than attacker_camp within the scene's presence radius. A scene cannot change hands while any
+    remain (user 09-17), and both tanks and paratroops kill them before touching the buildings.
+    Returns (tanks, soldiers) as lists of ONumbers."""
+    terrain = _probe_terrain_for_room(room_id)
+    txy = tc_scene_xy(terrain, sidx)
+    if not txy:
+        return [], []
+    pr = tc_presence_radius(terrain, sidx)
+    _t = [o for o, t in TANKS.items()
+          if t['room'] == room_id and not t.get('dead') and t['camp'] != attacker_camp
+          and math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= pr]
+    _s = [o for o, sd in SOLDIERS.items()
+          if sd['room'] == room_id and not sd.get('dead') and sd['camp'] != attacker_camp
+          and math.hypot(sd['pos'][0] - txy[0], sd['pos'][1] - txy[1]) <= pr]
+    return _t, _s
 
 def tc_scene_contested(room_id, sidx):
     """True when a live tank of another camp sits within TC_CAPTURE_RADIUS of the scene.
