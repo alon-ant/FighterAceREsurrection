@@ -5821,6 +5821,8 @@ def send_lobby_news(s, text=None, form=None, reason=''):
 LOBBY_NEWS_ACK_S = 0.0       # v745f5: no ACK wait at all - each line is transmitted and handed to the
                              # RELKEEP immediately, so the whole pane lands in one RTT instead of one
                              # per line (0.05 s x 16 lines was still ~1-2 s on a remote link).
+LOBBY_NEWS_LINE_GAP_S = 0.08 # v762f5: small gap between news lines so a long news does not swamp the
+                             # reliable channel and stall cargo / other replies
 
 LOBBY_NEWS_MAX_LINE  = 120
 LOBBY_NEWS_MAX_LINES = 200
