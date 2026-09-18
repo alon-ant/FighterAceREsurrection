@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v750f5'
+VERSION = 'v754f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10764,7 +10764,7 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         return None
     loaded = 0
     for _i in range(n):
-        r = camp_supply_take(room_id, terrain, camp, TC_TANK_AMMO_KG, TC_TANK_FUEL_KG)
+        r = camp_supply_take(room_id, terrain, camp, TC_TANK_AMMO_KG, TC_TANK_FUEL_KG, prefer_xy=(fx, fy))   # v753f5: the factory's own stores
         if r is None:
             loaded = n; break                       # no pool table -> arcade: everyone rolls
         got_a, got_f = r[0], r[1]
@@ -11486,21 +11486,36 @@ def _scene_store_take(room_id, terrain, sidx, metal, fuel, ammo):
     return tuple(got)
 
 def cargo_repair_scene(room_id, sidx, metal_kg, reason=''):
-    """Spend metal on the scene's destroyed objects, cheapest first. Returns (objs repaired, kg spent)."""
+    """Spend metal on the scene's destroyed objects, cheapest first. Returns (objs repaired, kg spent).
+    v754f5: the metal is DEDUCTED from the scene's store (it used to stock the scene AND repair with
+    the same kilograms), and the same call now runs after a TRAIN delivery, so unloading metal
+    anywhere hastens that scene's repair - only what the store can pay for is rebuilt."""
     if metal_kg <= 0:
         return [], 0
-    dead = sorted((o for (r, o) in _SCENE36_DESTROYED if r == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
+    terrain = _probe_terrain_for_room(room_id)
+    r = supply_state(room_id, terrain, sidx)
+    _avail = int(r[0].get('metal', 0)) if (r and r[0] is not None) else 0
+    budget = min(float(metal_kg), float(_avail))
+    if budget <= 0:
+        return [], 0
+    dead = sorted((o for (r2, o) in _SCENE36_DESTROYED if r2 == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
     todo, spent = [], 0
     for o in dead:
         oi = trn_obj_info(room_id, o)
         if not oi or oi.get('scene') != int(sidx):
             continue
         cost = max(50.0, float(oi.get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE)
-        if spent + cost > metal_kg:
+        if spent + cost > budget:
             continue
         todo.append(o); spent += cost
-    done = repair_objects(room_id, todo, reason=f'(cargo repair {reason})') if todo else []
-    return done, int(spent) if done else 0
+    done = repair_objects(room_id, todo, reason=f'(metal repair {reason})') if todo else []
+    if done:
+        _paid = int(sum(max(50.0, float((trn_obj_info(room_id, o) or {}).get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE) for o in done))
+        if r and r[0] is not None:
+            with _SUPPLY_LOCK:
+                r[0]['metal'] = max(0, int(r[0].get('metal', 0)) - _paid)
+        return done, _paid
+    return [], 0
 
 def _handle_cargo_request_106(s, pl):
     if not CARGO_MODEL:
@@ -11824,6 +11839,14 @@ def _train_stop_at(tr, onum, station):
     terrain = tr['terrain']
     txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
     moved = train_exchange(tr, sidx)
+    # v754f5: metal delivered by train repairs the scene the same way a cargo drop does
+    if moved and moved.get('metal', 0) > 0:
+        try:
+            _rep, _sp = cargo_repair_scene(tr['room'], sidx, moved['metal'], reason=f'train 0x{onum:04x}')
+            if _rep:
+                log('TRAIN', f'train 0x{onum:04x}: {len(_rep)} object(s) at scene {sidx} repaired with {_sp} kg of delivered metal')
+        except Exception:
+            logx('TRAIN', 'train metal repair failed')
     # v699f5 [TRAIN CHAT PER TEAM]: every stop is reported to the train's OWN camp only (tc_say
     # camp=): what was loaded / unloaded, or 'nothing to exchange' - GB pilots see GB's trains and
     # nobody else's. The train is named by its start slot (rear / front / mid) and the stop by the
@@ -12253,6 +12276,90 @@ def delete_train(onum, reason=''):
     log('TRAIN', f'room {tr["room"]}: delete train 0x{onum:04x} -> {n} session(s) {reason}')
     return n
 
+# --- v751f5 RAIL BRIDGES ----------------------------------------------------------------------
+# A destroyed bridge on a rail line stops the trains: a train that would cross it waits before it
+# (stopped, keep-alive only) until the object is repaired, then rolls on. Crossings are found once
+# per terrain: every goi object whose class name says 'bridge' within RAIL_BRIDGE_NEAR_M of a road
+# polyline, mapped to (road, cumulative metres along the road).
+RAIL_BRIDGE_NEAR_M = 80.0
+RAIL_BRIDGE_STOP_M = 60.0      # the train halts this far short of the bridge
+_RAIL_BRIDGES = {}             # terrain -> {road: [(cum_m, obj, name), ...]}
+
+def rail_bridges(terrain):
+    t = _tbase(terrain)
+    if t in _RAIL_BRIDGES:
+        return _RAIL_BRIDGES[t]
+    out = {}
+    rails = rails_for(t)
+    tt = trn_tables(t) or {}
+    goi = tt.get('goi') or []
+    if not rails or not goi:
+        return out
+    got = tt.get('got') or []
+    for idx, o in enumerate(goi):
+        ty = got[o['type']] if 0 <= o.get('type', -1) < len(got) else {}
+        nm = (ty.get('name') or '').lower()
+        if 'bridge' not in nm:
+            continue
+        ox, oy = float(o['x']), float(o['y'])
+        for r in rails['roads']:
+            nds = r['nodes']
+            best = None
+            for i in range(len(nds) - 1):
+                ax, ay, bx, by = nds[i][0], nds[i][1], nds[i + 1][0], nds[i + 1][1]
+                vx, vy = bx - ax, by - ay
+                L2 = vx * vx + vy * vy
+                u = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((ox - ax) * vx + (oy - ay) * vy) / L2))
+                px, py = ax + u * vx, ay + u * vy
+                d = math.hypot(ox - px, oy - py)
+                if d <= RAIL_BRIDGE_NEAR_M and (best is None or d < best[0]):
+                    best = (d, nds[i][3] + u * math.hypot(vx, vy))
+            if best is not None:
+                out.setdefault(int(r['index']), []).append((best[1], int(o.get('i', idx)), nm))
+    for r in out:
+        out[r].sort()
+    _RAIL_BRIDGES[t] = out
+    n = sum(len(v) for v in out.values())
+    if n:
+        log('TRAIN', f'terrain {t}: {n} rail bridge crossing(s): ' +
+                     ' '.join(f'r{r}:{[(int(c), o) for c, o, _n in v]}' for r, v in sorted(out.items())))
+    return out
+
+RAIL_BRIDGE_SPAN_M = 60.0      # v752f5: a train within this of a bridge's crossing point is ON it
+
+def trains_on_bridge_destroyed(room_id, obj, killer=None):
+    """v752f5: the bridge object `obj` was just destroyed - any train of the room whose position
+    is within RAIL_BRIDGE_SPAN_M of that crossing goes down with it, credited to `killer`."""
+    for onum, tr in list(TRAINS.items()):
+        if tr.get('room') != room_id or tr.get('dead'):
+            continue
+        terrain = tr.get('terrain') or _probe_terrain_for_room(room_id)
+        rails = rails_for(terrain)
+        if not rails:
+            continue
+        for cum, bobj, _nm in rail_bridges(terrain).get(tr['road'], []):
+            if bobj != int(obj):
+                continue
+            _cum = rails['roads'][tr['road']]['nodes'][tr['node']][3] + tr['dist']
+            if abs(_cum - cum) <= RAIL_BRIDGE_SPAN_M:
+                log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) was ON bridge obj {obj} when it fell - destroyed'
+                             + (f' by {killer.current_pilot}' if killer is not None and getattr(killer, 'current_pilot', None) else ''))
+                try:
+                    tc_say(room_id, f'AI: {tc_camp_tag(tr["camp"])} train lost with the bridge')
+                except Exception:
+                    pass
+                train_killed(onum, killer, reason='(bridge collapsed under it)')
+
+def train_blocked_by_bridge(tr, cum_now, cum_next):
+    """The (cum_m, obj) of a DESTROYED bridge the train would reach between cum_now and cum_next
+    (forward), or None."""
+    for cum, obj, _nm in rail_bridges(tr.get('terrain') or _probe_terrain_for_room(tr['room'])).get(tr['road'], []):
+        if (tr['room'], obj) in _SCENE36_DESTROYED and cum_now < cum - RAIL_BRIDGE_STOP_M <= cum_next:
+            return cum, obj
+        if (tr['room'], obj) in _SCENE36_DESTROYED and cum - RAIL_BRIDGE_STOP_M <= cum_now < cum + 10.0:
+            return cum, obj
+    return None
+
 def _trains_tick(dt):
     """Advance every rolling train along its road (both directions); keep-alive when stopped;
     supply AI per train."""
@@ -12260,6 +12367,11 @@ def _trains_tick(dt):
     for onum, tr in list(TRAINS.items()):
         if not TRAIN_ALLOW_REVERSE and tr.get('dir'):
             tr['dir'] = 0                  # v725f5: never run a NetTrain backwards (client rolls forward)
+        # v751f5: a train halted at a bridge rolls again once the bridge is repaired
+        if tr.get('_bridge_wait') and (tr['room'], tr['_bridge_wait']) not in _SCENE36_DESTROYED and tr['mps'] <= 0:
+            tr['mps'] = tr.get('_mps_before_bridge') or TRAIN_CRUISE_MPS
+            tr['_bridge_wait'] = None
+            log('TRAIN', f'train 0x{onum:04x}: bridge repaired - rolling on')
         terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
         rails = rails_for(terrain)
         if not rails:
@@ -12268,6 +12380,31 @@ def _trains_tick(dt):
         nn = len(road['nodes']) - 1
         if tr['mps'] > 0:
             step = tr['mps'] * dt
+            # v751f5: a DESTROYED bridge ahead on this road stops the train short of it; it waits
+            # (keep-alive only) until the object is repaired, then rolls on. Cumulative position =
+            # node cum + dist; the halt point is RAIL_BRIDGE_STOP_M before the crossing.
+            _cum_now = road['nodes'][tr['node']][3] + tr['dist']
+            _blk = train_blocked_by_bridge(tr, _cum_now, _cum_now + step)
+            if _blk is not None:
+                _hold = max(0.0, (_blk[0] - RAIL_BRIDGE_STOP_M) - _cum_now)
+                if _hold > 0.5:
+                    step = min(step, _hold)          # roll up to the halt point this tick
+                else:
+                    if not tr.get('_bridge_wait'):
+                        tr['_bridge_wait'] = _blk[1]
+                        tr['_mps_before_bridge'] = tr['mps']
+                        log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) waiting before destroyed bridge '
+                                     f'obj {_blk[1]} on road {tr["road"]} ({_blk[0]:.0f} m)')
+                        try:
+                            tc_say(tr['room'], f'AI: {tc_camp_tag(tr["camp"])} train halted at a destroyed bridge', camp=tr['camp'])
+                        except Exception:
+                            pass
+                    tr['mps'] = 0.0
+                    if now - tr.get('last_sent', 0.0) >= TANK_IDLE_S:
+                        train_broadcast_state(onum)
+                    continue
+            elif tr.get('_bridge_wait'):
+                tr['_bridge_wait'] = None
             if tr.get('dir', 0) == 0:
                 tr['dist'] += step
                 while True:
@@ -18884,6 +19021,13 @@ def broadcast_scene_36(room_id, records, reason='', force=False, killer=None):
             _SCENE36_DESTROYED.add((room_id, _i))
             _OBJ_DEAD_AT[(room_id, _i)] = _now        # v556f5: repair clock starts here
             _OBJ_ARMED_AT[(room_id, _i)] = _now       # v557f5: Destroyer floor clock
+    # v752f5: a train ON a bridge that just went down goes with it (cyan kill line to the pilot who
+    # dropped the bridge, exactly like a direct train kill)
+    try:
+        for _i, _c, _p in records:
+            trains_on_bridge_destroyed(room_id, _i, killer if killer is not _TC_AI_KILLER else None)
+    except Exception:
+        logx('TRAIN', 'bridge-collapse train check failed')
     pkt = build_scene_destroy_36(records)
     sess = get_sessions_in_room(room_id)
     _desc = ', '.join(f'obj={i} camp=0x{c:02x} score={p:g}' for i, c, p in records)
@@ -21029,6 +21173,14 @@ def supply_take(room_id, terrain, scene_id, ammo_kg, fuel_kg, allow_default=True
 # terrains with no camp table (SCENE_CAMP_BY_TERRAIN), and the raw AF ident stays in the grant
 # log as AFRAW for the eventual start-place mapping work.
 SUPPLY_CAMP_POOL = True
+SUPPLY_LOCAL_ONLY = True          # v753f5 (user): a pilot draws ONLY from the base he is at - within
+                                  # SUPPLY_LOCAL_RADIUS_M of his position (fallback: the nearest own
+                                  # scene). A field with its fuel storage destroyed cannot fuel him,
+                                  # whatever the rest of the nation holds. Columns / cargo use the
+                                  # same rule with their own position. prefer_xy=None (no position)
+                                  # keeps the old camp-wide draw.
+SUPPLY_LOCAL_RADIUS_M = 3000.0
+SPAWN59_POS_WAIT_S    = 1.5       # v753f5: how long the spawn grant waits for the pilot's first position
 
 def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg, prefer_xy=None):
     """v424f5: draw up to ammo_kg / fuel_kg from every profiled scene the camp owns, airfield-
@@ -21051,6 +21203,9 @@ def camp_supply_take(room_id, terrain, camp, ammo_kg, fuel_kg, prefer_xy=None):
             xy = tc_scene_xy(terrain, sidx)
             return math.hypot(xy[0] - prefer_xy[0], xy[1] - prefer_xy[1]) if xy else 1e12
         own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, _dist(sidx)))
+        if SUPPLY_LOCAL_ONLY:
+            _near = [s for s in own if _dist(s) <= SUPPLY_LOCAL_RADIUS_M]
+            own = _near if _near else own[:1]          # the base he is at, else the nearest one only
     else:
         own.sort(key=lambda sidx: (0 if _is_af(sidx) else 1, sidx))
     need = {'ammo': ammo_kg, 'fuel': fuel_kg}
@@ -23033,6 +23188,13 @@ def _grant_spawn_supply(s):
     if SPAWN59_USE_CLIENT_WEIGHTS and _q59 and (_q59['fuel'] > 0 or _q59['ammo'] > 0):
         _ask_f = _q59['fuel'] if _q59['fuel'] > 0 else _ask_f                 # v612f5: the plane's own weights
         _ask_a = _q59['ammo']
+    # v753f5: the spawn grant must debit the field the pilot spawned AT, which needs his position;
+    # at spawn time _pos_xy is not yet known (cleared at the grant). Wait briefly for the first
+    # telemetry frame - it arrives within a second of ServerConfirm - before drawing.
+    if SUPPLY_LOCAL_ONLY and s.__dict__.get('_pos_xy') is None:
+        _t0 = time.time()
+        while time.time() - _t0 < SPAWN59_POS_WAIT_S and s.__dict__.get('_pos_xy') is None:
+            time.sleep(0.1)
     _draw = _tc_pool_draw(s, _ask_a, _ask_f)
     if _draw is None:
         # unmapped terrain: serve arcade-style rather than deny (same rationale as the poll)
