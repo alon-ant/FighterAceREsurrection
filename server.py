@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v754f5'
+VERSION = 'v757f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -21007,11 +21007,25 @@ def scene_profile_per_scene(terrain, scene_id):
     cache = globals().setdefault('_SCENE_PROFILE_CACHE', {})
     p = cache.get(key)
     if p is None:
-        p = {'caps': {k: int(sc['caps'].get(k, 0)) for k in ('ammo', 'fuel', 'metal')},
+        # v756f5 (user): FORWARD and MID-FIELD airfields hold 10x their table storage. With the field
+        # the only source of a pilot's fuel/ammo (v753), one heavy bomber emptied a front airfield
+        # (online 09-18 14:45: a Lancaster's arm took the last 1,583 kg of fuel at 68,AX). Bomber
+        # airfields and the production scenes keep their table values.
+        _st = (scene_type_for(terrain, scene_id) or '').lower()
+        _mult = 1.0
+        for _k, _m in SCENE_CAP_MULT_BY_TYPE.items():
+            if _k in _st:
+                _mult = float(_m); break
+        p = {'caps': {k: int(int(sc['caps'].get(k, 0)) * _mult) for k in ('ammo', 'fuel', 'metal')},
              'rates': {k: int(sc.get('rates', {}).get(k, 0)) for k in ('ammo', 'fuel', 'metal')},
-             'unit_producers': list(sc.get('unit_producers') or []), 'per_scene': True}
+             'unit_producers': list(sc.get('unit_producers') or []), 'per_scene': True,
+             'cap_mult': _mult}
         cache[key] = p
     return p
+
+# type-name substring -> storage capacity multiplier (first match wins). v757f5: ALL airfields
+# 10x - bomber bases too (user).
+SCENE_CAP_MULT_BY_TYPE = {'airfield': 10.0}
 
 def scene_profile(terrain, scene_id, allow_default=False):
     """{'caps':{ammo,fuel,metal}, 'rates':{...}} for a scene, or None if unknown/no economy.
@@ -21649,9 +21663,10 @@ def supply_on_building_destroyed(room_id, scene_id, obj_idx):
         return None
     kind = b.get('kind')
     lost = {}
+    _prof = scene_profile(trn, scene_id) or {}          # v757f5: the CAPPED profile (10x on airfields)
     if kind in (0, 1):
-        r = b.get('resource'); vol = int(b.get('max', 0) or 0)
-        cap = int((sc.get('caps') or {}).get(r, 0) or 0)
+        r = b.get('resource'); vol = int((b.get('max', 0) or 0) * float(_prof.get('cap_mult', 1.0)))   # scaled with the scene
+        cap = int((_prof.get('caps') or {}).get(r, 0) or 0)
         st = _SUPPLY.get((room_id, int(scene_id)))
         if r in ('metal', 'fuel', 'ammo') and cap > 0 and vol > 0:
             with _SUPPLY_LOCK:
@@ -22845,6 +22860,30 @@ def _tc_pool_draw(s, ammo_ask, fuel_ask):
     return _got_a, _got_f, _pk2['ammo'], _pk2['fuel'], f'scene AFRAW={_af}'
 
 
+def _supply_shortage_line(s, got_f, got_a, rem_f, rem_a):
+    """v755f5: say WHY a grant came up short. The client's own narration on a zero grant is
+    'insufficient aircraft units...' (misleading - the 09-18 reports read it as a bug); the real
+    reason is the FIELD's stores, which since v753 are the only source. One line per pilot per
+    SUPPLY_SHORTAGE_LINE_S."""
+    try:
+        if got_f > 0 and got_a > 0:
+            return
+        _k = s.__dict__.get('_shortage_line_at', 0.0)
+        if time.time() - _k < SUPPLY_SHORTAGE_LINE_S:
+            return
+        s.__dict__['_shortage_line_at'] = time.time()
+        _what = []
+        if got_f <= 0:
+            _what.append('fuel')
+        if got_a <= 0:
+            _what.append('ammunition')
+        tc_say(s.current_room, f'AI: This field has no {" or ".join(_what)} in store '
+                               f'(fuel {int(rem_f)} kg, ammo {int(rem_a)} kg) - supply it by train or cargo drop', to=s)
+    except Exception:
+        pass
+
+SUPPLY_SHORTAGE_LINE_S = 60.0
+
 def _grant_auto_resupply(s, pos, explicit=False):
     """v425f5: THE EXPLICIT TWO-LEVEL SUPPLY POLICY (the refactor's level 1 / level 2).
     Mode = scoring_mode_for_room(): 'tc' -> economy; anything else -> arcade. Flag semantics
@@ -22919,6 +22958,7 @@ def _grant_auto_resupply(s, pos, explicit=False):
     send_supply_grant_60(
         s, flags=_flags, amount=amt, amount2=amt2,
         reason=f'(auto-resupply TC {_tier}: {s.current_pilot} parked, {_src})')
+    _supply_shortage_line(s, _got_f, _got_a, _rem_f, _rem_a)      # v755f5
     log('RESUPPLY', f'{s.current_pilot} ground-stop pos={pos} -> TC {_tier} [{_src}: '
                     f'+fuel {_got_f}kg +ammo {_got_a}kg | pool now ammo {_rem_a} '
                     f'fuel {_rem_f} kg | flags=0x{_flags:02x} AFRAW={_af}]')
@@ -23234,6 +23274,7 @@ def _grant_spawn_supply(s):
                     f'ammo {"FULL ARM" if _ammo_ok else f"LIMITED {_got_a}kg"} '
                     f'(ceiling {_ask_a}) fuel {"loadout" if _fuel_ok else "LIMITED"} '
                     f'debit a={_got_a} f={_got_f} kg [{_src} now ammo {_rem_a} fuel {_rem_f} kg]{_unit_note}')
+    _supply_shortage_line(s, _got_f if not _fuel_ok else 1, _got_a if not _ammo_ok else 1, _rem_f, _rem_a)   # v755f5
 
 def _handle_ask_resources_59(s, pl):
     """v437f5: reply to the client's spawn-time msg-59 with an immediate msg-60 grant."""
