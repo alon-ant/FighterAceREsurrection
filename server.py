@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v761f5'
+VERSION = 'v767f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2874,6 +2874,42 @@ def apply_buildings_repair_rate(d, rate=None):
 CRATERS_VANISH_MIN = 10
 CRATERS_VANISH_MAX = 40
 
+CARGO_PERCENT_PATCH   = False   # v764f5: OFF - the v763 locator matched inside the PLANE block (@+993,
+                                # +1099 on 1196-byte blobs; the real TC byte is at +531). Re-enable only
+                                # with an exact, dump-verified locator. Cargo loaded fine before it.
+CARGO_PERCENT_DEFAULT = 100
+
+def apply_cargo_percent(d, pct=None):
+    """v763f5: set [TC] CargoPercent in a DECOMPRESSED GAME_DEF. The templates ship 0, and the
+    client refuses to load ANY cargo with it 0 ('There is no cargo to load your plane') whatever
+    the base holds (messages49 09-18 21:52). Byte-packed TC block, read from room 49's blob:
+      f32 SupplyResourceRadius | f32 ParachuteResourceRadius | u8 x3 link radii | u8 GetFuelWhenLimFuel
+      | u8 GetAmmoWhenLimAmmo | u8 CARGOPERCENT | f32 EnemyMapPointerHeight | u8 RadarType ...
+    Anchor: the ParachuteResourceRadius float (500..5000 m) preceded by a 1..50 km float and followed
+    by the byte run; CargoPercent = anchor + 9. Returns (offset, old) or None; length-preserving."""
+    pct = CARGO_PERCENT_DEFAULT if pct is None else max(0, min(100, int(pct)))
+    try:
+        n = len(d)
+        for i in range(4, n - 20):
+            supp = struct.unpack_from('<f', d, i - 4)[0]
+            para = struct.unpack_from('<f', d, i)[0]
+            if not (500.0 <= para <= 5000.0 and 1000.0 <= supp <= 50000.0):
+                continue
+            off = i + 9
+            _gf, _ga = d[off - 2], d[off - 1]
+            _h = struct.unpack_from('<f', d, off + 1)[0]
+            if not (_gf <= 100 and _ga <= 100 and d[off] <= 100 and 0.0 <= _h <= 2000.0
+                    and all(v <= 3 for v in d[off + 5:off + 9])):
+                continue
+            old = d[off]
+            if old == pct:
+                return None
+            d[off] = pct
+            return off, old
+    except Exception:
+        pass
+    return None
+
 SHOW_GROUND_OBJECTS_DEFAULT = True
 
 def apply_show_ground_objects(d, on=None):
@@ -3380,6 +3416,15 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
         log('MAP57', f'ShowGroundObjects @+{_sg[0]}: {_sg[1]} -> {1 if _sgo else 0}')
     else:
         log('MAP57', f'ShowGroundObjects: not located or already {1 if _sgo else 0}; left as-is')
+    # v763f5 CARGO PERCENT: 0 in every template = the client will not load cargo at all
+    if CARGO_PERCENT_PATCH:
+        _cp = (arena_settings or {}).get('cargo_percent')
+        _cp = CARGO_PERCENT_DEFAULT if _cp in (None, '') else int(_cp)
+        _cr2 = apply_cargo_percent(d, _cp)
+        if _cr2:
+            log('CARGO', f'CargoPercent @+{_cr2[0]}: {_cr2[1]} -> {_cp}')
+        else:
+            log('CARGO', f'CargoPercent: not located or already {_cp}; left as-is')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -5810,8 +5855,11 @@ def send_lobby_news(s, text=None, form=None, reason=''):
     n = len(_lines) + (1 if _wel else 0)
 
     def _push(_s=s, _ls=list(_lines), _w=_wel):
+        # v767f5: the lines go UNRELIABLE, back-to-back - they must never occupy the reliable channel
+        # (user). A lost line is a missing line, nothing worse; the welcome is the one reliable
+        # packet, sent last.
         for _l in _ls:
-            send_rel(_s, build_lobby_news_202(_l, 11), '<- LOBBY NEWS 202 line', to=LOBBY_NEWS_ACK_S)
+            send_unrel(_s, build_lobby_news_202(_l, 11), '<- LOBBY NEWS 202 line')
         if _w:
             send_rel(_s, build_lobby_news_202(_w, 10), '<- LOBBY WELCOME 202 (pane 0)', to=LOBBY_NEWS_ACK_S)
     threading.Thread(target=_push, daemon=True).start()
@@ -5821,8 +5869,8 @@ def send_lobby_news(s, text=None, form=None, reason=''):
 LOBBY_NEWS_ACK_S = 0.0       # v745f5: no ACK wait at all - each line is transmitted and handed to the
                              # RELKEEP immediately, so the whole pane lands in one RTT instead of one
                              # per line (0.05 s x 16 lines was still ~1-2 s on a remote link).
-LOBBY_NEWS_LINE_GAP_S = 0.08 # v762f5: small gap between news lines so a long news does not swamp the
-                             # reliable channel and stall cargo / other replies
+LOBBY_NEWS_LINE_GAP_S = 0.02 # v766f5: 80 -> 20 ms between lines (32 lines took ~2.6 s; now ~0.6 s) -
+                             # still no burst that buries other replies
 
 LOBBY_NEWS_MAX_LINE  = 120
 LOBBY_NEWS_MAX_LINES = 200
@@ -11565,9 +11613,20 @@ def _handle_cargo_request_106(s, pl):
                 tc_say(rid, f'AI: {s.current_pilot} delivered {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}'
                             + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
+        if pickup:
+            # v765f5 [107 CONTRACT, FUN_00559790 read 09-19]: for a PICK-UP the answer carries the
+            # amounts GIVEN (the client loads the plane with exactly these; all-equal-to-request ->
+            # 'cargo loaded', all zero -> 'There is no cargo to load your plane', less -> 'only N').
+            # Field order on the wire is [ident][FUEL][METAL][AMMO]. v606 sent the shortfall in
+            # metal/fuel/ammo order - zeros for a full load, i.e. 'no cargo' on every successful load.
+            _f1, _f2, _f3 = gf, gm, ga
+        else:
+            # DROP: zeros = all delivered, negative = not delivered (v609 contract, unchanged)
+            _f1, _f2, _f3 = -short[1], -short[0], -short[2]
         pkt = build_ingame_pkt(bytes([MSG_CARGO_ANSWER_107]) + struct.pack('<Hhhh', ident,
-                               max(-32768, min(32767, short[0])), max(-32768, min(32767, short[1])), max(-32768, min(32767, short[2]))))
-        _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 ident={ident} short m{short[0]}/f{short[1]}/a{short[2]}', to=3.0)
+                               max(-32768, min(32767, _f1)), max(-32768, min(32767, _f2)), max(-32768, min(32767, _f3))))
+        # v764f5: reliable, via the pool (never block the RX thread)
+        _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 ident={ident} f{_f1}/m{_f2}/a{_f3}', to=3.0)
     except Exception:
         logx('CARGO', 'msg-106 handling failed')
 
