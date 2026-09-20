@@ -46,6 +46,38 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-20 (e): v784f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v784f5.py'. (Previous: v781f5.)
+
+v782f5-v784f5 [ONUMBER COLLISION CTD, MSG-36 SCORE FIELD, DISCONNECT = CRASH] (09-20)
+    * v782 THE !Objects[N] CTDs (Starfighter, Taurus): the object-number ring reserved planes and
+      chutes but never the live AI objects; once it wrapped in a long session a PLANE was issued
+      a live TRAIN's number (13:54:41 Dwing's plane as 0x019d) and the client asserted on the
+      double create. Every live tank / soldier / train is reserved, deleted AI numbers quarantined
+      for OBJ_HISTORY_GRACE_SEC, the recycle pool checked too. Also a candidate for the later
+      'vanished train / tank in the wrong place' reports.
+    * v783 MSG-36 f32 = the pilot's NEW CATEGORY TOTAL, not the object's value: FUN_004f9d90
+      STORES it as the local bomber (+0x58) / fighter (+0x54) score. Sending 150 made the
+      client's local total garbage ('Score:-24845' for Taurus while the server booked +150 /
+      +300 / +450 correctly). Points are booked first, then the 36 goes with the new total.
+    * v784 DISCONNECT WHILE FLYING = CRASH (user: pilots force-closed the client when about to be
+      shot down, keeping their aces): any non-msg-3 exit of an AIRBORNE pilot (idle reap, kick,
+      reap, timeout) is booked as a death - the latched last hitter gets the kill, else a crash;
+      plane + pilot lost, aces reset, AI line to the room. Parked (resupplied < 30 s) = no charge.
+    * Online was on v767 at the time of these reports: the news 'Wrong char' flood (v768/769
+      fix) and the CargoPercent / cargo-slot work were not deployed yet.
+
+==============================================================================
+*** BANKED 2026-09-20 (d): v781f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v781f5.py'. (Previous: v780f5.)
+
+v781f5 [CHUTE KILL PENALTY]  Shooting a pilot under his parachute PAID the shooter +50 since v513
+    (PILOT_KILL_SCORE; the ACWIKI 'Kill Player Parachute' is -500). Now -10,000 (user) on both
+    chute-kill paths (client-reported and server-decided), no kill for the shooter, the victim's
+    pilot loss booked as before, an AI line to the room naming the shooter and the penalty. The
+    rank multiplier does not scale it.
+
+==============================================================================
 *** BANKED 2026-09-20 (c): v780f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v780f5.py'. (Previous: v769f5.)
 

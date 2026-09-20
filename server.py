@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v780f5'
+VERSION = 'v784f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8642,7 +8642,32 @@ def _obj_numbers_in_use():
                     used.add(num)
     except Exception:
         pass
+    # v782f5 [ONUMBER COLLISION -> !Objects[N] CTD]: the AI objects draw from the SAME ring, but
+    # this set only counted planes and chutes - once the ring wrapped, a plane was issued a live
+    # train's number (online 09-20 13:54:41: Dwing's plane as 0x019d while train 0x019d was
+    # alive -> assert on Starfighter; Taurus at 0x01a9 the same). Every live tank / soldier /
+    # train, and every recently deleted AI number (a peer may still hold it), is reserved too.
+    try:
+        used.update(TANKS.keys()); used.update(SOLDIERS.keys()); used.update(TRAINS.keys())
+        _now_m = time.monotonic()
+        for _n, _t in list(_AI_ONUM_QUARANTINE.items()):
+            if _now_m - _t <= OBJ_HISTORY_GRACE_SEC:
+                used.add(_n)
+            else:
+                _AI_ONUM_QUARANTINE.pop(_n, None)
+    except Exception:
+        pass
     return used
+
+_AI_ONUM_QUARANTINE = {}     # v782f5: deleted AI object number -> monotonic time (kept out of the ring for a grace period)
+
+def ai_onum_released(n):
+    """v782f5: call when an AI object (tank / soldier / train) is removed - its number stays out
+    of circulation for OBJ_HISTORY_GRACE_SEC."""
+    try:
+        _AI_ONUM_QUARANTINE[int(n)] = time.monotonic()
+    except Exception:
+        pass
 
 def next_obj_number():
     global _obj_num_next
@@ -8650,7 +8675,7 @@ def next_obj_number():
     with _obj_num_lock:
         if RECYCLE_OBJ_NUMBERS and _obj_num_free:
             n, freed_at = _obj_num_free[0]
-            if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC:
+            if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC and n not in used:   # v782f5: never a live AI number
                 _obj_num_free.pop(0)
                 return n
         for _ in range(OBJ_NUMBER_MAX - 0x0100 + 1):
@@ -10307,6 +10332,7 @@ def delete_tank(onum, reason='', entry=None):
     (cyan + kill sound on the hunter's own client, plain line elsewhere) and, for object type
     3 = tank, FUN_004a02a0 = the tank explosion. Bare (2-byte) = silent removal."""
     t = TANKS.pop(onum, None)
+    ai_onum_released(onum)                                   # v782f5
     if t is None:
         return 0
     if entry is not None:
@@ -10580,6 +10606,7 @@ def soldier_killed(onum, killer, reason='', ai_hunter=None):
         except Exception:
             pass
     sd2 = SOLDIERS.pop(onum, None)
+    ai_onum_released(onum)                                   # v782f5
     if sd2 is None:
         return
     _SOLDIER_GONE[onum] = (time.time(), f'killed {reason}')          # v685f5
@@ -12350,6 +12377,7 @@ def train_killed(onum, killer, reason='', ai_hunter=None):
     def _remove(_onum=onum, _room=_room, _peers=_peers, _entry=entry, _reason=reason):
         time.sleep(TRAIN_WRECK_S)
         TRAINS.pop(_onum, None)
+        ai_onum_released(_onum)                              # v782f5
         raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(_entry) if _entry else struct.pack('<H', _onum & 0xFFFF))
         pkt = build_msg13(raw)
         for p in get_sessions_in_room(_room):
@@ -12542,6 +12570,7 @@ def spawn_train(rid, camp, road_idx, node_idx, n_wagons=3, dist=0.0, reason=''):
 
 def delete_train(onum, reason=''):
     tr = TRAINS.pop(onum, None)
+    ai_onum_released(onum)                                   # v782f5
     if tr is None:
         return 0
     raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
@@ -15028,8 +15057,9 @@ PILOT_KILL_SCORING  = True   # v513f5: a pilot shot/collided dead UNDER CANOPY (
                              #   the room, give the killer PILOT_KILL_SCORE points (NO kill notch),
                              #   and book the victim's lost pilot. False = old behaviour (chute kill
                              #   silent and uncounted).
-PILOT_KILL_SCORE    = 50     # v513f5: points a pilot kill is worth - deliberately LIMITED (a plane
-                             #   kill is far more: the Destroy Plane Bonus). Tune freely.
+PILOT_KILL_SCORE    = -10000 # v781f5 (user): killing a pilot under his canopy is a PENALTY - -10,000 to the
+                             #   shooter (the wiki's 'Kill Player Parachute' is -500; v513 had paid +50).
+                             #   The victim's pilot loss is booked as before; the shooter gets no kill.
 RELAY_CHUTE_KILL_TAIL = True # v516f5 [EXPERIMENT]: a KILLED canopy's delete arrives with a full
                              #   12-byte tail (hunter at +3, parachuter PPT 0x42 at +11). Relay it
                              #   VERBATIM instead of stripping to a bare delete, so the killer's
@@ -18286,6 +18316,36 @@ def _teardown_session(x, why='(session ended)', tag='SESSION', msg=None):
         return
     x._torn_down = True
     x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
+    # v784f5 [DISCONNECT WHILE FLYING = CRASH] (user: pilots force-close the client when about to be
+    # shot down, keeping their aces and dodging the loss). Any exit that is not the client's own
+    # msg-3 - idle reap after a CTD / kill / alt-F4, exit-reply timeout, reconnect-reap, kick -
+    # of a pilot who is IN THE AIR is booked like a death: the latched last hitter gets the kill
+    # (that is exactly what the quitter was trying to deny), otherwise a crash; plane lost, pilot
+    # lost, aces reset. A pilot parked at a field (resupplied within the last 30 s) is not charged.
+    try:
+        if (getattr(x, 'entered_game', False) and getattr(x, 'flying', False)
+                and getattr(x, 'my_obj_number', None) is not None and x.current_pilot
+                and not getattr(x, '_death_booked', False)):
+            _parked = (time.time() - (x.__dict__.get('_repair_grant_at') or 0.0)) < 30.0
+            if _parked:
+                log('DISCONNECT', f'{x.current_pilot} left while parked {why} - no loss booked')
+            else:
+                x._death_booked = True
+                _pk = PENDING_KILL.get(x.my_obj_number)
+                log('DISCONNECT', f'{x.current_pilot} left while AIRBORNE {why} -> booked as '
+                                  f'{"a kill for the last hitter" if _pk else "a crash"} (plane + pilot lost, aces reset)')
+                score_on_death(x, b'', hunter_obj=None, victim_obj=x.my_obj_number, pilot_lost=True)
+                try:
+                    if LIVE_ACE_TRACKING:
+                        db_set_pilot_aces(x.current_pilot, 0)
+                except Exception:
+                    pass
+                try:
+                    tc_say(x.current_room, f'AI: {x.current_pilot} dropped from the game while in the air - counted as a loss')
+                except Exception:
+                    pass
+    except Exception:
+        logx('DISCONNECT', 'airborne-disconnect booking failed')
     try:
         if x.current_pilot:
             # tell IN-GAME peers to drop this pilot's plane AND player slot before the
@@ -19946,8 +20006,20 @@ def _handle_ground_damage_31(s, body, via=''):
                     _camp36(oi['scene']) if oi['scene'] is not None and oi['scene'] >= 0 else 0,
                     float(oi['value'] * SCENE36_SCORE_PCT) / 100.0 if oi['value'] > 0 else 0.0)
                    for obj, oi in destroyed]
-        broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)',
-                           killer=s)
+        # v783f5 [MSG-36 f32 = THE PILOT'S NEW CATEGORY TOTAL]: FUN_004f9d90 does not ADD the f32 -
+        # it STORES it as the local pilot's bomber (+0x58) or fighter (+0x54) score, by the plane he
+        # is in. We sent the object's value, so the client's local bomber score became '150' and
+        # its 'Score:' line printed a garbage total (Taurus 09-20: 'Score:-24845' while the server
+        # booked +150/+300/+450 correctly). So: book the points FIRST, then send the 36 carrying the
+        # category's NEW TOTAL (the same number the STAT25 push shows), and the two sides agree.
+        _gk_bomber_pre = is_bomber_plane(getattr(s, 'plane_type', None))
+        _gk_pts_pre = sum(int(round(r[2])) for r in _recs36)
+        _cat_total = None; _sent36 = False
+        if GROUND_KILL_SCORE and s.current_pilot and _gk_pts_pre > 0 and scoring_mode_for_room(s.current_room) is not None:
+            pass                      # booked just below; the 36 is sent after it with the new total
+        else:
+            broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)', killer=s)
+            _sent36 = True
         # v558f5 [GROUND-KILL SCORE, server side]. The msg-36 f32 only credits the killer's
         # CLIENT-LOCAL score record, and the server re-pushes msg 25 from the DB with every 88 /
         # HQ screen - so the credit vanished on the next push (run_20260907_171511: bscore 3902
@@ -19970,6 +20042,15 @@ def _handle_ground_damage_31(s, body, via=''):
                              f'({", ".join(oi["name"] for _o, oi in destroyed if oi["value"] > 0)}) '
                              f'-> {"BOMBER" if _gk_bomber else "FIGHTER"} score | total {_gk_sc} '
                              f'rank {_gk_old}->{_gk_rk} buildings={_gk_bld}')
+                # v783f5: the 36 now, with the category's new total as the f32 (see above)
+                try:
+                    _st = db_get_pilot_stat25(s.current_pilot)
+                    _cat_total = float(_st.get('bomber_score' if _gk_bomber else 'score', 0) or 0)
+                except Exception:
+                    _cat_total = None
+                _recs36_tot = [(r[0], r[1], (_cat_total if (_cat_total is not None and r[2] > 0) else 0.0)) for r in _recs36]
+                broadcast_scene_36(s.current_room, _recs36_tot, reason='(auto: msg-31 damage killed object)', killer=s)
+                _sent36 = True
                 try:
                     send_stat_block_25(s, reason='(ground kill)')
                 except Exception:
@@ -19977,6 +20058,8 @@ def _handle_ground_damage_31(s, body, via=''):
             elif _gk_pts > 0:
                 log('SCORE', f'{s.current_pilot} ground kill(s) x{_gk_n} worth {_gk_pts} NOT booked '
                              f'(room {s.current_room} is outside the scored arena modes)')
+        if not _sent36:                     # v783f5: the destroy must always reach the killer's client
+            broadcast_scene_36(s.current_room, _recs36, reason='(auto: msg-31 damage killed object)', killer=s)
         for obj, oi in destroyed:
             _sc = oi['scene']
             _hp_need = obj_hp_needed(oi)                            # v704f5
@@ -20559,7 +20642,12 @@ def _ingame_own_object_removed(s, tb, stored):
                     if LIVE_ACE_TRACKING:
                         db_set_pilot_aces(s.current_pilot, 0)
                     if _pkname:
-                        db_apply_score_delta(_pkname, PILOT_KILL_SCORE, mode=_pksmode)  # limited, NO kill
+                        db_apply_score_delta(_pkname, PILOT_KILL_SCORE, mode=_pksmode)  # v781f5: a PENALTY
+                        log('SCORE', f'{_pkname} {PILOT_KILL_SCORE:+d} = shot {s.current_pilot}\'s pilot under his parachute')
+                        try:
+                            tc_say(s.current_room, f'AI: {_pkname} shot a pilot in his parachute - {PILOT_KILL_SCORE:+d} points')
+                        except Exception:
+                            pass
                 _pkline = f"{_pkname or 'A pilot'} killed {s.current_pilot}'s pilot"
                 # v525f5: the sysop-style broadcast line is DISABLED by default - its wording/format
                 # is not true to the original game (user request). Scoring and the victim's pilot-
@@ -24885,7 +24973,12 @@ def handle_post_auth(s, cmd, pl):
                             db_credit_capture(_powner.current_pilot, mode=_smode519)
                             if LIVE_ACE_TRACKING:
                                 db_set_pilot_aces(_powner.current_pilot, 0)
-                            db_apply_score_delta(s.current_pilot, PILOT_KILL_SCORE, mode=_smode519)
+                            db_apply_score_delta(s.current_pilot, PILOT_KILL_SCORE, mode=_smode519)   # v781f5: a PENALTY
+                            log('SCORE', f'{s.current_pilot} {PILOT_KILL_SCORE:+d} = shot {_powner.current_pilot}\'s pilot under his parachute')
+                            try:
+                                tc_say(s.current_room, f'AI: {s.current_pilot} shot a pilot in his parachute - {PILOT_KILL_SCORE:+d} points')
+                            except Exception:
+                                pass
                         # v522f5: do NOT clear para_obj_number here - it is the victim's ticket
                         # through the v510f5 telemetry gate, and clearing it at the server kill
                         # blanked their world mid-descent (run_102527 10:38:51). The canopy
