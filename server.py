@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v767f5'
+VERSION = 'v780f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4261,6 +4261,21 @@ def console_handler():
                         send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'cargo':
+                # v772f5: cargo order <fam|mfa|...>  - the resource each 107 answer field carries
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    global CARGO_ANSWER_ORDER, CARGO_DROP_SILENT_ON_FULL
+                    if _a and _a[0] == 'silent' and len(_a) > 1:
+                        CARGO_DROP_SILENT_ON_FULL = _a[1].lower() in ('on', '1', 'true', 'yes')
+                        log('CONSOLE', f'cargo: silent on fully delivered drop = {CARGO_DROP_SILENT_ON_FULL}')
+                    elif _a and _a[0] == 'order' and len(_a) > 1 and sorted(_a[1]) == ['a', 'f', 'm']:
+                        CARGO_ANSWER_ORDER = _a[1]
+                        log('CONSOLE', f'cargo: 107 answer field order now {CARGO_ANSWER_ORDER} (field1={CARGO_ANSWER_ORDER[0]} field2={CARGO_ANSWER_ORDER[1]} field3={CARGO_ANSWER_ORDER[2]})')
+                    else:
+                        raise IndexError
+                except (IndexError, ValueError):
+                    log('CONSOLE', f'usage: cargo order <three of f,a,m>   (now {CARGO_ANSWER_ORDER})')
             elif cmd == 'groups':
                 # v715f5: groups <pilot>  (send the live records) | groups probe <pilot> f0 f1 f2 f3 mission uc n
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -4690,6 +4705,22 @@ def console_handler():
                                        f'rate1={SOLDIER_WALK_RATE1} rate2={SOLDIER_WALK_RATE2}')
                     except (IndexError, ValueError):
                         log('CONSOLE', 'usage: tc soldier <throttle 0..1> [state] [rate1] [rate2]')
+                elif _a[0] == 'mission':
+                    # v770f5: tc mission <scene> <camp> [attack|defend]  - file the AI mission lines for
+                    # a scene WITHOUT raising a column (missions screen / map arrows test)
+                    try:
+                        _sidx = int(_a[1]); _camp = int(_a[2])
+                        _purpose = _a[3] if len(_a) > 3 else 'attack'
+                        _rid = _rooms[0] if _rooms else None
+                        _trn = _probe_terrain_for_room(_rid)
+                        _txy = tc_scene_xy(_trn, _sidx)
+                        _tcamp = scene_camp(_trn, _sidx)
+                        _fac = tc_nearest_tank_factory(_rid, _trn, _camp, _txy[0], _txy[1])
+                        _form = (_fac[1], _fac[2]) if _fac else (_txy[0] + 5000.0, _txy[1] + 5000.0)
+                        tc_mission_lines(_rid, _camp, _tcamp, _purpose, _form, _txy, 'console', sidx=_sidx)
+                        log('CONSOLE', f'tc mission: filed {_purpose} missions for scene {_sidx} (camp {_camp} vs {_tcamp}) in room {_rid}')
+                    except (IndexError, ValueError, TypeError):
+                        log('CONSOLE', 'usage: tc mission <scene> <camp> [attack|defend]')
                 elif _a[0] == 'class':
                     # v717f5: tc class <camp> <class id>  - set a camp's tank class live
                     try:
@@ -5795,12 +5826,23 @@ def lobby_news_text():
 
 def build_lobby_news_202(text, form=None):
     form = LOBBY_NEWS_FORM if form is None else int(form)
-    b = (text or '').replace('\r\n', '\n').encode('latin-1', 'replace')
+    # v768f5: strip control characters (the client's line parser logs 'ERROR: Wrong char 1, pos 3'
+    # for every one - a flood per news push, user 09-20) and never send an EMPTY line: a blank
+    # spacer goes out as a single space.
+    _t = ''.join(ch for ch in (text or '').replace('\r\n', '\n') if ch == '\n' or ord(ch) >= 32)
+    if form >= 11 and not _t.strip():
+        _t = ' '
+    b = _t.encode('latin-1', 'replace')
     if form >= 10:
-        # v731f5 (probe-verified 09-16): [0xca][PANE byte][text\0] - the byte after 0xca selects the
-        # pane. form 10+n sends pane n. (form 2's length byte 0x15 landed in the LEFT pane; form 1's
-        # accidental 'H' in the right one.)
-        body = bytes([0xca, (form - 10) & 0xff]) + b + b'\x00'
+        # v731f5 (probe-verified 09-16): the byte after 0xca selects the pane - 0 = left pane, other
+        # = append a right-pane line. v769f5: for the RIGHT pane no byte at all - the client's line
+        # parser treats the payload as text from its first byte, and a 0x01 prefix rendered fine
+        # but logged 'ERROR: Wrong char 1, pos 3' for every line (18,825 in one session, user 09-20).
+        # Plain text = 'not NUL' = right pane. The left pane keeps its leading NUL (form 10).
+        if form == 10:
+            body = bytes([0xca, 0x00]) + b + b'\x00'
+        else:
+            body = bytes([0xca]) + b + b'\x00'
     elif form == 2:
         body = bytes([0xca]) + struct.pack('<H', len(b)) + b + b'\x00'
     elif form == 3:
@@ -6785,6 +6827,68 @@ def send_your_squadron(s, reason=''):
 # We stamp PlayerIndex=0 - the player allocated by the 201 grant - so it resolves to
 # the local pilot ("Test1").
 
+# --- v780f5 CHAT WORD FILTER ----------------------------------------------------------------
+# Applied at both reflect points (lobby chat and in-arena msg 20): matched words are replaced by
+# asterisks (their length kept, so the line still reads), the sender is not told, and the hit is
+# logged. The list lives in badwords.txt next to server.py, one entry per line; a line ending in *
+# matches the prefix (e.g. 'damn*' catches 'damned'), '#' starts a comment. Reloaded when the file
+# changes, so admins edit it live (the web page below writes it). Matching is case-insensitive on
+# WHOLE WORDS (letters/digits), with the common leetspeak digits folded (0->o, 1->i/l, 3->e,
+# 4->a, 5->s, 7->t, @->a, $->s). Moderators are filtered too - it is a word filter, not a gag.
+CHAT_FILTER_ENABLED = True
+CHAT_FILTER_FILE = os.path.join(SERVER_DIR, 'badwords.txt')
+_CHAT_FILTER = {'mtime': None, 'exact': set(), 'prefix': []}
+_CHAT_LEET = str.maketrans({'0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's', '!': 'i'})
+
+def _chat_filter_load():
+    try:
+        m = os.path.getmtime(CHAT_FILTER_FILE)
+    except Exception:
+        m = None
+    if m == _CHAT_FILTER['mtime']:
+        return
+    exact, prefix = set(), []
+    if m is not None:
+        try:
+            with open(CHAT_FILTER_FILE, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f:
+                    w = line.split('#', 1)[0].strip().lower()
+                    if not w:
+                        continue
+                    if w.endswith('*'):
+                        prefix.append(w[:-1])
+                    else:
+                        exact.add(w)
+        except Exception:
+            pass
+    _CHAT_FILTER.update(mtime=m, exact=exact, prefix=[p for p in prefix if p])
+    log('CHATFILTER', f'{len(exact)} word(s) + {len(prefix)} prefix(es) loaded from {CHAT_FILTER_FILE}')
+
+import re as _re
+_CHAT_WORD_RE = _re.compile(r"[A-Za-z0-9@$!']+")
+
+def chat_filter(text, who=''):
+    """Return (filtered_text, n_hits)."""
+    if not CHAT_FILTER_ENABLED or not text:
+        return text, 0
+    _chat_filter_load()
+    ex, pf = _CHAT_FILTER['exact'], _CHAT_FILTER['prefix']
+    if not ex and not pf:
+        return text, 0
+    hits = []
+
+    def _sub(mo):
+        w = mo.group(0)
+        k = w.lower().translate(_CHAT_LEET).strip("'")
+        if k in ex or any(k.startswith(p) for p in pf):
+            hits.append(w)
+            return '*' * len(w)
+        return w
+    out = _CHAT_WORD_RE.sub(_sub, text)
+    if hits:
+        log('CHATFILTER', f'{who}: {len(hits)} word(s) masked {hits!r} in {text!r}')
+    return out, len(hits)
+
 def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
     """Build the DISPLAY form of msg 20 so the client renders a chat line."""
     if isinstance(text, str):
@@ -6808,6 +6912,10 @@ def reflect_chat_20(s, channel, text, player_index=0):
         disp = text.split(b'\x00')[0].decode('ascii', 'replace')
     else:
         disp = str(text)
+    # v780f5: word filter (both chat paths)
+    _fd, _nh = chat_filter(disp, who=getattr(s, 'current_pilot', '?'))
+    if _nh:
+        disp = _fd; text = _fd
     room = s.current_room
     # v304 GAG: a gagged sender's chat is dropped at the server (the authoritative reflect point).
     # We swallow silently rather than bouncing an error, matching how the retail server behaved -
@@ -10329,7 +10437,11 @@ def _tank_note_client_delete(s, pl):
 # (the 'hold fire' state - a dead tank stops shooting) and then a bare msg-3 delete.
 TANK_CLASS_HP     = {}             # class_id -> hit points (from tank_tables.json phys f38)
 TANK_FALLBACK_HP  = 1000.0
-TANK_KILL_SCORE   = 150            # points for a tank kill (GROUND_KILL_SCORE model)
+TANK_KILL_SCORE   = 250            # fallback; v779f5: per CLASS from the wiki's TC table (below)
+# v779f5 (ACWIKI 'Fighter Ace - Scoring Information', TC values): Sherman 250, Cromwell 250,
+# T-34 400, Panther 400, Tiger 500. Class ids from the client's table: US 133, GB 131, SU 132/135,
+# GE 134 (Panther) / 136 (Tiger), JP 137 (no wiki row - Sherman value).
+TANK_KILL_SCORE_BY_CLASS = {131: 250, 133: 250, 132: 400, 135: 400, 134: 400, 136: 500, 137: 250}
 # v608f5 ARMOUR: the client's per-hit damage is by round energy (live msg-51 values: MG 1-81, 20 mm
 # ~210-320, 40 mm+ 500-1150, bombs 3000+). Applied raw, 3-4 x 20 mm killed a 1000 HP tank. Scale
 # by band so light rounds mostly bounce: 20 mm needs ~20 hits, 40 mm ~3, a bomb still kills.
@@ -10395,7 +10507,7 @@ def _handle_tank_hit_51(s, pl):
 SOLDIER_HP          = 12.0    # v735f5: 60 -> 12. A plane's gun rounds arrive as msg-51 records of 2..6
                               # each, so 60 meant a long burst per man (user 09-17: 'too many hits').
                               # Tank fire (TC_TANK_VS_TANK_DPS) and AA still kill in about a second.
-SOLDIER_KILL_SCORE  = 20
+SOLDIER_KILL_SCORE  = 50      # v779f5: 20 -> 50 (ACWIKI TC value for a Paratrooper)
 TC_CREDIT_PARA_GROUND_KILLS = True    # v739f5: ON (user, corrected) - objects destroyed by a pilot's
                                       # paratroops DO score for the pilot who dropped them, as before.
                                       # A console-spawned stick still has no dropper, so it credits
@@ -10514,9 +10626,10 @@ def tank_killed(onum, killer, reason=''):
             _mode = scoring_mode_for_room(killer.current_room)
             if _mode is not None:
                 _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
-                _sc, _rk, _old = db_apply_score_delta(kname, TANK_KILL_SCORE, bomber=_bomber, mode=_mode)
+                _tks = TANK_KILL_SCORE_BY_CLASS.get(int(t.get('class', 0) or 0), TANK_KILL_SCORE)   # v779f5: per class
+                _sc, _rk, _old = db_apply_score_delta(kname, _tks, bomber=_bomber, mode=_mode)
                 _nt = db_bump_pilot_counter(kname, 'ai_tanks', 1)
-                log('SCORE', f'{kname} +{TANK_KILL_SCORE} = tank kill (0x{onum:04x}) -> '
+                log('SCORE', f'{kname} +{_tks} = tank kill (0x{onum:04x}, class {t.get("class")}) -> '
                              f'{"BOMBER" if _bomber else "FIGHTER"} score | total {_sc} rank {_old}->{_rk} tanks={_nt}')
                 send_stat_block_25(killer, reason='(tank kill)')
             else:
@@ -10878,27 +10991,50 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
                     f'{tc_grid(form_xy[0], form_xy[1])} forming to {purpose} {tc_camp_tag(tcamp)} {txy[2].strip()} at '
                     f'{tc_grid(txy[0], txy[1])}{who}')
     # mission lines, to each side
-    tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot)
+    tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot, sidx=int(target_sidx), gid=gid)
     log('TC', f'room {room_id}: column {gid} ({loaded}/{n_want} x class {cls}) {purpose} scene {target_sidx} '
               f'from {ftype} {fsidx} ({fd:.0f} m away)')
     return gid
 
-def tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot):
+def tc_mission_lines(room_id, camp, tcamp, purpose, form_xy, txy, trigger_pilot, sidx=None, gid=None):
     """The per-side mission lines, film wording (kind 'A'/'I'). Chat fallback for clients without
-    a mission script (msg 104 produces the real ones)."""
-    if not TC_CHAT_MISSION_LINES:
-        return
+    a mission script (msg 104 produces the real ones).
+    v770f5: the same lines are filed as MISSIONS (the flight dialog's Offensive / Defensive boxes
+    and the map's mission arrows): the attacker's side gets an OFFENSIVE 'attack' + a DEFENSIVE
+    'cover our tanks'; the defender's side a DEFENSIVE 'destroy their tanks'. Cleared when the
+    scene is captured (mission_remove by sidx).
+    v771f5: the lines that name the TANKS' position carry a {tanks} placeholder and the column id,
+    so the mission refresh loop rewrites them with the column's live grid as it drives."""
     who = f' (triggered by {trigger_pilot})' if trigger_pilot else ''
+    _tg = tc_grid(form_xy[0], form_xy[1])
+    _cover_t = (f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {{tanks}} '
+                f'{"attacking" if purpose == "attack" else "defending"} {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
     if purpose == 'attack':
-        tc_say(room_id, f'Attack {tc_camp_tag(tcamp)} scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
-        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} '
-                        f'attacking {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
-        tc_say(room_id, f'Destroy {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} headed for '
-                        f'{tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=tcamp)
+        _atk = f'Attack {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}{who}'
+        _def_t = (f'Destroy {tc_camp_tag(camp)} tanks at {{tanks}} headed for '
+                  f'{tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+        try:
+            mission_add(room_id, camp, 1, _atk, txy[0], txy[1], by='AI', sidx=sidx, reason='(trigger)')
+            mission_add(room_id, camp, 2, _cover_t.replace('{tanks}', _tg), form_xy[0], form_xy[1], by='AI', sidx=sidx,
+                        reason='(trigger)', template=_cover_t, gid=gid)
+            if tcamp is not None and tcamp != SCENE_CAMP_NEUTRAL:
+                mission_add(room_id, tcamp, 2, _def_t.replace('{tanks}', _tg), form_xy[0], form_xy[1], by='AI', sidx=sidx,
+                            reason='(trigger)', template=_def_t, gid=gid)
+        except Exception:
+            logx('MISSION', 'AI mission add failed')
+        if TC_CHAT_MISSION_LINES:
+            tc_say(room_id, _atk, camp=camp); tc_say(room_id, _cover_t.replace('{tanks}', _tg), camp=camp)
+            tc_say(room_id, _def_t.replace('{tanks}', _tg), camp=tcamp)
     else:
-        tc_say(room_id, f'Defend scene at {tc_grid(txy[0], txy[1])}{who}', camp=camp)
-        tc_say(room_id, f'Provide fighter cover for {tc_camp_tag(camp)} tanks at {tc_grid(form_xy[0], form_xy[1])} '
-                        f'defending {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+        _dfd = f'Defend {tc_camp_tag(tcamp)} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}{who}'
+        try:
+            mission_add(room_id, camp, 2, _dfd, txy[0], txy[1], by='AI', sidx=sidx, reason='(defence)')
+            mission_add(room_id, camp, 2, _cover_t.replace('{tanks}', _tg), form_xy[0], form_xy[1], by='AI', sidx=sidx,
+                        reason='(defence)', template=_cover_t, gid=gid)
+        except Exception:
+            logx('MISSION', 'AI mission add failed')
+        if TC_CHAT_MISSION_LINES:
+            tc_say(room_id, _dfd, camp=camp); tc_say(room_id, _cover_t.replace('{tanks}', _tg), camp=camp)
 
 TC_REUSE_RADIUS = 20000.0   # v600f5: idle friendly column within this of a new target is re-tasked
 TC_TANK_LINK_RADIUS_M = 60000.0  # v602f5: farther than this from any tank producer -> 'out of range of any tanks units'
@@ -11158,14 +11294,17 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
         broadcast_scene_snapshot_42(room_id, reason=f'(scene {sidx} captured by camp {camp})')
     except Exception:
         logx('TC', 'snapshot after capture failed')
-    # v749f5: trains belong to the camp that owns their line. A capture can strand an enemy train
-    # (no own station left on that road) or leave one standing in captured territory - check every
-    # train of the room; ensure_camp_trains then spawns for the new owner on the next tick.
+    # v749f5: trains belong to the camp that owns their line.
     try:
         for _on in list(TRAINS):
             train_check_territory(_on)
     except Exception:
         logx('TRAIN', 'territory check after capture failed')
+    # v770f5: the scene's missions (attack / cover / destroy) are done - clear them on both sides
+    try:
+        mission_remove(room_id, sidx=int(sidx), reason=f'(scene {sidx} captured by camp {camp})')
+    except Exception:
+        pass
     # v678f5: 'Your hit helps capture scene ...' goes to the pilots whose hits contributed, AT the
     # capture (user: after the capture, not during the attack) - once each.
     try:
@@ -11499,7 +11638,13 @@ def _handle_para_request_113(s, pl):
 # points (the 2009 bonus was metal/fuel/ammo x gamedef percentages).
 MSG_CARGO_REQUEST_106 = 0x6a
 MSG_CARGO_ANSWER_107  = 0x6b
+CARGO_ANSWER_ORDER = 'afm'    # v775f5: field-verified 09-20 - the answer's three fields are in the SAME slot
+                              # order as the request: AMMO, FUEL, METAL. ('fam' put a fuel load in the ammo
+                              # slot and the client dumped it as ammo 5 ms later; metal, field 3, was right.)
 CARGO_MODEL              = True
+CARGO_MIN_HAUL_M         = 5000.0   # v774f5: a drop scores only at another scene at least this far from the pick-up
+CARGO_DROP_SILENT_ON_FULL = True    # v778f5: no 107 for a fully delivered drop (the all-zero reply prints
+                                    # 'There is no cargo to load your plane'). `cargo silent on|off`.
 CARGO_REPAIR_KG_PER_VALUE = 5.0     # 5 kg of metal per value point: hangar (150) = 750 kg, factory 1000+
 CARGO_REPAIR_WITH_FUEL_AMMO = False # only metal rebuilds; fuel/ammo just stock the scene
 CARGO_SCORE_PER_KG_METAL = 0.10
@@ -11535,17 +11680,20 @@ def _scene_store_take(room_id, terrain, sidx, metal, fuel, ammo):
             got.append(take)
     return tuple(got)
 
-def cargo_repair_scene(room_id, sidx, metal_kg, reason=''):
+def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False):
     """Spend metal on the scene's destroyed objects, cheapest first. Returns (objs repaired, kg spent).
-    v754f5: the metal is DEDUCTED from the scene's store (it used to stock the scene AND repair with
-    the same kilograms), and the same call now runs after a TRAIN delivery, so unloading metal
-    anywhere hastens that scene's repair - only what the store can pay for is rebuilt."""
+    v754f5: metal from the STORE is deducted (train deliveries). v774f5: from_delivery=True spends
+    the DELIVERED kilograms directly (a cargo drop) - a field whose metal storage is dead has no
+    store to draw on, and that is exactly the field that needs the flown-in metal."""
     if metal_kg <= 0:
         return [], 0
     terrain = _probe_terrain_for_room(room_id)
     r = supply_state(room_id, terrain, sidx)
-    _avail = int(r[0].get('metal', 0)) if (r and r[0] is not None) else 0
-    budget = min(float(metal_kg), float(_avail))
+    if from_delivery:
+        budget = float(metal_kg)
+    else:
+        _avail = int(r[0].get('metal', 0)) if (r and r[0] is not None) else 0
+        budget = min(float(metal_kg), float(_avail))
     if budget <= 0:
         return [], 0
     dead = sorted((o for (r2, o) in _SCENE36_DESTROYED if r2 == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
@@ -11561,7 +11709,7 @@ def cargo_repair_scene(room_id, sidx, metal_kg, reason=''):
     done = repair_objects(room_id, todo, reason=f'(metal repair {reason})') if todo else []
     if done:
         _paid = int(sum(max(50.0, float((trn_obj_info(room_id, o) or {}).get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE) for o in done))
-        if r and r[0] is not None:
+        if not from_delivery and r and r[0] is not None:
             with _SUPPLY_LOCK:
                 r[0]['metal'] = max(0, int(r[0].get('metal', 0)) - _paid)
         return done, _paid
@@ -11574,7 +11722,12 @@ def _handle_cargo_request_106(s, pl):
         body = bytes(pl)
         if len(body) < 5 + 18 or body[4] != MSG_CARGO_REQUEST_106:
             return
-        ident, sw, metal, fuel, ammo, pi, dist, ftime = struct.unpack_from('<HHHHHIHH', body, 5)
+        # v773f5: the three amounts are in the client's slot order (AMMO, FUEL, METAL) - the reverse
+        # of the v606 read. Field evidence 09-20: a METAL load arrived as 'a2750', and every load
+        # after v772 auto-dropped the previous cargo because the type the pilot chose never matched
+        # the type the plane got. With this order the decompile's answer mapping (f1<-slot2,
+        # f2<-slot1, f3<-slot3) is exactly CARGO_ANSWER_ORDER 'fam'.
+        ident, sw, ammo, fuel, metal, pi, dist, ftime = struct.unpack_from('<HHHHHIHH', body, 5)
         sidx = sw & 0x3fff
         pickup, bonus = bool(sw & 0x8000), bool(sw & 0x4000)
         rid = s.current_room
@@ -11590,15 +11743,30 @@ def _handle_cargo_request_106(s, pl):
             short = [metal - gm, fuel - gf, ammo - ga]
             log('CARGO', f'{s.current_pilot} PICK-UP at scene {sidx} "{txy[2].strip()}" (camp {scamp}): asked '
                          f'm{metal}/f{fuel}/a{ammo} kg -> given m{gm}/f{gf}/a{ga} (dist {dist * 100} m, {ftime}s)')
+            if gm or gf or ga:
+                s.__dict__['_cargo_origin'] = (int(sidx), txy[0], txy[1])     # v774f5: where it was loaded
         else:
-            gm, gf, ga = _scene_store_add(rid, terrain, sidx, metal, fuel, ammo)
+            # v774f5: METAL REPAIRS FIRST, from the DELIVERED kilograms - not from the store. A field
+            # with its metal storage dead has capacity 0, so v754's store-funded repair had nothing to
+            # spend and the flown-in metal vanished ('stored m0, repaired 0' at 46 on 09-20). Now the
+            # delivered metal rebuilds the scene's cheapest dead objects (the storage included), and
+            # whatever is left is stocked up to the (possibly restored) capacity.
+            repaired, spent = ([], 0)
+            if metal > 0:
+                repaired, spent = cargo_repair_scene(rid, sidx, metal, reason=f'by {s.current_pilot}', from_delivery=True)
+            gm, gf, ga = _scene_store_add(rid, terrain, sidx, max(0, metal - spent), fuel, ammo)
+            gm += spent                                     # the repair metal counts as delivered
             short = [metal - gm, fuel - gf, ammo - ga]
-            repaired, spent = cargo_repair_scene(rid, sidx, gm if not CARGO_REPAIR_WITH_FUEL_AMMO else gm + gf + ga,
-                                                 reason=f'by {s.current_pilot}')
-            pts = int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO))
+            # v774f5: no points for unloading where you loaded (or within CARGO_MIN_HAUL_M of it)
+            _origin = s.__dict__.get('_cargo_origin')
+            _haul_ok = (_origin is None or (_origin[0] != int(sidx)
+                        and math.hypot(txy[0] - _origin[1], txy[1] - _origin[2]) >= CARGO_MIN_HAUL_M))
+            pts = int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO)) if _haul_ok else 0
             log('CARGO', f'{s.current_pilot} DROP at scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
-                         f'm{metal}/f{fuel}/a{ammo} kg -> stored m{gm}/f{gf}/a{ga}, repaired {len(repaired)} obj(s) '
-                         f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus})')
+                         f'm{metal}/f{fuel}/a{ammo} kg -> stored m{gm - spent}/f{gf}/a{ga}, repaired {len(repaired)} obj(s) '
+                         f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus}'
+                         + ('' if _haul_ok else ', same base as the pick-up - no points') + ')')
+            s.__dict__.pop('_cargo_origin', None)
             if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
                 try:
                     _mode = scoring_mode_for_room(rid)
@@ -11608,23 +11776,33 @@ def _handle_cargo_request_106(s, pl):
                         send_stat_block_25(s, reason='(cargo delivery)')
                 except Exception:
                     logx('CARGO', 'delivery bonus failed')
-            if gm or gf or ga:
+            if (gm or gf or ga) and _haul_ok:            # v776f5: no AI line for unloading where you loaded either
                 parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
                 tc_say(rid, f'AI: {s.current_pilot} delivered {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}'
                             + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
         if pickup:
-            # v765f5 [107 CONTRACT, FUN_00559790 read 09-19]: for a PICK-UP the answer carries the
-            # amounts GIVEN (the client loads the plane with exactly these; all-equal-to-request ->
-            # 'cargo loaded', all zero -> 'There is no cargo to load your plane', less -> 'only N').
-            # Field order on the wire is [ident][FUEL][METAL][AMMO]. v606 sent the shortfall in
-            # metal/fuel/ammo order - zeros for a full load, i.e. 'no cargo' on every successful load.
-            _f1, _f2, _f3 = gf, gm, ga
+            # v765f5/v772f5 [107 CONTRACT]: for a PICK-UP the answer carries the amounts GIVEN; the
+            # client loads its three cargo slots from the three fields IN ITS OWN ORDER. v765 sent
+            # (fuel, metal, ammo) and a metal load arrived on the plane as AMMO (08:36 drop: 'a2750'
+            # for a metal pick-up). CARGO_ANSWER_ORDER names which resource goes in each field.
+            _by = {'m': gm, 'f': gf, 'a': ga}
+            _f1, _f2, _f3 = (_by[CARGO_ANSWER_ORDER[0]], _by[CARGO_ANSWER_ORDER[1]], _by[CARGO_ANSWER_ORDER[2]])
         else:
-            # DROP: zeros = all delivered, negative = not delivered (v609 contract, unchanged)
-            _f1, _f2, _f3 = -short[1], -short[0], -short[2]
+            # DROP answer (client log 09-20 06:42:51 'lb of Cargo Fuel has been lost' settled the sign):
+            # POSITIVE = that much stays ON BOARD (the client reloads the plane with it), 0 = delivered,
+            # NEGATIVE = LOST. v765's -short threw every refused drop away; v777f5 sends +short so
+            # cargo a full or dead storage cannot take is kept for another field.
+            _sh = {'m': short[0], 'f': short[1], 'a': short[2]}
+            _f1, _f2, _f3 = (_sh[CARGO_ANSWER_ORDER[0]], _sh[CARGO_ANSWER_ORDER[1]], _sh[CARGO_ANSWER_ORDER[2]])
         pkt = build_ingame_pkt(bytes([MSG_CARGO_ANSWER_107]) + struct.pack('<Hhhh', ident,
                                max(-32768, min(32767, _f1)), max(-32768, min(32767, _f2)), max(-32768, min(32767, _f3))))
+        # v778f5: an all-zero drop answer makes the client print 'There is no cargo to load your
+        # plane' (its all-zero branch), which reads wrong in flight. With CARGO_DROP_SILENT_ON_FULL
+        # a FULLY delivered drop is not answered - the client clears the cargo itself. Test knob.
+        if (not pickup) and CARGO_DROP_SILENT_ON_FULL and _f1 == 0 and _f2 == 0 and _f3 == 0:
+            log('CARGO', f'{s.current_pilot}: drop fully delivered - no 107 sent (CARGO_DROP_SILENT_ON_FULL)')
+            return
         # v764f5: reliable, via the pool (never block the RX thread)
         _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 ident={ident} f{_f1}/m{_f2}/a{_f3}', to=3.0)
     except Exception:
@@ -11653,25 +11831,48 @@ def _handle_give_rsc_105(s, pl):
         n = (len(body) - 16) // 10
         rid = s.current_room
         terrain = _probe_terrain_for_room(rid)
-        tot = [0, 0, 0]; deliv = [0, 0, 0]; per_scene = {}; missed = 0
+        tot = [0, 0, 0]; deliv = [0, 0, 0]; per_scene = {}; per_scene_raw = {}; missed = 0
         for i in range(n):
             e = body[16 + i * 10: 26 + i * 10]
-            x = int.from_bytes(e[0:3], 'little', signed=True) * TANK_POS_XY_SCALE
-            y = int.from_bytes(e[3:6], 'little', signed=True) * TANK_POS_XY_SCALE
+            # v777f5: a parachute is a PLANE-family object - its packed position uses PLANE_POS_SCALE
+            # (0.016), not the tank scale (0.032, which put the 09-20 09:53 stick 15 km off and
+            # '13 out of range': 429 metal / 429 fuel / 1,487 ammo written off).
+            _sc = PLANE_POS_SCALE or TANK_POS_XY_SCALE
+            x = int.from_bytes(e[0:3], 'little', signed=True) * _sc
+            y = int.from_bytes(e[3:6], 'little', signed=True) * _sc
             m, f, a = e[7], e[8], e[9]
             tot[0] += m; tot[1] += f; tot[2] += a
             near = tc_nearest_scene_any(terrain, x, y)
             if not near or near[1] > PARA_RESOURCE_RADIUS:
-                missed += 1; continue
+                # fallback: the RELEASE point (the pilot's own position when the first chute went out)
+                _rp = s.__dict__.get('_cargo_release_xy')
+                _nr = tc_nearest_scene_any(terrain, _rp[0], _rp[1]) if _rp else None
+                if _nr and _nr[1] <= PARA_RESOURCE_RADIUS:
+                    near = _nr
+                else:
+                    missed += 1; continue
             sidx = near[0]
             gm, gf, ga = _scene_store_add(rid, terrain, sidx, m, f, a)
             deliv[0] += gm; deliv[1] += gf; deliv[2] += ga
             ps = per_scene.setdefault(sidx, [0, 0, 0]); ps[0] += gm; ps[1] += gf; ps[2] += ga
+            pr = per_scene_raw.setdefault(sidx, [0, 0, 0]); pr[0] += m; pr[1] += f; pr[2] += a   # v777f5: what actually came down
         pts = 0
         for sidx, (gm, gf, ga) in per_scene.items():
             txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
             scamp = scene_camp(terrain, sidx)
-            repaired, spent = cargo_repair_scene(rid, sidx, gm, reason=f'air-drop by {s.current_pilot}')
+            # v777f5: air-dropped metal repairs from the DELIVERED kilograms (v774 rule), so a dead
+            # metal storage can be rebuilt by air; the stock was added above, so undo the repaired
+            # part from the store to keep the metal single-counted
+            _dm = per_scene_raw.get(sidx, [0, 0, 0])[0]
+            repaired, spent = cargo_repair_scene(rid, sidx, _dm, reason=f'air-drop by {s.current_pilot}', from_delivery=True)
+            if spent:
+                try:
+                    _st2, _p2 = supply_state(rid, terrain, sidx)
+                    if _st2 is not None:
+                        with _SUPPLY_LOCK:
+                            _st2['metal'] = max(0, int(_st2.get('metal', 0)) - min(int(spent), int(gm)))
+                except Exception:
+                    pass
             pts += int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO))
             parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
             log('CARGO', f'{s.current_pilot} AIR-DROP -> scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
@@ -11680,7 +11881,8 @@ def _handle_give_rsc_105(s, pl):
                 tc_say(rid, f'AI: {s.current_pilot} air-dropped {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}' + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
         log('CARGO', f'{s.current_pilot} msg 105: {n} chute(s), {missed} out of range; total m{tot[0]}/f{tot[1]}/a{tot[2]} kg, '
-                     f'delivered m{deliv[0]}/f{deliv[1]}/a{deliv[2]} (flight {ftime}s, dist {dist * 100} m) -> bonus {pts}')
+                     f'delivered m{deliv[0]}/f{deliv[1]}/a{deliv[2]} (flight {ftime}s, dist {dist * 100} m'
+                     + (f', first chute decoded at {x:.0f},{y:.0f} = {tc_grid(x, y)}' if n else '') + f') -> bonus {pts}')
         if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
             try:
                 _mode = scoring_mode_for_room(rid)
@@ -11692,6 +11894,9 @@ def _handle_give_rsc_105(s, pl):
                 logx('CARGO', 'air-drop bonus failed')
         # answer: zeros = everything delivered; negatives = what did not reach a scene
         und = [-(tot[i] - deliv[i]) for i in range(3)]
+        if CARGO_DROP_SILENT_ON_FULL and all(v == 0 for v in und):
+            log('CARGO', f'{s.current_pilot}: air-drop fully delivered - no 107 sent (CARGO_DROP_SILENT_ON_FULL)')   # v778f5
+            return
         pkt = build_ingame_pkt(bytes([MSG_CARGO_ANSWER_107]) + struct.pack('<Hhhh', ident, und[0], und[1], und[2]))
         _submit_send(send_rel, s, pkt, f'<- CARGO_ANSWER 107 (air-drop) ident={ident} undelivered m{und[0]}/f{und[1]}/a{und[2]}', to=3.0)
         if 0 < missed < n:
@@ -11763,7 +11968,8 @@ WAGON_HP              = 1500.0   # wagons: ~2-3 x 30 mm, 5 x 20 mm
 def train_effective_damage(raw):
     """Trains are not armoured: full reported damage, MG rounds (<100) at 30%."""
     return raw * 0.3 if raw < 100 else raw
-TRAIN_KILL_SCORE      = 300
+TRAIN_KILL_SCORE      = 40      # v779f5: 300 -> 40 (ACWIKI: Locomotive 40, Rail car 10) - the whole
+WAGON_KILL_SCORE      = 10      #         consist is 40 + 10 per wagon; the wiki prices trains low
 TRAIN_RESPAWN_S       = 600.0
 TRAIN_PER_CAMP_MAX    = 3
 TRAIN_CHAT_EMPTY_STOPS = True   # v699f5: also report stops where nothing was exchanged
@@ -12186,6 +12392,16 @@ def _handle_train_hit(s, victim, attacker, dmg, car=0):
             cap_lost = WAGON_CAP.get(part.get('cls'), 0)
             tr['load'][kind] = max(0, tr['load'][kind] - cap_lost)
         log('TRAIN', f'train 0x{victim:04x}: wagon #{i} ({kind}) destroyed by {s.current_pilot} - mask 0x{tr["mask"]:x}')
+        # v779f5: a wagon pays WAGON_KILL_SCORE (ACWIKI: Rail car 10)
+        try:
+            if GROUND_KILL_SCORE and s.current_pilot and WAGON_KILL_SCORE:
+                _mode = scoring_mode_for_room(s.current_room)
+                if _mode is not None:
+                    _sc, _rk, _old = db_apply_score_delta(s.current_pilot, WAGON_KILL_SCORE,
+                                                          bomber=is_bomber_plane(getattr(s, 'plane_type', None)), mode=_mode)
+                    log('SCORE', f'{s.current_pilot} +{WAGON_KILL_SCORE} = rail car (train 0x{victim:04x} wagon #{i}) | total {_sc}')
+        except Exception:
+            logx('TRAIN', 'wagon score failed')
         tr['last_sent'] = 0.0; train_broadcast_state(victim)
 
 def rails_for(terrain):
@@ -13106,6 +13322,127 @@ def send_map_message_57(s, ox, oy, reason=''):
     send_rel(s, pkt, f'<- MAP 57 x{n} {reason}', to=3.0)
     log('MAP57', f'{s.current_pilot}: msg 57 origin ({ox:.0f},{oy:.0f}) -> {n} icon(s) of {len(items)} {reason}')
     return n
+
+# --- v770f5 PLAYER MISSIONS (msgs 102 / 103 / 110 / 99 / 100) -------------------------------
+# FA.exe (read 09-20): the flight dialog's missions tab sends a one-byte 102 when it opens online
+# (FUN_004f0ca0); the host answers 103 = [0x67] + N x [u8 type][u32 id][text\0] (FUN_004efae0 ->
+# the DynamicMissions list the Offensive / Defensive boxes are filled from; type 1 = offensive,
+# 2 = defensive). 'Create' sends 110 = [0x6e][u8 type][u8 camp][u8][f32 x][f32 y][f32 z][u16 flags]
+# [u8 target][u8][text\0] (FUN_006ce090), with a literal '%s' in the text where the host inserts
+# the position's grid; the host confirms with 99 = [0x63][u32 id] (FUN_004f42f0 -> 'Set Id') and
+# 'Delete' sends 100 = [0x64][u32 id]. Missions are per CAMP (103 carries no camp - each pilot
+# gets his own camp's list). The AI's triggers and drops file missions here too (tc_mission_lines).
+MISSIONS = {}                 # room -> list of {'id','type','camp','text','x','y','by','at','sidx'}
+_MISSION_NEXT_ID = [1]
+MISSION_TTL_S = 1800.0        # a player mission expires after this; AI missions when their scene resolves
+
+def _mission_id():
+    _MISSION_NEXT_ID[0] += 1
+    return _MISSION_NEXT_ID[0]
+
+def build_missions_103(missions):
+    body = bytearray([0x67])
+    for m in missions[:40]:
+        body += bytes([int(m['type']) & 0xff]) + struct.pack('<I', int(m['id']) & 0xffffffff)
+        body += (m['text'] or '')[:200].encode('latin-1', 'replace') + b'\x00'
+    return build_ingame_pkt(bytes(body))
+
+def missions_for(room_id, camp):
+    now = time.time()
+    lst = MISSIONS.get(room_id) or []
+    keep = [m for m in lst if now - m['at'] < MISSION_TTL_S]
+    if len(keep) != len(lst):
+        MISSIONS[room_id] = keep
+    return [m for m in keep if m['camp'] == int(camp)]
+
+def send_missions_103(s, reason=''):
+    if getattr(s, 'current_room', None) is None:
+        return 0
+    ms = missions_for(s.current_room, getattr(s, 'nation', 0) or 0)
+    send_rel(s, build_missions_103(ms), f'<- MISSIONS 103 x{len(ms)} {reason}', to=3.0)
+    log('MISSION', f'{s.current_pilot}: missions list x{len(ms)} {reason}')
+    return len(ms)
+
+def missions_push_camp(room_id, camp, reason=''):
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False) and (getattr(p, 'nation', 0) or 0) == int(camp):
+            _submit_send(send_missions_103, p, reason=reason)
+
+def mission_add(room_id, camp, mtype, text, x=None, y=None, by=None, sidx=None, reason='', template=None, gid=None):
+    m = {'id': _mission_id(), 'type': 1 if int(mtype) == 1 else 2, 'camp': int(camp), 'text': text,
+         'x': x, 'y': y, 'by': by, 'at': time.time(), 'sidx': sidx, 'template': template, 'gid': gid}
+    MISSIONS.setdefault(room_id, []).append(m)
+    log('MISSION', f'room {room_id}: +mission {m["id"]} camp {camp} type {m["type"]}: {text!r} {reason}')
+    missions_push_camp(room_id, camp, reason=f'(mission {m["id"]} added)')
+    return m
+
+def mission_remove(room_id, mid=None, sidx=None, reason=''):
+    lst = MISSIONS.get(room_id) or []
+    gone = [m for m in lst if (mid is not None and m['id'] == mid) or (sidx is not None and m.get('sidx') == sidx)]
+    if not gone:
+        return 0
+    MISSIONS[room_id] = [m for m in lst if m not in gone]
+    for m in gone:
+        log('MISSION', f'room {room_id}: -mission {m["id"]} camp {m["camp"]}: {m["text"]!r} {reason}')
+    for c in {m['camp'] for m in gone}:
+        missions_push_camp(room_id, c, reason=reason)
+    return len(gone)
+
+MISSION_REFRESH_S = 30.0      # v771f5: AI missions that name a column's position are rewritten this often
+
+def _missions_refresh_loop():
+    """v771f5 (user): the auto-filed missions say where the tanks ARE, not where they formed -
+    every MISSION_REFRESH_S each column-linked mission is re-rendered with the leader's live grid
+    and pushed to its camp when the text changed. A mission whose column is gone is removed."""
+    while running:
+        time.sleep(MISSION_REFRESH_S)
+        try:
+            for rid, lst in list(MISSIONS.items()):
+                changed = set(); gone = []
+                for m in list(lst):
+                    if m.get('gid') is None or not m.get('template'):
+                        continue
+                    col = COLUMNS.get(m['gid'])
+                    lead = TANKS.get(col['leader']) if col else None
+                    if col is None or lead is None or lead.get('dead'):
+                        gone.append(m); continue
+                    txt = m['template'].replace('{tanks}', tc_grid(lead['pos'][0], lead['pos'][1]))
+                    if txt != m['text']:
+                        m['text'] = txt; m['x'], m['y'] = lead['pos'][0], lead['pos'][1]
+                        changed.add(m['camp'])
+                for m in gone:
+                    mission_remove(rid, mid=m['id'], reason='(column gone)')
+                for c in changed:
+                    missions_push_camp(rid, c, reason='(tank position refresh)')
+        except Exception:
+            logx('MISSION', 'refresh loop failed')
+
+def _handle_mission_create_110(s, pl):
+    """[0x6e][type][camp][?][f32 x][f32 y][f32 z][u16 flags][u8 target][u8][text\0]"""
+    try:
+        b = pl[4:] if len(pl) > 4 and pl[4] == 0x6e else pl
+        mtype, camp = b[1], b[2]
+        x, y, z = struct.unpack_from('<fff', b, 4)
+        text = b[20:].split(b'\x00', 1)[0].decode('latin-1', 'replace')
+        grid = tc_grid(x, y)
+        text = text.replace('%s', grid, 1)
+        m = mission_add(s.current_room, getattr(s, 'nation', camp) or camp, mtype, text, x, y, by=s.current_pilot,
+                        reason=f'(created by {s.current_pilot})')
+        send_rel(s, build_ingame_pkt(bytes([0x63]) + struct.pack('<I', m['id'])), f'<- MISSION CONFIRM 99 id={m["id"]}', to=3.0)
+        try:
+            tc_say(s.current_room, f'{s.current_pilot}: {text}', camp=m['camp'])
+        except Exception:
+            pass
+    except Exception:
+        logx('MISSION', 'mission create parse failed')
+
+def _handle_mission_delete_100(s, pl):
+    try:
+        b = pl[4:] if len(pl) > 4 and pl[4] == 0x64 else pl
+        mid = struct.unpack_from('<I', b, 1)[0]
+        mission_remove(s.current_room, mid=mid, reason=f'(deleted by {s.current_pilot})')
+    except Exception:
+        logx('MISSION', 'mission delete parse failed')
 
 def is_transport_plane(plane_id):
     try:
@@ -18185,6 +18522,7 @@ def _handle_chat_pl(s, pl):
         msg       = parts[1].decode('ascii', 'replace') if len(parts) > 1 else ''
         reconstructed = (chr(slot_char) + rest) if 0x20 <= slot_char <= 0x7e else rest
         sender = s.current_pilot or reconstructed
+    msg, _nh = chat_filter(msg, who=sender)          # v780f5: word filter (lobby path)
     log('CHAT', f'[{sender}]: {msg!r}')
     bcast = build_chat_broadcast(sender, msg)
     sessions = get_all_sessions()
@@ -23765,6 +24103,18 @@ def handle_post_auth(s, cmd, pl):
         except Exception:
             logx('MAP57', 'map message reply failed')
         return
+    # v770f5 PLAYER MISSIONS: 102 = list request, 110 = create, 100 = delete (all in-game, cmd 0)
+    if cmd == 0 and getattr(s, 'entered_game', False) and sub in (0x66, 0x6e, 0x64):
+        try:
+            if sub == 0x66:
+                send_missions_103(s, reason='(list request)')
+            elif sub == 0x6e:
+                _handle_mission_create_110(s, stored)
+            else:
+                _handle_mission_delete_100(s, stored)
+        except Exception:
+            logx('MISSION', 'mission message failed')
+        return
     if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
         # v294: the scene supply query the client fires on every map open / scene select.
         _handle_scene_supply_query_69(s, stored)
@@ -25275,6 +25625,8 @@ def handle_post_auth(s, cmd, pl):
                 _phist.append((_pn, time.time()))
                 if len(_phist) > 16:
                     del _phist[:-16]
+                if s.__dict__.get('_pos_xy') is not None:
+                    s.__dict__['_cargo_release_xy'] = tuple(s.__dict__['_pos_xy'])   # v777f5: the air-drop's release point
                 log('PARA', f'{s.current_pilot} CREW chute -> object 0x{_pn:04x} (tag 0x{_tag555:02x}, '
                             f'human bit clear; plane 0x{s.my_obj_number:04x}, pilot still aboard) - '
                             f'confirm + create on peers, no bail booked [v555f5]')
@@ -26122,6 +26474,7 @@ threading.Thread(target=_supply_tick_loop, daemon=True).start()   # v280: P2b pr
 threading.Thread(target=_camp_scores_loop, daemon=True).start()   # v651f5: Ctrl-L country scores (msg 43 + 40)
 threading.Thread(target=_prod40_fast_loop, daemon=True).start()   # v663f5: units keep-alive vs the client's 60 s overwrite
 threading.Thread(target=_group26_push_loop, daemon=True).start()  # v724f5: map group boxes refreshed every 5 s while the map is open
+threading.Thread(target=_missions_refresh_loop, daemon=True).start()  # v771f5: AI missions follow their columns
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive

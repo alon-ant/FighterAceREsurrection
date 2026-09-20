@@ -1396,6 +1396,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
                     <a href="/admin/logs" style="color:#17a2b8;">Live Console</a> |
                     <a href="/admin/lobby_news" style="color:#6f42c1;">Lobby News</a> |
+                    <a href="/admin/badwords" style="color:#dc3545;">Chat Filter</a> |
                     Logged in as <strong>{hesc(str(user))}</strong></div>
                 <h1>Server Administration</h1>
 
@@ -2252,6 +2253,33 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        elif self.path.startswith('/admin/badwords'):
+            # v780f5: the chat word filter list (badwords.txt next to server.py, reloaded live)
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><a href='/'>&larr; Back</a>"); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            try:
+                with open(os.path.join(_dir, 'badwords.txt'), 'r', encoding='utf-8', errors='replace') as f:
+                    _cur = f.read()
+            except Exception:
+                _cur = ''
+            _saved = 'saved' in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            content = f"""
+                <div class="nav"><a href="/admin">&larr; Back to Admin</a></div>
+                <h1>Chat Word Filter</h1>
+                {'<p style="color:#198754;"><strong>Saved.</strong> In effect immediately.</p>' if _saved else ''}
+                <div class="card">
+                  <p style="color:#888; max-width:640px;">One word per line. Matched words are replaced by asterisks in
+                  lobby and arena chat (whole words, case-insensitive, common leetspeak folded: 0=o 1=i 3=e 4=a 5=s
+                  7=t). End a line with <code>*</code> to match any word starting with it. <code>#</code> starts a
+                  comment. Hits are logged under CHATFILTER with the sender's name.</p>
+                  <form method="POST" action="/admin/badwords">
+                    <textarea name="words" rows="20" style="width:100%; font-family:monospace;">{hesc(_cur)}</textarea>
+                    <p><button type="submit">Save</button></p>
+                  </form>
+                </div>"""
+            self.send_html(content)
+
         elif self.path.startswith('/admin/lobby_news'):
             # v731f5: edit the lobby News page (msg 202): the right-hand news lines and the left
             # welcome pane. Files live next to server.py so the game server picks them up live.
@@ -2516,6 +2544,20 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(post_data)
         
         user = self.get_current_user()
+
+        if self.path == '/admin/badwords':
+            if not is_user_admin(user):
+                self.send_response(302); self.send_header('Location', '/'); self.end_headers(); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            _txt = qs.get('words', [''])[0].replace('\r\n', '\n')
+            try:
+                with open(os.path.join(_dir, 'badwords.txt'), 'w', encoding='utf-8') as f:
+                    f.write(_txt)
+                SRV['log']('WEB', f'{user} updated the chat word filter ({len([l for l in _txt.splitlines() if l.strip() and not l.strip().startswith("#")])} entries)')
+            except Exception as e:
+                SRV['log']('WEB', f'badwords save failed: {e!r}')
+            self.send_response(302); self.send_header('Location', '/admin/badwords?saved=1'); self.end_headers()
+            return
 
         if self.path == '/admin/lobby_news':
             # v731f5: save the lobby News / Welcome text (admin only)

@@ -46,6 +46,214 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-20 (c): v780f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v780f5.py'. (Previous: v769f5.)
+
+v770f5-v780f5 [MISSIONS SCREEN, CARGO SLOTS, AIRDROP SCALE, ECONOMY FIXES, SCORES, CHAT FILTER]
+    * v770/v771 PLAYER MISSIONS (EXE read 09-20): the flight dialog's missions tab sends a one-byte
+      102 when it opens online; the host answers 103 = [0x67] + N x [u8 type 1=off/2=def][u32 id]
+      [text\0] (-> DynamicMissions, the Offensive / Defensive boxes + the map's mission arrows).
+      'Create' sends 110 = [0x6e][type][camp][?][f32 x][f32 y][f32 z][u16][u8][u8][text with a
+      literal '%s' the host fills with the grid]; the host confirms with 99 [u32 id]; 'Delete'
+      sends 100 [u32 id]. Missions are per CAMP. Every trigger files Attack + Cover (attacker) and
+      Destroy (defender), cleared at the capture; the lines naming the tanks' position are
+      re-rendered every 30 s with the column's live grid (v771). `tc mission <scene> <camp>` files
+      them without tanks.
+    * v772..v775 CARGO SLOTS: the 106 request's three amounts are (AMMO, FUEL, METAL) - the reverse
+      of the v606 read - and the 107 answer uses the SAME slot order ('afm'). Every wrong guess
+      showed as the client dumping the load 5 ms later (type mismatch) or a metal load arriving
+      as ammo. `cargo order <xyz>` to test. v774: delivered metal repairs FIRST from the delivered
+      kilograms (a field with dead metal storage has no store to draw on), then stocks; no points
+      or AI line for unloading where you loaded (CARGO_MIN_HAUL_M 5 km). v778: a fully delivered
+      drop gets NO 107 - the only all-delivered form is all-zero, which the client narrates as
+      'There is no cargo to load your plane' (CARGO_DROP_SILENT_ON_FULL, `cargo silent on|off`).
+    * v777 AIRDROP: the 105 chute positions use PLANE_POS_SCALE (0.016) - the tank scale put a
+      13-chute stick 15 km off ('13 out of range', 2,345 kg written off); fallback to the release
+      point; air-dropped metal repairs from the delivered kilograms too.
+    * v779 SCORES (ACWIKI TC table): tanks per class (Sherman/Cromwell 250, T-34/Panther 400,
+      Tiger 500), paratrooper 50, locomotive 40 + 10 per rail car (was 300 / 0 - the wiki prices
+      trains low; TRAIN_KILL_SCORE is the one-line revert).
+    * v780 CHAT WORD FILTER at both reflect points (lobby + msg 20): asterisks of the same length,
+      whole-word, case-insensitive, leetspeak folded, 'word*' prefixes; badwords.txt next to
+      server.py, edited on the admin 'Chat Filter' page, reloaded live; hits logged CHATFILTER.
+
+==============================================================================
+*** BANKED 2026-09-20 (b): v769f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v769f5.py'. (Previous: v767f5.)
+
+v768f5-v769f5 [LOBBY NEWS: PARSER ERRORS]  Every news line logged 'ERROR: Wrong char 1, pos 3 in
+    line '   \x01<text>'' on the client (18,825 in one session): the client prepends three spaces
+    and hands the payload to its text-line parser from its FIRST byte, so the 0x01 'pane byte' was
+    inside the text. The pane rule is simply: a NUL first byte = left pane (welcome), plain text =
+    a right-pane line - the accidental form-1 probe on 09-16 was the correct wire form all along.
+    v768: control characters stripped, a blank spacer sent as one space.
+
+==============================================================================
+*** BANKED 2026-09-20: v767f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v767f5.py'. (Previous: v745f5.)
+
+v746f5-v767f5 [CONTESTED SCENES, TRAINS, ECONOMY, CARGO CONTRACT] (09-17 .. 09-19)
+    * v746: a scene DEFENDED by live enemy tanks/soldiers cannot change hands; attacking tanks
+      and paratroops clear the defenders before the buildings (tank vs infantry 6/s, infantry AT
+      12/s, infantry vs infantry 2/s).
+    * v747: a killed train is WRECKED (every car's mask bit) for TANK_WRECK_S then deleted with
+      the kill entry - it used to blink out with no explosion.
+    * v748: ONE COLUMN PER TRIGGER - re-tasking an idle column is now the fallback (no units /
+      pool empty / cap), not the default (Duran: four triggers, one column chasing all four).
+    * v749: trains belong to the camp that owns their line's stations; a capture strands / removes
+      the enemy train and the new owner's spawns (Taurus: a GE train sat at a US factory).
+    * v750: msg-57 peer-plane icons OFF - the cross sat at the last 15-30 s poll position = the
+      'ghost aircraft marker trailing a mile behind' (Flakmagic / Duran).
+    * v751/v752: RAIL BRIDGES - a train halts 60 m short of a destroyed bridge on its line and rolls
+      on when it is repaired; a train ON the bridge when it falls is destroyed (cyan kill to the
+      bomber). Crossings = bridge objects within 80 m of a rail polyline.
+    * v753: a pilot's fuel/ammo come ONLY from the base he is at (3 km; spawn waits up to 1.5 s
+      for his first position); columns from their factory. v755: an AI chat line says WHY a grant
+      came up short (the client's own text is 'insufficient aircraft units'). v756/v757: airfield
+      storage x10 (all airfield types; per-building loss scaled). v758's capacity floor REMOVED in
+      v759 - the 'no fuel for the whole SU team' online was their front airfield with all six fuel
+      tanks bombed out (= the design). v760: the local draw logs scene / type / distance / grid.
+    * v754: metal delivered by TRAIN repairs the scene like a cargo drop; the metal is DEDUCTED
+      (the cargo path used to stock and repair with the same kilograms).
+    * v761: a camp with trains kept the abstract per-minute deliveries only for scenes that are
+      NOT rail stations - captured off-rail bases join the chain (they were fed by nobody).
+    * v762..v767 CARGO + NEWS: a 32-line news on the reliable channel stalled the cargo answers
+      (a dozen re-requests / 'could not load'). Lines now go UNRELIABLE in one burst, the welcome
+      reliable last. v763's CargoPercent patch matched inside the PLANE block and is OFF (never
+      re-enable without a dump-verified offset). v765 THE REAL CARGO BUG since v606: the 107
+      answer to a PICK-UP must carry the amounts GIVEN as [ident][fuel][metal][ammo]
+      (FUN_00559790: all-equal -> 'cargo loaded', all zero -> 'There is no cargo to load your
+      plane'); we sent the shortfall - zeros on every full load, i.e. 'no cargo' - so every
+      'given' in the logs since v606 was a load the client refused. Drops keep zeros / negative.
+
+==============================================================================
+*** BANKED 2026-09-17 (c): v745f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v745f5.py'. (Previous: v741f5.)
+
+v742f5 [MAPDATA FOLDER]  The terrain / TC data files moved to 'mapdata\' next to server.py:
+    rails_trnNN, trn_tables_trnNN, fa_scene_profiles_trnNN, tank_tables, roadmap, fa_memdump,
+    fa_scenes, objscene_map, weapon_map. mapdata_path() prefers that folder and falls back to the
+    server directory, so a server that has not moved them still runs; everything the server or the
+    dump tools WRITE (probe map, weapon map, fa_dump_tank_tables, fa_make_rails) goes to mapdata\.
+    personas.json and q6_manifest.json stay put (server config / launcher manifest).
+
+v743f5-v745f5 [LOBBY NEWS DELIVERY]  send_rel BLOCKS until each packet is ACKed, so the news went
+    out one round trip per line: 5-6 s on a remote link, filling visibly. v743 dispatched the lines
+    through the send pool - fast but CONCURRENT, and they arrived scrambled (the client appends in
+    arrival order). v744/v745: ONE thread sends them in file order with NO ACK wait
+    (LOBBY_NEWS_ACK_S = 0) and the RELKEEP retransmits anything lost - the pane fills in about one
+    round trip, in order. Note for the text itself: the pane WRAPS long lines (~60-70 chars reads
+    best) and blank lines render as spacers.
+
+==============================================================================
+*** BANKED 2026-09-17 (b): v741f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v741f5.py'. (Previous: v740f5.)
+
+v741f5 [LOBBY NEWS: DUPLICATE PANE]  The pilot-select push (v732) and the News page's own 0xca a
+    second later both APPEND, so the right pane sometimes showed the news twice. Pushes closer
+    together than NEWS_MIN_INTERVAL_S (1.5 s) are collapsed; every later page open still gets a
+    full copy - a longer window would leave a re-opened page blank, because the client clears the
+    pane before it re-requests. Silence is never an option: an unanswered request puts the page
+    back into 'offline' mode (v734).
+
+==============================================================================
+*** BANKED 2026-09-17: v740f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v740f5.py'. (Previous: v734f5.)
+
+v735f5-v740f5 [INFANTRY COMBAT, PARA CREDIT, FORWARD STAGING] (09-17)
+    * v735: SOLDIER_HP 60 -> 12 (a plane's rounds report as msg-51 records of 2..6, so 60 was a
+      sustained burst per man). PLAYER kills carry the kill entry again -> the normal cyan 'has
+      destroyed' line + sound, like a tank kill; AI / AA kills stay silent + the magenta AI line
+      (that is the path the DEV build asserts on, v684).
+    * v736: the scene's DEFENCES (AA / flak / towers / bunkers / MG posts) are valid infantry
+      targets whatever their value and are engaged FIRST - the SOLDIER_HARD_VALUE cut had excluded
+      exactly the guns shooting the stick, so troops died without firing back.
+    * v737: defence damage derived from SOLDIER_HP via DEFENCE_TTK_S (30 s for one gun to kill one
+      man), so tuning soldier HP for aircraft fire no longer makes the AA lethal in 6 s.
+    * v738/v739: a CONSOLE-spawned stick (`tc paradrop`) has no dropper - it used to credit the
+      first in-game pilot with its ground kills and buildings. A real drop still credits its pilot
+      (TC_CREDIT_PARA_GROUND_KILLS True - v738 turned it off, user corrected it back).
+    * v740: an attack column is STAGED at the camp's nearest own scene that has the ammo+fuel for
+      it (>= TC_STAGE_MIN_GAIN_M closer than the factory), and that base pays from its own stores;
+      the units are still built at the factory. Online 09-16 19:52: TSC_Dutchy triggered 47,CQ and
+      the column formed 22,282 m away - a 34-minute drive; the scene was captured at 20:27 before
+      it arrived ('trigger but no tanks').
+
+==============================================================================
+*** BANKED 2026-09-17: v734f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v734f5.py'. (Previous: v730f5.)
+
+v731f5-v734f5 [LOBBY NEWS (msg 202 / 0xca)]  The lobby's News page: the LEFT pane and the tip come
+    from the client's own files ('Dlg_Helps\Lobby_News.doc', 'The News Tab.htm' - FUN_00711050 ->
+    FUN_006b4070 prefixes Dlg_Helps\ / DlgJ_Helps\ for the Japanese build), but ONLINE the page also
+    sends a one-byte 0xca (FUN_004f0380, gated on the connection flag DAT_00c822dc) and waits for the
+    server. We never answered, so the page stayed on its offline text with an empty News pane.
+    WIRE FORM (probe-verified 09-16, `news probe <pilot> <form> <text>`):
+        [0xca][PANE byte][text\0]   pane 0 = REPLACE the left pane, pane != 0 = APPEND one line to
+        the right News pane. (form 1 worked by accident - the 'H' of the text was the pane byte.)
+    So the news file is sent LINE BY LINE and the welcome LAST (a pane-1 line blanks the left pane).
+    The request arrives in THREE framings, all handled: bare (cmd 0), PREFIXED (cmd=0x01/09/1012,
+    inner sub at pl[8] - the reframe normalises sub to 0), and COUNTER-WRAPPED (stripped later in
+    the dispatch). Pushed 1.5 s after pilot selection too (direct + compound), so a pilot who never
+    opens the tab still gets it. v734: ALWAYS answer - the client re-requests on every page open and
+    treats silence as 'not online' (the v733 once-per-content gate made the page fall back).
+    Content: lobby_news.txt (right pane, one line each) + lobby_welcome.txt (left pane) next to
+    server.py, edited from the web admin (Lobby News page, admin-only, POST /admin/lobby_news) and
+    read live - no restart. Console: `news <pilot>`, `news probe <pilot> <form> [text]`, `news reload`.
+
+==============================================================================
+*** BANKED 2026-09-16: v730f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v730f5.py'. (Previous: v701f5, 2026-09-14.)
+
+v702f5-v730f5 [TC BALANCE, MAP UNIT BOXES, TRAIN FIXES] (09-15 .. 09-16)
+  TRIGGERS / DAMAGE / REPAIR
+    * v702: a PARATROOP stick's TRIGGERS entry no longer locks the damage trigger out for 5 min nor
+      silences the 40% warning (48,BC sat at 74% with no trigger); trigger test uses the ROUNDED
+      percent the map shows (an airfield read 60% at 59.9x and did not fire).
+    * v704/v707: building HP = the client's class LIFE (AA 200, hangar 2000, factory 2100) x
+      OBJ_HP_LIFE_MULT 2.0 - was value x 25, i.e. 5..12x the 2009 figure, hence 'impossible to
+      trigger'. `repair hp <mult>`. Repair clocks x4 (`repair mult <x>`).
+    * v708/v709: HARD targets (factories, hangars, HQs, rail yards, depots, bridges, docks,
+      bunkers, silos, power, mills) take BOMB / ROCKET damage only - a msg-31 record under
+      HARD_TARGET_MIN_HIT (1500; a cannon burst tops ~1100, a 250 lb bomb 2100+) is discarded on
+      them. Soft (AA, flak, fuel tanks, radar, storage, towers, barracks, trucks...) as before.
+    * v710: paratroop capture needs the stick COMPLETE (drop window closed) and PARA_CAPTURE_HOLD_S
+      (90 s) of holding at capture% - it used to flip the scene while chutes were still in the air.
+    * v711: at TC_MAX_TANKS_PER_ROOM (32 -> 48) the camp's oldest idle column is RECALLED to free
+      tanks instead of 'No tanks available' (US owned half the map and could not attack).
+    * v717: tank class per camp (US 133, GB 131, SU 135, GE 134, JP 137; `tc class <camp> <id>`);
+      v722: soldier class per camp (170..174) - every stick had been US.
+  SCORING / STATS
+    * v713/v714: squadron AND pilot tallies for Buildings / Tanks / Ground Units / Trains /
+      Captures, on the web ladder (Career + TC boards, compact scrollable layout).
+  MAP (field-verified with fa_dump_groups.py + probes, 09-16)
+    * msg 26 GROUP_INFO answered with the room's live groups: 14-byte records, u16 =
+      [mission 12-15][camp 9-11][kind 6-8][strategy 3-5][f3 0-2], u8 class, u8 count, i16 x/y of the
+      OBJECTIVE then i16 x/y of the LIVE position (the box is drawn at the second pair, the text
+      names the scene at the first), i16 flag. POSITION SCALE = (i16 << 10) x 0.01 (_DAT_00a23268).
+      KIND: 0/4 destroyer, 1 tank, 2 fighter, 3 bomber, 5 soldier, 6 sub, 7 lorry (no train glyph
+      exists - trains use the lorry). STRATEGY: 0 none, 1 'Go to', 2 Attack, 3 Defend, 4 Return.
+      v724: pushed every 5 s while the map is open (the client polls only every 30 s).
+    * msg 57 MAP_MESSAGE answered (origin + u32 records: camp, kind bit, 64 m steps, altitude) -
+      peer planes only; ground squares off (MAP57_GROUND_ICONS) as they add nothing over the boxes.
+    * ShowGroundObjects: the [Misc] flag byte at len-52 bit 0x08 of the served GAME_DEF (templates
+      ship it OFF, and the draw loop skips every ground icon without it) - patched at serve time,
+      web switch per arena. The 'train icon' from 2009 is the Rail Yard SCENE icon, not a moving
+      train (MapIcons.bmp tile per scene type; group boxes use tiles kind-1).
+  TRAINS
+    * v729 THE REAL BUG behind the warping / backwards / vanishing trains: the ROADMAP dump appends
+      node[0] as the last node of every road; on an OPEN line that is a phantom 37 km segment back
+      to the start (road 5: end at 78,AW -> start at 93,AJ by the BBB). Dropped at load.
+    * v725: no reverse running (the client rolls a NetTrain forward only) - at the end of an open
+      line the train is re-created at the first station; v726: rear/front/mid must not share a NODE
+      (two GB trains spawned on top of each other at 78,AR, one vanished).
+    * v730: rail_stations no longer CACHES an empty table (it can run before the scene tables load:
+      '0 rail station(s)' = no trains, no train chat). fa_make_rails.py column mapping fixed
+      ([x,y,z,cum] = roadmap [2],[3],[1],[6]) + a span sanity check; the v728 rebuild had no Y.
+    * v699: per-team train chat at every stop; v698: one train per qualifying road first (US road 8
+      by the BBB); v706: the economy (trains, production, msg 40/43/71) runs in TC arenas only.
+
+==============================================================================
 *** BANKED 2026-09-14 (b): v701f5 is the STABLE BANKING POINT (user-approved via the online-log
     review). Snapshot server.py -> 'old files\server_v701f5.py'. (Previous: v692f5.)
 
