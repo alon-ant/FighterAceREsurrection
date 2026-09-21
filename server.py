@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v791f5'
+VERSION = 'v792f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13695,6 +13695,9 @@ def soldier_broadcast_state(onum):
     return n
 
 SOLDIER_IDLE_S = 8.0     # v790f5: keep-alive cadence for a standing soldier (client cull is ~28 s of silence)
+SOLDIER_ARRIVE_M = 4.0   # v792f5: close enough to the slot (was 2 m)
+SOLDIER_STUCK_S  = 12.0  # v792f5: no progress this long -> stand where he is
+SOLDIER_STUCK_M  = 1.5   #         'progress' = closing at least this much
 SOLDIER_AIM_CHANGE_DEG = 15.0   # v791f5: an aim swing smaller than this is not worth an update
 
 def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
@@ -13960,7 +13963,20 @@ def _soldier_step(sd, o, terrain, gx, gy, dt, now):
     True when it moved."""
     x, y, _z = sd['pos']
     dist = math.hypot(gx - x, gy - y)
-    if dist <= 2.0:
+    if dist <= SOLDIER_ARRIVE_M:
+        sd['moving'] = False; sd['_stuck_since'] = None; sd['_best_dist'] = None
+        return False
+    # v792f5 [STUCK = STAND]: a slot on / inside a building cannot be reached; the man used to be
+    # pushed at it forever - 'moving' at 2 Hz for every soldier (8.8 KB/s online 18:25) and
+    # jittering in place ('paratroopers jumping about'). No progress of SOLDIER_STUCK_M within
+    # SOLDIER_STUCK_S -> he stands where he is (still fires, still counts as present).
+    _bd = sd.get('_best_dist')
+    if _bd is None or dist < _bd - SOLDIER_STUCK_M:
+        sd['_best_dist'] = dist; sd['_stuck_since'] = now
+    elif now - (sd.get('_stuck_since') or now) > SOLDIER_STUCK_S:
+        if not sd.get('_stuck_logged'):
+            sd['_stuck_logged'] = True
+            log('PARA', f'soldier 0x{o:04x}: no progress for {SOLDIER_STUCK_S:.0f}s ({dist:.0f} m from its slot) - standing here')
         sd['moving'] = False
         return False
     wps = sd.get('_wps')
