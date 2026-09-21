@@ -46,6 +46,34 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-21: v793f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v793f5.py'. (Previous: v784f5.)
+
+v785f5-v793f5 [THE CREATE / CULL LOOP AND THE AI TELEMETRY LOAD] (09-21)
+    * v785 THE COMMON CAUSE of the 09-20/21 reports (lag, warping, 5 s delays, empty map boxes,
+      invisible tanks, hits not registering, Taurus's runtime error): the client culls SOLDIERS
+      at a few km and trains/tanks near 30 km; our 1 Hz 're-create within 30 km' put them straight
+      back and the client culled them again every 5 s. Online run 09-20: 9,645 culls / 15,660
+      re-creates; 66,018 'Get coord for missing object' on one client. It surfaced when v712
+      made every cull list parseable (before that most were silently swallowed - the loop was
+      hidden). Fix: per-kind re-create radii inside the client's own cull (soldier 6 km, tank /
+      train 18 km) + a 45 s per-(client, object) cooldown after a cull, lifted only once the
+      pilot has closed 4 km. All three cull parsers and both re-create paths honour it.
+    * v786 AAPATCH / CRATERS lines at INFO (the craters patch is refusing on the online blobs -
+      'tail check failed' says why; AA visibility for the 'reset loses AA settings' report).
+    * v787 trains 1 Hz beyond 8 km (v723's 2 Hz was a patch for the phantom-node bug v729 fixed).
+    * v788/v789 PERF now COUNTS the AI telemetry (it never had: the whole gap between the
+      server's 1.2 KB/s and the client's 3 KB/s) - 'ai_tx=' on the INFO line, per-pilot KB/s on a
+      DEBUG 'PERF/PILOTS' line.
+    * v790..v793 SOLDIER STREAM: standing soldiers keep-alive every 8 s (immediate update only on
+      walking or an aim swing > 15 deg - v790's exact tuple compare fired every tick on firing
+      defenders); a man with no progress toward its slot for 12 s STANDS (slots on / in buildings
+      were pushed at forever = every soldier 'moving' at 2 Hz = the 'paratroopers jumping about');
+      walkers at 1 Hz. Field result 09-21 20:xx: 52 standing soldiers + 5 pilots = ai_tx 1.0-1.5
+      KB/s for the ROOM (from 9 KB/s); a client's inbound 6.2 -> 2.5 KB/s, the rest being the
+      other planes at full relay rate (~0.4-0.5 KB/s per peer in range).
+
+==============================================================================
 *** BANKED 2026-09-20 (e): v784f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v784f5.py'. (Previous: v781f5.)
 

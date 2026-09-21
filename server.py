@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v793f5'
+VERSION = 'v795f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9955,8 +9955,9 @@ TRAIN_MAP_WIDE        = False   # v720f5: OFF - the client culls AI objects beyo
                                 # on - a create/cull loop that rubber-banded the trains and left 'spawns
                                 # that never render'. Map icons come from msg 57 records, not objects.
 TRAIN_FAR_KEEPALIVE_S = 20.0
+AI_SILENCE_CULL_S     = 30.0    # v795f5: our silence after which the client has certainly culled the object
 
-def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
+def _ai_peer_send_ok(obj, p, x, y, now, kind='tank', onum=None):
     """True if this peer should receive this object's state now (tiered by distance + cadence).
     v675f5: beyond the near tier an ENEMY object drops straight to the keep-alive rate - the
     tactical map shows live positions of friendly units only (user 09-13)."""
@@ -9974,7 +9975,25 @@ def _ai_peer_send_ok(obj, p, x, y, now, kind='tank'):
     elif kind == 'train' and TRAIN_MAP_WIDE:
         hz = 1.0 / TRAIN_FAR_KEEPALIVE_S                  # v716f5: map-wide trains stay alive everywhere
     else:
+        # v795f5 [MIRROR THE CLIENT'S SILENCE CULL]: beyond the far tier we are silent, so the
+        # client culls the object after ~28 s - and it does NOT send a delete notify for a silence
+        # cull. If the peer stays in the set, a later position fix (or a missing one) resumes
+        # updates to an object the client no longer has: Flakmagic 09-21, 16,690 'Get coord for
+        # missing object' (tank 429: 943 alone) = the invisible tanks. After AI_SILENCE_CULL_S of
+        # our own silence the peer is dropped here; the re-create paths bring it back in range.
+        _sl = obj.setdefault('_silent_since', {})
+        _t0 = _sl.get(p.addr)
+        if _t0 is None:
+            _sl[p.addr] = now
+        elif now - _t0 >= AI_SILENCE_CULL_S:
+            obj.get('peers', set()).discard(p.addr)
+            _sl.pop(p.addr, None)
+            try:
+                _note_client_cull(p, onum if onum is not None else -1, x, y)
+            except Exception:
+                pass
         return False                                   # v680f5: beyond the client's cull - silence
+    obj.get('_silent_since', {}).pop(p.addr, None)     # in range again
     pl = obj.setdefault('_peer_last', {})
     if now - pl.get(p.addr, 0.0) < 1.0 / hz:
         return False
@@ -10014,7 +10033,7 @@ def tank_broadcast_state(onum):
             if hold.get(p.addr, 0.0) > now:
                 continue
             if not _ai_peer_send_ok(t, p, t['pos'][0], t['pos'][1], now,
-                                    kind='follower' if _is_follower else 'tank'):      # v668f5/v672f5
+                                    kind='follower' if _is_follower else 'tank', onum=onum):      # v668f5/v672f5
                 continue
             if send_tank_update(onum, p, pl):
                 n += 1
@@ -12573,7 +12592,7 @@ def train_broadcast_state(onum, only=None):
     _hold = tr.get('hold_until') or {}
     for p in get_sessions_in_room(tr['room']):
         if getattr(p, 'addr', None) in tr['peers'] and _hold.get(p.addr, 0.0) <= now \
-                and _ai_peer_send_ok(tr, p, x, y, now, kind='train') \
+                and _ai_peer_send_ok(tr, p, x, y, now, kind='train', onum=onum) \
                 and _send_unrel_frame_to(p, onum, pl):
             n += 1
     tr['last_sent'] = time.time()
@@ -13689,7 +13708,7 @@ def soldier_broadcast_state(onum):
     sd['_aim_sent'] = sd.get('_aim')
     for p in get_sessions_in_room(sd['room']):
         if getattr(p, 'addr', None) in sd['peers'] and _hold.get(p.addr, 0.0) <= _now \
-                and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now, kind='soldier') \
+                and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now, kind='soldier', onum=onum) \
                 and _send_unrel_frame_to(p, onum, pl):
             n += 1
     sd['last_sent'] = time.time()
@@ -17477,12 +17496,14 @@ def relay_telemetry(src, data, _split_obj=None):
     # 25-bit signed at bits 0..24, Y = 25-bit signed at bits 25..49, Z = 22-bit unsigned at bits
     # 50..71, all x PLANE_POS_SCALE (dumped double @0xa48090), Z minus 500 - NOT the tank's 7-byte
     # form (v591f5 read that and put every landing at the take-off field).
+    _co_onum = None; _co_pos = None                   # v794f5: object number / position of THIS frame
     if len(pl) >= 18 and PLANE_POS_SCALE:
         _co_onum = int.from_bytes(pl[7:9], 'little')
         if _co_onum == getattr(src, 'my_obj_number', None):
             try:
                 _ox, _oy, _oz = unpack_plane_pos9(pl[9:18])         # v612f5: the pilot's own position
                 src._pos_xy = (_ox, _oy); src._pos_z = _oz
+                _co_pos = (_ox, _oy)
             except Exception:
                 pass
         _crew_ent = (src.__dict__.get('crew_para_objs') or {}).get(_co_onum)
@@ -17490,6 +17511,7 @@ def relay_telemetry(src, data, _split_obj=None):
             try:
                 _px, _py, _pz = unpack_plane_pos9(pl[9:18])
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
+                _co_pos = (_px, _py)
             except Exception:
                 pass
     # v243: and the quantised world POSITION (body[0:6] = 3x u16, i.e. pl[9:15]). This is what tells
@@ -17563,7 +17585,7 @@ def relay_telemetry(src, data, _split_obj=None):
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
     _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
-    _src_pos = src.__dict__.get('_pos_xy')            # v674f5: distance tiers for peer plane telemetry
+    _src_pos = _co_pos if _co_pos is not None else src.__dict__.get('_pos_xy')   # v794f5: THIS object's position
     for p in peers:
         # v674f5 [PLANE RELAY TIERS] (user 09-13: live telemetry only near the player, tactical
         # positions beyond): a peer farther than PLANE_RELAY_NEAR_M from the sender gets this
@@ -17575,10 +17597,15 @@ def relay_telemetry(src, data, _split_obj=None):
             if _dd > PLANE_RELAY_NEAR_M:
                 _friend = getattr(p, 'nation', None) == getattr(src, 'nation', None)
                 _hz = PLANE_RELAY_MID_HZ if (_dd <= PLANE_RELAY_FAR_M or _friend) else PLANE_RELAY_FAR_HZ   # v683f5: never silent
+                # v794f5: the limiter is PER OBJECT, not per sender - the plane and every chute it
+                # dropped shared one slot, so once the transport flew out of the near tier all 14
+                # chutes over the base got one update per second BETWEEN them (troops 'jumping and
+                # warping in the air', user 09-22). And a chute's own distance decides its tier.
                 _rl = src.__dict__.setdefault('_relay_last', {})
-                if _now_relay - _rl.get(p.addr, 0.0) < 1.0 / _hz:
+                _okey = (p.addr, _co_onum if _co_onum is not None else -1)
+                if _now_relay - _rl.get(_okey, 0.0) < 1.0 / _hz:
                     continue
-                _rl[p.addr] = _now_relay
+                _rl[_okey] = _now_relay
         if SEND_CREATE_OBJECT and src.my_obj_number is not None:
             _cp = src.__dict__.setdefault('_created_peers', set())
             if p.addr not in _cp:
@@ -18006,6 +18033,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
         s.__dict__.pop('_pos_xy', None)             # v632f5: no stale in-flight position
     else:
         s.sp_regrant_pending = True   # alive landed-TAB: keep world flags; defer to next out-4
+        s.__dict__.pop('_pos_xy', None)             # v795f5: the old field's position is stale for the tiers
     # v416f5: mark the grant->ServerConfirm window. Between this grant and CONFIRM5 the client
     # is REBUILDING ITS WORLD (terrain load + the 82% WaitingForStartPlaceList screen) and has
     # not yet inserted its player, so scoreboard pushes about players it may not have built
