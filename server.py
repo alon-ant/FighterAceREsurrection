@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v792f5'
+VERSION = 'v793f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9939,8 +9939,9 @@ PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
 PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client, never re-created
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
-AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 4.0}   # v790f5: soldiers back to 2 Hz
-                                              # while WALKING (1 Hz warped them); standing ones are keep-alive only
+AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 1.0, 'train': 4.0}   # v793f5: soldiers 1 Hz - the
+                                              # 'warping' that put them at 2 Hz was the unreachable-slot jitter
+                                              # (v792), not the rate; 23 walkers x 2 Hz x 3 pilots was 5.6 KB/s
 AI_TELEMETRY_MID_HZ_KIND = {'train': 1.0}     # v787f5: back to 1 Hz beyond 8 km - v723's 2 Hz was a patch for
                                               # the speed mismatch that v729 fixed at the root (the phantom
                                               # rail node); 15 trains at 2 Hz were ~1.3 KB/s on their own
