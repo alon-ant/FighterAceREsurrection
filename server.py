@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v790f5'
+VERSION = 'v791f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13669,11 +13669,21 @@ def soldier_broadcast_state(onum):
     n = 0
     _now = time.time()
     _hold = sd.get('hold_until') or {}
-    # v790f5: a STANDING soldier (not moving, no fresh aim change) gets a keep-alive every
-    # SOLDIER_IDLE_S instead of the near-tier cadence - 24 standing defenders were 0.9 KB/s per
-    # pilot for nothing (online 17:38). Walkers are sent at the near tier (2 Hz, see below) so
-    # the client's own motion integration is corrected often enough not to warp.
-    if not _mv and sd.get('_aim_sent') == sd.get('_aim') and (_now - sd.get('last_sent', 0.0)) < SOLDIER_IDLE_S:
+    # v790f5/v791f5: a STANDING soldier gets a keep-alive every SOLDIER_IDLE_S and an immediate
+    # update only when it starts walking or its aim really swings (> SOLDIER_AIM_CHANGE_DEG) -
+    # v790 compared the aim tuples exactly, and a firing defender recomputes its aim every tick
+    # with float jitter, so 39 standing soldiers still went out at 2 Hz (online 18:05, 9 KB/s).
+    def _aim_changed(a, b):
+        if a is None or b is None:
+            return a is not b
+        try:
+            na = math.hypot(a[0], a[1]) or 1.0; nb = math.hypot(b[0], b[1]) or 1.0
+            dot = (a[0] * b[0] + a[1] * b[1]) / (na * nb)
+            return dot < math.cos(math.radians(SOLDIER_AIM_CHANGE_DEG))
+        except Exception:
+            return True
+    if not _mv and not _aim_changed(sd.get('_aim_sent'), sd.get('_aim')) \
+            and (_now - sd.get('last_sent', 0.0)) < SOLDIER_IDLE_S:
         return 0
     sd['_aim_sent'] = sd.get('_aim')
     for p in get_sessions_in_room(sd['room']):
@@ -13685,6 +13695,7 @@ def soldier_broadcast_state(onum):
     return n
 
 SOLDIER_IDLE_S = 8.0     # v790f5: keep-alive cadence for a standing soldier (client cull is ~28 s of silence)
+SOLDIER_AIM_CHANGE_DEG = 15.0   # v791f5: an aim swing smaller than this is not worth an update
 
 def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
     """Create up to SOLDIER_MAX_PER_STICK NetSoldiers at the given positions (one msg-2 per
