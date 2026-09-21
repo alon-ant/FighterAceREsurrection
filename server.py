@@ -337,7 +337,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v784f5'
+VERSION = 'v785f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10390,6 +10390,15 @@ def _ai_cull_list(s, ids):
             continue
         coll[onum]['peers'].discard(addr); n += 1
         _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else 'train')
+        try:                                                     # v785f5: start the re-create cooldown
+            if coll is TRAINS:
+                _rl = rails_for(coll[onum].get('terrain') or _probe_terrain_for_room(coll[onum]['room']))
+                (_cx, _cy, _cz), _ = rail_point(_rl['roads'][coll[onum]['road']], coll[onum]['node'], coll[onum]['dist'])
+            else:
+                _cx, _cy = coll[onum]['pos'][0], coll[onum]['pos'][1]
+            _note_client_cull(s, onum, _cx, _cy)
+        except Exception:
+            pass
         log('TANK', f'{s.current_pilot} dropped {_kind} 0x{onum:04x} (client cull list) - re-created when back within {REJOIN_RADIUS_M / 1000:.0f} km')
     try:
         _rid = getattr(s, 'current_room', None)
@@ -10425,15 +10434,24 @@ def _tank_note_client_delete(s, pl):
             if t is not None:
                 if getattr(s, 'addr', None) in t['peers']:
                     t['peers'].discard(s.addr)
+                    _note_client_cull(s, onum, t['pos'][0], t['pos'][1])            # v785f5
                     log('TANK', f'{s.current_pilot} dropped tank 0x{onum:04x} (client delete notify) - '
                                 f'{len(t["peers"])} peer(s) still have it; re-created at his next ServerConfirm')
                 i += 2
             elif sd is not None:
                 sd['peers'].discard(getattr(s, 'addr', None))       # v590f5: soldiers are bare entries too
+                _note_client_cull(s, onum, sd['pos'][0], sd['pos'][1])              # v785f5
                 i += 2
             elif onum in TRAINS:
                 if getattr(s, 'addr', None) in TRAINS[onum]['peers']:
                     TRAINS[onum]['peers'].discard(s.addr)   # v613f5
+                    try:
+                        _tr = TRAINS[onum]
+                        _rl = rails_for(_tr.get('terrain') or _probe_terrain_for_room(_tr['room']))
+                        (_cx, _cy, _cz), _ = rail_point(_rl['roads'][_tr['road']], _tr['node'], _tr['dist'])
+                        _note_client_cull(s, onum, _cx, _cy)                         # v785f5
+                    except Exception:
+                        pass
                     log('TRAIN', f'{s.current_pilot} dropped train 0x{onum:04x} (client delete notify) - re-created when back within {REJOIN_RADIUS_M / 1000:.0f} km')
                 i += 2
             elif i + 3 <= len(body):
@@ -12771,25 +12789,58 @@ def _recreate_near_pilots():
                 rails = rails_for(tr.get('terrain') or _probe_terrain_for_room(rid))
                 if rails:
                     (x, y, _z), _ = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
-                    if math.hypot(x - pos[0], y - pos[1]) <= REJOIN_RADIUS_M:
+                    if _recreate_allowed(s, onum, 'train', x, y, pos):          # v785f5
                         near_any = True; break
         if not near_any:
             for onum, t in TANKS.items():
                 if t['room'] == rid and not t.get('dead') and s.addr not in t['peers'] \
-                        and math.hypot(t['pos'][0] - pos[0], t['pos'][1] - pos[1]) <= REJOIN_RADIUS_M:
+                        and _recreate_allowed(s, onum, 'tank', t['pos'][0], t['pos'][1], pos):
                     near_any = True; break
         if not near_any:
             for onum, sd in SOLDIERS.items():
                 if sd['room'] == rid and s.addr not in sd['peers'] \
-                        and math.hypot(sd['pos'][0] - pos[0], sd['pos'][1] - pos[1]) <= REJOIN_RADIUS_M:
+                        and _recreate_allowed(s, onum, 'soldier', sd['pos'][0], sd['pos'][1], pos):
                     near_any = True; break
         if near_any:
             try:
-                tank_recreate_for(s, reason='(back in range)', near_xy=pos, radius=REJOIN_RADIUS_M)
+                tank_recreate_for(s, reason='(back in range)', near_xy=pos, radius=REJOIN_RADIUS_M, per_kind=True)
             except Exception:
                 logx('TANK', 're-create near pilot failed')
 
 REJOIN_RADIUS_M = 30000.0   # v688f5: back to 30 km (see AI_TELEMETRY_FAR_M)
+# v785f5 [CREATE / CULL LOOP - the 09-20 lag, warping, invisible boxes, unregistered hits]: the
+# client culls SOLDIERS at a much shorter range than 30 km and TRAINS/TANKS near it too; our 1 Hz
+# 'back in range' re-create put them straight back and the client culled them again every 5 s
+# (online run 09-20: 9,645 culls / 15,660 re-creates; 66,018 'Get coord for missing object' on
+# one client). Per-kind re-create radii inside the client's own cull, and a per-(client, object)
+# COOLDOWN after a cull that is lifted only once the pilot has closed RECREATE_APPROACH_M.
+REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0}
+RECREATE_COOLDOWN_S   = 45.0
+RECREATE_APPROACH_M   = 4000.0
+
+def _recreate_allowed(s, onum, kind, x, y, pos):
+    """May object `onum` be re-created for session s now?"""
+    d = math.hypot(x - pos[0], y - pos[1])
+    if d > REJOIN_RADIUS_BY_KIND.get(kind, REJOIN_RADIUS_M):
+        return False
+    cd = s.__dict__.setdefault('_recreate_cd', {})
+    ent = cd.get(onum)
+    if ent is None:
+        return True
+    t_cull, d_cull = ent
+    if time.time() - t_cull >= RECREATE_COOLDOWN_S and d < d_cull - RECREATE_APPROACH_M:
+        return True
+    return False
+
+def _note_client_cull(s, onum, x, y):
+    """Record where the pilot was when his client culled the object (for the cooldown)."""
+    pos = s.__dict__.get('_pos_xy')
+    d = math.hypot(x - pos[0], y - pos[1]) if pos else 0.0
+    cd = s.__dict__.setdefault('_recreate_cd', {})
+    cd[onum] = (time.time(), d)
+    if len(cd) > 400:
+        for k in sorted(cd, key=lambda k: cd[k][0])[:200]:
+            cd.pop(k, None)
 
 # --- v640f5 ARENA RESET ------------------------------------------------------------------
 # Console `reset <room> [winner_camp]`, the web 'Reset' button, or the TC WIN CHECK (room setting
@@ -14179,7 +14230,7 @@ def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
     warned[key] = time.time()
     tc_say(room_id, f'Your {tc_scene_kind_word(txy[2])} at {tc_grid(txy[0], txy[1])} is about to be triggered!', camp=tcamp)
 
-def tank_recreate_for(s, reason='', near_xy=None, radius=None):
+def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
     """v563f5/v570f5/v604f5: after a (re)spawn, create every tank of the room this session
     doesn't hold - batched, but never more than RECREATE_CHUNK records per msg-2: the live
     48-tank batch (1,057 B) at 09-09 17:15 was silently not applied by the client (16 x 21 B +
@@ -14189,10 +14240,14 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None):
     if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS):
         return 0
     rid = getattr(s, 'current_room', None)
-    def _near(x, y):
-        return near_xy is None or math.hypot(x - near_xy[0], y - near_xy[1]) <= (radius or REJOIN_RADIUS_M)
+    def _near(x, y, kind='tank', onum=None):
+        if near_xy is None:
+            return True
+        if per_kind and onum is not None:
+            return _recreate_allowed(s, onum, kind, x, y, near_xy)         # v785f5: per-kind radius + cooldown
+        return math.hypot(x - near_xy[0], y - near_xy[1]) <= (radius or REJOIN_RADIUS_M)
     todo = [(onum, t) for onum, t in list(TANKS.items()) if t['room'] == rid and getattr(s, 'addr', None) not in t['peers']
-            and not t.get('dead') and _near(t['pos'][0], t['pos'][1])]
+            and not t.get('dead') and _near(t['pos'][0], t['pos'][1], 'tank', onum)]
     n = 0
     for i in range(0, len(todo), RECREATE_CHUNK):
         chunk = todo[i:i + RECREATE_CHUNK]
@@ -14211,7 +14266,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None):
         log('TANK', f'{s.current_pilot}: re-created {n} tank(s) in {(n + RECREATE_CHUNK - 1) // RECREATE_CHUNK} msg-2(s) {reason}')
     # v590f5/v604f5: soldiers the same way, same chunking
     stodo = [(onum, sd) for onum, sd in list(SOLDIERS.items()) if sd['room'] == rid and getattr(s, 'addr', None) not in sd['peers']
-             and _near(sd['pos'][0], sd['pos'][1])]
+             and _near(sd['pos'][0], sd['pos'][1], 'soldier', onum)]
     sn = 0
     for i in range(0, len(stodo), RECREATE_CHUNK):
         chunk = stodo[i:i + RECREATE_CHUNK]
@@ -14236,7 +14291,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None):
             if not rails:
                 continue
             (x, y, _z), _ = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
-            if not _near(x, y):
+            if not _near(x, y, 'train', onum):
                 continue
         ttodo.append((onum, tr))
     tn = 0
