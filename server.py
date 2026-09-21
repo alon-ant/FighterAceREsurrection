@@ -292,6 +292,16 @@ TODO list:
       (slot 2). 'Aircraft/Tank/Ship units' on Ctrl-L / HQ are 'value of deployed units', not a
       stock (10,417 = a loco + 8 wagons; 1,562 = one Tempest). Authentic 2009 behaviour; the
       resources rows are ours. Nothing to feed.
+  [ ] (SCORING, 2026-09-21) CRASH-LANDING IN ENEMY TERRITORY loses only the PLANE, not the pilot
+      (user). Today a crash-land (MEC 1 / 26 on the ground) books a pilot loss when it is not a
+      clean landing; the pilot walked away - the plane is gone, the pilot is not. Needs: on an
+      on-ground exit with the plane intact enough to be a crash-landing (not a crash into the
+      ground at speed), book planes_lost only, no lost pilot, no -500; and 'enemy territory' =
+      nearest scene not the pilot's camp - possibly a small capture-risk penalty instead.
+  [ ] (UI, 2026-09-21) Skyyr: squadron tag missing on first login (91_3); showed after re-selecting
+      the pilot - the pilot-select 0xe4 stamp vs the squadron list order at first entry.
+  [ ] (TC, 2026-09-21) Taurus: US column at 52,AY approached the SU base and did not attack - re-check
+      after v785 (the create/cull loop made its defender targets invisible).
   [ ] (TC, 2026-09-16) MISSIONS SCREEN (Offensive / Defensive Missions boxes + the map page's mission
       arrows): client 'create mission' upload = msg 110 (0x6e), 90 B sample (US pilot, 'Attack US
       tanks at 73,AW heading to US factory'):
@@ -337,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v785f5'
+VERSION = 'v789f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2967,6 +2977,8 @@ def apply_craters_vanish(d, minutes=None, number=None):
         ox1, ox2 = struct.unpack_from('<II', d, off - 11)
         if not (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
                 and 100 <= ox1 <= 100000 and 100 <= ox2 <= 100000 and ox1 < ox2):
+            log('CRATERS', f'tail check failed: delays {ccd}/{pmt}/{get_} craters {cvd}/{cvn} oxygen {ox1}/{ox2} '
+                           f'(len {n}) - blob layout differs; not patched')      # v786f5: say why
             return None
         if (cvd, cvn) == (minutes, number):
             return None
@@ -3377,10 +3389,10 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
         _aa = apply_aa_quality(d, _q)
         if _aa:
             _off, _old = _aa
-            log('GAMEDEF212', f'EvP AA quality @+{_off}: {_old} -> {list(_q)} '
-                              f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')
+            log('AAPATCH', f'EvP AA quality @+{_off}: {_old} -> {list(_q)} '
+                           f'(AAquality/Flak/BomberGunner/ShipAA/TankAA)')      # v786f5: INFO tag
         else:
-            log('GAMEDEF212', 'EvP AA: quality bytes not located/verified; left as-is')
+            log('AAPATCH', f'EvP AA: quality bytes not located/verified; left as-is (wanted {list(_q)})')
     # BUILDING AUTO-REPAIR OFF (v450f5): force BuildingsRepairRate=0 (2009-authentic; room
     # templates carry the client INI default 100, which visibly self-repaired destroyed
     # buildings in the 2026-08-16 field test). Length-preserving single-byte write.
@@ -8477,7 +8489,7 @@ _relay_send_q = queue.Queue()
 # REVERT: PERF_STATS=False silences the output; the counters themselves cost ~nothing.
 PERF_STATS = True
 PERF_STATS_INTERVAL = 30.0
-_perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0,
+_perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0, 'aib': 0,
          'disp_t': 0.0, 'disp_max': 0.0, 'disp_n': 0, 'rq_max': 0}
 
 def _perf_stats_loop():
@@ -8502,6 +8514,22 @@ def _perf_stats_loop():
             _mem_s += f' sendq={_send_pool._work_queue.qsize()}'      # v707f5: send-pool backlog
         except Exception:
             pass
+        # v788f5: AI telemetry share + per-pilot outbound (KB/s) - the number the client's 'Receive
+        # data' shows, which PERF used to under-report by the whole AI stream. v789f5: on a separate
+        # DEBUG line (PERF/PILOTS), the INFO PERF line stays as it was (user: the info view is crowded).
+        _pp_line = ''
+        try:
+            _mem_s += f' ai_tx={w["aib"] / iv / 1024.0:.1f}KBs'
+            with sl:
+                _pp = []
+                for x in list(sids.values()):
+                    _b = x.__dict__.pop('_txb_win', 0)
+                    if _b and getattr(x, 'flying', False):
+                        _pp.append(f'{x.current_pilot}={_b / iv / 1024.0:.1f}')
+            if _pp:
+                _pp_line = 'per_pilot KB/s: ' + ' '.join(_pp)
+        except Exception:
+            pass
         log('PERF', 'window=%.0fs rx=%.1fpps/%.1fKBs tx=%.1fpps/%.1fKBs '
                     'rxthread_busy=%.1f%% disp_avg=%.2fms disp_max=%.2fms '
                     'relay_q_max=%d sessions=%d flying=%d'
@@ -8509,6 +8537,8 @@ def _perf_stats_loop():
                100.0*w['disp_t']/iv,
                (1000.0*w['disp_t']/w['disp_n']) if w['disp_n'] else 0.0,
                1000.0*w['disp_max'], w['rq_max'], ns, nf) + _mem_s)
+        if _pp_line:
+            log('PERF/PILOTS', _pp_line, level='DEBUG')         # v789f5: debug view only
 
 def _process_rss_mb():
     """v690f5: resident set size of this process in MB (Windows via psapi, else /proc), or None."""
@@ -9909,9 +9939,11 @@ PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
 PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client, never re-created
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
-AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 4.0}   # v720f5: trains 4 Hz near (smooth)
-AI_TELEMETRY_MID_HZ_KIND = {'train': 2.0}     # v723f5: trains 2 Hz in the mid tier (8-30 km) - a moving object
-                                              # corrected once a second showed the pull as a jump
+AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 1.0, 'train': 4.0}   # v787f5: soldiers 1 Hz (a
+                                              # stick of 14 at 2 Hz was ~0.7 KB/s; they walk at 1.5 m/s)
+AI_TELEMETRY_MID_HZ_KIND = {'train': 1.0}     # v787f5: back to 1 Hz beyond 8 km - v723's 2 Hz was a patch for
+                                              # the speed mismatch that v729 fixed at the root (the phantom
+                                              # rail node); 15 trains at 2 Hz were ~1.3 KB/s on their own
 # v716f5 [TRAINS MAP-WIDE]: the client's map draws TRAINS from the NetTrain objects it holds (its
 # own 'Show Trains' option) - no group-record glyph exists for them. So every client keeps every
 # train: beyond the far tier a train still gets a keep-alive every TRAIN_FAR_KEEPALIVE_S (the
@@ -13607,7 +13639,10 @@ def _send_unrel_frame_to(sess, onum, payload):
     seq = getattr(sess, '_relay_seq', 0) & 0xFF
     sess._relay_seq = seq + 1
     try:
-        sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, sess.addr)
+        _p = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
+        sock.sendto(_p, sess.addr)
+        _perf['tx'] += 1; _perf['txb'] += len(_p); _perf['aib'] += len(_p)      # v788f5: AI telemetry was NOT counted
+        sess.__dict__['_txb_win'] = sess.__dict__.get('_txb_win', 0) + len(_p)
         return True
     except OSError:
         return False
