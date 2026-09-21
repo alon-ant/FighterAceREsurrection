@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v789f5'
+VERSION = 'v790f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9939,8 +9939,8 @@ PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
 PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client, never re-created
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
-AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 1.0, 'train': 4.0}   # v787f5: soldiers 1 Hz (a
-                                              # stick of 14 at 2 Hz was ~0.7 KB/s; they walk at 1.5 m/s)
+AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 2.0, 'train': 4.0}   # v790f5: soldiers back to 2 Hz
+                                              # while WALKING (1 Hz warped them); standing ones are keep-alive only
 AI_TELEMETRY_MID_HZ_KIND = {'train': 1.0}     # v787f5: back to 1 Hz beyond 8 km - v723's 2 Hz was a patch for
                                               # the speed mismatch that v729 fixed at the root (the phantom
                                               # rail node); 15 trains at 2 Hz were ~1.3 KB/s on their own
@@ -13669,6 +13669,13 @@ def soldier_broadcast_state(onum):
     n = 0
     _now = time.time()
     _hold = sd.get('hold_until') or {}
+    # v790f5: a STANDING soldier (not moving, no fresh aim change) gets a keep-alive every
+    # SOLDIER_IDLE_S instead of the near-tier cadence - 24 standing defenders were 0.9 KB/s per
+    # pilot for nothing (online 17:38). Walkers are sent at the near tier (2 Hz, see below) so
+    # the client's own motion integration is corrected often enough not to warp.
+    if not _mv and sd.get('_aim_sent') == sd.get('_aim') and (_now - sd.get('last_sent', 0.0)) < SOLDIER_IDLE_S:
+        return 0
+    sd['_aim_sent'] = sd.get('_aim')
     for p in get_sessions_in_room(sd['room']):
         if getattr(p, 'addr', None) in sd['peers'] and _hold.get(p.addr, 0.0) <= _now \
                 and _ai_peer_send_ok(sd, p, sd['pos'][0], sd['pos'][1], _now, kind='soldier') \
@@ -13676,6 +13683,8 @@ def soldier_broadcast_state(onum):
             n += 1
     sd['last_sent'] = time.time()
     return n
+
+SOLDIER_IDLE_S = 8.0     # v790f5: keep-alive cadence for a standing soldier (client cull is ~28 s of silence)
 
 def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
     """Create up to SOLDIER_MAX_PER_STICK NetSoldiers at the given positions (one msg-2 per
