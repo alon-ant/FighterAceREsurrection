@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v798f5'
+VERSION = 'v799f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10581,6 +10581,20 @@ def _handle_tank_hit_51(s, pl):
                 _handle_train_hit(s, victim, attacker, dmg, car=0)      # v617f5/v626f5: the loco
                 continue
             if t is None:
+                # v799f5 [HITS ON PLANES ARE EVIDENCE]: the shooter's client reports every hit here
+                # (msg 33: victim / attacker / damage). A victim plane that later crashes with a
+                # SHORT exit (no hunter, no msg-28 latch - Skyyr: 'shoot them 2-3 times, they crash
+                # while manoeuvring, cyan line but no kill') is credited to the last pilot whose
+                # HITS on that plane are on record within PLANE_HIT_CREDIT_S - that is exactly the
+                # evidence the FALLBACK (v695, off) lacked: hits on THIS plane, not 'someone fired'.
+                try:
+                    _vs = next((q for q in get_sessions_in_room(s.current_room)
+                                if getattr(q, 'my_obj_number', None) == victim), None)
+                    if _vs is not None and _vs is not s and dmg > 0:
+                        PLANE_LAST_HIT[victim] = (attacker, time.time(), s.current_pilot)
+                        continue
+                except Exception:
+                    pass
                 _g = _SOLDIER_GONE.get(victim)                        # v685f5: say WHY an id is unknown
                 _why = (f'a soldier removed {time.time() - _g[0]:.0f}s ago {_g[1]}' if _g else 'never one of our AI objects')
                 log('TANKHIT', f'{s.current_pilot}: hit on 0x{victim:04x} by 0x{attacker:04x} dmg={dmg} '
@@ -10622,6 +10636,9 @@ DEFENCE_TTK_S       = 30.0      # v737f5: seconds for ONE defence object to kill
                                 # Two guns on the same man halve it; the stick shoots back (v736).
 def defence_dps():
     return max(0.1, float(SOLDIER_HP) / max(1.0, DEFENCE_TTK_S))
+
+PLANE_LAST_HIT = {}          # v799f5: victim obj -> (attacker obj, time, attacker pilot) from msg-33 hit reports
+PLANE_HIT_CREDIT_S = 90.0    # a crash within this of the last recorded hit credits that shooter
 
 def _handle_soldier_hit(s, victim, attacker, dmg):
     sd = SOLDIERS.get(victim)
@@ -16488,6 +16505,19 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     #    still has took_damage set and is caught by the latch (path 2) anyway.
     _clean_bail_husk = (getattr(victim, 'para_obj_number', None) is not None
                         and not bool(getattr(victim, 'took_damage', False)))
+    # 3) v799f5 HIT-RECORD: the last pilot whose msg-33 HITS on this plane are on record (within
+    #    PLANE_HIT_CREDIT_S). Evidence about THIS plane, unlike the old room-wide fallback.
+    if killer is None and not _clean_bail_husk:
+        _vo = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+        _lh = PLANE_LAST_HIT.pop(_vo, None) if _vo is not None else None
+        if _lh and time.time() - _lh[1] <= PLANE_HIT_CREDIT_S:
+            _hp2, _ = _peer_owning_object(victim, _lh[0])
+            if _hp2 is None:
+                _hp2 = next((p for p in get_sessions_in_room(victim.current_room)
+                             if p is not victim and getattr(p, 'my_obj_number', None) == _lh[0]), None)
+            if _hp2 is not None and _hp2 is not victim:
+                killer = _hp2
+                log('KILL', f'attribution: HIT-RECORD - {_hp2.current_pilot} hit this plane {time.time() - _lh[1]:.0f}s ago (msg 33)')
     if killer is None and not _clean_bail_husk and KILL_FALLBACK_CREDIT:
         now = time.time(); best = 0.0
         for p in get_sessions_in_room(victim.current_room):
@@ -21081,7 +21111,8 @@ def _ingame_own_object_removed(s, tb, stored):
         # A plane that dies with a hunter named less than STALE_EXIT_S after its own ServerConfirm,
         # with no hit ever held against it, is that stale record: treat it as a clean exit.
         _age = time.time() - s.__dict__.get('_obj_confirmed_at', 0.0)
-        if scored and is_death and _age < STALE_EXIT_S and PENDING_KILL.get(s.my_obj_number) is None:
+        if scored and is_death and _age < STALE_EXIT_S and PENDING_KILL.get(s.my_obj_number) is None \
+                and s.my_obj_number not in PLANE_LAST_HIT:                       # v799f5: a recorded hit is not stale
             log('DEATH', f'{s.current_pilot}: exit 0x{exitb:02x} (MEC {mec_nib}) on a plane confirmed '
                          f'{_age:.1f}s ago with no hit held against it -> STALE exit record, '
                          f'treated as a clean exit (no loss, no credit)')
