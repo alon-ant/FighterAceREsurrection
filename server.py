@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v807f5'
+VERSION = 'v808f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14699,12 +14699,13 @@ CHUTE_KEEPALIVE_S  = 0.5          # v806f5: 8 s -> 0.5 s. The receiving client d
                                   # between frames - it holds the canopy where the last frame put it - so
                                   # an 8 s cadence lurched it 48 m at a time ('worse', 09-22). Frames go
                                   # at 2 Hz along a path predicted from the owner's opening frames.
-CHUTE_DESCENT_MPS  = 6.0          # default vertical rate (the opening frames refine it per chute)
+CHUTE_DESCENT_MPS  = 9.5          # v808f5: default vertical rate = the client's terminal sink (~9.6 m/s in the
+                                  # landing bursts); the owner's last frames refine it per chute
 CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
 
 def _chute_keepalive_loop():
     while running:
-        time.sleep(1.0)
+        time.sleep(0.25)                                   # v808f5: was 1.0 - capped the cadence at 1 Hz
         try:
             now = time.time()
             for s in list(get_all_sessions()):
@@ -17677,18 +17678,23 @@ def relay_telemetry(src, data, _split_obj=None):
         if _crew_ent is not None:
             try:
                 _px, _py, _pz = unpack_plane_pos9(pl[9:18])
-                # v806f5: velocity estimate from consecutive owner frames (the opening burst) - used
-                # to drive the canopy while the owner is silent. Sink rate is kept negative and
-                # sane; drift is whatever the frames show.
-                _prev = _crew_ent.get('pos'); _prev_t = _crew_ent.get('pos_at')
-                if _prev is not None and _prev_t:
-                    _dtf = time.time() - _prev_t
-                    if 0.05 <= _dtf <= 2.0:
-                        _vx = (_px - _prev[0]) / _dtf; _vy = (_py - _prev[1]) / _dtf; _vz = (_pz - _prev[2]) / _dtf
-                        if abs(_vx) < 40 and abs(_vy) < 40:
-                            _ov = _crew_ent.get('vel')
-                            _vz = -CHUTE_DESCENT_MPS if not (-12.0 <= _vz <= -1.0) else _vz
-                            _crew_ent['vel'] = ((_ov[0] + _vx) / 2, (_ov[1] + _vy) / 2, (_ov[2] + _vz) / 2) if _ov else (_vx, _vy, _vz)
+                # v806f5/v808f5: velocity estimate for driving the canopy while the owner is silent.
+                # v808: from the LAST 1.0 s of the owner's frames only - the first seconds are the
+                # canopy slowing from free fall, and averaging them in gave a sink rate far below
+                # the client's terminal ~9.6 m/s: each server frame pulled the chute back UP, the
+                # client sank it again = 'jumping up and down' once a second (online 16:14, Taurus
+                # and Duran observing). A short history of (t, pos) gives the recent rate.
+                _hist = _crew_ent.setdefault('_hist', [])
+                _now_f = time.time()
+                _hist.append((_now_f, _px, _py, _pz))
+                if len(_hist) > 12:
+                    del _hist[:-12]
+                _old = next((h for h in _hist if _now_f - h[0] <= 1.0), None)
+                if _old is not None and _now_f - _old[0] >= 0.4:
+                    _dtf = _now_f - _old[0]
+                    _vx = (_px - _old[1]) / _dtf; _vy = (_py - _old[2]) / _dtf; _vz = (_pz - _old[3]) / _dtf
+                    if abs(_vx) < 40 and abs(_vy) < 40 and -20.0 <= _vz <= 2.0:
+                        _crew_ent['vel'] = (_vx, _vy, min(-1.0, _vz))
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
                 _crew_ent['last_frame'] = bytes(data[:8]) + bytes(pl)      # v803f5: for the descent keep-alive
                 _co_pos = (_px, _py)
