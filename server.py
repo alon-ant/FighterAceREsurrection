@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v806f5'
+VERSION = 'v807f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11706,6 +11706,7 @@ STICKS = {}                     # stick_id -> {'room','camp','pos','n','target',
 # PARA_REGEN_PER_MIN, only from scenes of the pilot's own camp; LimitedParatroopers=yes arenas
 # are the ones where this matters.
 MSG_PARA_REQUEST_113 = 0x71
+PARA_ASK_DEDUP_S = 3.0     # v807f5: a repeated identical troop request within this is the client's retry
 MSG_PARA_ANSWER_114  = 0x72
 PARA_SCENE_STOCK     = 40
 PARA_REGEN_PER_MIN   = 2.0
@@ -11739,13 +11740,24 @@ def _handle_para_request_113(s, pl):
         scamp = scene_camp(terrain, sidx) if rid is not None else None
         given = 0
         if count > 0:
-            if scamp is not None and scamp == getattr(s, 'nation', None):
-                given = min(count, para_scene_avail(rid, sidx))
-                if given > 0:
-                    para_scene_take(rid, sidx, given)
-            s._troops_aboard = int(s.__dict__.get('_troops_aboard', 0) or 0) + given     # v609f5
-            log('PARA', f'{s.current_pilot}: asks {count} paratroops from scene {sidx} (camp {scamp}) -> given {given} '
-                        f'(stock left {para_scene_avail(rid, sidx) if rid is not None else "?"})')
+            # v807f5 [DOUBLE DEBIT]: the client re-sends the load request when the answer is slow
+            # (online 15:24:03: two identical asks 180 ms apart) and the field was debited twice
+            # (26 -> 12 -> 0), which left the next pilot short. A repeat of the same ask within
+            # PARA_ASK_DEDUP_S is answered again with the same count and no debit.
+            _last = s.__dict__.get('_para_ask_last')
+            if _last and _last[0] == int(sidx) and _last[1] == count and time.time() - _last[2] < PARA_ASK_DEDUP_S:
+                given = _last[3]
+                log('PARA', f'{s.current_pilot}: repeat ask for {count} paratroops from scene {sidx} within '
+                            f'{time.time() - _last[2]:.1f}s - answered {given} again, no second debit')
+            else:
+                if scamp is not None and scamp == getattr(s, 'nation', None):
+                    given = min(count, para_scene_avail(rid, sidx))
+                    if given > 0:
+                        para_scene_take(rid, sidx, given)
+                s._troops_aboard = int(s.__dict__.get('_troops_aboard', 0) or 0) + given     # v609f5
+                s.__dict__['_para_ask_last'] = (int(sidx), count, time.time(), given)
+                log('PARA', f'{s.current_pilot}: asks {count} paratroops from scene {sidx} (camp {scamp}) -> given {given} '
+                            f'(stock left {para_scene_avail(rid, sidx) if rid is not None else "?"})')
         elif count < 0:
             s._troops_aboard = max(0, int(s.__dict__.get('_troops_aboard', 0) or 0) + count)   # v609f5 (count < 0)
             if refund and rid is not None:
