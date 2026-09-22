@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v809f5'
+VERSION = 'v811f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10125,6 +10125,8 @@ def spawn_column(room_id, camp, class_id, n, x, y, group_id=None, reason=''):
     for p in get_sessions_in_room(room_id):
         if not getattr(p, 'entered_game', False):
             continue
+        if not _spawn_in_range(p, 'tank', x, y):          # v811f5: out-of-range peers get it when they close in
+            continue
         body = bytearray([0x02]) + _ensure_ai_client_on(p)
         for _i, on in enumerate(onums):
             body += build_tank_record(AI_CLIENT_ST, on, camp, class_id, group_id)
@@ -12684,15 +12686,17 @@ def spawn_train(rid, camp, road_idx, node_idx, n_wagons=3, dist=0.0, reason=''):
                     'dir': 0, 'mps': 0.0, 'peers': set(), 'last_sent': 0.0, 'wagons': wagons, 'mask': 0,
                     'created': time.time()}
     n = 0
+    (x, y, z), _ = rail_point(road, node_idx, dist)
     for p in get_sessions_in_room(rid):
         if not getattr(p, 'entered_game', False):
+            continue
+        if not _spawn_in_range(p, 'train', x, y):         # v811f5
             continue
         body = bytearray([0x02]) + _ensure_ai_client_on(p)
         body += build_train_record(AI_CLIENT_ST, onum, camp, loco, road_idx, node_idx, dist, wagons)
         TRAINS[onum]['peers'].add(getattr(p, 'addr', None))
         _submit_send(send_rel, p, build_msg13(bytes(body)), f'<- CreateObject 2 TRAIN 0x{onum:04x} {reason}', to=3.0)
         n += 1
-    (x, y, z), _ = rail_point(road, node_idx, dist)
     log('TRAIN', f'room {rid}: train 0x{onum:04x} camp {camp} loco {loco} + {wagons} on road {road_idx} '
                  f'node {node_idx} (+{dist:.0f} m) at {tc_grid(x, y)} ({x:.0f},{y:.0f},{z:.0f}) -> {n} session(s) {reason}')
     threading.Timer(0.5, train_broadcast_state, args=(onum,)).start()
@@ -12927,6 +12931,17 @@ REJOIN_RADIUS_M = 30000.0   # v688f5: back to 30 km (see AI_TELEMETRY_FAR_M)
 # one client). Per-kind re-create radii inside the client's own cull, and a per-(client, object)
 # COOLDOWN after a cull that is lifted only once the pilot has closed RECREATE_APPROACH_M.
 REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0}
+
+def _spawn_in_range(p, kind, x, y):
+    """v811f5: create a NEW AI object on this peer only if it is within the kind's re-create range of
+    him (a peer with no known position gets it). A column raised 30 km from a pilot was created on
+    him and silence-culled 27 s later - 164 such creates on Flakmagic's client in one session
+    (09-22), 8 reliable packets per trigger for nothing on a laggy link; the 1 Hz back-in-range
+    path creates it when he actually closes in."""
+    pos = p.__dict__.get('_pos_xy')
+    if pos is None:
+        return True
+    return math.hypot(x - pos[0], y - pos[1]) <= REJOIN_RADIUS_BY_KIND.get(kind, REJOIN_RADIUS_M)
 RECREATE_COOLDOWN_S   = 45.0
 RECREATE_APPROACH_M   = 4000.0
 
@@ -13797,6 +13812,8 @@ def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
     n = 0
     for p in get_sessions_in_room(rid):
         if not getattr(p, 'entered_game', False):
+            continue
+        if not _spawn_in_range(p, 'soldier', cx, cy):     # v811f5
             continue
         for ci in range(0, len(onums), RECREATE_CHUNK):          # v604f5: size-capped batches
             chunk = onums[ci:ci + RECREATE_CHUNK]
@@ -14701,7 +14718,9 @@ CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (
 # switch (off): v794 per-object relay tier/limiter (a bailed pilot's chute was being tiered by his
 # last plane position), v801 delete settle, v803..v808 server-driven descent frames, v804 frame
 # after create. `chute drive on|off` on the console flips it live for a controlled test.
-CHUTE_DRIVE_ENABLED = False
+CHUTE_DRIVE_ENABLED = True         # v810f5: ON by default - with v808's terminal sink rate and 2 Hz cadence the
+                                   # chutes came out 'almost entirely' smooth in the 09-22 test (user); the
+                                   # switch stays for A/B ('chute drive off' = v793 delivery)
 # v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
 # in the first ~0.7 s after creation and then NOTHING for the whole descent (~50 s; CHUTEFRAME
 # capture 09-22 13:44:54: 4 frames, silence, then a burst as it lands). Each observer simulates
