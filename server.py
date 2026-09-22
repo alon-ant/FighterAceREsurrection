@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v802f5'
+VERSION = 'v805f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6849,7 +6849,7 @@ def send_your_squadron(s, reason=''):
 # 4->a, 5->s, 7->t, @->a, $->s). Moderators are filtered too - it is a word filter, not a gag.
 CHAT_FILTER_ENABLED = True
 CHAT_FILTER_FILE = os.path.join(SERVER_DIR, 'badwords.txt')
-_CHAT_FILTER = {'mtime': None, 'exact': set(), 'prefix': [], 'allow': set()}
+_CHAT_FILTER = {'mtime': None, 'exact': set(), 'prefix': [], 'allow': set(), 'allow_prefix': []}
 _CHAT_LEET = str.maketrans({'0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's', '!': 'i'})
 
 def _chat_filter_load():
@@ -6859,7 +6859,7 @@ def _chat_filter_load():
         m = None
     if m == _CHAT_FILTER['mtime']:
         return
-    exact, prefix, allow = set(), [], set()
+    exact, prefix, allow, allow_prefix = set(), [], set(), []
     if m is not None:
         try:
             with open(CHAT_FILTER_FILE, 'r', encoding='utf-8', errors='replace') as f:
@@ -6868,15 +6868,20 @@ def _chat_filter_load():
                     if not w:
                         continue
                     if w.startswith('+'):                 # v800f5: WHITELIST - '+cockpit' is never masked,
-                        allow.add(w[1:].strip())          #          whatever 'cock*' says
+                        w = w[1:].strip()                 #          whatever 'cock*' says
+                        if w.endswith('*'):               # v805f5: '+cockpit*' whitelists the whole prefix
+                            if w[:-1]:
+                                allow_prefix.append(w[:-1])
+                        elif w:
+                            allow.add(w)
                     elif w.endswith('*'):
                         prefix.append(w[:-1])
                     else:
                         exact.add(w)
         except Exception:
             pass
-    _CHAT_FILTER.update(mtime=m, exact=exact, prefix=[p for p in prefix if p], allow=allow)
-    log('CHATFILTER', f'{len(exact)} word(s) + {len(prefix)} prefix(es) + {len(allow)} whitelisted loaded from {CHAT_FILTER_FILE}')
+    _CHAT_FILTER.update(mtime=m, exact=exact, prefix=[p for p in prefix if p], allow=allow, allow_prefix=allow_prefix)
+    log('CHATFILTER', f'{len(exact)} word(s) + {len(prefix)} prefix(es) + {len(allow)}/{len(allow_prefix)} whitelisted loaded from {CHAT_FILTER_FILE}')
 
 import re as _re
 _CHAT_WORD_RE = _re.compile(r"[A-Za-z0-9@$!']+")
@@ -6886,7 +6891,7 @@ def chat_filter(text, who=''):
     if not CHAT_FILTER_ENABLED or not text:
         return text, 0
     _chat_filter_load()
-    ex, pf, al = _CHAT_FILTER['exact'], _CHAT_FILTER['prefix'], _CHAT_FILTER['allow']
+    ex, pf, al, alp = _CHAT_FILTER['exact'], _CHAT_FILTER['prefix'], _CHAT_FILTER['allow'], _CHAT_FILTER['allow_prefix']
     if not ex and not pf:
         return text, 0
     hits = []
@@ -6894,8 +6899,8 @@ def chat_filter(text, who=''):
     def _sub(mo):
         w = mo.group(0)
         k = w.lower().translate(_CHAT_LEET).strip("'")
-        if k in al:
-            return w                                       # v800f5: whitelisted
+        if k in al or any(k.startswith(p) for p in alp):
+            return w                                       # v800f5/v805f5: whitelisted (exact or prefix)
         if k in ex or any(k.startswith(p) for p in pf):
             hits.append(w)
             return '*' * len(w)
@@ -9577,6 +9582,14 @@ def unpack_plane_pos9(b):
         y -= 0x2000000
     z = (v >> 50) & 0x3fffff
     return x * PLANE_POS_SCALE, y * PLANE_POS_SCALE, z * PLANE_POS_SCALE - TANK_POS_Z_OFF
+
+def pack_plane_pos9(x, y, z):
+    """v803f5: the inverse of unpack_plane_pos9 (25/25/22-bit fields, same scale and z offset)."""
+    xi = int(round(x / PLANE_POS_SCALE)) & 0x1ffffff
+    yi = int(round(y / PLANE_POS_SCALE)) & 0x1ffffff
+    zi = max(0, min(0x3fffff, int(round((z + TANK_POS_Z_OFF) / PLANE_POS_SCALE))))
+    v = xi | (yi << 25) | (zi << 50)
+    return v.to_bytes(9, 'little')
 
 def _load_tank_consts():
     """Pull the telemetry scale constants out of tank_tables.json (written by the dumper)."""
@@ -14661,6 +14674,65 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
 CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
 CREW_CHUTE_DELETE_SETTLE_S = 1.5   # v801f5: a delete of a chute younger than this waits, so it cannot beat its own create
 CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (CHUTEFRAME tag); 0 = off
+# v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
+# in the first ~0.7 s after creation and then NOTHING for the whole descent (~50 s; CHUTEFRAME
+# capture 09-22 13:44:54: 4 frames, silence, then a burst as it lands). Each observer simulates
+# the descent itself - but a client that hears nothing about an object for ~27 s CULLS it, so the
+# canopy vanished mid-air on every observer and came back at its creation altitude at the next
+# spawn ('paratroopers warping up and down'). While the owner is silent, the server re-sends the
+# chute's last frame every CHUTE_KEEPALIVE_S with the altitude advanced at CHUTE_DESCENT_MPS
+# (measured 6.4 m/s from the landing burst), which resets the peers' silence clocks and keeps the
+# canopy near where the peers' own simulation has it.
+CHUTE_KEEPALIVE_S  = 8.0
+CHUTE_DESCENT_MPS  = 6.0
+CHUTE_SILENT_AFTER_S = 3.0        # owner silent for this long -> keep-alives start
+
+def _chute_keepalive_loop():
+    while running:
+        time.sleep(1.0)
+        try:
+            now = time.time()
+            for s in list(get_all_sessions()):
+                crew = s.__dict__.get('crew_para_objs')
+                if not crew or not getattr(s, 'entered_game', False):
+                    continue
+                for onum, ent in list(crew.items()):
+                    lf = ent.get('last_frame'); pos = ent.get('pos'); t0 = ent.get('pos_at')
+                    if not lf or not pos or not t0:
+                        continue
+                    if now - t0 < CHUTE_SILENT_AFTER_S:
+                        continue                                    # the owner is still sending
+                    if now - ent.get('_ka_at', t0) < CHUTE_KEEPALIVE_S:
+                        continue
+                    ent['_ka_at'] = now
+                    _z = max(0.0, pos[2] - CHUTE_DESCENT_MPS * (now - t0))
+                    body = bytearray(lf[8:])                                # the frame after the 8-byte relay header
+                    try:
+                        body[9:18] = pack_plane_pos9(pos[0], pos[1], _z)
+                    except Exception:
+                        continue
+                    _peers = (s.__dict__.get('_para_created_peers') or {}).get(onum, set())
+                    n = 0
+                    for p in get_sessions_in_room(s.current_room):
+                        if p is s or getattr(p, 'addr', None) not in _peers:
+                            continue
+                        try:
+                            b2 = bytearray(body)
+                            rt = p.last_telem_tick
+                            if rt is not None and len(b2) >= 9:
+                                struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)   # peer-relative tick
+                            seq = getattr(p, '_relay_seq', 0) & 0xff                # the peer's own relay sequence
+                            p._relay_seq = seq + 1
+                            pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2)
+                            sock.sendto(pkt, p.addr); n += 1
+                            _perf['tx'] += 1; _perf['txb'] += len(pkt)
+                        except OSError:
+                            pass
+                    if n:
+                        log('CHUTEKA', f'{s.current_pilot} chute 0x{onum:04x}: owner silent {now - t0:.0f}s -> '
+                                       f'keep-alive to {n} peer(s) at z {_z:.0f} m', level='DEBUG')
+        except Exception:
+            logx('CHUTEKA', 'chute keep-alive loop failed')
 
 def send_crew_parachuter_create_for(src, dst, onum):
     """v555f5: create one of src's CREW chutes (bomber bail, tag human-bit clear) on dst. The
@@ -14692,6 +14764,25 @@ def send_crew_parachuter_create_for(src, dst, onum):
     src.__dict__.setdefault('_para_created_peers', {}).setdefault(onum, set()).add(dst.addr)
     log('PARA', f'create-crew-parachuter {src.current_pilot} St={src.client_number} '
                 f'ONumber=0x{onum:04x} rec={len(rec)}B body={hx(_ent["body"])} -> {dst.current_pilot}')
+    # v804f5 [CHUTES THAT NEVER OPEN]: the owner sends a chute's frames - the ones that carry its
+    # DEPLOYED state - only in the first ~0.7 s after creation, and a chute record is relayed to a
+    # peer only once his create is registered (just above). Whichever chutes' opening frames
+    # arrived before this create completed were dropped for him, and his canopy stayed in its
+    # initial unopened state for the whole descent (Taurus 09-22: 2 then 3 of a stick 'did not
+    # deploy' while the owner saw them all open). Send the chute's latest real frame right behind
+    # the create so the state is never missed.
+    _lf = _ent.get('last_frame')
+    if _lf and len(_lf) > 8 + 9:
+        try:
+            b2 = bytearray(_lf[8:])
+            rt = dst.last_telem_tick
+            if rt is not None and len(b2) >= 9:
+                struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)
+            seq = getattr(dst, '_relay_seq', 0) & 0xff
+            dst._relay_seq = seq + 1
+            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2), dst.addr)
+        except OSError:
+            pass
     return True
 
 def _forget_canopies_on(owner, viewer):
@@ -17567,6 +17658,7 @@ def relay_telemetry(src, data, _split_obj=None):
             try:
                 _px, _py, _pz = unpack_plane_pos9(pl[9:18])
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
+                _crew_ent['last_frame'] = bytes(data[:8]) + bytes(pl)      # v803f5: for the descent keep-alive
                 _co_pos = (_px, _py)
                 # v802f5 CHUTE FRAME CAPTURE: the observer's film (09-22) shows remote chutes
                 # rendered at ~82 m altitude steps; log the owner's raw chute frames (first
@@ -26815,6 +26907,7 @@ threading.Thread(target=_camp_scores_loop, daemon=True).start()   # v651f5: Ctrl
 threading.Thread(target=_prod40_fast_loop, daemon=True).start()   # v663f5: units keep-alive vs the client's 60 s overwrite
 threading.Thread(target=_group26_push_loop, daemon=True).start()  # v724f5: map group boxes refreshed every 5 s while the map is open
 threading.Thread(target=_missions_refresh_loop, daemon=True).start()  # v771f5: AI missions follow their columns
+threading.Thread(target=_chute_keepalive_loop, daemon=True).start()   # v803f5: canopies stay alive on peers through the silent descent
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive
