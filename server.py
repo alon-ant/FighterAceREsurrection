@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v805f5'
+VERSION = 'v806f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14683,9 +14683,12 @@ CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (
 # chute's last frame every CHUTE_KEEPALIVE_S with the altitude advanced at CHUTE_DESCENT_MPS
 # (measured 6.4 m/s from the landing burst), which resets the peers' silence clocks and keeps the
 # canopy near where the peers' own simulation has it.
-CHUTE_KEEPALIVE_S  = 8.0
-CHUTE_DESCENT_MPS  = 6.0
-CHUTE_SILENT_AFTER_S = 3.0        # owner silent for this long -> keep-alives start
+CHUTE_KEEPALIVE_S  = 0.5          # v806f5: 8 s -> 0.5 s. The receiving client does NOT simulate the descent
+                                  # between frames - it holds the canopy where the last frame put it - so
+                                  # an 8 s cadence lurched it 48 m at a time ('worse', 09-22). Frames go
+                                  # at 2 Hz along a path predicted from the owner's opening frames.
+CHUTE_DESCENT_MPS  = 6.0          # default vertical rate (the opening frames refine it per chute)
+CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
 
 def _chute_keepalive_loop():
     while running:
@@ -14705,10 +14708,15 @@ def _chute_keepalive_loop():
                     if now - ent.get('_ka_at', t0) < CHUTE_KEEPALIVE_S:
                         continue
                     ent['_ka_at'] = now
-                    _z = max(0.0, pos[2] - CHUTE_DESCENT_MPS * (now - t0))
+                    # v806f5: predict along the chute's own velocity - drift (wind) and sink rate
+                    # estimated from the owner's opening frames, sink defaulting to CHUTE_DESCENT_MPS
+                    _vx, _vy, _vz = ent.get('vel') or (0.0, 0.0, -CHUTE_DESCENT_MPS)
+                    _dt = now - t0
+                    _z = max(0.0, pos[2] + _vz * _dt)
+                    _x = pos[0] + _vx * _dt; _y = pos[1] + _vy * _dt
                     body = bytearray(lf[8:])                                # the frame after the 8-byte relay header
                     try:
-                        body[9:18] = pack_plane_pos9(pos[0], pos[1], _z)
+                        body[9:18] = pack_plane_pos9(_x, _y, _z)
                     except Exception:
                         continue
                     _peers = (s.__dict__.get('_para_created_peers') or {}).get(onum, set())
@@ -17657,6 +17665,18 @@ def relay_telemetry(src, data, _split_obj=None):
         if _crew_ent is not None:
             try:
                 _px, _py, _pz = unpack_plane_pos9(pl[9:18])
+                # v806f5: velocity estimate from consecutive owner frames (the opening burst) - used
+                # to drive the canopy while the owner is silent. Sink rate is kept negative and
+                # sane; drift is whatever the frames show.
+                _prev = _crew_ent.get('pos'); _prev_t = _crew_ent.get('pos_at')
+                if _prev is not None and _prev_t:
+                    _dtf = time.time() - _prev_t
+                    if 0.05 <= _dtf <= 2.0:
+                        _vx = (_px - _prev[0]) / _dtf; _vy = (_py - _prev[1]) / _dtf; _vz = (_pz - _prev[2]) / _dtf
+                        if abs(_vx) < 40 and abs(_vy) < 40:
+                            _ov = _crew_ent.get('vel')
+                            _vz = -CHUTE_DESCENT_MPS if not (-12.0 <= _vz <= -1.0) else _vz
+                            _crew_ent['vel'] = ((_ov[0] + _vx) / 2, (_ov[1] + _vy) / 2, (_ov[2] + _vz) / 2) if _ov else (_vx, _vy, _vz)
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
                 _crew_ent['last_frame'] = bytes(data[:8]) + bytes(pl)      # v803f5: for the descent keep-alive
                 _co_pos = (_px, _py)
