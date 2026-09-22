@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v808f5'
+VERSION = 'v809f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4273,6 +4273,16 @@ def console_handler():
                         send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'chute':
+                # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
+                # server-driven descent, frame-after-create, delete settle) as one switch
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                global CHUTE_DRIVE_ENABLED
+                if _a and _a[0] == 'drive' and len(_a) > 1:
+                    CHUTE_DRIVE_ENABLED = _a[1].lower() in ('on', '1', 'true', 'yes')
+                    log('CONSOLE', f'chute drive = {CHUTE_DRIVE_ENABLED}')
+                else:
+                    log('CONSOLE', f'usage: chute drive on|off   (now {CHUTE_DRIVE_ENABLED})')
             elif cmd == 'cargo':
                 # v772f5: cargo order <fam|mfa|...>  - the resource each 107 answer field carries
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -14686,6 +14696,12 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
 CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
 CREW_CHUTE_DELETE_SETTLE_S = 1.5   # v801f5: a delete of a chute younger than this waits, so it cannot beat its own create
 CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (CHUTEFRAME tag); 0 = off
+# v809f5 [CHUTE DELIVERY BACK TO v793]: all parachutes - troops AND bailed pilots - went jumpy after
+# the 09-22 work; the delivery is put back to what it was and the experiments are behind this one
+# switch (off): v794 per-object relay tier/limiter (a bailed pilot's chute was being tiered by his
+# last plane position), v801 delete settle, v803..v808 server-driven descent frames, v804 frame
+# after create. `chute drive on|off` on the console flips it live for a controlled test.
+CHUTE_DRIVE_ENABLED = False
 # v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
 # in the first ~0.7 s after creation and then NOTHING for the whole descent (~50 s; CHUTEFRAME
 # capture 09-22 13:44:54: 4 frames, silence, then a burst as it lands). Each observer simulates
@@ -14706,6 +14722,8 @@ CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server dri
 def _chute_keepalive_loop():
     while running:
         time.sleep(0.25)                                   # v808f5: was 1.0 - capped the cadence at 1 Hz
+        if not CHUTE_DRIVE_ENABLED:
+            continue
         try:
             now = time.time()
             for s in list(get_all_sessions()):
@@ -14793,7 +14811,7 @@ def send_crew_parachuter_create_for(src, dst, onum):
     # deploy' while the owner saw them all open). Send the chute's latest real frame right behind
     # the create so the state is never missed.
     _lf = _ent.get('last_frame')
-    if _lf and len(_lf) > 8 + 9:
+    if _lf and len(_lf) > 8 + 9 and CHUTE_DRIVE_ENABLED:
         try:
             b2 = bytearray(_lf[8:])
             rt = dst.last_telem_tick
@@ -17778,7 +17796,7 @@ def relay_telemetry(src, data, _split_obj=None):
         return
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
     _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
-    _src_pos = _co_pos if _co_pos is not None else src.__dict__.get('_pos_xy')   # v794f5: THIS object's position
+    _src_pos = (_co_pos if (_co_pos is not None and CHUTE_DRIVE_ENABLED) else src.__dict__.get('_pos_xy'))   # v794f5/v809f5
     for p in peers:
         # v674f5 [PLANE RELAY TIERS] (user 09-13: live telemetry only near the player, tactical
         # positions beyond): a peer farther than PLANE_RELAY_NEAR_M from the sender gets this
@@ -17795,7 +17813,7 @@ def relay_telemetry(src, data, _split_obj=None):
                 # chutes over the base got one update per second BETWEEN them (troops 'jumping and
                 # warping in the air', user 09-22). And a chute's own distance decides its tier.
                 _rl = src.__dict__.setdefault('_relay_last', {})
-                _okey = (p.addr, _co_onum if _co_onum is not None else -1)
+                _okey = (p.addr, _co_onum if (_co_onum is not None and CHUTE_DRIVE_ENABLED) else -1)   # v809f5: per-sender again unless the switch is on
                 if _now_relay - _rl.get(_okey, 0.0) < 1.0 / _hz:
                     continue
                 _rl[_okey] = _now_relay
@@ -20963,7 +20981,7 @@ def _ingame_own_object_removed(s, tb, stored):
             _crew_ent_l = s.crew_para_objs.pop(_ponum, None)
             (s.__dict__.get('_para_created_peers') or {}).pop(_ponum, None)
             _age_c = time.time() - float((_crew_ent_l or {}).get('at') or 0.0)
-            _delay_c = max(0.0, CREW_CHUTE_DELETE_SETTLE_S - _age_c) if _crew_ent_l else 0.0
+            _delay_c = (max(0.0, CREW_CHUTE_DELETE_SETTLE_S - _age_c) if (_crew_ent_l and CHUTE_DRIVE_ENABLED) else 0.0)
 
             def _relay_crew_delete(_s=s, _pkt=_pdc, _on=_ponum, _room=s.current_room, _d=_delay_c):
                 if _d > 0:
