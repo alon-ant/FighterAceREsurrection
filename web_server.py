@@ -219,6 +219,8 @@ LOG_CONSOLE_PAGE = """
                 <h1 style="display:flex; align-items:center; gap:14px; flex-wrap:wrap;">Live Server Console
                   <span id="pcount" style="font-size:0.55em; font-weight:normal; background:#1e1e1e; color:#7ec97e;
                         border-radius:14px; padding:5px 14px; font-family:monospace;">players: &hellip;</span>
+                  <span id="sver" style="font-size:0.55em; font-weight:normal; background:#1e1e1e; color:#e0c060;
+                        border-radius:14px; padding:5px 14px; font-family:monospace;">server: &hellip;</span>
                 </h1>
                 <div class="card" style="padding:12px;">
                   <label>Min level:
@@ -278,7 +280,11 @@ LOG_CONSOLE_PAGE = """
                 function reload(){
                   var lvl=document.getElementById('lvl').value;
                   fetch('/admin/logs.json?level='+lvl).then(function(r){return r.json();})
-                    .then(function(j){DATA=j.lines;render();showCounts(j.players);}).catch(function(){});
+                    .then(function(j){DATA=j.lines;render();showCounts(j.players);showVer(j.version);}).catch(function(){});
+                }
+                function showVer(v){
+                  var el=document.getElementById('sver');
+                  if(el) el.textContent='server: '+(v||'n/a');
                 }
                 function showCounts(p){
                   var el=document.getElementById('pcount');
@@ -2410,7 +2416,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     counts = pc()
                 except Exception:
                     counts = None
-            body = json.dumps({'lines': lines, 'players': counts}).encode('utf-8')
+            body = json.dumps({'lines': lines, 'players': counts,
+                               'version': SRV.get('version')}).encode('utf-8')     # v798f5: server build on the console
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
@@ -3422,8 +3429,9 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
-                     server_py=None):
+                     server_py=None, version=None):
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
+    SRV['version'] = version            # v798f5: shown on the live console
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn

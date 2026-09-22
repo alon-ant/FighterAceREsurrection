@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v795f5'
+VERSION = 'v798f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9955,7 +9955,11 @@ TRAIN_MAP_WIDE        = False   # v720f5: OFF - the client culls AI objects beyo
                                 # on - a create/cull loop that rubber-banded the trains and left 'spawns
                                 # that never render'. Map icons come from msg 57 records, not objects.
 TRAIN_FAR_KEEPALIVE_S = 20.0
-AI_SILENCE_CULL_S     = 30.0    # v795f5: our silence after which the client has certainly culled the object
+AI_SILENCE_CULL_S     = 45.0    # v795f5/v797f5: our silence after which the client has CERTAINLY culled the
+                                # object (its own timer is ~27 s) - 30 s raced it: a stale clock from a
+                                # previous life dropped Meno before his client culled, the next
+                                # ServerConfirm re-created the train he still held -> !Objects CTD (four
+                                # pilots, 09-21 22:1x). The clock is also reset on every create (above).
 
 def _ai_peer_send_ok(obj, p, x, y, now, kind='tank', onum=None):
     """True if this peer should receive this object's state now (tiered by distance + cadence).
@@ -14349,6 +14353,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
         for _i, (onum, t) in enumerate(chunk):
             body += build_tank_record(AI_CLIENT_ST, onum, t['camp'], t['class'], t['group'])
             t['peers'].add(s.addr); t['last_sent'] = 0.0
+            t.get('_silent_since', {}).pop(s.addr, None)       # v797f5: fresh create = fresh silence clock
             _tank_hold_peer(onum, s.addr, len(chunk) - 1 - _i)      # v666f5
             ids.append(f'0x{onum:04x}'); n += 1
         _submit_send(send_rel, s, build_msg13(bytes(body)),
@@ -14367,6 +14372,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
         for onum, sd in chunk:
             sbody += build_soldier_record(AI_CLIENT_ST, onum, sd['camp'], sd['class'], sd['stick'])
             sd['peers'].add(s.addr); sd['last_sent'] = 0.0
+            sd.get('_silent_since', {}).pop(s.addr, None)      # v797f5
             sn += 1
         _submit_send(send_rel, s, build_msg13(bytes(sbody)),
                      f'<- CreateObject 2 SOLDIER x{len(chunk)} (re-create {reason})', to=3.0)
@@ -14393,6 +14399,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
         loco = TRAIN_LOCO_BY_CAMP.get(int(tr['camp']) & 7, TRAIN_LOCO_CLASS)
         body += build_train_record(AI_CLIENT_ST, onum, tr['camp'], loco, tr['road'], tr['node'], tr['dist'], tr.get('wagons', []))
         tr['peers'].add(s.addr); tr['last_sent'] = 0.0
+        tr.get('_silent_since', {}).pop(s.addr, None)          # v797f5
         # v681f5: hold this peer's train telemetry until the create has settled - the unreliable
         # state update beat the reliable create (messages50 07:00:26 'Get coord for missing object
         # 260' before any 'Create NetTrain 260'), stubbed the slot and the create was refused:
@@ -14630,6 +14637,8 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
                 f'body={hx(bytes(body))} -> {dst.current_pilot}')
     return True
 
+CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
+
 def send_crew_parachuter_create_for(src, dst, onum):
     """v555f5: create one of src's CREW chutes (bomber bail, tag human-bit clear) on dst. The
     record is the client's own out-4 body + our trailer, like the pilot's, but there is no score
@@ -14639,6 +14648,17 @@ def send_crew_parachuter_create_for(src, dst, onum):
     _crew = src.__dict__.get('crew_para_objs') or {}
     _ent = _crew.get(onum)
     if _ent is None or src.my_obj_number is None:
+        return False
+    # v796f5 [STALE CHUTES]: a crew chute whose owner has sent no frame for CREW_CHUTE_STALE_S has
+    # landed (or was culled by its owner); re-creating it on a joiner put a canopy at its old
+    # position that nobody updates - it hung, got silence-culled 27 s later, and came back at the
+    # next spawn (Flakmagic 09-21 20:49 / 20:50: 0x0119 / 0x011b, Alon's chutes from minutes
+    # earlier) = 'paratroopers warping up and down'. Expire the entry instead of creating it.
+    _age = time.time() - (_ent.get('pos_at') or _ent.get('at') or 0.0)
+    if _age > CREW_CHUTE_STALE_S:
+        _crew.pop(onum, None)
+        src.__dict__.get('_para_created_peers', {}).pop(onum, None)
+        log('PARA', f'crew chute 0x{onum:04x} of {src.current_pilot} is {_age:.0f}s stale - expired, not re-created on {dst.current_pilot}')
         return False
     rec = build_parachuter_record(_ent['body'], st=src.client_number, onumber=onum,
                                   owner_obj=src.my_obj_number)
@@ -20520,7 +20540,21 @@ def _fire_server_confirm(s, via='', ident=None):
         except Exception:
             logx('REPAIR', 'dead-object snapshot failed')
     try:
-        tank_recreate_for(s, reason='(at ServerConfirm)')   # v563f5
+        # v797f5: re-create only what is IN RANGE of the spawn - every object of the room used to
+        # go out, including trains 60 km away that the client silence-culls 27 s later (and whose
+        # stale silence clocks then raced the client's cull -> double create CTDs). The pilot's
+        # position is not known at ServerConfirm; wait briefly for his first frame, then use the
+        # per-kind radii (v785). If no frame comes, fall back to the old full re-create.
+        def _rc(_s=s):
+            _t0 = time.time()
+            while time.time() - _t0 < 2.0 and _s.__dict__.get('_pos_xy') is None and not getattr(_s, 'closing', False):
+                time.sleep(0.1)
+            _pos = _s.__dict__.get('_pos_xy')
+            if _pos is not None:
+                tank_recreate_for(_s, reason='(at ServerConfirm, in range)', near_xy=_pos, radius=REJOIN_RADIUS_M, per_kind=True)
+            else:
+                tank_recreate_for(_s, reason='(at ServerConfirm, no position yet)')
+        threading.Thread(target=_rc, daemon=True).start()
     except Exception:
         logx('TANK', 'tank re-create at ServerConfirm failed')
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
@@ -26658,7 +26692,8 @@ threading.Thread(
             'password_read_fn': arena_password_read,    # arena editor: current arena password
             'arena_reset_fn': lambda rid, winner, by: arena_reset(rid, winner_camp=winner, by=by),   # v640f5
             'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX),           # v686f5
-            'server_py': os.path.abspath(__file__)},        # v731f5: the lobby-news editor writes next to it
+            'server_py': os.path.abspath(__file__),         # v731f5: the lobby-news editor writes next to it
+            'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()
 
