@@ -2277,7 +2277,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <div class="card">
                   <p style="color:#888; max-width:640px;">One word per line. Matched words are replaced by asterisks in
                   lobby and arena chat (whole words, case-insensitive, common leetspeak folded: 0=o 1=i 3=e 4=a 5=s
-                  7=t). End a line with <code>*</code> to match any word starting with it. <code>#</code> starts a
+                  7=t). End a line with <code>*</code> to match any word starting with it. Start a line with
+                  <code>+</code> to <strong>whitelist</strong> a word that a prefix would otherwise catch (e.g.
+                  <code>+cockpit</code> alongside <code>cock*</code>). <code>#</code> starts a
                   comment. Hits are logged under CHATFILTER with the sender's name.</p>
                   <form method="POST" action="/admin/badwords">
                     <textarea name="words" rows="20" style="width:100%; font-family:monospace;">{hesc(_cur)}</textarea>

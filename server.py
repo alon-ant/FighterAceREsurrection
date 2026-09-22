@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v799f5'
+VERSION = 'v802f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6849,7 +6849,7 @@ def send_your_squadron(s, reason=''):
 # 4->a, 5->s, 7->t, @->a, $->s). Moderators are filtered too - it is a word filter, not a gag.
 CHAT_FILTER_ENABLED = True
 CHAT_FILTER_FILE = os.path.join(SERVER_DIR, 'badwords.txt')
-_CHAT_FILTER = {'mtime': None, 'exact': set(), 'prefix': []}
+_CHAT_FILTER = {'mtime': None, 'exact': set(), 'prefix': [], 'allow': set()}
 _CHAT_LEET = str.maketrans({'0': 'o', '1': 'i', '3': 'e', '4': 'a', '5': 's', '7': 't', '@': 'a', '$': 's', '!': 'i'})
 
 def _chat_filter_load():
@@ -6859,7 +6859,7 @@ def _chat_filter_load():
         m = None
     if m == _CHAT_FILTER['mtime']:
         return
-    exact, prefix = set(), []
+    exact, prefix, allow = set(), [], set()
     if m is not None:
         try:
             with open(CHAT_FILTER_FILE, 'r', encoding='utf-8', errors='replace') as f:
@@ -6867,14 +6867,16 @@ def _chat_filter_load():
                     w = line.split('#', 1)[0].strip().lower()
                     if not w:
                         continue
-                    if w.endswith('*'):
+                    if w.startswith('+'):                 # v800f5: WHITELIST - '+cockpit' is never masked,
+                        allow.add(w[1:].strip())          #          whatever 'cock*' says
+                    elif w.endswith('*'):
                         prefix.append(w[:-1])
                     else:
                         exact.add(w)
         except Exception:
             pass
-    _CHAT_FILTER.update(mtime=m, exact=exact, prefix=[p for p in prefix if p])
-    log('CHATFILTER', f'{len(exact)} word(s) + {len(prefix)} prefix(es) loaded from {CHAT_FILTER_FILE}')
+    _CHAT_FILTER.update(mtime=m, exact=exact, prefix=[p for p in prefix if p], allow=allow)
+    log('CHATFILTER', f'{len(exact)} word(s) + {len(prefix)} prefix(es) + {len(allow)} whitelisted loaded from {CHAT_FILTER_FILE}')
 
 import re as _re
 _CHAT_WORD_RE = _re.compile(r"[A-Za-z0-9@$!']+")
@@ -6884,7 +6886,7 @@ def chat_filter(text, who=''):
     if not CHAT_FILTER_ENABLED or not text:
         return text, 0
     _chat_filter_load()
-    ex, pf = _CHAT_FILTER['exact'], _CHAT_FILTER['prefix']
+    ex, pf, al = _CHAT_FILTER['exact'], _CHAT_FILTER['prefix'], _CHAT_FILTER['allow']
     if not ex and not pf:
         return text, 0
     hits = []
@@ -6892,6 +6894,8 @@ def chat_filter(text, who=''):
     def _sub(mo):
         w = mo.group(0)
         k = w.lower().translate(_CHAT_LEET).strip("'")
+        if k in al:
+            return w                                       # v800f5: whitelisted
         if k in ex or any(k.startswith(p) for p in pf):
             hits.append(w)
             return '*' * len(w)
@@ -14655,6 +14659,8 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
     return True
 
 CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
+CREW_CHUTE_DELETE_SETTLE_S = 1.5   # v801f5: a delete of a chute younger than this waits, so it cannot beat its own create
+CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (CHUTEFRAME tag); 0 = off
 
 def send_crew_parachuter_create_for(src, dst, onum):
     """v555f5: create one of src's CREW chutes (bomber bail, tag human-bit clear) on dst. The
@@ -17562,6 +17568,13 @@ def relay_telemetry(src, data, _split_obj=None):
                 _px, _py, _pz = unpack_plane_pos9(pl[9:18])
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
                 _co_pos = (_px, _py)
+                # v802f5 CHUTE FRAME CAPTURE: the observer's film (09-22) shows remote chutes
+                # rendered at ~82 m altitude steps; log the owner's raw chute frames (first
+                # CHUTE_CAPTURE_N per chute) so the z encoding on the wire can be read directly.
+                if CHUTE_CAPTURE_N and _crew_ent.get('_cap', 0) < CHUTE_CAPTURE_N:
+                    _crew_ent['_cap'] = _crew_ent.get('_cap', 0) + 1
+                    log('CHUTEFRAME', f'{src.current_pilot} chute 0x{_co_onum:04x} #{_crew_ent["_cap"]}: '
+                                      f'len={len(pl)} pos=({_px:.0f},{_py:.0f},{_pz:.1f}) raw={bytes(pl).hex()}')
             except Exception:
                 pass
     # v243: and the quantised world POSITION (body[0:6] = 3x u16, i.e. pl[9:15]). This is what tells
@@ -20809,16 +20822,29 @@ def _ingame_own_object_removed(s, tb, stored):
             return
         if _ponum is not None and _ponum in (s.__dict__.get('crew_para_objs') or {}):
             # v555f5: a CREW chute came down - relay a bare delete so peers drop it, forget it.
+            # v801f5: the transport's client creates its chutes in PAIRS and deletes the second of
+            # each pair ~300 ms later (online 13:20:52-57: 20 creates, 10 deletes at +0.3 s). The
+            # create had just gone to the peers through the send pool; a delete racing it can land
+            # FIRST, and a create that arrives after its delete is a canopy nobody removes - hanging
+            # in the air, silence-culled 27 s later, back at the next spawn ('troops warping up and
+            # down'). A delete of a chute younger than CREW_CHUTE_DELETE_SETTLE_S is held that long.
             _pexitc = stored[7] if len(stored) > 7 else 0
             _pdc = build_delete_object_3(onumber=_ponum, client_number=None)
-            for _peerc in get_sessions_in_room(s.current_room):
-                if _peerc is not s:
-                    _submit_send(send_rel, _peerc, _pdc,
-                                 f'<- delete CREW PARACHUTER 0x{_ponum:04x} ({s.current_pilot})', to=3.0)
             _crew_ent_l = s.crew_para_objs.pop(_ponum, None)
             (s.__dict__.get('_para_created_peers') or {}).pop(_ponum, None)
-            log('PARA', f'{s.current_pilot} crew chute 0x{_ponum:04x} removed (exit=0x{_pexitc:02x}) '
-                        f'-> relayed delete to peers, no pilot fate involved [v555f5]')
+            _age_c = time.time() - float((_crew_ent_l or {}).get('at') or 0.0)
+            _delay_c = max(0.0, CREW_CHUTE_DELETE_SETTLE_S - _age_c) if _crew_ent_l else 0.0
+
+            def _relay_crew_delete(_s=s, _pkt=_pdc, _on=_ponum, _room=s.current_room, _d=_delay_c):
+                if _d > 0:
+                    time.sleep(_d)
+                for _peerc in get_sessions_in_room(_room):
+                    if _peerc is not _s:
+                        _submit_send(send_rel, _peerc, _pkt,
+                                     f'<- delete CREW PARACHUTER 0x{_on:04x} ({_s.current_pilot})', to=3.0)
+            threading.Thread(target=_relay_crew_delete, daemon=True).start()
+            log('PARA', f'{s.current_pilot} crew chute 0x{_ponum:04x} removed (exit=0x{_pexitc:02x}, age {_age_c:.1f}s) '
+                        f'-> delete to peers{" in %.1fs" % _delay_c if _delay_c > 0 else ""}, no pilot fate involved [v555f5/v801f5]')
             try:
                 tc_para_landed(s, _ponum, _crew_ent_l)          # v588f5: paratroop?
             except Exception:
