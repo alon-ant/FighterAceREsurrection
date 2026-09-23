@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v812f5'
+VERSION = 'v813f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8309,12 +8309,21 @@ class S:
                                   #   beacon - the discriminator between flying and parked
         self._relkeep_held=0      # v419f5: sends currently held by _rel_keeper (window expired)
         self._stall_warned=False  # STALL-WATCH logs the transition once, not every tick
+        self._dseq_lock=threading.Lock()   # v813f5
         # -- Flight recorder rings (dumped to logs/flightrec/ when STALL-WATCH fires) --
         self._rec_rel=deque(maxlen=FLIGHT_REC_RELMAX)    # reliable msgs both directions
         self._rec_unrel=deque(maxlen=FLIGHT_REC_UNRMAX)  # trailing unreliable telemetry
         self._rec_dumped=False    # dump once per stall, re-armed when reliable RX resumes
     def nsq(self): v=self.sq; self.sq=(self.sq+1)&0xFF; return v
-    def nundgram(self): v=self.undgram; self.undgram=(self.undgram+1)&0xFF; return v
+    def nundgram(self):
+        # v813f5 [ONE DATAGRAM COUNTER PER SESSION]: every unreliable packet to this client - msg
+        # pushes (send_unrel), relayed peer planes, AI object frames, chute frames - takes its
+        # sequence byte HERE, atomically. Two counters interleaved on one channel (undgram +
+        # _relay_seq, the latter also raced across threads) looked to the client like constant
+        # loss ('Data loss 7%' on a link the server measured at 0%; Alon 09-23).
+        with self._dseq_lock:
+            v = self.undgram; self.undgram = (self.undgram + 1) & 0xFF
+        return v
     def nts(self): self.ts=(self.ts+1)&0xFF; return self.ts
     def ela(self): return time.time()-self.t0
     def nrel(self):
@@ -10445,8 +10454,7 @@ def send_tank_update(onum, tick_for, payload26):
     if rt is None:
         return False
     frame = build_tank_update((rt - RELAY_TICK_LEAD) & 0xFFFF, onum, payload26)
-    seq = getattr(tick_for, '_relay_seq', 0) & 0xFF
-    tick_for._relay_seq = seq + 1
+    seq = tick_for.nundgram()                                   # v813f5: the one datagram counter
     pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
     try:
         sock.sendto(pkt, tick_for.addr)
@@ -13734,8 +13742,7 @@ def _send_unrel_frame_to(sess, onum, payload):
     size = 1 + 2 + 2 + len(payload)
     frame = (bytes([size // 16, ((size % 16) << 4) | 0x02, 0, 0, 0x07])
              + struct.pack('<HH', (rt - RELAY_TICK_LEAD) & 0xFFFF, onum & 0xffff) + bytes(payload))
-    seq = getattr(sess, '_relay_seq', 0) & 0xFF
-    sess._relay_seq = seq + 1
+    seq = sess.nundgram()                                   # v813f5: the one datagram counter
     try:
         _p = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
         sock.sendto(_p, sess.addr)
@@ -14782,8 +14789,7 @@ def _chute_keepalive_loop():
                             rt = p.last_telem_tick
                             if rt is not None and len(b2) >= 9:
                                 struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)   # peer-relative tick
-                            seq = getattr(p, '_relay_seq', 0) & 0xff                # the peer's own relay sequence
-                            p._relay_seq = seq + 1
+                            seq = p.nundgram()                                      # v813f5
                             pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2)
                             sock.sendto(pkt, p.addr); n += 1
                             _perf['tx'] += 1; _perf['txb'] += len(pkt)
@@ -14839,8 +14845,7 @@ def send_crew_parachuter_create_for(src, dst, onum):
             rt = dst.last_telem_tick
             if rt is not None and len(b2) >= 9:
                 struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)
-            seq = getattr(dst, '_relay_seq', 0) & 0xff
-            dst._relay_seq = seq + 1
+            seq = dst.nundgram()                                                    # v813f5
             sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2), dst.addr)
         except OSError:
             pass
@@ -17957,8 +17962,7 @@ def relay_telemetry(src, data, _split_obj=None):
                 # regardless of what future wrapper forms slip past the scans.
                 if len(relayed) >= 9:
                     struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
-        seq = getattr(p, '_relay_seq', 0) & 0xFF
-        p._relay_seq = seq + 1
+        seq = p.nundgram()                                  # v813f5: the one datagram counter
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
         if RELAY_SEND_ASYNC:
             _relay_batch.append((p.addr, pkt))   # v389f5: defer the sendto syscall off the RX thread
