@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v813f5'
+VERSION = 'v816f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4280,8 +4280,11 @@ def console_handler():
                 # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
                 # server-driven descent, frame-after-create, delete settle) as one switch
                 _a = (parts[1].split() if len(parts) > 1 else [])
-                global CHUTE_DRIVE_ENABLED
-                if _a and _a[0] == 'drive' and len(_a) > 1:
+                global CHUTE_DRIVE_ENABLED, CHUTE_NO_PARENT
+                if _a and _a[0] == 'noparent' and len(_a) > 1:
+                    CHUTE_NO_PARENT = _a[1].lower() in ('on', '1', 'true', 'yes')
+                    log('CONSOLE', f'chute noparent = {CHUTE_NO_PARENT}')
+                elif _a and _a[0] == 'drive' and len(_a) > 1:
                     CHUTE_DRIVE_ENABLED = _a[1].lower() in ('on', '1', 'true', 'yes')
                     log('CONSOLE', f'chute drive = {CHUTE_DRIVE_ENABLED}')
                 else:
@@ -14729,6 +14732,7 @@ CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (
 # last plane position), v801 delete settle, v803..v808 server-driven descent frames, v804 frame
 # after create. `chute drive on|off` on the console flips it live for a controlled test.
 CHUTE_DRIVE_ENABLED = True         # v810f5: ON by default - with v808's terminal sink rate and 2 Hz cadence the
+CHUTE_NO_PARENT = False            # v816f5: troop chutes created without a parent plane (see send_crew_parachuter_create_for)
                                    # chutes came out 'almost entirely' smooth in the 09-22 test (user); the
                                    # switch stays for A/B ('chute drive off' = v793 delivery)
 # v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
@@ -14744,8 +14748,10 @@ CHUTE_KEEPALIVE_S  = 0.5          # v806f5: 8 s -> 0.5 s. The receiving client d
                                   # between frames - it holds the canopy where the last frame put it - so
                                   # an 8 s cadence lurched it 48 m at a time ('worse', 09-22). Frames go
                                   # at 2 Hz along a path predicted from the owner's opening frames.
-CHUTE_DESCENT_MPS  = 9.5          # v808f5: default vertical rate = the client's terminal sink (~9.6 m/s in the
-                                  # landing bursts); the owner's last frames refine it per chute
+CHUTE_DESCENT_MPS  = 6.6          # v814f5: measured terminal average (09-23 12:26: 413 -> 145 m in 41 s); the
+                                  # owner's opening frames are NOT used for the rate (still decelerating)
+CHUTE_MIN_Z        = 20.0         # v814f5: never drive a canopy below this (no terrain height here)
+CHUTE_OPEN_FRAMES  = 6            # v815f5: a chute with fewer real frames than this has no reliable opened state
 CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
 
 def _chute_keepalive_loop():
@@ -14760,22 +14766,43 @@ def _chute_keepalive_loop():
                 if not crew or not getattr(s, 'entered_game', False):
                     continue
                 for onum, ent in list(crew.items()):
-                    lf = ent.get('last_frame'); pos = ent.get('pos'); t0 = ent.get('pos_at')
-                    if not lf or not pos or not t0:
+                    pos = ent.get('pos'); t0 = ent.get('pos_at')
+                    if not pos or not t0:
+                        continue
+                    # v815f5 [UNOPENED / TUMBLING CHUTES]: the canopy's state (deployed, orientation)
+                    # travels in its frames. The LAST chutes of a stick get one frame or NONE from the
+                    # owner before he goes silent (online 12:39: 0x015a one frame at release, 0x015b /
+                    # 0x015c none until 167 m) - driven from a pre-open frame, or not driven at all,
+                    # they 'freefall to the ground' or 'spiral' on observers. A chute with fewer than
+                    # CHUTE_OPEN_FRAMES real frames borrows its state from a sibling of the same stick
+                    # that has an opened canopy; only its object number and position are its own.
+                    lf = ent.get('last_frame') if ent.get('frames', 0) >= CHUTE_OPEN_FRAMES else None
+                    if lf is None:
+                        _donor = next((e for e in crew.values()
+                                       if e is not ent and e.get('frames', 0) >= CHUTE_OPEN_FRAMES and e.get('last_frame')), None)
+                        if _donor is None:
+                            continue
+                        lf = _donor['last_frame']
+                    if not lf:
                         continue
                     if now - t0 < CHUTE_SILENT_AFTER_S:
                         continue                                    # the owner is still sending
                     if now - ent.get('_ka_at', t0) < CHUTE_KEEPALIVE_S:
                         continue
                     ent['_ka_at'] = now
-                    # v806f5: predict along the chute's own velocity - drift (wind) and sink rate
-                    # estimated from the owner's opening frames, sink defaulting to CHUTE_DESCENT_MPS
-                    _vx, _vy, _vz = ent.get('vel') or (0.0, 0.0, -CHUTE_DESCENT_MPS)
+                    # v806f5/v814f5: the canopy is driven straight down at the TERMINAL sink rate with
+                    # NO drift. v808 used the owner's last second of frames, but that second is the
+                    # canopy still opening (13.6 m/s and a drift that reversed by landing; online
+                    # 12:26 chute 0x0112: 413 -> 145 m over the 41 s silence = 6.6 m/s average), so
+                    # the driven chute fell twice as fast, went through the ground and popped back
+                    # up at the landing. It also never goes below the altitude the canopy would
+                    # plausibly have reached - the last owner altitude minus sink x time, floored.
                     _dt = now - t0
-                    _z = max(0.0, pos[2] + _vz * _dt)
-                    _x = pos[0] + _vx * _dt; _y = pos[1] + _vy * _dt
+                    _z = max(CHUTE_MIN_Z, pos[2] - CHUTE_DESCENT_MPS * _dt)
+                    _x = pos[0]; _y = pos[1]
                     body = bytearray(lf[8:])                                # the frame after the 8-byte relay header
                     try:
+                        body[7:9] = (int(onum) & 0xffff).to_bytes(2, 'little')   # v815f5: this chute's own number
                         body[9:18] = pack_plane_pos9(_x, _y, _z)
                     except Exception:
                         continue
@@ -14824,6 +14851,13 @@ def send_crew_parachuter_create_for(src, dst, onum):
         return False
     rec = build_parachuter_record(_ent['body'], st=src.client_number, onumber=onum,
                                   owner_obj=src.my_obj_number)
+    # v816f5 [EXPERIMENT, off by default]: the observer's client prints '<transport>(p) has bailed out'
+    # for every trooper chute created WITH a parent plane (FUN_004f26b0 case 2 -> FUN_004a8c20); the
+    # 09-23 records were byte-identical for the chutes that printed it and those that did not - the
+    # client throttles the repeated line to ~1 per 3 s. With CHUTE_NO_PARENT the parent field
+    # (body[2:4]) goes out as -1, the client's own 'no parent' path. Test with `chute noparent on`.
+    if CHUTE_NO_PARENT and len(rec) >= 4:
+        rec = bytearray(rec); rec[2:4] = b'\xff\xff'; rec = bytes(rec)
     _del_raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
     pkt = build_msg13(_del_raw, bytes([0x02]) + rec)          # atomic predel+create (v552f5 form)
     send_rel(dst, pkt, f'<- ATOMIC predel+create CREW PARACHUTER: {src.current_pilot} '
@@ -17742,6 +17776,7 @@ def relay_telemetry(src, data, _split_obj=None):
                         _crew_ent['vel'] = (_vx, _vy, min(-1.0, _vz))
                 _crew_ent['pos'] = (_px, _py, _pz); _crew_ent['pos_at'] = time.time()
                 _crew_ent['last_frame'] = bytes(data[:8]) + bytes(pl)      # v803f5: for the descent keep-alive
+                _crew_ent['frames'] = _crew_ent.get('frames', 0) + 1       # v815f5
                 _co_pos = (_px, _py)
                 # v802f5 CHUTE FRAME CAPTURE: the observer's film (09-22) shows remote chutes
                 # rendered at ~82 m altitude steps; log the owner's raw chute frames (first
@@ -26133,7 +26168,12 @@ def handle_post_auth(s, cmd, pl):
                     and not (_tag555 & 0x80):
                 _crew = s.__dict__.setdefault('crew_para_objs', {})
                 _crew[_pn] = {'ident': _pi, 'at': time.time(),
-                              'body': bytes(pl[7:7 + PARACHUTER_HEADER_SIZE])}
+                              'body': bytes(pl[7:7 + PARACHUTER_HEADER_SIZE]), 'frames': 0}
+                # v815f5: seed the chute's position with the transport's own at release, so a chute
+                # whose owner never sends a frame for it can still be driven (see keep-alive loop)
+                if s.__dict__.get('_pos_xy') is not None:
+                    _crew[_pn]['pos'] = (s._pos_xy[0], s._pos_xy[1], float(s.__dict__.get('_pos_z') or 400.0))
+                    _crew[_pn]['pos_at'] = time.time()
                 _phist = s.__dict__.setdefault('_obj_number_history', [])
                 _phist.append((_pn, time.time()))
                 if len(_phist) > 16:
