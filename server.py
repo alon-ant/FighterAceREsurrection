@@ -347,7 +347,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v811f5'
+VERSION = 'v812f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -408,6 +408,9 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
 STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
+REL_RX_INORDER = True      # v812f5: in-order reliable delivery + ACK only the contiguous prefix (see pt==1)
+REL_RX_HOLE_S  = 6.0       # v812f5: a missing client seq not retransmitted within this is given up on
+REL_RX_BUF_MAX = 48        # v812f5: or when this many later packets are held behind it
                            # (v217 step 1) is confirmed stable - the RTT ring is finally bounded at 32
                            # (cfg[0x40] now correctly delivered at packet byte 88), so slot writes
                            # wrap at index 32, well before the index-64 delivery-callback slot that
@@ -26611,39 +26614,77 @@ def on_pkt(data, addr):
                 s._stall_warned=False
                 s._rec_dumped=False
                 log('STALL-WATCH', f'{s.current_pilot}: reliable RX RESUMED (cs={cs})')
+            # v812f5 [IN-ORDER RELIABLE RX - LOST CLIENT MESSAGES]. The ACK used to say 'next
+            # expected = this seq + 1', i.e. it CUMULATIVELY acknowledged every earlier seq too. When
+            # one of the client's reliable packets was lost and the next one arrived, that ACK told
+            # the client the lost one had been received: vcncNet dropped it from its send queue and
+            # NEVER retransmitted it. Every lost reliable message was lost for good on a lossy uplink
+            # (Alon 09-22 18:59, ul loss 12%: the out-4 spawn request vanished, no ServerConfirm,
+            # stuck 'loading', all peers culled 29 s later, then quit). Now: packets are delivered
+            # strictly in seq order, the ACK only covers the contiguous prefix received (a packet
+            # beyond a hole is acked individually and held), so the client keeps retransmitting the
+            # missing one until it lands. Safety valve: a hole older than REL_RX_HOLE_S (or a
+            # buffer of REL_RX_BUF_MAX) is flushed in order - never worse than a short delay.
+            _deliver = []
+            _nx = getattr(s, '_rx_next', None)
+            if _nx is None or not REL_RX_INORDER:
+                _nx = cs9
+            _dd = (cs9 - _nx) & 0x1FF
+            _buf = s.__dict__.setdefault('_rx_buf', {})
+            if _dd == 0:
+                _deliver.append((pl, sz, _dup))
+                _nx = (cs9 + 1) & 0x1FF
+                while _nx in _buf:
+                    _p2, _sz2, _t2 = _buf.pop(_nx)
+                    _deliver.append((_p2, _sz2, False)); _nx = (_nx + 1) & 0x1FF
+                s._rx_next = _nx
+                if not _buf:
+                    s.__dict__.pop('_rx_hole_at', None)
+            elif _dd < 256:
+                if cs9 not in _buf:
+                    _buf[cs9] = (pl, sz, _now)
+                if s.__dict__.get('_rx_hole_at') is None:
+                    s._rx_hole_at = _now
+                    log('RELRX', f'{getattr(s, "current_pilot", "?")}: reliable seq {_nx} MISSING (got {cs9}) - '
+                                 f'holding {len(_buf)} packet(s) until the client retransmits it')
+                if _now - s._rx_hole_at > REL_RX_HOLE_S or len(_buf) > REL_RX_BUF_MAX:
+                    log('RELRX', f'{getattr(s, "current_pilot", "?")}: hole at seq {_nx} not filled after '
+                                 f'{_now - s._rx_hole_at:.1f}s - flushing {len(_buf)} held packet(s) in order')
+                    for _k in sorted(_buf, key=lambda k: (k - _nx) & 0x1FF):
+                        _p2, _sz2, _t2 = _buf[_k]; _deliver.append((_p2, _sz2, False))
+                    _nx = (max(_buf, key=lambda k: (k - _nx) & 0x1FF) + 1) & 0x1FF
+                    _buf.clear(); s._rx_next = _nx; s.__dict__.pop('_rx_hole_at', None)
+            else:
+                pass                          # behind the window: already delivered - ack only
+            _contig = ((getattr(s, '_rx_next', (cs9 + 1) & 0x1FF)) - 1) & 0x1FF
+            if _buf and s.__dict__.get('_rx_hole_at') is not None:
+                if s.__dict__.get('_rx_hole_logged') != _contig:
+                    s._rx_hole_logged = _contig
+            elif s.__dict__.get('_rx_hole_logged') is not None:
+                log('RELRX', f'{getattr(s, "current_pilot", "?")}: hole filled by retransmit - in order again (next {s._rx_next})')
+                s.__dict__.pop('_rx_hole_logged', None)
             # v357f5 [PERF]: same 10ms-delayed ACK, served off-thread (see _ack_sender_loop).
-            _ackpkt = build_rel_ack(30, cs9)
+            _ackpkt = build_rel_ack(30, cs9, next_exp=(_contig + (1 if RTT_SAMPLING else 2)) & 0x1FF)
             if ACK_ASYNC:
                 _ack_q.put((time.time() + ACK_DELAY_S, _ackpkt, s.addr))
             else:
                 time.sleep(ACK_DELAY_S); sock.sendto(_ackpkt, s.addr)
-            cv=struct.unpack_from('>H',pl,2)[0] if len(pl)>=4 else 0
-            if getattr(s,'entered_game',False):
-                _dtag=f' DUP#{s._rel_rx_dups}(retransmit)' if _dup else ''
-                log('RELRX', f'{s.current_pilot} cs={cs} d0=0x{data[0]:02x} cmd={cv} sz={sz}{_dtag}')
-                _rec(s, 'C->S', 'RELRX',
-                     f'cs={cs} cmd={cv} sz={sz}{_dtag} pl={binascii.hexlify(pl[:24]).decode()}')
-            if cv==4:
-                s.session_id=pl[4:6] if len(pl)>=6 else b'\x00\x01'
-                if not getattr(s,'_login_started',False):
-                    s._login_started=True
-                    threading.Thread(target=login,args=(s,),daemon=True).start()
-            elif s.auth_done or getattr(s, '_login_started', False):
-                # v390f5 [INTERNET/CRITICAL]: queue non-cv4 reliable commands from the moment login
-                # STARTS, not only after auth_done flips. login() sets auth_done only AFTER it
-                # send_rel's the auth reply and blocks a full RTT for the ACK; the client fires its
-                # pilot-list request (cv=512) the instant it receives that reply, so on a high-RTT
-                # internet link (server on GCP ~200ms) the request lands in the ~1-RTT window while
-                # auth_done is still False - and the old 'elif s.auth_done' with no else SILENTLY
-                # DROPPED it (ACKed, never queued) -> no pilot list -> blank splash -> the '100%'
-                # loading hang (KILO earlier, bigalon run_20260802_190259: auth 19:04:16, then a
-                # dead 15s gap, pilot list never sent, client disconnected). LAN's sub-ms RTT closed
-                # the window, which is exactly why it never reproduced locally. The dispatch loop
-                # runs from login() AFTER auth_done, so anything queued during the window is drained
-                # only then (handle_post_auth still executes strictly post-auth) - we merely stop
-                # DROPPING it. _login_started is set at cv==4, so the gate opens the instant auth begins.
-                with s._lock: s.post_auth_cmds.append((cv,pl))
-                s._cmd_evt.set()          # v328: wake the dispatch loop immediately
+            for pl, sz, _dup in _deliver:
+                cv=struct.unpack_from('>H',pl,2)[0] if len(pl)>=4 else 0
+                if getattr(s,'entered_game',False):
+                    _dtag=f' DUP#{s._rel_rx_dups}(retransmit)' if _dup else ''
+                    log('RELRX', f'{s.current_pilot} cs={cs} d0=0x{data[0]:02x} cmd={cv} sz={sz}{_dtag}')
+                    _rec(s, 'C->S', 'RELRX',
+                         f'cs={cs} cmd={cv} sz={sz}{_dtag} pl={binascii.hexlify(pl[:24]).decode()}')
+                if cv==4:
+                    s.session_id=pl[4:6] if len(pl)>=6 else b'\x00\x01'
+                    if not getattr(s,'_login_started',False):
+                        s._login_started=True
+                        threading.Thread(target=login,args=(s,),daemon=True).start()
+                elif s.auth_done or getattr(s, '_login_started', False):
+                    # v390f5: queue non-cv4 reliable commands from the moment login STARTS (see history)
+                    with s._lock: s.post_auth_cmds.append((cv,pl))
+                    s._cmd_evt.set()          # v328: wake the dispatch loop immediately
             return
         if pt==0 and sz==8:
             aseq=(dw>>20)&0x1FF
