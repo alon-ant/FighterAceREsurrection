@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v826f5'
+VERSION = 'v828f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2890,7 +2890,11 @@ def apply_buildings_repair_rate(d, rate=None):
 # it x 60000), CratersVanishNumber (max craters kept). The client templates ship 1 / 10
 # (messages44 dump) - craters gone after a minute. Located by shape near the blob's end.
 CRATERS_VANISH_MIN = 10
-CRATERS_VANISH_MAX = 40
+CRATERS_VANISH_MAX = 2         # v828f5: 40 -> 2. CratersVanishNumber is NOT a crater count: the client
+                               # (Server\Crater.cpp FUN_00628fc0/FUN_00628da0) SUBTRACTS it from every crater's
+                               # VolumeRemains at each vanish tick - 40 wiped a 500 lb crater at the first tick
+                               # (online 09-24: 'gone in 30-60 s', the survivors shallow enough to roll over).
+                               # Offline 1 min / 10 kept the same craters 2+ minutes.
 
 CARGO_PERCENT_PATCH   = False   # v764f5: OFF - the v763 locator matched inside the PLANE block (@+993,
                                 # +1099 on 1196-byte blobs; the real TC byte is at +531). Re-enable only
@@ -2969,7 +2973,10 @@ def apply_runway_collisions(d, on=True):
         if n < 100:
             return None
         x = n - 60
-        if not (d[x - 1] == 0xff and d[x + 1] == 0x02):
+        # v828f5: anchor on the three bytes BEFORE the neighbour, not the neighbours themselves - those
+        # are flag bytes too and differ per arena (room 125: ...02 fe 46 fc [d0] 06..., rooms 49/58:
+        # ...02 fe 46 ff [d0|f1] 02...), so v822's 'ff before / 02 after' refused room 125.
+        if not (d[x - 4] == 0x02 and d[x - 3] == 0xfe and d[x - 2] == 0x46):
             return None
         old = d[x]
         new = (old | 0x20) if on else (old & ~0x20 & 0xff)
@@ -25518,7 +25525,23 @@ def handle_post_auth(s, cmd, pl):
             # are exactly 6+count*9 (15,24,33,42,60,69,78,87,96) = our 10+count*9 minus the
             # 4-byte [bc][T][00][00] header.
             def _dmg_ok(b):
-                return len(b) >= 10 and (len(b) - 10) % 9 == 0 and b[9] == (len(b) - 10) // 9
+                # v827f5 [MULTI-VICTIM DAMAGE]: a frame is [4-byte header][0x1c] followed by one or
+                # more VICTIM BLOCKS [victim u16][attacker u16][count u8][count x 9-byte hits] - a bomb
+                # blast damaging several planes packs one block per victim (online 09-24 12:08: a
+                # 105-byte frame = two 50-byte blocks for Taurus and Alon, refused by the single-block
+                # test, so no bomb damage ever reached a victim). Valid only if the blocks walk to the
+                # exact end - the malformed frames behind the old Network.cpp:249 CTD still fail.
+                if len(b) < 10 or b[4] != 0x1c:
+                    return False
+                off = 5
+                while off < len(b):
+                    if off + 5 > len(b):
+                        return False
+                    cnt = b[off + 4]
+                    if cnt == 0:
+                        return False
+                    off += 5 + cnt * 9
+                return off == len(b)
             if not _dmg_ok(stored):
                 if len(stored) > 4 and _dmg_ok(stored[4:]):
                     if not getattr(s, '_dmg28_pfx_logged', False):
