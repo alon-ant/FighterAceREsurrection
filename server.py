@@ -292,6 +292,11 @@ TODO list:
       (slot 2). 'Aircraft/Tank/Ship units' on Ctrl-L / HQ are 'value of deployed units', not a
       stock (10,417 = a loco + 8 wagons; 1,562 = one Tempest). Authentic 2009 behaviour; the
       resources rows are ours. Nothing to feed.
+  [ ] (TC, 2026-09-23) CHUTE DRIVE: still slightly jumpy (user) - tune the driven descent. Likely
+      CHUTE_DESCENT_MPS (6.6 m/s from one chute; 9.6 m/s was measured in another stick): measure
+      more sticks from the CHUTEFRAME capture (release z / landing z / silence length), maybe per
+      drop altitude; consider a short free-fall phase before the canopy opens and a drift estimate
+      from the first chute that lands. `chute drive on|off` for A/B.
   [ ] (SCORING, 2026-09-21) CRASH-LANDING IN ENEMY TERRITORY loses only the PLANE, not the pilot
       (user). Today a crash-land (MEC 1 / 26 on the ground) books a pilot loss when it is not a
       clean landing; the pilot walked away - the plane is gone, the pilot is not. Needs: on an
@@ -347,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v816f5'
+VERSION = 'v824f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2925,6 +2930,56 @@ def apply_cargo_percent(d, pct=None):
 
 SHOW_GROUND_OBJECTS_DEFAULT = True
 
+RUNWAY_COLLISIONS_DEFAULT = True   # v821f5: TC arenas get [Game] RunwayCollisions=yes (craters crash planes)
+RUNWAY_ANGLE_DEFAULT = 60          # v823f5: [PlaneSettings] RunwayAngle - client default 60, arena templates 30
+
+def apply_runway_angle(d, deg=60):
+    """v823f5: set [PlaneSettings] RunwayAngle (a u8 in the serialized blob). Offline, where a big
+    crater crashed the DC-3, RunwayAngle=60 (the client's parse default); online templates carry 30
+    and the same crater (Vor15) only did 40% damage to a TBF. Every other damage/physics setting
+    matched. Located in the int run right after the pair of u16 1000/2000: e8 03 d0 07 [BomberAI
+    delay][FuelDurationPercent][DefaultFuelDuration][RunwayAngle]. Returns (off, old) or None."""
+    try:
+        deg = max(1, min(90, int(deg)))
+        i = bytes(d).find(b'\xe8\x03\xd0\x07')
+        if i < 0 or bytes(d).find(b'\xe8\x03\xd0\x07', i + 1) >= 0:
+            return None
+        x = i + 7
+        old = d[x]
+        if not (1 <= old <= 90 and 1 <= d[x - 2] <= 200 and 1 <= d[x - 1] <= 240):
+            return None
+        if old == deg:
+            return None
+        d[x] = deg
+        return x, old
+    except Exception:
+        return None
+
+def apply_runway_collisions(d, on=True):
+    r"""v821f5/v822f5: set/clear [Game] RunwayCollisions in a DECOMPRESSED GAME_DEF. With it 'no' (every
+    arena template) a plane rolls straight through a bomb crater - the crater (OBJECTS\Crater\
+    Vor15.q6) is only tested with runway collisions on (offline: yes -> crashed 3x; test server: no ->
+    rolled through). v821 patched the WRONG byte (it was AA quality @+482 - the 58/59 diff there came
+    from the web AA setting); the real flag, from the same 58 (on) / 59 (off) / 49 (off) dumps, is
+    BIT 0x20 of the tail flags byte at len-60: ...02 fe 46 ff [f1 | d1 | d0] 02 f5... - the same
+    family as ShowGroundObjects (bit 0x08 at len-52). Only that bit is touched. Returns (off, old,
+    new) or None; length-preserving; refuses unless the neighbours match."""
+    try:
+        n = len(d)
+        if n < 100:
+            return None
+        x = n - 60
+        if not (d[x - 1] == 0xff and d[x + 1] == 0x02):
+            return None
+        old = d[x]
+        new = (old | 0x20) if on else (old & ~0x20 & 0xff)
+        if new == old:
+            return None
+        d[x] = new
+        return x, old, new
+    except Exception:
+        return None
+
 def apply_show_ground_objects(d, on=None):
     """v719f5: set [UI] ShowGroundObjects in a DECOMPRESSED GAME_DEF. In the serialised blob the
     Padlock distance section is a fixed run of 10 f32 (Information 15000, FighterPlane 3000,
@@ -2975,11 +3030,15 @@ def apply_craters_vanish(d, minutes=None, number=None):
         n = len(d)
         if n < 100:
             return None
-        off = n - 71
+        # v822f5: the layout is ONE BYTE EARLIER than v703 had it - the 09-24 logs read 'craters 10/1
+        # oxygen 4560992/4588280' where the client printed CratersVanishDelay=1 / Number=10, and the
+        # 'oxygen' dwords shifted by one byte are floats 0x459860xx / 0x4602f8xx = ~4876 / ~8382 m. So
+        # [Oxygen1 f32 @len-80][Oxygen2 f32 @len-76][3 small bytes][Delay @len-72][Number @len-71].
+        off = n - 72
         ccd, pmt, get_, cvd, cvn = d[off - 3], d[off - 2], d[off - 1], d[off], d[off + 1]
-        ox1, ox2 = struct.unpack_from('<II', d, off - 11)
+        ox1, ox2 = struct.unpack_from('<ff', d, off - 11)
         if not (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
-                and 100 <= ox1 <= 100000 and 100 <= ox2 <= 100000 and ox1 < ox2):
+                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 < ox2):
             log('CRATERS', f'tail check failed: delays {ccd}/{pmt}/{get_} craters {cvd}/{cvn} oxygen {ox1}/{ox2} '
                            f'(len {n}) - blob layout differs; not patched')      # v786f5: say why
             return None
@@ -3196,8 +3255,19 @@ def apply_tc_settings(d, settings=None):
             d[off] = max(0, min(255, int(val)))
     return o, old
 
+def _tc_room_flag(room_id):
+    """v824f5: True for a TC (economy) arena, False for anything else, None if unknown. The
+    TC-oriented GAME_DEF patches (ShowGroundObjects, RunwayCollisions, RunwayAngle) are applied only
+    to TC arenas unless the arena's own setting asks: 'Nations at war' (room 48, a dogfight arena not
+    flagged FFA) got all of them, and a bomb-loaded Lancaster CTD'd there on its first frame twice
+    (09-23 map open, 09-24 'logical error ScreenManagerLock.cpp 215')."""
+    try:
+        return bool(room_has_economy(room_id))
+    except Exception:
+        return None
+
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None,
-                     hide_planes=None, is_ffa=False, stamp_mission=False, room_name=None):
+                     hide_planes=None, is_ffa=False, stamp_mission=False, room_name=None, tc_room=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -3425,12 +3495,42 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # v719f5 SHOW GROUND OBJECTS: the map draws tank/train/soldier icons only when this [UI] flag is
     # set; the arena templates ship it 0. Default ON for TC arenas (web editor: show_ground_objects).
     _sgo = (arena_settings or {}).get('show_ground_objects')
+    # v819f5: FFA arenas are NOT patched unless the web setting asks for it - with the flag forced
+    # on, opening the map in FFA arena 48 CTD'd the client every time (Access violation 0x530EF2 in
+    # the object-tree find, v.addr 0x84; user 09-23, reproducible). FFA rooms have none of the
+    # ground objects the map would draw.
+    if _sgo is None and (is_ffa or force_ffa or tc_room is False):
+        _sgo_skip = True
+    else:
+        _sgo_skip = False
     _sgo = SHOW_GROUND_OBJECTS_DEFAULT if _sgo is None else bool(int(_sgo))
-    _sg = apply_show_ground_objects(d, _sgo)
-    if _sg:
+    _sg = None if _sgo_skip else apply_show_ground_objects(d, _sgo)
+    if _sgo_skip:
+        log('MAP57', 'ShowGroundObjects: FFA arena - left as the template has it')
+    elif _sg:
         log('MAP57', f'ShowGroundObjects @+{_sg[0]}: {_sg[1]} -> {1 if _sgo else 0}')
     else:
         log('MAP57', f'ShowGroundObjects: not located or already {1 if _sgo else 0}; left as-is')
+    # v821f5 RUNWAY COLLISIONS (craters crash planes): on for TC arenas unless the arena setting says
+    # otherwise; FFA arenas only when explicitly set
+    _rwc = (arena_settings or {}).get('runway_collisions')
+    if _rwc is None and (is_ffa or force_ffa or tc_room is False):
+        log('CRATER', 'RunwayCollisions/RunwayAngle: not a TC arena - left as the template has it')
+    else:
+        _rwc = RUNWAY_COLLISIONS_DEFAULT if _rwc is None else bool(int(_rwc))
+        _rw = apply_runway_collisions(d, _rwc)
+        if _rw:
+            log('CRATER', f'RunwayCollisions @+{_rw[0]}: flags 0x{_rw[1]:02x} -> 0x{_rw[2]:02x} ({"yes" if _rwc else "no"})')
+        else:
+            log('CRATER', f'RunwayCollisions: not located or already {"yes" if _rwc else "no"}; left as-is')
+        # v823f5: RunwayAngle with it (per-arena 'runway_angle', default 60)
+        _ra = (arena_settings or {}).get('runway_angle')
+        _ra = RUNWAY_ANGLE_DEFAULT if _ra in (None, '') else int(_ra)
+        _rap = apply_runway_angle(d, _ra)
+        if _rap:
+            log('CRATER', f'RunwayAngle @+{_rap[0]}: {_rap[1]} -> {_ra}')
+        else:
+            log('CRATER', f'RunwayAngle: not located or already {_ra}; left as-is')
     # v763f5 CARGO PERCENT: 0 in every template = the client will not load cargo at all
     if CARGO_PERCENT_PATCH:
         _cp = (arena_settings or {}).get('cargo_percent')
@@ -6781,7 +6881,8 @@ def build_gamedef_212(room, hide_planes=None):
                                     hide_planes=hide_planes,
                                     is_ffa=is_ffa_room(room),
                                     stamp_mission=_room_official,  # v438f5b: official -> Type 1
-                                    room_name=(room[1] or None))   # v473f5: DB name -> in-arena
+                                    room_name=(room[1] or None),   # v473f5: DB name -> in-arena
+                                    tc_room=_tc_room_flag(room[0]))  # v824f5: TC-only patches
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -13360,6 +13461,7 @@ GROUP_STRATEGY    = {'none': 0, 'goto': 1, 'attack': 2, 'defend': 3, 'defence': 
 GROUP_KIND        = {'ship': 0, 'tank': 1, 'fighter': 2, 'bomber': 3, 'soldier': 5, 'sub': 6, 'lorry': 7, 'train': 7}
 GROUP_MISSION_NONE = 0xf
 TRAIN_GROUP_RECORDS = True     # v722f5: ON - the lorry box is the train's marker on both map scales (user)
+GROUP_STICK_MERGE_M = 1500.0   # v817f5: sticks with the same camp/purpose/objective closer than this share one map box
 
 def _g16(v):
     return max(-32768, min(32767, int(round(float(v) / (1024.0 * GROUP_POS_SCALE)))))
@@ -13401,6 +13503,11 @@ def room_group_records(room_id):
                     'x': txy[0] if txy else tx, 'y': txy[1] if txy else ty,
                     'tx': tx, 'ty': ty,
                     'w6': 1 if lead.get('goal') is not None else 0})
+    # v817f5 [ONE BOX PER GARRISON]: sticks of the same camp with the same purpose and objective whose
+    # centres are within GROUP_STICK_MERGE_M share ONE box carrying their combined count. Each stick used
+    # to get its own box at its centre; several sticks defending one field put their boxes on the same
+    # spot, so the map showed one set of troops (Bama 09-23: sticks 6-9, 50 men, at 68,AX).
+    _st_groups = []
     for sid, st in list(STICKS.items()):
         if st.get('room') != room_id:
             continue
@@ -13408,11 +13515,19 @@ def room_group_records(room_id):
         if not objs:
             continue
         sx = sum(SOLDIERS[o]['pos'][0] for o in objs) / len(objs); sy = sum(SOLDIERS[o]['pos'][1] for o in objs) / len(objs)
-        tgt = st.get('target', -1)
+        key = (st.get('camp', 0), st.get('purpose') or 'none', st.get('target', -1))
+        g = next((g for g in _st_groups if g['key'] == key and math.hypot(g['sx'] / g['n'] - sx, g['sy'] / g['n'] - sy) <= GROUP_STICK_MERGE_M), None)
+        if g is None:
+            g = {'key': key, 'sx': 0.0, 'sy': 0.0, 'n': 0, 'objs': []}
+            _st_groups.append(g)
+        g['sx'] += sx * len(objs); g['sy'] += sy * len(objs); g['n'] += len(objs); g['objs'].extend(objs)
+    for g in _st_groups:
+        camp, purpose, tgt = g['key']
+        sx, sy = g['sx'] / g['n'], g['sy'] / g['n']
         txy = tc_scene_xy(terrain, tgt) if isinstance(tgt, int) and tgt >= 0 else None
-        out.append({'camp': st.get('camp', 0), 'kind': GROUP_KIND['soldier'],
-                    'strategy': GROUP_STRATEGY.get(st.get('purpose') or 'none', 0), 'f3': 1,
-                    'uc': int(SOLDIERS[objs[0]].get('class', 170)), 'count': len(objs),
+        out.append({'camp': camp, 'kind': GROUP_KIND['soldier'],
+                    'strategy': GROUP_STRATEGY.get(purpose, 0), 'f3': 1,
+                    'uc': int(SOLDIERS[g['objs'][0]].get('class', 170)), 'count': min(255, g['n']),
                     'x': txy[0] if txy else sx, 'y': txy[1] if txy else sy,
                     'tx': sx, 'ty': sy, 'w6': 1})
     rails = rails_for(terrain)
@@ -14411,6 +14526,26 @@ def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
     warned[key] = time.time()
     tc_say(room_id, f'Your {tc_scene_kind_word(txy[2])} at {tc_grid(txy[0], txy[1])} is about to be triggered!', camp=tcamp)
 
+ROOM_CRATERS = {}             # v818f5: room -> [(time, crater record bytes)] for replay to late spawners
+CRATER_HISTORY_S = 1800.0     # keep records this long (the client's own vanish rule removes them earlier)
+CRATER_HISTORY_MAX = 200
+CRATER_REPLAY_DELAY_S = 2.0
+
+def crater_replay_for(s):
+    time.sleep(CRATER_REPLAY_DELAY_S)
+    rid = getattr(s, 'current_room', None)
+    if rid is None or not (getattr(s, 'entered_game', False) and getattr(s, 'flying', False)
+                           and getattr(s, 'obj_confirmed', False)):
+        return
+    cut = time.time() - CRATER_HISTORY_S
+    got = s.__dict__.setdefault('_craters_have', set())
+    recs = [r for t, r in (ROOM_CRATERS.get(rid) or []) if t >= cut and r not in got]
+    for r in recs:
+        _submit_send(send_rel, s, build_appspace_pkt(r), f'<- CRATER 52 replay', to=3.0)
+        got.add(r)
+    if recs:
+        log('CRATER', f'{s.current_pilot}: {len(recs)} crater record(s) replayed after spawn')
+
 def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
     """v563f5/v570f5/v604f5: after a (re)spawn, create every tank of the room this session
     doesn't hold - batched, but never more than RECREATE_CHUNK records per msg-2: the live
@@ -14752,6 +14887,7 @@ CHUTE_DESCENT_MPS  = 6.6          # v814f5: measured terminal average (09-23 12:
                                   # owner's opening frames are NOT used for the rate (still decelerating)
 CHUTE_MIN_Z        = 20.0         # v814f5: never drive a canopy below this (no terrain height here)
 CHUTE_OPEN_FRAMES  = 6            # v815f5: a chute with fewer real frames than this has no reliable opened state
+CHUTE_ORPHAN_S     = 15.0         # v820f5: a silent chute this long past its predicted landing is deleted by the server
 CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
 
 def _chute_keepalive_loop():
@@ -14787,6 +14923,24 @@ def _chute_keepalive_loop():
                         continue
                     if now - t0 < CHUTE_SILENT_AFTER_S:
                         continue                                    # the owner is still sending
+                    # v820f5 [ORPHAN CHUTES -> CTD]: the owner's client normally deletes every chute as
+                    # it lands; one of SeanTB1's 7 (0x04c6, 09-23 22:00) never was. The server kept
+                    # driving it, then (v796) quietly forgot it at 200 s - but every peer still held
+                    # it, silence-culled it later, and the client's own cull of a chute whose parent
+                    # plane still references it left a dangling child pointer: flakmagic's CTD at
+                    # 22:05:07 (write AV 0x7E2928) came 1 s after 'Check discon. and del 1222
+                    # (Dakota Mk.II(8)(p))'. Once a silent chute has had time to land, the server
+                    # sends the owner's delete itself - the client's normal delete path.
+                    if now - t0 > max(CHUTE_ORPHAN_S, (pos[2] - CHUTE_MIN_Z) / max(1.0, CHUTE_DESCENT_MPS) + CHUTE_ORPHAN_S):
+                        crew.pop(onum, None)
+                        (s.__dict__.get('_para_created_peers') or {}).pop(onum, None)
+                        _pdo = build_delete_object_3(onumber=onum, client_number=None)
+                        for p in get_sessions_in_room(s.current_room):
+                            if p is not s:
+                                _submit_send(send_rel, p, _pdo, f'<- delete ORPHAN CHUTE 0x{onum:04x} ({s.current_pilot})', to=3.0)
+                        log('PARA', f'{s.current_pilot} chute 0x{onum:04x}: owner silent {now - t0:.0f}s and never deleted it '
+                                    f'- server sent the delete to peers (orphan)')
+                        continue
                     if now - ent.get('_ka_at', t0) < CHUTE_KEEPALIVE_S:
                         continue
                     ent['_ka_at'] = now
@@ -14847,6 +15001,14 @@ def send_crew_parachuter_create_for(src, dst, onum):
     if _age > CREW_CHUTE_STALE_S:
         _crew.pop(onum, None)
         src.__dict__.get('_para_created_peers', {}).pop(onum, None)
+        # v820f5: tell the peers too - they still hold it (see the orphan note in _chute_keepalive_loop)
+        try:
+            _pdo = build_delete_object_3(onumber=onum, client_number=None)
+            for p in get_sessions_in_room(src.current_room):
+                if p is not src:
+                    _submit_send(send_rel, p, _pdo, f'<- delete STALE CHUTE 0x{onum:04x} ({src.current_pilot})', to=3.0)
+        except Exception:
+            pass
         log('PARA', f'crew chute 0x{onum:04x} of {src.current_pilot} is {_age:.0f}s stale - expired, not re-created on {dst.current_pilot}')
         return False
     rec = build_parachuter_record(_ent['body'], st=src.client_number, onumber=onum,
@@ -20792,6 +20954,16 @@ def _fire_server_confirm(s, via='', ident=None):
         except Exception:
             logx('REPAIR', 'dead-object snapshot failed')
     try:
+        # v818f5 [CRATERS FOR LATE SPAWNERS]: crater records were relayed only to pilots in the air at
+        # the moment of the bombing (v693's guard - a record delivered to a client in the HQ crashed it),
+        # so anyone who spawned on the field AFTER it was bombed had an intact runway while the bomber
+        # saw the holes. Offline RE 09-23: a crater is a collision object (OBJECTS\Crater\Vor15.q6) that
+        # crashes a plane rolling into it. Replay the room's unexpired crater records to this pilot
+        # once he is actually in the world (same guard, CRATER_REPLAY_DELAY_S after ServerConfirm).
+        threading.Thread(target=crater_replay_for, args=(s,), daemon=True).start()
+    except Exception:
+        logx('CRATER', 'crater replay start failed')
+    try:
         # v797f5: re-create only what is IN RANGE of the spawn - every object of the room used to
         # go out, including trains 60 km away that the client silence-culls 27 s later (and whose
         # stale silence clocks then raced the client's cull -> double create CTDs). The pilot's
@@ -23717,6 +23889,13 @@ def ground_stop_eligible(s, now):
     except Exception:
         return False, 'movement-error', None
     if _pm != 0:
+        # v822f5 [STRANDED AFTER A CRATER]: a plane that asked for repair (msg 119) and has sat within
+        # STRANDED_TOL_M for STRANDED_SPAN_S is serviced even if its position jitters - a crater-damaged
+        # plane (wrecked gear, dead engine) rocks in place and never reads EXACTLY 0 movement, so the
+        # repair never fired and it could not restart its engine or reposition (user 09-24).
+        _st = _stranded_pos(s, now) if getattr(s, '_repair_119_pending', 0.0) else None
+        if _st is not None:
+            return True, 'stranded', _st
         return False, f'movement={_pm}', None
     run_start_t = t_new
     run_n = 0
@@ -23733,8 +23912,45 @@ def ground_stop_eligible(s, now):
     if (t_new - run_start_t) < AUTO_RESUPPLY_SETTLE:
         return False, f'span={t_new - run_start_t:.1f}s', None
     if len(ticks) < 2:
+        _st = _stranded_pos(s, now) if getattr(s, '_repair_119_pending', 0.0) else None   # v822f5
+        if _st is not None:
+            return True, 'stranded', _st
         return False, 'conductor-frozen', None
     return True, 'parked', p_new
+
+STRANDED_TOL_M = 6.0      # v822f5: 'sitting still' for a damaged plane that asked for repair
+STRANDED_SPAN_S = 2.5     #   (_pos_hist keeps CRASH_MOVEMENT_WINDOW_S = 3 s)
+
+def _stranded_pos(s, now):
+    """v822f5: the plane's position if every own-telemetry sample of the last STRANDED_SPAN_S lies
+    within STRANDED_TOL_M of the newest one (and the window really is that long), else None.
+    _pos_hist samples carry the first three u16 of the 9-byte packed position (25-bit x, then y
+    from bit 25); x is complete, y is its low 23 bits - enough for a metres-scale comparison."""
+    try:
+        hist = getattr(s, '_pos_hist', None) or []
+        if len(hist) < 3:
+            return None
+        t_new, p_new = hist[-1][0], hist[-1][1]
+        if now - t_new > AUTO_RESUPPLY_FRESH:
+            return None
+        win = [e for e in hist if t_new - e[0] <= STRANDED_SPAN_S]
+        if len(win) < 3 or (t_new - win[0][0]) < 2.0:
+            return None
+        sc = PLANE_POS_SCALE or 0.016
+        def _xy(p):
+            x = p[0] | ((p[1] & 0x1ff) << 16)
+            y = (p[1] >> 9) | (p[2] << 7)
+            return x, y
+        cx, cy = _xy(p_new)
+        for e in win:
+            qx, qy = _xy(e[1])
+            dx = min(abs(qx - cx), 0x2000000 - abs(qx - cx))
+            dy = min(abs(qy - cy), 0x800000 - abs(qy - cy))
+            if math.hypot(dx * sc, dy * sc) > STRANDED_TOL_M:
+                return None
+        return p_new
+    except Exception:
+        return None
 
 # v427f5: msg-60 SEMANTICS FROM THE HANDLER ITSELF (FA.exe 0x005581c0, defined + decompiled
 # 2026-08-12; reconciles every probe from both matrices; supersedes ALL prior tables):
@@ -25968,6 +26184,12 @@ def handle_post_auth(s, cmd, pl):
         if sub == 0x34 and getattr(s, 'current_room', None) is not None:
             try:
                 _crpkt = build_appspace_pkt(bytes(stored[4:]))
+                # v818f5: keep the record for pilots who spawn LATER (see crater_replay_for)
+                _hist = ROOM_CRATERS.setdefault(s.current_room, [])
+                _hist.append((time.time(), bytes(stored[4:])))
+                s.__dict__.setdefault('_craters_have', set()).add(bytes(stored[4:]))   # his own crater
+                _cut = time.time() - CRATER_HISTORY_S
+                ROOM_CRATERS[s.current_room] = [h for h in _hist if h[0] >= _cut][-CRATER_HISTORY_MAX:]
                 _ncr = 0
                 for _p in get_sessions_in_room(s.current_room):
                     # v693f5: only to pilots IN THE WORLD - a crater record delivered to a client
@@ -25976,6 +26198,7 @@ def handle_post_auth(s, cmd, pl):
                     if (_p is not s and getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)
                             and getattr(_p, 'obj_confirmed', False)):
                         _submit_send(send_rel, _p, _crpkt, f'<- CRATER 52 from {s.current_pilot}', to=3.0); _ncr += 1
+                        _p.__dict__.setdefault('_craters_have', set()).add(bytes(stored[4:]))   # v818f5
                 if _ncr:
                     log('CRATER', f'{s.current_pilot}: crater record ({len(stored) - 4}B) relayed to {_ncr} peer(s)')
             except Exception:
