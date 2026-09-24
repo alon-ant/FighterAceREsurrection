@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v824f5'
+VERSION = 'v826f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -9380,6 +9380,7 @@ def assign_player_slot(s, room_id):
         log('SLOT', f'room {room_id}: cooldown scan passed index {SLOT_INDEX_SOFT_MAX} - '
                     f'fell back to first-free {_fb} for "{getattr(s, "current_pilot", "?")}"')
     # Log outside the lock - never hold the session lock across I/O.
+    s.__dict__['_craters_have'] = set()        # v825f5: a fresh arena entry has no craters yet
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
@@ -14531,6 +14532,31 @@ CRATER_HISTORY_S = 1800.0     # keep records this long (the client's own vanish 
 CRATER_HISTORY_MAX = 200
 CRATER_REPLAY_DELAY_S = 2.0
 
+def crater_record_in(s, body, echo=False):
+    """v686f5/v818f5/v826f5: a crater record from s ([0x34][u16 id][i32 time][...]; one record can
+    carry several craters) - kept for later spawners and relayed to every other pilot in the world.
+    echo=True also returns it to the sender, as the plain-form generic echo always did."""
+    try:
+        _crpkt = build_appspace_pkt(body)
+        _hist = ROOM_CRATERS.setdefault(s.current_room, [])
+        _hist.append((time.time(), body))
+        s.__dict__.setdefault('_craters_have', set()).add(body)          # his own crater
+        _cut = time.time() - CRATER_HISTORY_S
+        ROOM_CRATERS[s.current_room] = [h for h in _hist if h[0] >= _cut][-CRATER_HISTORY_MAX:]
+        _ncr = 0
+        for _p in get_sessions_in_room(s.current_room):
+            # v693f5: only to pilots IN THE WORLD - a crater record delivered to a client sitting in
+            # the HQ crashed it in the crater manager (messages14 00:33, AV 0x636BD8 after 'in 52'17')
+            if (_p is not s and getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)
+                    and getattr(_p, 'obj_confirmed', False)):
+                _submit_send(send_rel, _p, _crpkt, f'<- CRATER 52 from {s.current_pilot}', to=3.0); _ncr += 1
+                _p.__dict__.setdefault('_craters_have', set()).add(body)
+        if echo:
+            _submit_send(send_rel, s, _crpkt, '<- CRATER 52 echo', to=3.0)
+        log('CRATER', f'{s.current_pilot}: crater record ({len(body)}B) kept, relayed to {_ncr} peer(s)')
+    except Exception:
+        logx('CRATER', 'crater record failed')
+
 def crater_replay_for(s):
     time.sleep(CRATER_REPLAY_DELAY_S)
     rid = getattr(s, 'current_room', None)
@@ -18510,6 +18536,11 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
         # msg-3 notify (_tank_note_client_delete) is the single source of truth.
         _why = (f'airfield change ({old_af}->{af})' if af_changed else 'HQ re-entry (world rebuilt)')
         log('FLY23', f'{_why} -> peers re-create objects on {s.current_pilot}')
+        # v825f5 [CRATER PERSISTENCE]: the client's world - craters included - is rebuilt here, so
+        # whatever craters it had are gone; forget them so the replay after this spawn sends ALL of
+        # the room's craters again (online 09-24: Duran crashed on a crater, went to the HQ, respawned
+        # and his craters were gone; the bomber left and re-joined and his own were gone too).
+        s.__dict__['_craters_have'] = set()
     if s.__dict__.pop('_rejoin_pending', False):     # re-join only (first join did this at enter)
         # Re-announce US to PEERS - they removed us via msg-63 REMOVE on our exit, so this is
         # a clean re-add (fixes the phantom/garbage scoreboard row).
@@ -24762,6 +24793,12 @@ def handle_post_auth(s, cmd, pl):
                 log('NEWS', f'{s.current_pilot}: news request (prefixed 0xca, {len(pl)}B) - replying')
                 send_lobby_news(s, reason='(news request)')
                 return
+            if _isub == 0x34 and len(pl) > 9 and getattr(s, 'current_room', None) is not None:
+                # v826f5 [MULTI-CRATER RECORDS]: a stick of bombs arrives as ONE crater record in the
+                # prefixed form (local 09-24 14:51:25: 15 bombs = a 63-byte prefixed record + one
+                # 15-byte plain one); the sub normalisation above hid it from the crater handler, so
+                # it was never kept or relayed and only the 1 plain crater came back on a rejoin.
+                crater_record_in(s, bytes(pl[8:]))     # no echo: the sender already shows them
             if 0xcf <= _isub <= 0xdf:   # TEMP squadron msg capture (prefixed path; remove once decoded)
                 log('SQNCAP', f'{s.current_pilot} PREFIXED sub=0x{_isub:02x} type=0x{pl[5]:02x} '
                               f'len={len(pl)} hex={bytes(pl).hex()}', level='INFO')
@@ -26182,27 +26219,7 @@ def handle_post_auth(s, cmd, pl):
         # the room so everyone's runway has the same holes; the generic echo only returned it to
         # the sender. Relay to every other in-game session, then echo as before.
         if sub == 0x34 and getattr(s, 'current_room', None) is not None:
-            try:
-                _crpkt = build_appspace_pkt(bytes(stored[4:]))
-                # v818f5: keep the record for pilots who spawn LATER (see crater_replay_for)
-                _hist = ROOM_CRATERS.setdefault(s.current_room, [])
-                _hist.append((time.time(), bytes(stored[4:])))
-                s.__dict__.setdefault('_craters_have', set()).add(bytes(stored[4:]))   # his own crater
-                _cut = time.time() - CRATER_HISTORY_S
-                ROOM_CRATERS[s.current_room] = [h for h in _hist if h[0] >= _cut][-CRATER_HISTORY_MAX:]
-                _ncr = 0
-                for _p in get_sessions_in_room(s.current_room):
-                    # v693f5: only to pilots IN THE WORLD - a crater record delivered to a client
-                    # sitting in the HQ (own plane deleted, model loading) crashed it in the
-                    # crater manager (messages14 00:33, Access violation 0x636BD8 after 'in 52'17')
-                    if (_p is not s and getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)
-                            and getattr(_p, 'obj_confirmed', False)):
-                        _submit_send(send_rel, _p, _crpkt, f'<- CRATER 52 from {s.current_pilot}', to=3.0); _ncr += 1
-                        _p.__dict__.setdefault('_craters_have', set()).add(bytes(stored[4:]))   # v818f5
-                if _ncr:
-                    log('CRATER', f'{s.current_pilot}: crater record ({len(stored) - 4}B) relayed to {_ncr} peer(s)')
-            except Exception:
-                logx('CRATER', 'relay failed')
+            crater_record_in(s, bytes(stored[4:]))
         if sub in NO_ECHO_SUBS:
             if sub == 0x03:
                 _tank_note_client_delete(s, stored)     # v563f5: client dropped a tank -> forget that peer
