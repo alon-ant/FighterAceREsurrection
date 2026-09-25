@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v850f5'
+VERSION = 'v855f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -411,12 +411,13 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # base (FUN_10007d13), which ADVANCES the base mid-game and defeats the
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
-STATUS_INTERVAL_S = 6.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
-                           # v839f5: 2 -> 6 s. The client's 'Data loss' is per STATUS interval and clamped
-                           # at 0 (FUN_100073a4), so reordering across an interval boundary (+-1 packet)
-                           # showed as 1-2% on clean links and never as the compensating negative. Three
-                           # times the packets per interval cuts that to a third; the latency readout
-                           # and session clock still update every 6 s (the 18-bit base wraps at 262 s).
+STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+                           # v855f5: back to 2 s. v839 stretched it to 6 s to smooth the clamped loss
+                           # gauge - but the client's 'Receive data' readout counts bytes PER STATUS
+                           # INTERVAL and shows them as a rate, so every pilot saw 3x ('1k -> over
+                           # 3k'), and the interval is also the session-clock / RTT rhythm the
+                           # client was built around ('jumpy', Bama 09-25). The 1-2% jitter reading
+                           # on the loss gauge is the lesser evil; it was always cosmetic.
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
 REL_RX_INORDER = True      # v812f5: in-order reliable delivery + ACK only the contiguous prefix (see pt==1)
 REL_RX_HOLE_S  = 6.0       # v812f5: a missing client seq not retransmitted within this is given up on
@@ -10843,6 +10844,17 @@ TC_CREDIT_PARA_GROUND_KILLS = True    # v739f5: ON (user, corrected) - objects d
                                       # A console-spawned stick still has no dropper, so it credits
                                       # nobody (that was the v738 report: it took the first in-game pilot).
 DEFENCE_NAME_KEYS   = ('tower', 'aa ', 'aa battery', 'flak', 'bunker', 'mg ', 'machine gun', 'pillbox')
+DEFENCE_NAME_EXCLUDE = ('ammo bunker', 'fuel bunker', 'storage', 'depot')   # v854f5: storage, not guns
+
+def is_defence_name(name):
+    """v854f5: a scene object that SHOOTS - AA, flak, MG posts, pillboxes, towers, gun bunkers. An
+    'Ammo Bunker' / 'Hardened Ammo Bunker' is a magazine, and the 'bunker' keyword had it killing
+    paratroops at scenes whose AA was already down (Taurus 09-25: 8 of 10 troop losses in the
+    session were to ammo bunkers)."""
+    n = (name or '').lower()
+    if any(x in n for x in DEFENCE_NAME_EXCLUDE):
+        return False
+    return any(k in n for k in DEFENCE_NAME_KEYS)
 SOLDIER_VS_SOLDIER_DPS = 2.0    # v746f5: infantry firefight (SOLDIER_HP 12 -> ~6 s per man)
 SOLDIER_VS_TANK_DPS    = 12.0   # v746f5: infantry AT fire on a tank holding the scene
 DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
@@ -12343,12 +12355,15 @@ TRAIN_CRUISE_MPS      = 22.0
 TRAIN_STOP_S          = 30.0
 TRAIN_PICKUP_KEEP     = 0.50   # producers keep this fraction of capacity
 TRAIN_DROP_FILL       = 0.85   # consumers are topped up to this fraction
-TRAIN_HP              = 3000.0   # v627f5: halved again (user) - loco ~5 x 30 mm, ~10 x 20 mm, one bomb
-WAGON_HP              = 1500.0   # wagons: ~2-3 x 30 mm, 5 x 20 mm
+TRAIN_HP              = 1200.0   # v852f5: 3000 -> 1200. Online 09-25 raw damage: MG 1-100, 20 mm 100-400, rocket /
+WAGON_HP              = 600.0    # 500 lb 660-1300, 1000 lb ~3300 - at 3000 the loco shrugged off a 500 lb bomb and
+                                 # needed two 1000 lb ('nearly invulnerable', Taurus). Now: one 500 lb, ~5 x 20 mm,
+                                 # ~25 x .50 cal for the loco; wagons half that.
 
 def train_effective_damage(raw):
-    """Trains are not armoured: full reported damage, MG rounds (<100) at 30%."""
-    return raw * 0.3 if raw < 100 else raw
+    """Trains are not armoured: full reported damage (v852f5: the 30% cut on MG rounds is gone -
+    '.50 cal has no effect' was that cut on top of the old 3000 HP)."""
+    return raw
 TRAIN_KILL_SCORE      = 40      # v779f5: 300 -> 40 (ACWIKI: Locomotive 40, Rail car 10) - the whole
 WAGON_KILL_SCORE      = 10      #         consist is 40 + 10 per wagon; the wiki prices trains low
 TRAIN_RESPAWN_S       = 600.0
@@ -12394,6 +12409,33 @@ def rail_stations(terrain):
                  ' '.join(f'r{r}:{[s for _n, s in v]}' for r, v in sorted(out.items())))
     return out
 
+def _train_segment_stations(tr, stations):
+    """v853f5: the own-camp stations of the SEGMENT the train is on - the run of stations around its
+    node with no ENEMY-held station in between (neutral ones do not cut the line). A road with SU
+    stations at both ends and four US-captured ones in the middle used to be 'SU's line': its trains
+    ran the full length through US territory (Taurus 09-25). On a loop the run may wrap around."""
+    terrain = tr['terrain']; camp = tr['camp']
+    allst = stations.get(tr['road'], [])
+    if not allst:
+        return []
+    def _enemy(s):
+        c = scene_camp(terrain, s)
+        return c is not None and c <= 7 and c != camp
+    # index of the station nearest the train along the road
+    node = tr['node']
+    k = min(range(len(allst)), key=lambda j: abs(allst[j][0] - node))
+    if _enemy(allst[k][1]):
+        # sitting on/at an enemy station: the segment is whichever side the train is heading to
+        return []
+    seg = [allst[k]]
+    j = k - 1
+    while j >= 0 and not _enemy(allst[j][1]):
+        seg.insert(0, allst[j]); j -= 1
+    j = k + 1
+    while j < len(allst) and not _enemy(allst[j][1]):
+        seg.append(allst[j]); j += 1
+    return [(ni, s) for ni, s in seg if scene_camp(terrain, s) == camp]
+
 def train_check_territory(onum):
     """v749f5 (Taurus 09-18: a GE train sat at a US tank factory forever): a train belongs to the
     camp that owns the stations it serves. When its line no longer has ANY own-camp station - the
@@ -12403,14 +12445,15 @@ def train_check_territory(onum):
     if tr is None or tr.get('dead'):
         return False
     terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
-    own = [s for _ni, s in (rail_stations(terrain).get(tr['road']) or []) if scene_camp(terrain, s) == tr['camp']]
+    tr.setdefault('terrain', terrain)
+    own = _train_segment_stations(tr, rail_stations(terrain))       # v853f5: the SEGMENT, not the whole road
     # v834f5: fewer than TWO own stations is no supply line (nothing to exchange between) - the
     # train is stranded then, not only at zero. GB took a US airfield and its factories and the US
     # train kept running the road for its one remaining station while the captured scenes went
     # unserved (user 09-25).
     if len(own) >= 2:
         return False
-    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) has {len(own)} own station(s) left on road {tr["road"]} '
+    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) has {len(own)} own station(s) left on its segment of road {tr["road"]} '
                  f'- territory changed hands, removing it')
     _TRAIN_LOST_AT.pop((tr['room'], tr['camp'], tr['road'], tr.get('start', 'rear')), None)
     delete_train(onum, reason='(stranded - line lost)')
@@ -12420,7 +12463,7 @@ def _train_next_station(tr, rails, stations):
     """The next own-camp station ahead of the train in its direction (node index), or None."""
     terrain = tr['terrain']
     road = rails['roads'][tr['road']]
-    st = [(ni, s) for ni, s in stations.get(tr['road'], []) if scene_camp(terrain, s) == tr['camp']]
+    st = _train_segment_stations(tr, stations)                       # v853f5: never past an enemy station
     if not st:
         return None
     n = len(road['nodes']) - 1
@@ -12644,7 +12687,25 @@ def spawn_supply_train(rid, camp, road_idx, reason='', start='rear'):
     return onum
 
 def rails_stations_own(terrain, road_idx, camp):
-    return [(ni, s) for ni, s in rail_stations(terrain).get(road_idx, []) if scene_camp(terrain, s) == camp]
+    """The camp's stations on a road that a train can actually serve: v853f5 - the LARGEST run of
+    stations with no enemy-held station inside it (an enemy station cuts the line). The spawner
+    counts these, so a road whose own stations sit on both sides of a captured one no longer gets a
+    train that strands at once."""
+    allst = rail_stations(terrain).get(road_idx, [])
+    def _enemy(s):
+        c = scene_camp(terrain, s)
+        return c is not None and c <= 7 and c != camp
+    best, cur = [], []
+    for ni, s in allst:
+        if _enemy(s):
+            if len(cur) > len(best):
+                best = cur
+            cur = []
+        elif scene_camp(terrain, s) == camp:
+            cur.append((ni, s))
+    if len(cur) > len(best):
+        best = cur
+    return best
 
 def ensure_camp_trains(rid):
     """Once a minute: every camp gets TRAIN_PER_CAMP_MAX supply trains. v679f5: the three start
@@ -12767,7 +12828,13 @@ def _handle_train_hit(s, victim, attacker, dmg, car=0):
     i = car if 0 <= car < len(parts) else 0
     part = parts[i]
     if part['hp'] <= 0:
-        return
+        # v852f5: a hit on a car that is already wrecked is not wasted - it goes to the nearest
+        # car still standing, the loco first (a bomb over a dead wagon still rocks the consist)
+        _live = [k for k, q in enumerate(parts) if q['hp'] > 0]
+        if not _live:
+            return
+        i = 0 if 0 in _live else min(_live, key=lambda k: abs(k - i))
+        part = parts[i]
     part['hp'] -= eff
     tr['hp'] = parts[0]['hp']
     log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit train 0x{victim:04x} camp {tr["camp"]} for {dmg} (eff {eff:.0f}) '
@@ -14509,9 +14576,9 @@ def _tc_para_capture_tick():
             # kill the stick, and they were excluded from its target list by the SOLDIER_HARD_VALUE
             # cut - the troops had no chance with the AA up (user 09-17). They are now valid targets
             # whatever their value, and are taken FIRST; the soft targets follow once they are down.
-            _defs_t = [e for e in _all if e[4] and any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
+            _defs_t = [e for e in _all if e[4] and is_defence_name(e[1].get('name'))]
             soft = _defs_t + [e for e in _all if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE
-                              and not any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
+                              and not is_defence_name(e[1].get('name'))]
             per_soldier = st['n'] / max(1, len(objs))
             for o in objs:
                 sd = SOLDIERS[o]
@@ -14550,7 +14617,7 @@ def _tc_para_capture_tick():
         # an enemy soldier deals DEFENCE_DPS to the nearest one per second ---
         if objs:
             defs = [e for e in tc_scene_objects(rid, terrain, sidx)
-                    if any(k in (e[1].get('name') or '').lower() for k in DEFENCE_NAME_KEYS)]
+                    if is_defence_name(e[1].get('name'))]
             for e in defs:
                 near = [o for o in objs if o in SOLDIERS and math.hypot(e[2] - SOLDIERS[o]['pos'][0], e[3] - SOLDIERS[o]['pos'][1]) <= DEFENCE_RANGE]
                 if not near:
