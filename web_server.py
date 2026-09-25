@@ -2075,6 +2075,61 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 items = "".join(f"<li>{hesc(str(n))} &mdash; <em>{hesc(str(st))}</em></li>" for n, st in mine)
                 mine_html = (f"<div class='card'><h2 style='margin-top:0;'>Squadrons you created</h2>"
                              f"<ul style='margin:0;'>{items}</ul></div>")
+            # v851f5 [SQUADRON MANAGEMENT FOR COs AND OFFICERS]: every approved squadron in which one of
+            # the user's pilots is commander or officer gets a management card: members with role,
+            # a RANK TAG (appended to the pilot's in-game name as ^TAG, e.g. AC2E_Bigalon^CO), pending
+            # applications to approve, and removal. The tag rename goes through the same carry-over
+            # as any pilot rename, so membership and command follow it.
+            manage_html = ""
+            try:
+                conn = sqlite3.connect(SRV['db_path'])
+                _mypilots = [p for (p,) in conn.execute("SELECT pilot_name FROM pilots WHERE account_name=?", (user,)).fetchall()]
+                _managed = []
+                if _mypilots:
+                    _q = ','.join('?' * len(_mypilots))
+                    _managed = conn.execute(
+                        f"SELECT DISTINCT s.squadron_id, s.name, s.tag FROM squadrons s JOIN squadron_members m "
+                        f"ON m.squadron_id=s.squadron_id WHERE s.status='approved' AND m.status='approved' "
+                        f"AND m.role IN ('commander','officer') AND m.account_name IN ({_q}) ORDER BY s.name",
+                        tuple(_mypilots)).fetchall()
+                for _sid, _sname, _stag in _managed:
+                    _mem = conn.execute(
+                        "SELECT account_name, COALESCE(role,'member'), status FROM squadron_members WHERE squadron_id=? "
+                        "ORDER BY status DESC, CASE role WHEN 'commander' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, account_name",
+                        (_sid,)).fetchall()
+                    _rows = ""
+                    for _mname, _mrole, _mstatus in _mem:
+                        _base, _sep, _cur = str(_mname).partition('^')
+                        _sidh = hesc(str(_sid), quote=True); _mh = hesc(str(_mname), quote=True)
+                        _opts = ''.join(f"<option value='{r}'{' selected' if r == _mrole else ''}>{r}</option>" for r in ('member', 'officer', 'commander'))
+                        if _mstatus == 'pending':
+                            _rows += (f"<tr><td>{hesc(str(_mname))}</td><td colspan='2'><em>application pending</em></td>"
+                                      f"<td><form method='POST' action='/squadrons/manage' style='display:inline;'>"
+                                      f"<input type='hidden' name='squadron_id' value='{_sidh}'><input type='hidden' name='member' value='{_mh}'>"
+                                      f"<button type='submit' name='op' value='approve' class='btn-green' style='width:auto;padding:5px 10px;margin:0;'>Approve</button> "
+                                      f"<button type='submit' name='op' value='remove' class='btn-red' style='width:auto;padding:5px 10px;margin:0;'>Decline</button></form></td></tr>")
+                            continue
+                        _rows += (f"<tr><td>{hesc(str(_mname))}</td>"
+                                  f"<td><form method='POST' action='/squadrons/manage' style='display:inline;'>"
+                                  f"<input type='hidden' name='squadron_id' value='{_sidh}'><input type='hidden' name='member' value='{_mh}'>"
+                                  f"<select name='role' style='padding:4px;'>{_opts}</select> "
+                                  f"<button type='submit' name='op' value='setrole' class='btn-yellow' style='width:auto;padding:5px 10px;margin:0;'>Set role</button></form></td>"
+                                  f"<td><form method='POST' action='/squadrons/manage' style='display:inline;'>"
+                                  f"<input type='hidden' name='squadron_id' value='{_sidh}'><input type='hidden' name='member' value='{_mh}'>"
+                                  f"{hesc(_base)}^<input type='text' name='rank' value='{hesc(_cur, quote=True)}' maxlength='6' size='5' style='padding:4px;' placeholder='CO'> "
+                                  f"<button type='submit' name='op' value='setrank' class='btn-yellow' style='width:auto;padding:5px 10px;margin:0;'>Set tag</button></form></td>"
+                                  f"<td><form method='POST' action='/squadrons/manage' style='display:inline;'>"
+                                  f"<input type='hidden' name='squadron_id' value='{_sidh}'><input type='hidden' name='member' value='{_mh}'>"
+                                  f"<button type='submit' name='op' value='remove' class='btn-red' style='width:auto;padding:5px 10px;margin:0;' onclick=\"return confirm('Remove this member?');\">Remove</button></form></td></tr>")
+                    manage_html += (f"<div class='card'><h2 style='margin-top:0;'>Manage {hesc(str(_sname))}"
+                                    f"{(' [' + hesc(str(_stag)) + ']') if _stag else ''}</h2>"
+                                    f"<p style='color:#666; margin-top:0; font-size:0.9em;'>The rank tag is appended to the pilot's "
+                                    f"in-game name as <code>name^TAG</code> (letters, digits, _ and -; up to 6). A pilot who is "
+                                    f"online sees the new name after his next login.</p>"
+                                    f"<table><tr><th>Pilot</th><th>Role</th><th>Rank tag</th><th></th></tr>{_rows}</table></div>")
+                conn.close()
+            except Exception as _e:
+                manage_html = f"<div class='card'><p style='color:#c00;'>Squadron management unavailable: {hesc(str(_e))}</p></div>"
             pilot_opts = "".join(f"<option>{hesc(str(p))}</option>" for (p,) in pilots)
             if pilot_opts:
                 create_card = f"""
@@ -2112,6 +2167,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     {table}
                 </div>
                 {mine_html}
+                {manage_html}
                 {create_card}
             """
             self.send_html(content)
@@ -2666,6 +2722,72 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_html(f"<h2 style='color:red;'>Launch Error</h2><p>{str(e)}</p><a href='/'>Back</a>")
                 
+        elif self.path == '/squadrons/manage':
+            # v851f5: commander/officer management of their own squadron (see the GET card)
+            if not user: return self.send_error(401)
+            sid = qs.get('squadron_id', [''])[0].strip(); member = qs.get('member', [''])[0].strip()
+            op = qs.get('op', [''])[0].strip()
+            if not sid.isdigit() or not member:
+                return self.send_error(400)
+            conn = sqlite3.connect(SRV['db_path'])
+            try:
+                _mypilots = [p for (p,) in conn.execute("SELECT pilot_name FROM pilots WHERE account_name=?", (user,)).fetchall()]
+                _my = conn.execute(
+                    "SELECT role FROM squadron_members WHERE squadron_id=? AND status='approved' AND account_name IN (%s) "
+                    "ORDER BY CASE role WHEN 'commander' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END LIMIT 1"
+                    % ','.join('?' * max(1, len(_mypilots))), (int(sid), *(_mypilots or ['']))).fetchone()
+                _myrole = _my[0] if _my else None
+                if _myrole not in ('commander', 'officer'):
+                    conn.close(); return self.send_error(403)
+                _trow = conn.execute("SELECT role, status FROM squadron_members WHERE squadron_id=? AND account_name=?",
+                                     (int(sid), member)).fetchone()
+                if _trow is None:
+                    conn.close(); return self.send_error(404)
+                _trole = _trow[0]
+                if _myrole == 'officer' and (_trole == 'commander' or op == 'setrole'):
+                    conn.close(); return self.send_error(403)      # officers manage members, not the CO or roles
+                msg = ''
+                if op == 'setrole':
+                    role = qs.get('role', ['member'])[0].strip()
+                    if role in ('member', 'officer', 'commander'):
+                        conn.execute("UPDATE squadron_members SET role=? WHERE squadron_id=? AND account_name=?", (role, int(sid), member))
+                        if role == 'commander':
+                            conn.execute("UPDATE squadrons SET commander=? WHERE squadron_id=?", (member, int(sid)))
+                            conn.execute("UPDATE squadron_members SET role='officer' WHERE squadron_id=? AND role='commander' AND account_name<>?", (int(sid), member))
+                        msg = f'{member} role -> {role}'
+                elif op == 'remove':
+                    conn.execute("DELETE FROM squadron_members WHERE squadron_id=? AND account_name=?", (int(sid), member))
+                    _c = conn.execute("SELECT commander FROM squadrons WHERE squadron_id=?", (int(sid),)).fetchone()
+                    if _c and _c[0] == member:
+                        conn.execute("UPDATE squadrons SET commander='' WHERE squadron_id=?", (int(sid),))
+                    msg = f'{member} removed'
+                elif op == 'approve':
+                    conn.execute("UPDATE squadron_members SET status='approved' WHERE squadron_id=? AND account_name=?", (int(sid), member))
+                    msg = f'{member} approved'
+                elif op == 'setrank':
+                    rank = qs.get('rank', [''])[0].strip()[:6]
+                    _allowed = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')
+                    if any(c not in _allowed for c in rank):
+                        conn.close(); return self.send_html("<h2 style='color:red;'>Tag may use letters, digits, _ and - only</h2><a href='/squadrons'>Back</a>")
+                    _base = member.split('^', 1)[0]
+                    new_name = (_base + '^' + rank) if rank else _base
+                    if new_name != member:
+                        if len(new_name) > 24:
+                            conn.close(); return self.send_html("<h2 style='color:red;'>Name with tag would exceed 24 characters</h2><a href='/squadrons'>Back</a>")
+                        if conn.execute("SELECT 1 FROM pilots WHERE pilot_name=?", (new_name,)).fetchone():
+                            conn.close(); return self.send_html(f"<h2 style='color:red;'>A pilot named {hesc(new_name)} already exists</h2><a href='/squadrons'>Back</a>")
+                        # the rename with the v850 carry-over: pilot record, membership rows, command
+                        conn.execute("UPDATE pilots SET pilot_name=? WHERE pilot_name=?", (new_name, member))
+                        conn.execute("UPDATE squadron_members SET account_name=? WHERE account_name=?", (new_name, member))
+                        conn.execute("UPDATE squadrons SET commander=? WHERE commander=?", (new_name, member))
+                        msg = f'{member} -> {new_name}'
+                conn.commit()
+                if msg:
+                    SRV['log']('WEB', f'{user} ({_myrole}) squadron {sid}: {msg}')
+            finally:
+                conn.close()
+            self.send_response(302); self.send_header('Location', '/squadrons'); self.end_headers()
+
         elif self.path == '/squadrons/create':
             if not user: return self.send_error(401)
             name = qs.get('name', [''])[0].strip()[:31]

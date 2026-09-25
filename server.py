@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v849f5'
+VERSION = 'v850f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -727,6 +727,27 @@ def db_get_pilots(acct):
 def db_delete_pilot(pilot_name, acct):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM pilots WHERE pilot_name=? AND account_name=?", (pilot_name, acct))
+    # v850f5 [SQUADRONS FOLLOW THE PILOT]: membership and command are keyed by PILOT name; a
+    # deleted pilot leaves his squadron, and if he commanded it the command passes to the
+    # longest-serving officer (or member) so nobody has to be re-engaged by hand (Taurus 09-25).
+    try:
+        _rows = conn.execute("SELECT squadron_id, role FROM squadron_members WHERE account_name=?", (pilot_name,)).fetchall()
+        conn.execute("DELETE FROM squadron_members WHERE account_name=?", (pilot_name,))
+        for _sid, _role in _rows:
+            _c = conn.execute("SELECT commander FROM squadrons WHERE squadron_id=?", (_sid,)).fetchone()
+            if _c and _c[0] == pilot_name:
+                _next = conn.execute("SELECT account_name FROM squadron_members WHERE squadron_id=? AND status='approved' "
+                                     "ORDER BY CASE role WHEN 'commander' THEN 0 WHEN 'officer' THEN 1 ELSE 2 END, joined_at LIMIT 1",
+                                     (_sid,)).fetchone()
+                _new = _next[0] if _next else ''
+                conn.execute("UPDATE squadrons SET commander=? WHERE squadron_id=?", (_new, _sid))
+                if _new:
+                    conn.execute("UPDATE squadron_members SET role='commander' WHERE squadron_id=? AND account_name=?", (_sid, _new))
+                log('SQUADRON', f'pilot {pilot_name} deleted: left squadron {_sid} as commander - command passed to {_new or "(nobody - squadron has no members)"}')
+            else:
+                log('SQUADRON', f'pilot {pilot_name} deleted: left squadron {_sid} ({_role})')
+    except Exception:
+        logx('SQUADRON', 'membership cleanup on pilot delete failed')
     conn.commit(); conn.close()
 
 # --- Moderator rights (v301) --------------------------------------------------
@@ -1164,6 +1185,16 @@ def db_rename_pilot(old_name, new_name, acct):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE pilots SET pilot_name=? WHERE pilot_name=? AND account_name=?",
                  (new_name, old_name, acct))
+    # v850f5 [SQUADRONS FOLLOW THE PILOT]: a renamed pilot keeps his membership, role and command.
+    # Before, the squadron kept the OLD name: the pilot was 'no longer in the squad' after adding
+    # his tag and the CO had to remove the old entry and re-appoint the new one (Taurus 09-25).
+    try:
+        _n1 = conn.execute("UPDATE squadron_members SET account_name=? WHERE account_name=?", (new_name, old_name)).rowcount
+        _n2 = conn.execute("UPDATE squadrons SET commander=? WHERE commander=?", (new_name, old_name)).rowcount
+        if _n1 or _n2:
+            log('SQUADRON', f'pilot renamed {old_name} -> {new_name}: {_n1} membership row(s), {_n2} command(s) carried over')
+    except Exception:
+        logx('SQUADRON', 'membership carry-over on rename failed')
     conn.commit(); conn.close()
 
 def db_get_pilot_slot(acct, name):

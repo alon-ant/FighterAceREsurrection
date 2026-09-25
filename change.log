@@ -46,6 +46,128 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-25: v851f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v851f5.py'. (Previous: v816f5.)
+
+v817f5-v851f5 [CRATERS, TRAINS, PROTOCOL AUDIT, MISSING HANDLERS, SQUADRONS] (09-24 .. 09-25)
+    * CRATERS (v818, v821-v831): crater records kept per room and REPLAYED to every pilot when he
+      enters the world (spawn / HQ trip / field change / rejoin; the 'have' set is reset on each
+      rebuild - v825); the client's prefixed multi-crater record (a whole stick in one 63-107 B
+      message) is now recognised (v826 - before, only single-crater plain records were ever kept or
+      relayed live); multi-VICTIM damage frames (msg 28, one block per plane) pass the check (v827 -
+      bomb damage to parked planes never arrived before). RunwayCollisions = bit 0x20 of the tail
+      byte at len-60 (v822/v828; v821 had hit AA quality @+482 - REVERTED), RunwayAngle = the u8
+      after DefaultFuelDuration (v823), CratersVanish patch layout fixed one byte earlier (v822).
+      Vanish semantics READ FROM THE CLIENT (FUN_00628fc0): per tick, per map square, `Number` VOLUME
+      is taken from the OLDEST craters first (Vor10 = 500 lb = 10 volume, Vor15 = 15); default now
+      1 min / 5 (v830; 10/40 wiped a stick at the first tick, 2/4 kept it 75 min). Web help text says
+      so. Crater impact is the client's fixed speed ladder (5/15/20/25/56/112 m/s at 0x00a30288..,
+      same as any ground contact; a gear strike damages, >200 km/h kills) - no server lever. The
+      client's crater store only replaces its OWN local craters when a record arrives (field +0xc8),
+      so metal repair (v831: delivered metal fills a scene's craters oldest-first at 25 kg/volume)
+      acts on the replay set = pilots entering the world afterwards; existing pilots keep the
+      holes until the vanish rule. TC-only GAME_DEF patches (ShowGroundObjects, RunwayCollisions,
+      RunwayAngle) apply to economy rooms only (v824: 'Nations at war' got them and a bomb-loaded
+      Lancaster CTD'd on its first frame twice). Stranded-plane repair (v822): a damaged plane that
+      asked for repair and sits within 6 m for 2.5 s is serviced even if it jitters.
+    * TRAINS (v832, v834, v848): no 'back in range' re-creates for 6 s after ServerConfirm and a
+      delete in that window is not a cull (v832); a train is stranded with < 2 own stations on its
+      road, one train per qualifying road above the per-camp cap, spawner runs right after a
+      capture (v834); THE INVISIBLE-TRAIN BUG (v848): a cull with no known position (TAB clears it,
+      v795) recorded cull distance 0 and '4 km closer than 0' never happened - the object was locked
+      out for the session. No cooldown from a positionless cull; ServerConfirm re-creates ignore the
+      cooldown. Tank factories fall through to the next in-range factory when the nearest has tanks
+      but no fuel/ammo, and the AI line says what is missing (v833).
+    * PROTOCOL AUDIT against vcncNet.dll (v839-v842): STATUS loss gauge is per interval and clamped
+      at 0 (FUN_100073a4; counters zeroed per STATUS by FUN_100072fa) - boundary jitter showed as 1-2%
+      on clean links, never the compensating negative; STATUS cadence 2 -> 6 s. Reliable ACK
+      processor (FUN_10006b0e) confirms v812; retransmit is the client's timer (FUN_10005ef5).
+      Port-move adoption covers the ATTACHED time-ping too and matches by connection id, not IP
+      alone (v840). URGENT (type 2) and CONTROL (type 5) channels acknowledged and delivered (v842);
+      LARGE (type 3) logged. Send-socket refusals counted (PERF TXERR, v838); per-pair RELAY-GAP
+      log (v837); stalled receiver tick is EXTRAPOLATED from his measured rate instead of passing
+      the sender's raw tick (v835; a death screen, hitch or loss burst no longer misplaces peers).
+    * MISSING HANDLERS (from the FA.exe handler table at 0xc81ed8; v843-v849): msg 42 request ->
+      scene snapshot; msg 70 BIG MAP -> own side's planes and tanks as 6-byte PACKED_INFO (the
+      appspace 16n+1 padding CTD'd the client on 'Length % 6' - v847: in-game exact-length framing for
+      every record-walking message); msg 73 LOADOUT relayed to the room and REPLAYED after every
+      peer re-create (v849 - the bomber's bombs are drawn only if the peer knows the load; 'we used
+      to see bombs' = whoever happened to hold the plane when it loaded); msg 34 = NEAREST-ENEMY
+      hint (FUN_004be670 map/HUD arrow), answered with the nearest enemy plane instead of the echo;
+      msg 112 FROM the client = its own landing report (logged beside ours). Client-only messages
+      6/32/46/81/83/84 have no handler (nothing to send). Tank HIT POINTS were 20 (a float gun
+      figure read as HP) - now the class record int at +0x5c: Cromwell 520, Tiger 1100 (v836;
+      a 20 mm hit killed a tank, a 500 lb near-miss never did).
+    * SQUADRONS follow the pilot (v850): rename carries membership/role/command; delete removes the
+      member and passes command. Web management card for COs/officers (v851): roles, rank tag
+      (name^TAG rename), approve/decline, remove.
+
+==============================================================================
+*** BANKED 2026-09-23 (b): v816f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v816f5.py'. (Previous: v813f5.)
+
+v814f5-v816f5 [CHUTE DRIVE TUNING] (09-23)
+    * v814 the driven canopy goes straight down at a constant CHUTE_DESCENT_MPS = 6.6 m/s (measured
+      09-23 12:26 chute 0x0112: 413 -> 145 m over the owner's 41 s silence) with no drift, floor
+      CHUTE_MIN_Z 20 m. v808's 'last second of owner frames' was the canopy still opening (13.6
+      m/s, drift that reversed by landing): the driven chute fell twice as fast, went through the
+      ground and popped back up at the landing.
+    * v815 the LAST chutes of a stick get one owner frame or none before he goes silent (online
+      12:39: 0x015a one frame at release, 0x015b/c none until 167 m) - they 'freefell' or 'spiraled'
+      on observers. Each chute's position is seeded at release with the transport's; a chute with
+      fewer than CHUTE_OPEN_FRAMES (6) real frames borrows its canopy state from an opened sibling of
+      the same stick (only its object number and position are its own). Field: 'all chutes deployed,
+      smoother'.
+    * v816 CHUTE_NO_PARENT experiment (`chute noparent on|off`, default OFF): parent field -1 so the
+      observer does not print '<transport>(p) has bailed out' - the client then does NOT create the
+      chute at all (no 'Create NetParachuter', only 'Get coord for missing object'; troops appeared on
+      the ground). Left off. The 'bailed out' line is the client's own reaction to a trooper chute
+      created with its transport as parent (FUN_004f26b0 case 2 -> FUN_004a8c20), throttled by the
+      client to ~1 per 3 s; the create records are byte-identical for the chutes that print it and
+      those that don't. Expected behaviour, not a server bug.
+
+==============================================================================
+*** BANKED 2026-09-23: v813f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v813f5.py'. (Previous: v793f5.)
+
+v794f5-v813f5 [CHUTES, RELIABLE RX, DATAGRAM SEQ, MISC] (09-22 .. 09-23)
+    * v812 THE LOST-MESSAGE BUG (fundamental, since the ACK was written): the reliable ACK said
+      'next expected = this seq + 1', cumulatively acknowledging every EARLIER seq. A lost client
+      packet followed by the next one was therefore acked as received and vcncNet NEVER
+      retransmitted it - every lost reliable message on a lossy uplink was gone for good (Alon
+      09-22 18:59, ul loss 12%: the out-4 spawn request vanished -> stuck 'loading', peers culled,
+      quit). Now: strict in-order delivery, the ACK covers only the contiguous prefix, a packet
+      beyond a hole is acked individually and held until the retransmit fills it (flushed in order
+      after REL_RX_HOLE_S=6 s as a safety valve); retransmitted duplicates are acked but no longer
+      re-processed. Log: 'reliable seq N MISSING ... holding' / 'hole filled by retransmit'.
+    * v813 ONE locked unreliable-datagram counter per session (nundgram) for every unreliable path
+      (send_unrel, plane relay, AI frames, chute frames) - two interleaved counters (undgram +
+      _relay_seq, the latter racing across threads). vcncNet's Standard-DATA order filter
+      (FUN_10007838) is OFF (0x10020150 cleared in vcncOpen, only vcncSystem(0x400) sets it - and
+      our 8-bit seq would have killed telemetry after 256 packets if it were on), so no frames were
+      being dropped; the client's displayed loss is the STATUS-exchange count. Field result 09-23:
+      dl_total -0.01%, ul_total <0.1%, client display 0-2% (from 7%).
+    * CHUTES: the transport's client sends its chutes' frames only while they are within some
+      range of it - a transport that flies off goes SILENT for the ~50 s descent, and a client that
+      hears nothing for ~27 s culls the object (the 'warping'). v803..v808 drive the canopy from the
+      server at 2 Hz along the velocity of the owner's last second of frames (terminal sink 9.5
+      m/s) while the owner is silent; v804 sends the latest real frame right behind a late create
+      (the chutes that 'never opened' on observers); v794 per-object relay tier/limiter. All behind
+      CHUTE_DRIVE_ENABLED (v809 rolled back, v810 ON by default after the A/B: 'sorts the jumping
+      almost entirely'); `chute drive on|off`. v796 a chute unseen 40 s is never re-created; v801
+      delete settle 1.5 s; v802 CHUTEFRAME raw capture (first 60 frames per chute).
+    * v795/v797 silence-cull mirror (a peer silent to us for 45 s is dropped from the object; clock
+      reset on every create; ServerConfirm re-creates only in range) - v795's 30 s raced the client
+      and caused the 09-21 !Objects CTDs, fixed in v797. v798 server version badge on the live
+      console. v799 msg-33 hits on PLANES recorded - a crash within 90 s of a recorded hit credits
+      that shooter (Skyyr: 'cyan line but no kill'). v800/v805 chat-filter whitelist ('+word',
+      '+word*'). v807 a repeated identical troop request within 3 s is not debited twice. v811 a new
+      column/stick/train is created only on pilots within its kind's range.
+    * fa_read_film.py: BASE/Film3 container, record walk, tag-25 game messages (hits, kills,
+      destroys, captures in order with colour codes), --chutes decode (the film stores chute
+      altitude coarsely - 82 m steps - so films can't judge live chute motion).
+
+==============================================================================
 *** BANKED 2026-09-21: v793f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v793f5.py'. (Previous: v784f5.)
 
