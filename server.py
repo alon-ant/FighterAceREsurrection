@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v848f5'
+VERSION = 'v849f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -17829,6 +17829,18 @@ TELEM_POS_EVIDENCE_SIZES = (84, 86, 88, 90)
 # emits them for its whole duration; a couple of windows of margin after the last one).
 ODD_TELEM_HOLDOFF_S = 20.0
 
+def _send_loadout73_after(src, p, body, delay):
+    """v849f5: replay src's last msg-73 loadout block to p once the plane create has settled."""
+    try:
+        time.sleep(max(0.0, delay))
+        if not (getattr(p, 'entered_game', False) and getattr(src, 'flying', False)):
+            return
+        if src.__dict__.get('_loadout73') is not body:
+            return                                   # superseded by a newer block
+        send_rel(p, build_ingame_pkt(body), f'<- LOADOUT 73 of {src.current_pilot} (after re-create)', to=3.0)
+    except Exception:
+        logx('LOADOUT73', 'replay after re-create failed')
+
 def relay_telemetry(src, data, _split_obj=None):
     """Forward src's flying-state datagram to other flying players in the same room."""
     # v373f5 [IDENTITY/CRITICAL]: DROP a STRAGGLER telemetry frame from a source that has already
@@ -18264,6 +18276,14 @@ def relay_telemetry(src, data, _split_obj=None):
                 _plane_alive = getattr(src, 'flying', False)
                 if _plane_alive:
                     _submit_send(send_create_object_for, src, p, with_client=_wc)
+                    # v849f5 [LOADOUT AFTER A RE-CREATE]: the client sends its loadout block (msg 73)
+                    # only when it loads or rearms; a peer that re-creates this plane later (its own
+                    # world rebuild) gets an EMPTY aircraft and never draws its bombs falling (Taurus
+                    # 09-25 14:26: B-29 564 re-created, no 73 again -> only the craters showed; Duran,
+                    # who held it continuously, saw the bombs). Replay the latest block after the create.
+                    _lo = src.__dict__.get('_loadout73')
+                    if _lo:
+                        _submit_send(_send_loadout73_after, src, p, _lo, RELAY_CREATE_SETTLE_S + 0.3)
                 # v555f5: bomber CREW chutes onto a rebuilt peer (same created-set logic per onum).
                 for _co555 in list(src.__dict__.get('crew_para_objs') or {}):
                     _cs555 = (src.__dict__.get('_para_created_peers') or {}).get(_co555, set())
@@ -18703,6 +18723,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                                                 # else the re-join out-4 is swallowed -> no ServerConfirm
                                                 # -> no object created -> players invisible to each other
     s.__dict__.pop('_created_peers', None)      # respawn = new ONumber -> re-create on peers
+    s.__dict__.pop('_loadout73', None)          # v849f5: the new plane sends its own loadout block
     # In-world AIRFIELD CHANGE: the client rebuilds its world and DelObject's the peers'
     # planes too (the 'Get coord for missing object N' flood) - so each peer must re-
     # advertise its object to us. Drop our addr from every peer's object-created set; the
@@ -25191,6 +25212,7 @@ def handle_post_auth(s, cmd, pl):
         try:
             _on = struct.unpack_from('<H', stored, 5)[0]
             if _on == getattr(s, 'my_obj_number', None):
+                s.__dict__['_loadout73'] = bytes(stored[4:])     # v849f5: kept for peers who re-create the plane
                 _pk = build_ingame_pkt(bytes(stored[4:]))          # v847f5: exact length, as the client sent it
                 _nr = 0
                 for _p in get_sessions_in_room(s.current_room):
