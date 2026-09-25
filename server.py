@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v828f5'
+VERSION = 'v848f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -411,7 +411,12 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # base (FUN_10007d13), which ADVANCES the base mid-game and defeats the
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
-STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+STATUS_INTERVAL_S = 6.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+                           # v839f5: 2 -> 6 s. The client's 'Data loss' is per STATUS interval and clamped
+                           # at 0 (FUN_100073a4), so reordering across an interval boundary (+-1 packet)
+                           # showed as 1-2% on clean links and never as the compensating negative. Three
+                           # times the packets per interval cuts that to a third; the latency readout
+                           # and session clock still update every 6 s (the 18-bit base wraps at 262 s).
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
 REL_RX_INORDER = True      # v812f5: in-order reliable delivery + ACK only the contiguous prefix (see pt==1)
 REL_RX_HOLE_S  = 6.0       # v812f5: a missing client seq not retransmitted within this is given up on
@@ -2889,8 +2894,15 @@ def apply_buildings_repair_rate(d, rate=None):
 # GameEventsTime, CratersVanishDelay (MINUTES; the msg-52 crater record's time is offset by
 # it x 60000), CratersVanishNumber (max craters kept). The client templates ship 1 / 10
 # (messages44 dump) - craters gone after a minute. Located by shape near the blob's end.
-CRATERS_VANISH_MIN = 10
-CRATERS_VANISH_MAX = 2         # v828f5: 40 -> 2. CratersVanishNumber is NOT a crater count: the client
+CRATERS_VANISH_MIN = 1         # v830f5: 1 min ticks, 5 volume per tick. READ FROM FUN_00628fc0 (Server\Crater.cpp):
+CRATERS_VANISH_MAX = 5         # per tick, per map square, a budget of `Number` volume is spent on the OLDEST
+                               # craters first (whole craters deleted, the last one partly), then it waits
+                               # `Delay` minutes. A crater's volume is its size (Vor10 = 10 for a 500 lb
+                               # bomb, Vor15 = 15), so a square clears at Number/Delay volume per minute and
+                               # the n-th oldest crater lives ~ n x size / Number x Delay. 15 x 500 lb: 1/5
+                               # -> first gone at 2 min, last at 30; 2/4 -> last at 75 min ('more than an
+                               # hour', pilots 09-24); 10/40 -> four craters at the first tick ('gone at
+                               # 30-60 s'); the template 1/10 -> one crater a minute.
                                # (Server\Crater.cpp FUN_00628fc0/FUN_00628da0) SUBTRACTS it from every crater's
                                # VolumeRemains at each vanish tick - 40 wiped a 500 lb crater at the first tick
                                # (online 09-24: 'gone in 30-60 s', the survivors shallow enough to roll over).
@@ -5889,7 +5901,9 @@ SEND_ACE88_UNREL  = True     # msg 88 AceOrRankChangedCB - re-sent every spawn/k
 SEND_STAT25_UNREL = True     # msg 25 stat block         - re-sent alongside every 88
 SEND_SCORE96_UNREL = True    # msg 96 ScoreTable         - request-driven, re-answered on each 0x60
 
-def build_rel_ack(cid, seq=0, next_exp=None):
+def build_rel_ack(cid, seq=0, next_exp=None, ack_type=1):
+    # v842f5: ack_type 1 = reliable, 2 = URGENT, 5 = CONTROL (bits 17-19; the client builds all of
+    # its ACKs with one routine, FUN_10002b27(type, seq, next), and this mirrors it)
     # CUMULATIVE ACK -- ROOT-CAUSE FIX for the 3rd-reentry CTD.
     # Bit layout (matches vcncNet's own ACK builder FUN_10002a76 / router FUN_100032da):
     #   bits 20-28 = acked-seq (drives the client's RTT sample lookup)
@@ -5922,7 +5936,7 @@ def build_rel_ack(cid, seq=0, next_exp=None):
     # index wraps well before the index-64 delivery-callback slot that caused the old CTD.
     if next_exp is None: next_exp = (seq + (1 if RTT_SAMPLING else 2)) & 0x1FF
     p=bytearray(8); p[0]=0; p[1]=cid&0xFF; p[2]=2
-    struct.pack_into('>I',p,4,(seq<<20)|0x00020000|((next_exp&0x1FF)<<8)); return bytes(p)
+    struct.pack_into('>I',p,4,(seq<<20)|((ack_type & 7) << 17)|((next_exp&0x1FF)<<8)); return bytes(p)
 
 def build_data(cmd, sq=0):
     p=bytearray(15); p[0]=2; p[2]=0x20; p[10]=(cmd>>8)&0xFF; p[11]=cmd&0xFF; p[14]=sq&0xFF
@@ -8631,7 +8645,7 @@ _relay_send_q = queue.Queue()
 # REVERT: PERF_STATS=False silences the output; the counters themselves cost ~nothing.
 PERF_STATS = True
 PERF_STATS_INTERVAL = 30.0
-_perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0, 'aib': 0,
+_perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0, 'aib': 0, 'txerr': 0,
          'disp_t': 0.0, 'disp_max': 0.0, 'disp_n': 0, 'rq_max': 0}
 
 def _perf_stats_loop():
@@ -8662,6 +8676,8 @@ def _perf_stats_loop():
         _pp_line = ''
         try:
             _mem_s += f' ai_tx={w["aib"] / iv / 1024.0:.1f}KBs'
+            if w.get('txerr'):
+                _mem_s += f' TXERR={w["txerr"]}'                  # v838f5: sends the socket refused this window
             with sl:
                 _pp = []
                 for x in list(sids.values()):
@@ -8713,7 +8729,7 @@ def _relay_send_loop():
                 sock.sendto(_pkt, _addr)
                 _perf['tx'] += 1; _perf['txb'] += len(_pkt)   # v399f5
             except OSError:
-                pass
+                _perf['txerr'] = _perf.get('txerr', 0) + 1     # v838f5: a send the socket refused - counted, not silent
 
 ACK_ASYNC   = True
 ACK_DELAY_S = 0.010                    # the historical 10ms pacing, preserved exactly
@@ -9756,8 +9772,25 @@ def _load_tank_consts():
             if _c.get('class_id') is not None and _ph.get('max_speed_74'):
                 # class +0x74 is m per physics tick (0.2222 * 50 = 11.1 m/s = 40 km/h Cromwell)
                 TANK_CLASS_MAX_MPS[int(_c['class_id'])] = float(_ph['max_speed_74']) * float(_mult) * TANK_TICK_HZ
-            if _c.get('class_id') is not None and _ph.get('f38'):
-                TANK_CLASS_HP[int(_c['class_id'])] = float(_ph['f38'])     # v572f5: hit points
+            if _c.get('class_id') is not None:
+                # v836f5 [TANK HIT POINTS]: phys 'f38' is a FLOAT 20.0 in every class (a gun figure), and
+                # reading it as HP gave every tank 20 HP - so the v608 damage bands (built for ~1000)
+                # let a single 20 mm hit kill a tank while a 500 lb near-miss (raw 20-60 -> x0.03 =
+                # 1-2) never could (Taurus 09-24: 'bombs not killing tanks, a rocket killed two').
+                # The class record's int at +0x5c is the hit points: Cromwell 520, Tiger 1100.
+                _hp = None
+                try:
+                    _head = bytes.fromhex(_c.get('pcti_head_hex') or '')
+                    if len(_head) >= 0x60:
+                        _v = int.from_bytes(_head[0x5c:0x60], 'little')
+                        if 100 <= _v <= 5000:
+                            _hp = float(_v)
+                except Exception:
+                    _hp = None
+                if _hp is not None:
+                    TANK_CLASS_HP[int(_c['class_id'])] = _hp
+        if TANK_CLASS_HP:
+            log('TANK', 'class hit points: ' + ', '.join(f'{k}={int(v)}' for k, v in sorted(TANK_CLASS_HP.items())))
         if TANK_CLASS_MAX_MPS:
             log('TANK', f'class max speeds m/s (x mult {_mult:g} x tick {TANK_TICK_HZ:g}): ' +
                         ', '.join(f'{k}={v:.1f}' for k, v in sorted(TANK_CLASS_MAX_MPS.items())))
@@ -11048,11 +11081,14 @@ def tc_scene_xy(terrain, sidx):
         return float(g[sidx]['x']), float(g[sidx]['y']), g[sidx].get('type_name') or 'scene'
     return None
 
-def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty, n_want=0):
+def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty, n_want=0, all_candidates=False):
     """Nearest scene of `camp` whose type is a tank producer, as (sidx, x, y, dist) or None.
     v631f5 (wiki 'Reaction To Triggers'): with n_want > 0, the nearest factory holding ALL n_want
     tank units wins; if none holds that many, the nearest with the MOST (> 0); factories with no
-    stock are skipped. A trigger no longer drains one factory while the others sit full."""
+    stock are skipped. A trigger no longer drains one factory while the others sit full.
+    v833f5: all_candidates=True returns the whole ranked list [(sidx, x, y, dist, units), ...]
+    (full-stock ones first, then by stock, then distance) so the caller can fall through to the
+    next factory when the first cannot fuel and arm its tanks."""
     table = SCENE_CAMP_BY_TERRAIN.get(terrain) or {}
     cands = []
     for sidx, c in table.items():
@@ -11068,8 +11104,13 @@ def tc_nearest_tank_factory(room_id, terrain, camp, tx, ty, n_want=0):
         units = scene_units_state(room_id, sidx)['tank'] if UNITS_MODEL else n_want
         cands.append((d, sidx, sxy[0], sxy[1], units))
     if not cands:
-        return None
+        return [] if all_candidates else None
     cands.sort()
+    if all_candidates:
+        full = [c for c in cands if n_want > 0 and c[4] >= n_want]
+        some = sorted([c for c in cands if c[4] > 0 and c not in full], key=lambda c: (-c[4], c[0]))
+        rest = [c for c in cands if c[4] <= 0]
+        return [(sidx, x, y, d, u) for d, sidx, x, y, u in (full + some + rest)]
     if n_want > 0 and UNITS_MODEL:
         full = [c for c in cands if c[4] >= n_want]
         if full:
@@ -11157,8 +11198,6 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         tc_say(room_id, f'AI: The scene {tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2].strip()} at '
                         f'{tc_grid(txy[0], txy[1])} is out of range of any tanks units')
         return None
-    fsidx, fx, fy, fd = fac
-    ftype = scene_type_for(terrain, fsidx) or 'Tank Factory'
     # v748f5 [ONE COLUMN PER TRIGGER] (Duran 09-18: four triggers, one column chasing all four):
     # re-tasking an idle column (v600f5 'switch strategy') is now the FALLBACK, taken only when a
     # fresh battalion cannot be raised (no units built, pool empty, or the tank cap with nothing to
@@ -11184,34 +11223,54 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
         tc_mission_lines(room_id, camp, tcamp, purpose, (lx, ly), txy, trigger_pilot)
         log('TC', f'room {room_id}: column {gid} re-tasked ({purpose} scene {target_sidx}) - switch strategy [{_why}]')
         return gid
-    # units: what THIS factory holds (v631f5 per-scene stock); loadout: what the pool can equip
-    have = scene_units_state(room_id, fsidx)['tank'] if UNITS_MODEL else n_want
-    n = min(n_want, have)
-    if n <= 0:
-        _g = _reuse_idle('no tank units built')
-        if _g is not None:
-            return _g
-        tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
-                        f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
-        log('TC', f'room {room_id}: camp {camp} cannot raise a column - 0 tank units built')
-        return None
-    loaded = 0
-    for _i in range(n):
-        r = camp_supply_take(room_id, terrain, camp, TC_TANK_AMMO_KG, TC_TANK_FUEL_KG, prefer_xy=(fx, fy))   # v753f5: the factory's own stores
-        if r is None:
-            loaded = n; break                       # no pool table -> arcade: everyone rolls
-        got_a, got_f = r[0], r[1]
-        if got_a < TC_TANK_AMMO_KG * 0.5 or got_f < TC_TANK_FUEL_KG * 0.5:
-            break                                   # not 'fully loaded' - stop here
-        loaded += 1
+    # v833f5 [FALL THROUGH TO A FACTORY THAT CAN SUPPLY ITS TANKS]: the factory used to be chosen by
+    # tank UNITS alone; if it had the tanks but not the fuel/ammo to send them (each tank draws a full
+    # load from its own factory's stores since v753) the trigger got 'No tanks available' while a
+    # factory further along could have answered (Bama 09-24: 4 triggers, 1 column, 3 x 'pool empty').
+    # Now every in-range factory with tank units is tried, best-stocked first, and the AI line says
+    # WHAT is missing so a supply run can fix it.
+    _cands = [c for c in tc_nearest_tank_factory(room_id, terrain, camp, txy[0], txy[1], n_want=n_want, all_candidates=True)
+              if c[3] <= TC_TANK_LINK_RADIUS_M and c[4] > 0] or [(fac[0], fac[1], fac[2], fac[3], n_want)]
+    _dry = []                                      # factories that had tanks but no loadout
+    for _ci, (fsidx, fx, fy, fd, _units) in enumerate(_cands):
+        ftype = scene_type_for(terrain, fsidx) or 'Tank Factory'
+        have = scene_units_state(room_id, fsidx)['tank'] if UNITS_MODEL else n_want
+        n = min(n_want, have)
+        if n <= 0:
+            continue
+        loaded = 0
+        for _i in range(n):
+            r = camp_supply_take(room_id, terrain, camp, TC_TANK_AMMO_KG, TC_TANK_FUEL_KG, prefer_xy=(fx, fy))   # v753f5: the factory's own stores
+            if r is None:
+                loaded = n; break                       # no pool table -> arcade: everyone rolls
+            got_a, got_f = r[0], r[1]
+            if got_a < TC_TANK_AMMO_KG * 0.5 or got_f < TC_TANK_FUEL_KG * 0.5:
+                break                                   # not 'fully loaded' - stop here
+            loaded += 1
+        if loaded > 0:
+            break
+        _dry.append((fsidx, fx, fy))
+    else:
+        loaded = 0
     if loaded <= 0:
-        _g = _reuse_idle('supply pool empty')
+        _why = 'no tank units built' if not _dry else 'supply pool empty'
+        _g = _reuse_idle(_why)
         if _g is not None:
             return _g
-        tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
-                        f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
-        log('TC', f'room {room_id}: camp {camp} cannot raise a column - pool empty')
+        if _dry:
+            _fs, _fx, _fy = _dry[0]
+            tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])} - the {(scene_type_for(terrain, _fs) or "Tank Factory").strip()} '
+                            f'at {tc_grid(_fx, _fy)} has tanks but no fuel and ammo to send them (supply it by train or cargo)',
+                    camp=camp)
+            log('TC', f'room {room_id}: camp {camp} cannot raise a column - {len(_dry)} factory(ies) with tanks but no loadout {[d[0] for d in _dry]}')
+        else:
+            tc_say(room_id, f'AI: No tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
+            log('TC', f'room {room_id}: camp {camp} cannot raise a column - 0 tank units built')
         return None
+    # units: what THIS factory holds (v631f5 per-scene stock); loadout: what the pool can equip
+    # (v833f5: the loading loop moved up into the factory fall-through above)
     if UNITS_MODEL:
         camp_units_take(room_id, camp, 'tank', loaded, prefer_xy=(fx, fy))    # v621f5: from the producing factory first
     # v740f5: stage the column at the nearest SUPPLIED own scene when that is materially closer than
@@ -11568,6 +11627,9 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
     try:
         for _on in list(TRAINS):
             train_check_territory(_on)
+        # v834f5: and the new owner's train for the captured line comes now, not at the next
+        # once-a-minute spawner tick
+        ensure_camp_trains(room_id)
     except Exception:
         logx('TRAIN', 'territory check after capture failed')
     # v770f5: the scene's missions (attack / cover / destroy) are done - clear them on both sides
@@ -11978,6 +12040,12 @@ def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False):
         budget = min(float(metal_kg), float(_avail))
     if budget <= 0:
         return [], 0
+    # v831f5: delivered metal fills the scene's craters first (oldest first), the rest rebuilds objects
+    if from_delivery:
+        _cf, _ckg = crater_repair_scene(room_id, sidx, budget, reason=reason)
+        budget -= _ckg
+        if budget <= 0:
+            return [], _ckg
     dead = sorted((o for (r2, o) in _SCENE36_DESTROYED if r2 == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
     todo, spent = [], 0
     for o in dead:
@@ -12305,9 +12373,13 @@ def train_check_territory(onum):
         return False
     terrain = tr.get('terrain') or _probe_terrain_for_room(tr['room'])
     own = [s for _ni, s in (rail_stations(terrain).get(tr['road']) or []) if scene_camp(terrain, s) == tr['camp']]
-    if own:
+    # v834f5: fewer than TWO own stations is no supply line (nothing to exchange between) - the
+    # train is stranded then, not only at zero. GB took a US airfield and its factories and the US
+    # train kept running the road for its one remaining station while the captured scenes went
+    # unserved (user 09-25).
+    if len(own) >= 2:
         return False
-    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) has no own station left on road {tr["road"]} '
+    log('TRAIN', f'train 0x{onum:04x} (camp {tr["camp"]}) has {len(own)} own station(s) left on road {tr["road"]} '
                  f'- territory changed hands, removing it')
     _TRAIN_LOST_AT.pop((tr['room'], tr['camp'], tr['road'], tr.get('start', 'rear')), None)
     delete_train(onum, reason='(stranded - line lost)')
@@ -12561,12 +12633,16 @@ def ensure_camp_trains(rid):
     starts = ('rear', 'front', 'mid')
     for camp in camps:
         have = [tr for tr in TRAINS.values() if tr['room'] == rid and tr['camp'] == camp and tr.get('supply')]
-        if len(have) >= TRAIN_PER_CAMP_MAX:
-            continue
         cands = [(len(rails_stations_own(terrain, r, camp)), r) for r in stations]
         cands = [(n, r) for n, r in cands if n >= 2]
         cands.sort(reverse=True)
         if not cands:
+            continue
+        # v834f5: ONE train per qualifying road is guaranteed whatever the per-camp cap says - the cap
+        # only limits the extra front/mid trains. A captured line therefore gets its new owner's train
+        # even when that side already runs three elsewhere.
+        _cap = max(TRAIN_PER_CAMP_MAX, len(cands))
+        if len(have) >= _cap:
             continue
         # slots (v698f5): ONE train per qualifying road first (the v617 rule - the US bomber base is
         # served by road 8 alone, 5 km away, while the US main line is 35 km off; v679 gave all
@@ -12577,7 +12653,7 @@ def ensure_camp_trains(rid):
             slots.append((cands[0][0], cands[0][1], st))
         used = {(tr['road'], tr.get('start', 'rear')) for tr in have}
         for n, r, st in slots:
-            if len(have) >= TRAIN_PER_CAMP_MAX:
+            if len(have) >= _cap:
                 break
             if (r, st) in used:
                 continue
@@ -13067,15 +13143,24 @@ def _spawn_in_range(p, kind, x, y):
     return math.hypot(x - pos[0], y - pos[1]) <= REJOIN_RADIUS_BY_KIND.get(kind, REJOIN_RADIUS_M)
 RECREATE_COOLDOWN_S   = 45.0
 RECREATE_APPROACH_M   = 4000.0
+RECREATE_SPAWN_GRACE_S = 6.0     # v832f5: no 'back in range' re-creates, and no cull cooldown, this soon after ServerConfirm
 
-def _recreate_allowed(s, onum, kind, x, y, pos):
+def _recreate_allowed(s, onum, kind, x, y, pos, at_confirm=False):
     """May object `onum` be re-created for session s now?"""
     d = math.hypot(x - pos[0], y - pos[1])
     if d > REJOIN_RADIUS_BY_KIND.get(kind, REJOIN_RADIUS_M):
         return False
+    # v832f5: not in the first seconds after ServerConfirm - the client is still building its world
+    # and throws such creates away (Bama 09-24 16:46:27: 2 trains re-created 0.5 s after his
+    # confirm, deleted by his client 0.4 s later, then held off by the cull cooldown = invisible
+    # trains at his own field). The ServerConfirm re-create (at_confirm) covers this window.
+    if not at_confirm and time.time() - s.__dict__.get('_obj_confirmed_at', 0.0) < RECREATE_SPAWN_GRACE_S:
+        return False
     cd = s.__dict__.setdefault('_recreate_cd', {})
     ent = cd.get(onum)
-    if ent is None:
+    if ent is None or at_confirm:
+        # v848f5: a ServerConfirm re-create is a fresh world - nothing to ping-pong with, so the
+        # cull cooldown (which exists for the 1 Hz path) does not apply to it
         return True
     t_cull, d_cull = ent
     if time.time() - t_cull >= RECREATE_COOLDOWN_S and d < d_cull - RECREATE_APPROACH_M:
@@ -13084,8 +13169,21 @@ def _recreate_allowed(s, onum, kind, x, y, pos):
 
 def _note_client_cull(s, onum, x, y):
     """Record where the pilot was when his client culled the object (for the cooldown)."""
+    # v832f5: a delete within RECREATE_SPAWN_GRACE_S of the pilot's ServerConfirm is the client
+    # rejecting a create it was not ready for, not a range cull - no cooldown, let it come back
+    if time.time() - s.__dict__.get('_obj_confirmed_at', 0.0) < RECREATE_SPAWN_GRACE_S:
+        s.__dict__.setdefault('_recreate_cd', {}).pop(onum, None)
+        return
     pos = s.__dict__.get('_pos_xy')
-    d = math.hypot(x - pos[0], y - pos[1]) if pos else 0.0
+    if pos is None:
+        # v848f5 [TRAINS THAT NEVER CAME BACK]: with no position (cleared at a TAB reposition, v795)
+        # the cull distance was recorded as 0, and '4 km closer than 0' never happens - the object was
+        # locked out for the rest of the session (local 09-25: train 262 culled at the TAB to AF 13,
+        # never re-created at AF 1 two minutes later; the map boxes kept moving). A cull during a
+        # world rebuild is not a range cull: record nothing.
+        s.__dict__.setdefault('_recreate_cd', {}).pop(onum, None)
+        return
+    d = math.hypot(x - pos[0], y - pos[1])
     cd = s.__dict__.setdefault('_recreate_cd', {})
     cd[onum] = (time.time(), d)
     if len(cd) > 400:
@@ -14538,15 +14636,65 @@ ROOM_CRATERS = {}             # v818f5: room -> [(time, crater record bytes)] fo
 CRATER_HISTORY_S = 1800.0     # keep records this long (the client's own vanish rule removes them earlier)
 CRATER_HISTORY_MAX = 200
 CRATER_REPLAY_DELAY_S = 2.0
+CRATER_SCENE_RADIUS_M = 3000.0   # v831f5: a crater record is tagged with the scene within this of the bomber
+CRATER_REPAIR_KG_PER_VOLUME = 25.0   # v831f5: metal needed to fill one crater volume (a 500 lb crater is 10)
+CRATER_VOLUME_BY_TYPE = {0: 5, 1: 10, 2: 15, 3: 20}   # dword & 3 -> volume (Vor10 = 500 lb, Vor15 = 1,000 lb)
+
+def crater_repair_scene(room_id, sidx, metal_kg, reason=''):
+    """v831f5 [METAL REPAIRS CRATERS]: spend delivered metal on the scene's craters, OLDEST first,
+    CRATER_REPAIR_KG_PER_VOLUME kg per crater volume - the same order the client's own vanish rule
+    uses. The client has no 'fill' message (a record only replaces a square's LOCAL craters,
+    FUN_00629180 / FUN_006532b0: field +0xc8), so this acts on what the server controls: the craters
+    a pilot receives when he enters the world. Pilots already holding them keep them until the vanish
+    rule removes them. Returns (craters filled, kg spent)."""
+    try:
+        if metal_kg <= 0 or room_id is None:
+            return 0, 0
+        hist = ROOM_CRATERS.get(room_id) or []
+        budget = float(metal_kg) / CRATER_REPAIR_KG_PER_VOLUME
+        filled = 0; spent_vol = 0.0; new_hist = []
+        for t, body, sc in hist:
+            if sc != int(sidx) or budget <= 0:
+                new_hist.append((t, body, sc)); continue
+            n = max(0, (len(body) - 7) // 4)
+            keep = []
+            for i in range(n):
+                dw = struct.unpack_from('<I', body, 7 + 4 * i)[0]
+                vol = CRATER_VOLUME_BY_TYPE.get(dw & 3, 10)
+                if budget >= vol:
+                    budget -= vol; spent_vol += vol; filled += 1
+                else:
+                    keep.append(body[7 + 4 * i:11 + 4 * i])
+            if keep:
+                new_hist.append((t, bytes(body[:7]) + b''.join(keep), sc))
+        ROOM_CRATERS[room_id] = new_hist
+        kg = int(round(spent_vol * CRATER_REPAIR_KG_PER_VOLUME))
+        if filled:
+            log('CRATER', f'room {room_id} scene {sidx}: {kg} kg of metal filled {filled} crater(s) {reason} '
+                          f'- pilots entering the world from now on get the repaired runway')
+        return filled, kg
+    except Exception:
+        logx('CRATER', 'crater repair failed')
+        return 0, 0
 
 def crater_record_in(s, body, echo=False):
-    """v686f5/v818f5/v826f5: a crater record from s ([0x34][u16 id][i32 time][...]; one record can
-    carry several craters) - kept for later spawners and relayed to every other pilot in the world.
-    echo=True also returns it to the sender, as the plain-form generic echo always did."""
+    """v686f5/v818f5/v826f5: a crater record from s ([0x34][u16 square][i32 time][dword per crater]) -
+    kept for later spawners and relayed to every other pilot in the world. echo=True also returns
+    it to the sender, as the plain-form generic echo always did. v831f5: tagged with the scene it
+    fell nearest to (the bomber's own position), so metal delivered there can repair it."""
     try:
         _crpkt = build_appspace_pkt(body)
         _hist = ROOM_CRATERS.setdefault(s.current_room, [])
-        _hist.append((time.time(), body))
+        _sc = None
+        try:
+            _pp = s.__dict__.get('_pos_xy')
+            if _pp is not None:
+                _terr = _probe_terrain_for_room(s.current_room)
+                _b = tc_nearest_scene_any(_terr, _pp[0], _pp[1])
+                _sc = _b[0] if (_b and _b[1] <= CRATER_SCENE_RADIUS_M) else None
+        except Exception:
+            _sc = None
+        _hist.append((time.time(), body, _sc))
         s.__dict__.setdefault('_craters_have', set()).add(body)          # his own crater
         _cut = time.time() - CRATER_HISTORY_S
         ROOM_CRATERS[s.current_room] = [h for h in _hist if h[0] >= _cut][-CRATER_HISTORY_MAX:]
@@ -14560,7 +14708,8 @@ def crater_record_in(s, body, echo=False):
                 _p.__dict__.setdefault('_craters_have', set()).add(body)
         if echo:
             _submit_send(send_rel, s, _crpkt, '<- CRATER 52 echo', to=3.0)
-        log('CRATER', f'{s.current_pilot}: crater record ({len(body)}B) kept, relayed to {_ncr} peer(s)')
+        log('CRATER', f'{s.current_pilot}: crater record ({len(body)}B, {max(0, (len(body) - 7) // 4)} crater(s)'
+                      f'{", scene " + str(_sc) if _sc is not None else ""}) kept, relayed to {_ncr} peer(s)')
     except Exception:
         logx('CRATER', 'crater record failed')
 
@@ -14572,14 +14721,14 @@ def crater_replay_for(s):
         return
     cut = time.time() - CRATER_HISTORY_S
     got = s.__dict__.setdefault('_craters_have', set())
-    recs = [r for t, r in (ROOM_CRATERS.get(rid) or []) if t >= cut and r not in got]
+    recs = [h[1] for h in (ROOM_CRATERS.get(rid) or []) if h[0] >= cut and h[1] not in got]
     for r in recs:
         _submit_send(send_rel, s, build_appspace_pkt(r), f'<- CRATER 52 replay', to=3.0)
         got.add(r)
     if recs:
         log('CRATER', f'{s.current_pilot}: {len(recs)} crater record(s) replayed after spawn')
 
-def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
+def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, at_confirm=False):
     """v563f5/v570f5/v604f5: after a (re)spawn, create every tank of the room this session
     doesn't hold - batched, but never more than RECREATE_CHUNK records per msg-2: the live
     48-tank batch (1,057 B) at 09-09 17:15 was silently not applied by the client (16 x 21 B +
@@ -14593,7 +14742,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False):
         if near_xy is None:
             return True
         if per_kind and onum is not None:
-            return _recreate_allowed(s, onum, kind, x, y, near_xy)         # v785f5: per-kind radius + cooldown
+            return _recreate_allowed(s, onum, kind, x, y, near_xy, at_confirm=at_confirm)   # v785f5/v832f5
         return math.hypot(x - near_xy[0], y - near_xy[1]) <= (radius or REJOIN_RADIUS_M)
     todo = [(onum, t) for onum, t in list(TANKS.items()) if t['room'] == rid and getattr(s, 'addr', None) not in t['peers']
             and not t.get('dead') and _near(t['pos'][0], t['pos'][1], 'tank', onum)]
@@ -17533,6 +17682,9 @@ TELEM_RESTAMP_MAX_LEN = 100  # v253: only re-stamp the telemetry FORM WE KNOW. T
                              #   parse - that is the same mistake as hand-authoring the record.
 STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (the failure above was
                              #   silent for ~3 minutes; never let a frozen tick go unnoticed again)
+TICK_RATE_DEFAULT = 52.0        # v835f5: conductor ticks per second when a session's own rate is not yet measured
+STALE_TICK_EXTRAP_MAX_S = 30.0  # v835f5: extrapolate a stalled receiver tick this long, then pass the sender's tick
+RELAY_GAP_WARN_S = 2.0          # v837f5: log when one pilot's frames stop reaching another for this long
 
 # v343: START-PLACE / DEATH RACE. In every captured case the client sends its StartPlace
 # request (0x17) a few MILLISECONDS BEFORE it reports its own death (0x03), then the KILL
@@ -17928,8 +18080,15 @@ def relay_telemetry(src, data, _split_obj=None):
         return
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
-    src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
-    src.last_telem_time = time.time()
+    # v835f5: and learn his tick RATE (ticks per second, EMA) so a stalled tick can be extrapolated
+    _pt, _ptt = getattr(src, 'last_telem_tick', None), getattr(src, 'last_telem_time', 0.0)
+    _nt = int.from_bytes(pl[5:7], 'little'); _now_t = time.time()
+    if _pt is not None and 0.15 <= (_now_t - _ptt) <= 2.0:
+        _r = ((_nt - _pt) & 0xFFFF) / (_now_t - _ptt)
+        if 10.0 <= _r <= 200.0:
+            src._tick_rate = _r if getattr(src, '_tick_rate', None) is None else (0.8 * src._tick_rate + 0.2 * _r)
+    src.last_telem_tick = _nt
+    src.last_telem_time = _now_t
     if _split_obj is None and len(pl) >= 9 and 34 <= len(pl) - 7 <= 90:
         # v547f5: learn this object's record size from its single-record frames (feeds the splitter)
         src.__dict__.setdefault('_rec_size_by_obj', {})[int.from_bytes(pl[7:9], 'little')] = len(pl) - 7
@@ -18060,6 +18219,7 @@ def relay_telemetry(src, data, _split_obj=None):
         # plane's frames at PLANE_RELAY_MID_HZ, beyond PLANE_RELAY_FAR_M at PLANE_RELAY_FAR_HZ
         # (still well inside the client's ~28 s silence cull). Unknown positions -> full rate.
         _ppos = p.__dict__.get('_pos_xy')
+        _dd = None                                        # v837f5: known to the gap log below
         if _src_pos is not None and _ppos is not None:
             _dd = math.hypot(_src_pos[0] - _ppos[0], _src_pos[1] - _ppos[1])
             if _dd > PLANE_RELAY_NEAR_M:
@@ -18182,8 +18342,18 @@ def relay_telemetry(src, data, _split_obj=None):
                 if not getattr(p, '_stale_tick_warned', False):
                     p._stale_tick_warned = True
                     log('STALE-TICK', f'[warn] {p.current_pilot} conductor tick FROZEN at {rt} '
-                                      f'({_age:.1f}s old) - not re-stamping. Their telemetry is no '
-                                      f'longer being recognised; peers will lose sight of objects.')
+                                      f'({_age:.1f}s old) - re-stamping from the EXTRAPOLATED tick '
+                                      f'({getattr(p, "_tick_rate", None) or TICK_RATE_DEFAULT:.0f}/s) until his frames resume.')
+                # v835f5 [STALLED RECEIVER TICK]: v234 stopped re-stamping when the receiver's own
+                # frames stopped, passing the SENDER's absolute tick instead - which is skewed by
+                # tens of cycles, so every peer was drawn seconds off (Taurus 09-24 18:16: 'Bama
+                # 4 km away shooting me as if I'm in front of him' - his own frames had stalled 4 s
+                # earlier, STALE-TICK at 18:15:30). Extrapolate the receiver's tick instead: last
+                # tick + elapsed x his measured rate, capped at STALE_TICK_EXTRAP_MAX_S.
+                if len(relayed) >= 9 and _age <= STALE_TICK_EXTRAP_MAX_S:
+                    _rate = getattr(p, '_tick_rate', None) or TICK_RATE_DEFAULT
+                    _rt_est = (int(rt) + int(round(_age * _rate))) & 0xFFFF
+                    struct.pack_into('<H', relayed, 5, (_rt_est - RELAY_TICK_LEAD) & 0xFFFF)
             else:
                 p._stale_tick_warned = False
                 # v364f5: structural guard - never re-stamp a buffer too short to hold
@@ -18193,6 +18363,24 @@ def relay_telemetry(src, data, _split_obj=None):
                 if len(relayed) >= 9:
                     struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
         seq = p.nundgram()                                  # v813f5: the one datagram counter
+        # v837f5 [PER-PAIR RELAY GAP]: how long since the last frame of THIS sender reached THIS
+        # receiver. A stall between two specific pilots (Taurus 09-24: 'Bama 4 km away, shooting me')
+        # left no trace in the logs; now a gap over RELAY_GAP_WARN_S is logged once per occurrence
+        # with the tier it happened in, so 'stale object on his client' and 'delivery gap on the
+        # server' can be told apart. Rate-limited per pair.
+        try:
+            _rg = src.__dict__.setdefault('_relay_last_to', {})
+            _lt = _rg.get(p.addr)
+            _rg[p.addr] = _now_relay
+            if _lt is not None and (_now_relay - _lt) >= RELAY_GAP_WARN_S:
+                _rgw = src.__dict__.setdefault('_relay_gap_warned', {})
+                if _now_relay - _rgw.get(p.addr, 0.0) >= 30.0:
+                    _rgw[p.addr] = _now_relay
+                    log('RELAY-GAP', f'{src.current_pilot} -> {p.current_pilot}: no frame relayed for '
+                                     f'{_now_relay - _lt:.1f}s (distance {_dd / 1000.0 if _dd is not None else -1:.1f} km, '
+                                     f'sender frames {time.time() - getattr(src, "last_telem_time", 0.0):.1f}s old)')
+        except Exception:
+            pass
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
         if RELAY_SEND_ASYNC:
             _relay_batch.append((p.addr, pkt))   # v389f5: defer the sendto syscall off the RX thread
@@ -21013,7 +21201,7 @@ def _fire_server_confirm(s, via='', ident=None):
                 time.sleep(0.1)
             _pos = _s.__dict__.get('_pos_xy')
             if _pos is not None:
-                tank_recreate_for(_s, reason='(at ServerConfirm, in range)', near_xy=_pos, radius=REJOIN_RADIUS_M, per_kind=True)
+                tank_recreate_for(_s, reason='(at ServerConfirm, in range)', near_xy=_pos, radius=REJOIN_RADIUS_M, per_kind=True, at_confirm=True)
             else:
                 tank_recreate_for(_s, reason='(at ServerConfirm, no position yet)')
         threading.Thread(target=_rc, daemon=True).start()
@@ -24906,7 +25094,135 @@ def handle_post_auth(s, cmd, pl):
         except Exception:
             logx('MAP57', 'map message reply failed')
         return
-    # v770f5 PLAYER MISSIONS: 102 = list request, 110 = create, 100 = delete (all in-game, cmd 0)
+    # v843f5 [MISSING HANDLERS]: two in-game requests that fell through to the generic echo
+    if sub == 0x2a and cmd == 0 and getattr(s, 'entered_game', False) and getattr(s, 'current_room', None) is not None:
+        # msg 42 request: the client asks for the scene snapshot (map re-open, first entry) and was
+        # getting its own 1-byte request echoed back instead of the ownership table
+        try:
+            send_scene_snapshot_42_to(s, reason='(client request)')
+        except Exception:
+            logx('SCENE42', 'snapshot on request failed')
+        return
+    if sub == 0x22 and cmd == 0 and getattr(s, 'entered_game', False) and len(stored) >= 13 \
+            and getattr(s, 'current_room', None) is not None:
+        # v846f5 [msg 34 = NEAREST-ENEMY HINT]: the client reports its own position as
+        # [0x22][0][7-byte pos] and the host answers [0x22][enemy camp | 0xff = none][7-byte pos of
+        # the nearest enemy plane]; the client's map/HUD arrow (FUN_004be670, gated by GAME_DEF
+        # +0x498) uses it whenever no enemy is in its own local list. The generic echo was answering
+        # 'camp 0 at your own position'. 7-byte packing = the msg-112 form (s24 X, s24 Y, u8 Z).
+        try:
+            _me = s.__dict__.get('_pos_xy'); _my_camp = getattr(s, 'nation', None)
+            _best = None
+            if _me is not None and _my_camp is not None:
+                for _p in get_sessions_in_room(s.current_room):
+                    if _p is s or not (getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)):
+                        continue
+                    if getattr(_p, 'nation', None) in (None, _my_camp):
+                        continue
+                    _pp = _p.__dict__.get('_pos_xy')
+                    if _pp is None:
+                        continue
+                    _d = math.hypot(_pp[0] - _me[0], _pp[1] - _me[1])
+                    if _best is None or _d < _best[0]:
+                        _best = (_d, _p)
+            if _best is not None:
+                _e = _best[1]; _pp = _e.__dict__.get('_pos_xy'); _pz = float(_e.__dict__.get('_pos_z') or 0.0)
+                _body = bytes([0x22, int(getattr(_e, 'nation', 0)) & 0xff]) \
+                        + _s24(_pp[0] / TANK_POS_XY_SCALE) + _s24(_pp[1] / TANK_POS_XY_SCALE) \
+                        + bytes([max(0, min(255, int(round((_pz + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+            else:
+                _body = bytes([0x22, 0xff]) + bytes(7)
+            send_rel(s, build_ingame_pkt(_body), '<- NEAREST-ENEMY 34', to=3.0)   # v847f5: TRUE length, not appspace padding
+            s._ne34_n = getattr(s, '_ne34_n', 0) + 1
+            if s._ne34_n <= 2 or (s._ne34_n % 100) == 0:
+                log('ENEMY34', f'{s.current_pilot}: nearest enemy = '
+                               f'{(_best[1].current_pilot + f" at {_best[0] / 1000.0:.1f} km") if _best else "none"}')
+        except Exception:
+            logx('ENEMY34', 'nearest-enemy reply failed')
+        return
+    if sub == 0x46 and cmd == 0 and getattr(s, 'entered_game', False) and getattr(s, 'current_room', None) is not None:
+        # v845f5 [msg 70 = BIG MAP]: the client asks for the big-map object list and was getting its
+        # own 1-byte request back = an empty big map. Reply with the requester's own side: every
+        # flying plane and every live tank of his camp, as BIG_MAP_MESSAGE::PACKED_INFO records
+        # (FUN_0048ae30): dword = X14<<18 | Y14<<4 | camp<<1 | Zhi, then UC (icon class), then Zlo -
+        # X,Y signed 14-bit in 32 m units, Z 9-bit in 16 m units. The client marks the record that
+        # matches its own camp+class as itself.
+        try:
+            _camp = getattr(s, 'nation', None)
+            _recs = []
+            def _rec(x, y, z, camp, uc):
+                _x = int(round(x / 32.0)) & 0x3fff; _y = int(round(y / 32.0)) & 0x3fff
+                _z = max(0, min(511, int(round((z or 0.0) / 16.0))))
+                _dw = (_x << 18) | (_y << 4) | ((int(camp) & 7) << 1) | ((_z >> 8) & 1)
+                return struct.pack('<IBB', _dw, int(uc) & 0xff, _z & 0xff)
+            for _p in get_sessions_in_room(s.current_room):
+                if not (getattr(_p, 'entered_game', False) and getattr(_p, 'flying', False)):
+                    continue
+                if _camp is not None and getattr(_p, 'nation', None) != _camp:
+                    continue
+                _pp = _p.__dict__.get('_pos_xy')
+                if _pp is None or getattr(_p, 'plane_type', None) is None:
+                    continue
+                _recs.append(_rec(_pp[0], _pp[1], _p.__dict__.get('_pos_z'), getattr(_p, 'nation', 0), _p.plane_type))
+            for _on, _t in list(TANKS.items()):
+                if _t.get('room') != s.current_room or _t.get('dead'):
+                    continue
+                if _camp is not None and _t.get('camp') != _camp:
+                    continue
+                _recs.append(_rec(_t['pos'][0], _t['pos'][1], _t['pos'][2] if len(_t['pos']) > 2 else 0.0, _t.get('camp', 0), _t.get('class', 131)))
+            _body = bytes([0x46]) + b''.join(_recs)
+            # v847f5: the client asserts (Length-1) % 6 == 0 (FUN_004fb2c0) - the appspace framing pads
+            # to 16n+1 and CTD'd the client on the first reply (local 09-25 10:17: 'in 70'17', one
+            # record); build_ingame_pkt carries the exact length like msg 112 and the snapshots.
+            send_rel(s, build_ingame_pkt(_body), f'<- BIG_MAP 70 x{len(_recs)}', to=3.0)
+            s._bigmap_n = getattr(s, '_bigmap_n', 0) + 1
+            if s._bigmap_n <= 3 or (s._bigmap_n % 20) == 0:
+                log('BIGMAP70', f'{s.current_pilot}: big-map reply x{len(_recs)} (own camp {_camp})')
+        except Exception:
+            logx('BIGMAP70', 'big map reply failed')
+        return
+    if sub == 0x49 and cmd == 0 and getattr(s, 'entered_game', False) and len(stored) >= 7 \
+            and getattr(s, 'current_room', None) is not None:
+        # v844f5 [msg 73 = PLANE LOADOUT/CONFIG]: [0x49][ONumber u16][config block]. The client's
+        # handler (FUN_004f3e80 -> FUN_004c8420) applies it to the plane with that number; a peer
+        # that does not hold the plane just ignores it. The 2009 host relayed it so everyone saw the
+        # bomber's ordnance; we only echoed it to the sender. Relay to the room (reliable), and
+        # only for the sender's own plane number.
+        try:
+            _on = struct.unpack_from('<H', stored, 5)[0]
+            if _on == getattr(s, 'my_obj_number', None):
+                _pk = build_ingame_pkt(bytes(stored[4:]))          # v847f5: exact length, as the client sent it
+                _nr = 0
+                for _p in get_sessions_in_room(s.current_room):
+                    if _p is not s and getattr(_p, 'entered_game', False) and getattr(_p, 'obj_confirmed', False):
+                        _submit_send(send_rel, _p, _pk, f'<- LOADOUT 73 of {s.current_pilot}', to=3.0); _nr += 1
+                log('LOADOUT73', f'{s.current_pilot}: loadout block ({len(stored) - 4}B) for 0x{_on:04x} relayed to {_nr} peer(s)')
+        except Exception:
+            logx('LOADOUT73', 'relay failed')
+        # fall through: the sender still gets the echo it always got
+    if sub == 0x70 and cmd == 0 and getattr(s, 'entered_game', False) and len(stored) >= 12:
+        # msg 112 FROM the client: the transport's own paratroop landing report - [0x70][nation s8]
+        # [s16 target][u32 aux] then N x 7-byte packed positions (s24 X, s24 Y, u8 Z) - the same
+        # layout the host sends (see PARA_TO_SOLDIER). Logged beside our chute-derived count for now;
+        # if it proves complete over a few drops it becomes the landing source of truth.
+        try:
+            _nat = struct.unpack_from('<b', stored, 5)[0]
+            _tgt = struct.unpack_from('<h', stored, 6)[0]
+            _aux = struct.unpack_from('<I', stored, 8)[0]
+            _n = max(0, (len(stored) - 12) // 7)
+            _pts = []
+            for _i in range(_n):
+                _o = 12 + 7 * _i
+                _x = int.from_bytes(stored[_o:_o + 3], 'little', signed=True)
+                _y = int.from_bytes(stored[_o + 3:_o + 6], 'little', signed=True)
+                _pts.append((_x, _y, stored[_o + 6]))
+            _st = s.__dict__.get('_para_stick') or {}
+            log('PARA112', f'{s.current_pilot}: client landing report nation={_nat} target={_tgt} aux={_aux} '
+                           f'{_n} position(s) {_pts[:4]}{"..." if _n > 4 else ""} | our stick so far: '
+                           f'{len(_st.get("pts", []) or [])} landed')
+        except Exception:
+            logx('PARA112', 'landing report parse failed')
+        return
     if cmd == 0 and getattr(s, 'entered_game', False) and sub in (0x66, 0x6e, 0x64):
         try:
             if sub == 0x66:
@@ -26737,18 +27053,27 @@ def handle_post_auth(s, cmd, pl):
 
 # --- Packet receiver ----------------------------------------------------------
 
-def _match_session_by_ip(addr):
+def _match_session_by_ip(addr, connid=None):
     """v214: find a session whose IP matches addr[0] even if the PORT differs. The client can
     move its source port mid-session - e.g. IOCInitializeTimeSynchronization's failure path rebinds
     to a 'unique port' (FUN_100032b2) and retries, and NAT/rebind can also shift it. When that
     happens the time-sync pings arrive from a new (ip, port) that isn't in sadrs, so the old code
     silently dropped them (get_s -> None -> return) and the client got no reply -> sync FAIL (d660=5)
-    -> vcncGetTimeState -2 -> freeze. Matching by IP lets us still answer."""
+    -> vcncGetTimeState -2 -> freeze. Matching by IP lets us still answer.
+    v840f5: with connid (the per-connection id the client stamps in bytes 0-1 of every packet) the
+    match must also agree on it when the session has captured one - two pilots behind one NAT
+    share the IP, and the old IP-only match could hand one pilot's port to the other's session."""
     with sl:
-        for a, sess in sadrs.items():
-            if a[0] == addr[0]:
-                return sess
-    return None
+        cands = [sess for a, sess in sadrs.items() if a[0] == addr[0]]
+    if not cands:
+        return None
+    if connid is not None:
+        _byid = [c for c in cands if getattr(c, '_status_connid', None) == connid]
+        if _byid:
+            return _byid[0]
+        _unknown = [c for c in cands if getattr(c, '_status_connid', None) is None]
+        return _unknown[0] if len(_unknown) == 1 and len(cands) == 1 else None
+    return cands[0] if len(cands) == 1 else None
 
 def on_pkt(data, addr):
     sz=len(data)
@@ -26760,16 +27085,20 @@ def on_pkt(data, addr):
                       f'{"known" if _known else "UNKNOWN-ADDR"}')
     s=get_s(addr)
     # v214: time-sync ping from a moved port -> match by IP and ADOPT the new addr into the session,
-    # so subsequent packets (and our replies) stay aligned. Only for the 12-byte TIME ping, which is
-    # safe to answer regardless of the reliable-channel state.
-    if s is None and sz==12 and (data[2]&0x80):
-        s = _match_session_by_ip(addr)
+    # so subsequent packets (and our replies) stay aligned. v840f5: the in-game ping is ATTACHED to
+    # ordinary data packets (sz > 12, flag 0x80 - see v457 below), so the adoption now covers both
+    # forms; the match is by IP AND the client's connection id (bytes 0-1). A pilot whose router
+    # changes his port mid-flight (BoogDog 09-22: five reconnects in 80 min) is carried across
+    # within a second instead of being reaped after 74 s of 'silence'.
+    if s is None and sz >= 12 and (data[2]&0x80):
+        _cid = struct.unpack_from('>H', data, 0)[0]
+        s = _match_session_by_ip(addr, connid=_cid)
         if s is not None:
             _old = s.addr
             with sl:
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
-            log('RX/PORTMOVE', f'time-ping from {addr[0]}:{addr[1]} adopted into session '
-                               f'(was {_old[1]}) ({getattr(s,"current_pilot","?")})')
+            log('RX/PORTMOVE', f'{"attached" if sz > 12 else "standalone"} time-ping from {addr[0]}:{addr[1]} '
+                               f'(connid 0x{_cid:04x}) adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if not s: return
     s.last_rx = time.time()   # v387f5: liveness beacon for the idle reaper (time-pings keep it fresh)
     # v467f5 [D: DATA-LOSS GAUGE] RX counters - the receive-side twin of the sendto wrapper. Count
@@ -26817,6 +27146,55 @@ def on_pkt(data, addr):
         # composite (attached) form: fall through - DATA/ACK sections still need processing
     if sz>=8:
         dw=struct.unpack_from('>I',data,4)[0]; pt=(dw>>29)&7
+        if pt in (2, 5):
+            # v842f5 [URGENT and CONTROL CHANNELS]: vcncNet's URGENT channel (type 2) is a second
+            # reliable stream - same 9-bit seq in the u16 at bytes 6-7, same in-order receive queue
+            # (FUN_1000a8a1 -> FUN_10006124), acknowledged with the same ACK builder as the reliable
+            # channel but type 2 (FUN_10002b27(2, seq, next)). CONTROL (type 5) is the suspend/resume
+            # channel of host migration - a dedicated server has nothing to suspend, so it is
+            # acknowledged (type 5) and its payload logged. Each channel has its own sequence space;
+            # delivery follows the v812 rule: ack the contiguous prefix, hand a URGENT payload to the
+            # same command dispatch as a reliable one.
+            _ch = 'urg' if pt == 2 else 'ctl'
+            # the seq is the 9-bit field of the big-endian u16 at WIRE bytes 2-3 (the client's demux
+            # sees our packet behind a 4-byte prefix, so its 'bytes 6-7' are our 2-3; the reliable
+            # path reads the same field as byte 3 plus the low bit of byte 2)
+            _seq = struct.unpack_from('>H', data, 2)[0] & 0x1FF
+            _nx = s.__dict__.get(f'_{_ch}_rx_next')
+            if _nx is None:
+                _nx = _seq
+            _dd2 = (_seq - _nx) & 0x1FF
+            _deliver2 = False
+            if _dd2 == 0:
+                _deliver2 = True; _nx = (_seq + 1) & 0x1FF
+            elif _dd2 < 256:
+                _deliver2 = True                     # beyond a hole: deliver now, ack individually
+            s.__dict__[f'_{_ch}_rx_next'] = _nx
+            _contig2 = (_nx - 1) & 0x1FF
+            _ackpkt = build_rel_ack(30, _seq, next_exp=(_contig2 + (1 if RTT_SAMPLING else 2)) & 0x1FF,
+                                    ack_type=(2 if pt == 2 else 5))
+            if ACK_ASYNC:
+                _ack_q.put((time.time() + ACK_DELAY_S, _ackpkt, s.addr))
+            else:
+                sock.sendto(_ackpkt, s.addr)
+            pl2 = data[8:] if sz > 8 else b''
+            if not getattr(s, f'_seen_pt{pt}', False):
+                setattr(s, f'_seen_pt{pt}', True)
+                log('PROTO', f'{getattr(s, "current_pilot", "?")} first {"URGENT" if pt == 2 else "CONTROL"} packet '
+                             f'seq={_seq} sz={sz} pl={hx(pl2[:24])} - acknowledged (type {pt})')
+            if _deliver2 and pt == 2 and len(pl2) >= 4:
+                cv2 = struct.unpack_from('>H', pl2, 2)[0]
+                if s.auth_done or getattr(s, '_login_started', False):
+                    with s._lock: s.post_auth_cmds.append((cv2, pl2))
+                    s._cmd_evt.set()
+            return
+        if pt == 3 and not getattr(s, '_seen_pt3', False):
+            # LARGE (type 3) is the RUDPLB block-transfer state machine (BEGIN/DATA/END/ABORT with
+            # OK/ERROR replies, FUN_10004b06); the client has never used it with us. Logged, not
+            # acknowledged - a partial handshake would be worse than none.
+            s._seen_pt3 = True
+            log('PROTO', f'[warn] {getattr(s, "current_pilot", "?")} sent a LARGE (type 3) packet sz={sz} '
+                         f'head={hx(data[:16])} - block transfer not implemented')
         if pt==4 and sz >= 24:
             # v469f5 [STATLOSS]: the client's STATUS REPLY (subtype 4) - previously ignored. It
             # carries the client's PER-INTERVAL transport counters at the mirrored offsets

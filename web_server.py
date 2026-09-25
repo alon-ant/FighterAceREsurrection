@@ -1889,12 +1889,18 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _cvn = overrides.get('craters_vanish_max', '')
             _cv_def = (SRV.get('craters_defaults') or (lambda: (10, 40)))()
             craters_html = (
-                '<label style="display:block; margin:10px 0;">Craters last (minutes)<br>'
+                '<label style="display:block; margin:10px 0;">Craters vanish tick (minutes between ticks)<br>'
                 '<input type="number" name="s_craters_vanish_min" min="1" max="120" value="' + hesc(str(_cvd), quote=True) + '" '
                 'placeholder="' + str(_cv_def[0]) + '" style="width:120px; padding:6px;"></label>'
-                '<label style="display:block; margin:10px 0;">Max craters kept<br>'
+                '<label style="display:block; margin:10px 0;">Crater volume removed per tick<br>'
                 '<input type="number" name="s_craters_vanish_max" min="1" max="1000" value="' + hesc(str(_cvn), quote=True) + '" '
-                'placeholder="' + str(_cv_def[1]) + '" style="width:120px; padding:6px;"></label>')
+                'placeholder="' + str(_cv_def[1]) + '" style="width:120px; padding:6px;"></label>'
+                '<p class="muted" style="margin:4px 0 12px; max-width:640px;">Every tick, each map square removes '
+                '<b>volume-per-tick</b> from its <b>oldest craters first</b> (whole craters, the last one partly). A 500 lb crater is '
+                '10 volume, a 1,000 lb one 15. So a bombed square clears at <b>volume &divide; minutes</b> per minute, and the n-th '
+                'oldest crater lasts about <b>n &times; 10 &divide; volume &times; minutes</b>. For 15 &times; 500 lb on one runway: '
+                '1 min / 5 &rarr; first gone at 2 min, last at 30; 1 min / 10 &rarr; one crater a minute; 2 min / 4 &rarr; last one at 75 min; '
+                '10 min / 40 &rarr; four craters at the first tick.</p>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
