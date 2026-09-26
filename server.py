@@ -352,7 +352,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v855f5'
+VERSION = 'v856f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4427,6 +4427,15 @@ def console_handler():
                         send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'tick':
+                # v856f5: tick extrap on|off - the v835 stalled-receiver re-stamp
+                global STALE_TICK_EXTRAP
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0] == 'extrap' and len(_a) > 1:
+                    STALE_TICK_EXTRAP = _a[1].lower() in ('on', '1', 'true', 'yes')
+                    log('CONSOLE', f'tick extrap = {STALE_TICK_EXTRAP}')
+                else:
+                    log('CONSOLE', f'usage: tick extrap on|off   (now {STALE_TICK_EXTRAP})')
             elif cmd == 'chute':
                 # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
                 # server-driven descent, frame-after-create, delete settle) as one switch
@@ -17781,7 +17790,9 @@ TELEM_RESTAMP_MAX_LEN = 100  # v253: only re-stamp the telemetry FORM WE KNOW. T
 STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (the failure above was
                              #   silent for ~3 minutes; never let a frozen tick go unnoticed again)
 TICK_RATE_DEFAULT = 52.0        # v835f5: conductor ticks per second when a session's own rate is not yet measured
-STALE_TICK_EXTRAP_MAX_S = 30.0  # v835f5: extrapolate a stalled receiver tick this long, then pass the sender's tick
+STALE_TICK_EXTRAP_MAX_S = 10.0  # v835f5/v856f5: extrapolate a stalled receiver tick this long (was 30), then pass the sender's tick
+STALE_TICK_EXTRAP = True        # v856f5: `tick extrap on|off` on the console - two CTDs coincided with a server-wide
+                                #   inbound stall (09-26 20:12) during which this fired for every pilot; unproven, switchable
 RELAY_GAP_WARN_S = 2.0          # v837f5: log when one pilot's frames stop reaching another for this long
 
 # v343: START-PLACE / DEATH RACE. In every captured case the client sends its StartPlace
@@ -18468,7 +18479,7 @@ def relay_telemetry(src, data, _split_obj=None):
                 # 4 km away shooting me as if I'm in front of him' - his own frames had stalled 4 s
                 # earlier, STALE-TICK at 18:15:30). Extrapolate the receiver's tick instead: last
                 # tick + elapsed x his measured rate, capped at STALE_TICK_EXTRAP_MAX_S.
-                if len(relayed) >= 9 and _age <= STALE_TICK_EXTRAP_MAX_S:
+                if len(relayed) >= 9 and _age <= STALE_TICK_EXTRAP_MAX_S and STALE_TICK_EXTRAP:
                     _rate = getattr(p, '_tick_rate', None) or TICK_RATE_DEFAULT
                     _rt_est = (int(rt) + int(round(_age * _rate))) & 0xFFFF
                     struct.pack_into('<H', relayed, 5, (_rt_est - RELAY_TICK_LEAD) & 0xFFFF)
