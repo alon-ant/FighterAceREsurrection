@@ -334,6 +334,7 @@ appspace LENGTH RULE: client delivers Length = bc*16+1 to handlers, not the data
   padding. (Root cause of the v182-v186 crash series; see v187 note above.)
 """
 import socket, struct, time, binascii, threading, ctypes, os, sqlite3, secrets, sys, itertools, re, json, math, queue, subprocess
+import select, gc              # v864f5: receive-backlog and GC-pause measurement
 import concurrent.futures   # v357f5: shared send-worker pool
 from datetime import datetime
 from collections import deque
@@ -352,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v856f5'
+VERSION = 'v867f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4427,6 +4428,27 @@ def console_handler():
                         send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'desync':
+                # v862f5: list the automatic desync events of this run
+                if not _DESYNC_EVENTS:
+                    log('CONSOLE', 'desync: no events this run')
+                for _t, _a, _b, _d in _DESYNC_EVENTS[-20:]:
+                    log('CONSOLE', f'{time.strftime("%H:%M:%S", time.gmtime(_t))} {_a} hit {_b} at {_d / 1000.0:.2f} km (server view)')
+            elif cmd == 'trace':
+                # v861f5: trace <pilot> [seconds] - log every relayed frame TO that pilot (sender,
+                # tick as re-stamped, position) for a while, to compare with what his client drew
+                # (PhiD 09-27 00:13: Flak 'jumping 3k to 1k' with clean delivery on the server)
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a:
+                    _t = next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == _a[0]), None)
+                    if _t is None:
+                        log('CONSOLE', f'trace: no session for {_a[0]}')
+                    else:
+                        _secs = float(_a[1]) if len(_a) > 1 else 30.0
+                        _t._relay_trace_until = time.time() + _secs
+                        log('CONSOLE', f'trace: relayed frames to {_a[0]} logged for {_secs:.0f}s (RELAY-TRACE)')
+                else:
+                    log('CONSOLE', 'usage: trace <pilot> [seconds]')
             elif cmd == 'tick':
                 # v856f5: tick extrap on|off - the v835 stalled-receiver re-stamp
                 global STALE_TICK_EXTRAP
@@ -8687,7 +8709,26 @@ _relay_send_q = queue.Queue()
 PERF_STATS = True
 PERF_STATS_INTERVAL = 30.0
 _perf = {'rx': 0, 'rxb': 0, 'tx': 0, 'txb': 0, 'aib': 0, 'txerr': 0,
+         'rx_backlog': 0, 'rx_backlog_run': 0, 'gc_n': 0, 'gc_t': 0.0, 'gc_max': 0.0,
          'disp_t': 0.0, 'disp_max': 0.0, 'disp_n': 0, 'rq_max': 0}
+
+# v864f5: garbage-collector pause measurement - every stop-the-world pass is timed, so the PERF line
+# can say how much wall time the interpreter spent frozen and the longest single pause
+_gc_t0 = [0.0]
+def _gc_cb(phase, info):
+    try:
+        if phase == 'start':
+            _gc_t0[0] = time.perf_counter()
+        else:
+            _d = time.perf_counter() - _gc_t0[0]
+            _perf['gc_n'] += 1; _perf['gc_t'] += _d
+            if _d > _perf['gc_max']: _perf['gc_max'] = _d
+    except Exception:
+        pass
+try:
+    gc.callbacks.append(_gc_cb)
+except Exception:
+    pass
 
 def _perf_stats_loop():
     while running:
@@ -8719,6 +8760,10 @@ def _perf_stats_loop():
             _mem_s += f' ai_tx={w["aib"] / iv / 1024.0:.1f}KBs'
             if w.get('txerr'):
                 _mem_s += f' TXERR={w["txerr"]}'                  # v838f5: sends the socket refused this window
+            # v864f5: keeping-up figures - share of packets read with another already waiting, the
+            # longest such run, and GC pauses (count / total ms / longest ms) in the window
+            _mem_s += (f' rx_late={100.0 * w["rx_backlog"] / max(1, w["rx"]):.1f}%(run{w["rx_backlog_run"]})'
+                       f' gc={w["gc_n"]}/{1000.0 * w["gc_t"]:.0f}ms/max{1000.0 * w["gc_max"]:.0f}ms')
             with sl:
                 _pp = []
                 for x in list(sids.values()):
@@ -8849,6 +8894,7 @@ OBJ_NUMBER_QUARANTINE_SEC = 300.0
 # parachuter) or inside the history grace window (a peer may still hold them - the v324
 # wrong-plane class), so wrap is safe under churn.
 OBJ_NUMBER_MAX = 0x07FF
+OBJ_NUMBER_RESERVE = 200          # v860f5: object numbers kept free for planes / chutes / respawns when AI columns are raised
 
 def _obj_numbers_in_use():
     """Set of ONumbers that must not be re-issued right now: every session's live plane and
@@ -10818,6 +10864,10 @@ def _handle_tank_hit_51(s, pl):
                                 if getattr(q, 'my_obj_number', None) == victim), None)
                     if _vs is not None and _vs is not s and dmg > 0:
                         PLANE_LAST_HIT[victim] = (attacker, time.time(), s.current_pilot)
+                        try:
+                            _desync_check(s, _vs)              # v862f5 (see _desync_check)
+                        except Exception:
+                            pass
                         continue
                 except Exception:
                     pass
@@ -10875,6 +10925,69 @@ def defence_dps():
     return max(0.1, float(SOLDIER_HP) / max(1.0, DEFENCE_TTK_S))
 
 PLANE_LAST_HIT = {}          # v799f5: victim obj -> (attacker obj, time, attacker pilot) from msg-33 hit reports
+HIT_RANGE_ANOMALY_M = 1500.0 # v862f5: a scored hit with the two planes further apart than this (server view) is a desync
+DESYNC_TRACE_S = 20.0        # v862f5: relay trace switched on for both pilots after a desync event
+SENDER_JUMP_MPS = 350.0      # v862f5: a pilot's own frames implying more than this is a jump (no WWII plane does it)
+_DESYNC_EVENTS = []          # v862f5: (time, shooter, victim, distance) - `desync` on the console lists them
+DESYNC_DIR = LOG_DIR         # v863f5: one file per event, desync_<utc>_<shooter>_hits_<victim>.log - in the flat logs dir so
+                             # the admin Logs tab lists and serves it like any other log (sub-dirs are not traversed)
+DESYNC_RING_S = 30.0         # v863f5: seconds of each pilot's own frames kept for the event file
+
+def _desync_check(s, victim_s):
+    """v862f5 [AUTOMATIC DESYNC DETECTION]: a hit the shooter's client scored while the server's own
+    latest positions of shooter and victim are further apart than any gun reaches means the two
+    clients disagreed about where one of them was (PhiD hit Flak at 00:13 while Flak's client had
+    him 3.1 km behind). Log it with both positions and frame ages, and switch on the relay trace for
+    both pilots for DESYNC_TRACE_S so the next frames are captured without anyone at the console.
+    v863f5: everything about the event also goes to its OWN FILE in logs/desync/ - the 30 s of both
+    pilots' own frames BEFORE the hit (from the per-session ring), the event, and the traced frames
+    after it - so it can be diagnosed later from the server folder alone."""
+    _sp = s.__dict__.get('_pos_xy'); _vp = victim_s.__dict__.get('_pos_xy')
+    if _sp is None or _vp is None:
+        return
+    _d = math.hypot(_sp[0] - _vp[0], _sp[1] - _vp[1])
+    if _d <= HIT_RANGE_ANOMALY_M:
+        return
+    now = time.time()
+    if now - s.__dict__.get('_desync_logged_at', 0.0) < 5.0:
+        return
+    s._desync_logged_at = now
+    _line = (f'{s.current_pilot} scored a hit on {victim_s.current_pilot} while the server has them '
+             f'{_d / 1000.0:.2f} km apart (shooter frame {now - getattr(s, "last_telem_time", 0):.1f}s old, '
+             f'victim frame {now - getattr(victim_s, "last_telem_time", 0):.1f}s old; shooter at '
+             f'{tc_grid(_sp[0], _sp[1])}, victim at {tc_grid(_vp[0], _vp[1])})')
+    log('DESYNC', _line + f' - tracing both for {DESYNC_TRACE_S:.0f}s')
+    s._relay_trace_until = now + DESYNC_TRACE_S
+    victim_s._relay_trace_until = now + DESYNC_TRACE_S
+    _DESYNC_EVENTS.append((now, s.current_pilot, victim_s.current_pilot, _d))
+    del _DESYNC_EVENTS[:-200]
+    try:
+        os.makedirs(DESYNC_DIR, exist_ok=True)
+        _safe = lambda n: ''.join(c if c.isalnum() or c in '_-' else '_' for c in str(n))[:24]
+        _fn = os.path.join(DESYNC_DIR, f'desync_{time.strftime("%Y%m%d_%H%M%S", time.gmtime(now))}_'
+                                       f'{_safe(s.current_pilot)}_hits_{_safe(victim_s.current_pilot)}.log')
+        with open(_fn, 'w', encoding='utf-8') as fh:
+            fh.write(f'DESYNC EVENT {time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now))} UTC  server {VERSION}\n')
+            fh.write(_line + '\n\n')
+            for who, x in (('SHOOTER', s), ('VICTIM', victim_s)):
+                fh.write(f'--- {who} {x.current_pilot} (obj 0x{getattr(x, "my_obj_number", 0) or 0:04x}, plane {getattr(x, "plane_type", "?")}): '
+                         f'own frames of the last {DESYNC_RING_S:.0f} s as the server received them '
+                         f'(t-before-hit, tick, x, y, z, implied m/s)\n')
+                _ring = list(x.__dict__.get('_frame_ring') or [])
+                _pt = None
+                for t, tk, fx, fy, fz in _ring:
+                    _v = ''
+                    if _pt is not None and t - _pt[0] > 0:
+                        _v = f'{math.hypot(fx - _pt[1], fy - _pt[2]) / (t - _pt[0]):.0f}'
+                    fh.write(f'  {t - now:7.2f}s  tick {tk:5d}  ({fx:9.0f}, {fy:9.0f}, {fz:6.0f})  {_v}\n')
+                    _pt = (t, fx, fy)
+                fh.write(f'  last STATUS: loss dl_total={(1 - x.__dict__.get("_loss_dl_rx", 0) / max(1, x.__dict__.get("_loss_dl_tx", 1))) * 100:+.2f}% '
+                         f'RTT={x.__dict__.get("_rtt_ms", "?")}\n\n')
+            fh.write(f'--- relayed frames TO each of them for the next {DESYNC_TRACE_S:.0f} s (sender, re-stamped tick, pos, dist):\n')
+        s._relay_trace_file = _fn; victim_s._relay_trace_file = _fn
+        log('DESYNC', f'event file: {_fn}')
+    except Exception:
+        logx('DESYNC', 'event file failed')
 PLANE_HIT_CREDIT_S = 90.0    # a crash within this of the last recorded hit credits that shooter
 
 def _handle_soldier_hit(s, victim, attacker, dmg):
@@ -11222,7 +11335,72 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
                   f'(tank_tables.json not loaded next to server.py)')
         return None
     _alive = sum(1 for t in TANKS.values() if t['room'] == room_id and not t.get('dead'))
-    if _alive >= TC_MAX_TANKS_PER_ROOM:
+    # v860f5 [NO ARTIFICIAL TANK CAP] (user 09-27): how many tanks can exist is decided by PRODUCTION
+    # alone - the units each factory has built from its own metal (+ the arena's starting stock), as
+    # the Production Complex panel shows. The only limit kept is the OBJECT-NUMBER SPACE the client
+    # shares between planes, chutes, tanks, soldiers and trains (OBJ_NUMBER_MAX = 2047): a column
+    # is refused only when raising it would leave fewer than OBJ_NUMBER_RESERVE numbers free, and
+    # the AI line then says so. The v604/v711/v859 caps and idle-column recalls are gone.
+    try:
+        _used = len(_obj_numbers_in_use())
+    except Exception:
+        _used = 0
+    if _used + n_want > OBJ_NUMBER_MAX - OBJ_NUMBER_RESERVE:
+        log('TC', f'room {room_id}: cannot raise a column - object numbers nearly exhausted '
+                  f'({_used} in use of {OBJ_NUMBER_MAX}, reserve {OBJ_NUMBER_RESERVE}; {_alive} tanks alive)')
+        tc_say(room_id, f'AI: Too many objects on the map - no tanks available to {purpose} '
+                        f'{tc_camp_tag(scene_camp(terrain, target_sidx))} {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+        return None
+    if False:
+        _mine = 0
+        # v859f5: the side is at its own share - recall its oldest idle column (as before) or refuse
+        _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
+        if _reuse is None:
+            _victim = None
+            for _gid, _c in sorted(COLUMNS.items(), key=lambda kv: kv[1].get('held_at') or kv[1].get('created_at') or 0):
+                if _c.get('room') != room_id or _c.get('camp') != int(camp):
+                    continue
+                if _c.get('purpose') in ('hold', 'defend') and not _c.get('engaged'):
+                    _victim = _gid; break
+            if _victim is not None:
+                log('TC', f'room {room_id}: camp {camp} has {_mine} tanks >= TC_MAX_TANKS_PER_CAMP - recalling its idle column {_victim}')
+                column_delete(_victim, reason='(recalled - camp tank share, new battalion needed)')
+            else:
+                log('TC', f'room {room_id}: camp {camp} has {_mine} tanks >= TC_MAX_TANKS_PER_CAMP and no idle column to recall')
+                tc_say(room_id, f'AI: Tank limit reached - no tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                                f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+                return None
+    elif _alive >= TC_MAX_TANKS_PER_ROOM:
+        # v859f5 [THE ROOM CAP BLOCKED A SIDE WITH NO TANKS]: 48 tanks of the OTHER sides refused
+        # Bama's JP trigger ('No tanks available' with 288 tanks in his rear factories, 09-26 19:50).
+        # At the room cap the side furthest OVER its share gives up its oldest idle garrison, so a
+        # side under its share can always raise; only if nobody has an idle column does the
+        # request fail, and then the line says why.
+        _by_camp = {}
+        for t in TANKS.values():
+            if t['room'] == room_id and not t.get('dead'):
+                _by_camp[t.get('camp')] = _by_camp.get(t.get('camp'), 0) + 1
+        _victim = None
+        for _vc in sorted(_by_camp, key=lambda c: -_by_camp[c]):
+            if _by_camp[_vc] <= TC_MAX_TANKS_PER_CAMP and _vc != int(camp):
+                continue
+            for _gid, _c in sorted(COLUMNS.items(), key=lambda kv: kv[1].get('held_at') or kv[1].get('created_at') or 0):
+                if _c.get('room') != room_id or _c.get('camp') != _vc:
+                    continue
+                if _c.get('purpose') in ('hold', 'defend') and not _c.get('engaged'):
+                    _victim = (_gid, _vc); break
+            if _victim:
+                break
+        if _victim is not None:
+            log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM - recalling idle column {_victim[0]} '
+                      f'of camp {_victim[1]} ({_by_camp.get(_victim[1], 0)} tanks) to make room for camp {camp}')
+            column_delete(_victim[0], reason='(recalled - room tank cap, another side needs a battalion)')
+        else:
+            log('TC', f'room {room_id}: {_alive} tanks alive >= TC_MAX_TANKS_PER_ROOM and no side has an idle column to recall')
+            tc_say(room_id, f'AI: Tank limit reached - no tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
+                            f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
+            return None
+    if False:
         _reuse = tc_find_idle_column(room_id, camp, txy[0], txy[1])
         if _reuse is None:
             # v711f5 (BanzaiBama 09-16: 'no tanks available, US owns half the map'): at the cap,
@@ -11529,7 +11707,8 @@ TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
 CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
-TC_MAX_TANKS_PER_ROOM = 48      # v604f5/v711f5: 32 -> 48; at the cap an idle column of the camp is recalled
+TC_MAX_TANKS_PER_ROOM = 64      # v860f5: NO LONGER ENFORCED (production is the limit; see tc_raise_column) - kept for the console
+TC_MAX_TANKS_PER_CAMP = 24      # v860f5: NO LONGER ENFORCED
 # v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
 # proven; the others are knobs (`tc ppt <tank> <soldier> <aa>`) - the client's kill line names the
 # hunter from this ('GBR tank destroyed GER tank', 'GBR anti-aircraft destroyed GER soldier').
@@ -13691,11 +13870,30 @@ def build_group_info_26(records):
                             _g16(r.get('ty', r.get('y', 0))), int(r.get('w6', 0)) & 0xffff)
     return build_ingame_pkt(bytes(body))
 
-def room_group_records(room_id):
+def room_group_records(room_id, viewer_camp=None):
     """The room's live AI groups as msg-26 records: tank columns (leader position, objective scene,
-    strategy from the column's purpose), paratroop sticks and supply trains."""
+    strategy from the column's purpose), paratroop sticks and supply trains.
+    v858f5: viewer_camp links each column's box to ITS mission (the record's mission code = the
+    index of the column's own 'Attack ...' / 'Defend ...' mission in the viewer's mission list;
+    'item = value*2' per the RE). Every box carried 'no mission' (0xf), and the client then drew
+    the mission line of a NEW trigger from the FIRST column's box instead of the new column's
+    (Skyyr / Gibson 09-27: second column raised at 69,BQ, line drawn from the earlier column at
+    70,BM to the new target 64,BN, no line for the new tanks)."""
     terrain = _probe_terrain_for_room(room_id)
     out = []
+    _mlist = missions_for(room_id, viewer_camp) if viewer_camp is not None else []
+    _mtype1 = [m for m in _mlist if m['type'] == 1]
+    def _mission_code(col):
+        try:
+            if viewer_camp is None or col.get('camp') != viewer_camp:
+                return GROUP_MISSION_NONE
+            tgt = col.get('target')
+            for i, m in enumerate(_mtype1):
+                if m.get('sidx') == tgt:
+                    return i if i < 15 else GROUP_MISSION_NONE
+        except Exception:
+            pass
+        return GROUP_MISSION_NONE
     for gid, col in list(COLUMNS.items()):
         if col.get('room') != room_id:
             continue
@@ -13712,6 +13910,7 @@ def room_group_records(room_id):
         # had them swapped (box drawn on the target, text naming the departure factory).
         out.append({'camp': col.get('camp', 0), 'kind': GROUP_KIND['tank'],
                     'strategy': GROUP_STRATEGY.get(col.get('purpose') or 'none', 0), 'f3': 1,
+                    'mission': _mission_code(col),
                     'uc': int(lead.get('class', 131)), 'count': len(live),
                     'x': txy[0] if txy else tx, 'y': txy[1] if txy else ty,
                     'tx': tx, 'ty': ty,
@@ -13766,7 +13965,7 @@ def room_group_records(room_id):
 def send_group_info_26(s, reason=''):
     if getattr(s, 'current_room', None) is None:
         return 0
-    recs = room_group_records(s.current_room)
+    recs = room_group_records(s.current_room, viewer_camp=getattr(s, 'nation', None))   # v858f5
     pkt = build_group_info_26(recs)
     send_rel(s, pkt, f'<- GROUP_INFO 26 x{len(recs)} {reason}', to=3.0)
     log('GROUP26', f'{s.current_pilot}: msg 26 x{len(recs)} group record(s) {reason}')
@@ -13791,7 +13990,7 @@ def _group26_push_loop():
                     continue
                 if not room_has_economy(s.current_room):
                     continue
-                recs = room_group_records(s.current_room)
+                recs = room_group_records(s.current_room, viewer_camp=getattr(s, 'nation', None))   # v858f5
                 if recs:
                     send_unrel(s, build_group_info_26(recs), f'<- GROUP_INFO 26 x{len(recs)} (push)')
         except Exception:
@@ -18224,7 +18423,29 @@ def relay_telemetry(src, data, _split_obj=None):
         if _co_onum == getattr(src, 'my_obj_number', None):
             try:
                 _ox, _oy, _oz = unpack_plane_pos9(pl[9:18])         # v612f5: the pilot's own position
-                src._pos_xy = (_ox, _oy); src._pos_z = _oz
+                # v862f5 [SENDER JUMP]: consecutive own frames implying an impossible speed = the
+                # client teleported the plane (or sent an old position). Logged with both positions;
+                # a pilot who keeps doing it is the one the others see jumping.
+                try:
+                    _prev = src.__dict__.get('_pos_xy'); _prev_t = src.__dict__.get('_pos_at')
+                    if _prev is not None and _prev_t:
+                        _dtj = time.time() - _prev_t
+                        if 0.05 <= _dtj <= 5.0:
+                            _jump = math.hypot(_ox - _prev[0], _oy - _prev[1])
+                            if _jump > 300.0 and _jump / _dtj > SENDER_JUMP_MPS:
+                                _nj = src.__dict__.get('_jump_n', 0) + 1; src._jump_n = _nj
+                                if _nj <= 5 or (_nj % 50) == 0:
+                                    log('DESYNC', f'{src.current_pilot}: own frames jumped {_jump:.0f} m in {_dtj:.2f}s '
+                                                  f'({_jump / _dtj:.0f} m/s) from {tc_grid(_prev[0], _prev[1])} to {tc_grid(_ox, _oy)} '
+                                                  f'(#{_nj} this session)')
+                except Exception:
+                    pass
+                src._pos_xy = (_ox, _oy); src._pos_z = _oz; src._pos_at = time.time()
+                # v863f5: ring of the pilot's own frames for the desync event file
+                _fr = src.__dict__.setdefault('_frame_ring', [])
+                _fr.append((time.time(), int.from_bytes(pl[5:7], 'little'), _ox, _oy, _oz))
+                if len(_fr) > 160:
+                    del _fr[:-160]
                 _co_pos = (_ox, _oy)
             except Exception:
                 pass
@@ -18284,10 +18505,16 @@ def relay_telemetry(src, data, _split_obj=None):
                 #   * non-standard sizes contribute NO samples, and
                 #   * their SIGHTING is timestamped - ground_stop_eligible refuses while one
                 #     was seen inside the judgement window (see 'special-form').
-                if len(pl) not in TELEM_POS_EVIDENCE_SIZES or _opc != 0x07:
+                if (len(pl) not in TELEM_POS_EVIDENCE_SIZES or _opc != 0x07) and _split_obj is None:
                     # v532f5: the size list now admits the B-17's 90B native form; a CONVERTED
                     # 0x08 frame (bombsight run) is 90B too by the time it gets here, so the
                     # native-opcode test is what keeps v446's special-form sighting alive.
+                    # v866f5: a plane record split out of a MULTI-RECORD frame (transport + chutes,
+                    # 81 B) is a standard record, not the bombsight form - it was being counted as
+                    # one, and a transport that landed within 20 s of its last chute touching down
+                    # had its repair request refused (Bama 09-26 21:09:13, 0.2 s after his stick
+                    # landed; serviced only on the second ask at :55). Split records are also
+                    # admitted as position evidence below.
                     src._odd_telem_time = time.time()
                 else:
                     _p = struct.unpack_from('<HHH', pl, 9)
@@ -18492,6 +18719,21 @@ def relay_telemetry(src, data, _split_obj=None):
                 if len(relayed) >= 9:
                     struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
         seq = p.nundgram()                                  # v813f5: the one datagram counter
+        if time.time() < p.__dict__.get('_relay_trace_until', 0.0):
+            try:                                             # v861f5: `trace <pilot>`
+                _tx, _ty, _tz = unpack_plane_pos9(relayed[9:18])
+                _tl = (f'-> {p.current_pilot}: {src.current_pilot} obj 0x{_co_onum if _co_onum is not None else 0:04x} '
+                       f'tick={struct.unpack_from("<H", relayed, 5)[0]} (his rt={rt}) pos=({_tx:.0f},{_ty:.0f},{_tz:.0f}) '
+                       f'dist={(_dd / 1000.0) if _dd is not None else -1:.2f}km')
+                log('RELAY-TRACE', _tl)
+                _tf = p.__dict__.get('_relay_trace_file')
+                if _tf:                                      # v863f5: into the desync event file too
+                    with open(_tf, 'a', encoding='utf-8') as fh:
+                        fh.write(f'  +{time.time() - p.__dict__.get("_relay_trace_until", 0) + DESYNC_TRACE_S:6.2f}s {_tl}\n')
+            except Exception:
+                pass
+        elif p.__dict__.get('_relay_trace_file'):
+            p.__dict__.pop('_relay_trace_file', None)
         # v837f5 [PER-PAIR RELAY GAP]: how long since the last frame of THIS sender reached THIS
         # receiver. A stall between two specific pilots (Taurus 09-24: 'Bama 4 km away, shooting me')
         # left no trace in the logs; now a gap over RELAY_GAP_WARN_S is logged once per occurrence
@@ -20425,6 +20667,14 @@ def broadcast_scene_36(room_id, records, reason='', force=False, killer=None):
             _SCENE36_DESTROYED.add((room_id, _i))
             _OBJ_DEAD_AT[(room_id, _i)] = _now        # v556f5: repair clock starts here
             _OBJ_ARMED_AT[(room_id, _i)] = _now       # v557f5: Destroyer floor clock
+    # v860f5 [DAMAGE DRAWS DOWN STORED UNITS] (user 09-27): a producer scene's built units (tanks at
+    # a tank factory, aircraft at an airfield, ships at a port) sit in its buildings; when one of
+    # those buildings is destroyed the scene loses the share of its units that building represents
+    # (its value over the scene's total value, rounded up). The Production Complex numbers follow.
+    try:
+        scene_units_on_destroy(room_id, [r[0] for r in records])
+    except Exception:
+        logx('UNITS', 'unit draw-down on destroy failed')
     # v752f5: a train ON a bridge that just went down goes with it (cyan kill line to the pilot who
     # dropped the bridge, exactly like a direct train kill)
     try:
@@ -22194,7 +22444,9 @@ AUTO_RESUPPLY_SETTLE = 2.0     # min seconds of identical-position samples befor
                                #   window (CRASH_MOVEMENT_WINDOW_S=3.0), so in practice a plane is
                                #   granted once its whole recent history is still
 AUTO_RESUPPLY_POLL = 0.5       # v272: background poll interval
-REPAIR_119_PENDING_WINDOW_S = 10.0 # v505f5: how long a DEFERRED explicit msg-119 stays honorable.
+REPAIR_119_PENDING_WINDOW_S = 60.0 # v505f5/v865f5: how long a DEFERRED explicit msg-119 stays honorable (10 -> 60 s: a
+                               #   request deferred for the special-form holdoff (20 s after the last such frame)
+                               #   must outlive that holdoff).
                                #   In an AIR-START arena the poll grant is suppressed, so a 119 that
                                #   deferred (plane not settled yet) had NOTHING to retry it - the
                                #   client fires 119 once on engine-off and drops it, so a settled
@@ -22838,6 +23090,49 @@ def camp_units_state(room_id, camp):
 def scene_units_state(room_id, sidx):
     with _SUPPLY_UNITS_LOCK:
         return dict(_SCENE_UNITS.get((room_id, int(sidx)), {'aircraft': 0, 'tank': 0, 'ship': 0}))
+
+def scene_units_on_destroy(room_id, obj_ids):
+    """v860f5: for every destroyed object that belongs to a producer scene, remove that object's
+    value share of the scene's stored units (ceil), per kind the scene produces. Returns the
+    number of units removed in total."""
+    if not UNITS_MODEL or not obj_ids:
+        return 0
+    terrain = _probe_terrain_for_room(room_id)
+    lost_total = 0
+    for oid in obj_ids:
+        info = trn_obj_info(room_id, oid) or {}
+        sidx = info.get('scene')
+        if sidx is None:
+            continue
+        t = (scene_type_for(terrain, sidx) or '').lower()
+        kinds = []
+        if 'airfield' in t: kinds.append('aircraft')
+        if 'tank factory' in t or 'metal factory' in t: kinds.append('tank')
+        if 'port' in t: kinds.append('ship')
+        if not kinds:
+            continue
+        try:
+            objs = tc_scene_objects(room_id, terrain, sidx)
+            total_v = sum(max(0, int((e[1] or {}).get('value', 0))) for e in objs) or 1
+        except Exception:
+            total_v = 1
+        share = max(0.0, min(1.0, float(info.get('value', 0) or 0) / float(total_v)))
+        if share <= 0:
+            continue
+        with _SUPPLY_UNITS_LOCK:
+            su = _SCENE_UNITS.get((room_id, int(sidx)))
+            if not su:
+                continue
+            for k in kinds:
+                have = int(su.get(k, 0))
+                if have <= 0:
+                    continue
+                lose = min(have, int(math.ceil(have * share)))
+                su[k] = have - lose
+                lost_total += lose
+                log('UNITS', f'room {room_id} scene {sidx}: {info.get("name", "object")} destroyed - '
+                             f'{lose} {k} unit(s) lost ({share * 100:.0f}% of the scene), {su[k]} left')
+    return lost_total
 
 def camp_units_state_legacy(room_id, camp):
     """Current built-not-deployed unit counts for a camp, {'aircraft','tank','ship'}."""
@@ -24612,8 +24907,15 @@ def _handle_repair_request_119(s, pl):
     # form position stream freezes (movement reads 0) while the plane is very much airborne.
     _odd = getattr(s, '_odd_telem_time', 0.0)
     if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S:
-        log('RESUPPLY', f'{s.current_pilot} msg-119 request REFUSED - special telemetry form '
-                        f'seen {now - _odd:.1f}s ago (bombsight/autopilot window)')
+        # v865f5: DEFER instead of refusing. A bomber that has just landed can still be sending
+        # the special form (bombsight / autopilot view left open on the ground), and the refusal
+        # dropped the request on the floor - the pilot sat on the runway un-serviced until he
+        # taxied to the hangar and asked again 40 s later (Bama 09-26 21:09: REFUSED at :13,
+        # serviced at :57). Now the request is kept pending and the poll services it as soon as
+        # the normal-form stream has been back for the holdoff and the plane reads parked.
+        s._repair_119_pending = now
+        log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - special telemetry form '
+                        f'seen {now - _odd:.1f}s ago (bombsight/autopilot window) - poll services it once the normal stream is back')
         return
     # DEBOUNCE only (v454f5). The one-shot 'resupplied_this_stop' latch is GONE from this
     # EXPLICIT-request path: field evidence (Taurus, messages88, NAW II 5-towers) shows the
@@ -25149,6 +25451,21 @@ def handle_post_auth(s, cmd, pl):
             if _isub == 0xd9 and len(pl) >= 13:   # DISPLAY MEMBERS request (prefixed) -> reply
                 handle_squadron_members_request(s, int.from_bytes(bytes(pl[4:])[5:9], 'little'))
                 return
+            if _isub == 0xd7 and len(pl) >= 13:   # v857f5: SQUADRON NOTES request (prefixed form)
+                # The join dialog asks for the selected squadron's notes and waits for the reply
+                # before it proceeds; only the DIRECT form was answered, so a client that batched
+                # this one in the prefixed framing sat on 'joining' until it timed out (Alon as
+                # boazb68, 09-26 19:27-20:16: two unanswered PREFIXED 0xd7 for squadron 9).
+                _d7id = int.from_bytes(bytes(pl[4:])[5:9], 'little')
+                _d7row = db_get_squadron(_d7id) if _d7id else None
+                if _d7row:
+                    _notes = _d7row[4] or ''
+                    threading.Thread(target=lambda: send_rel(
+                        s, build_squadron_notes(_d7id, _notes),
+                        f'<- 0xd7 squadron notes ({_d7row[1]}, id={_d7id}) (prefixed)', to=5.0),
+                        daemon=True).start()
+                    log('SQNMGT', f'notes request (prefixed) id={_d7id} ({_d7row[1]}) -> {_notes!r}')
+                    return
             if _isub == 0xdb and len(pl) >= 13:   # REMOVE MEMBER request (prefixed)
                 _inner = bytes(pl[4:])
                 handle_squadron_remove_member(s, int.from_bytes(_inner[5:9], 'little'),
@@ -26299,6 +26616,20 @@ def handle_post_auth(s, cmd, pl):
                 # re-send the advancing responses (so the stuck client unsticks itself) but skip
                 # the one-time join broadcasts. First selection is unchanged.
                 _reselect = (getattr(s, 'current_pilot', None) == pname and not s.entered_game)
+                _prev_pilot = getattr(s, 'current_pilot', None)
+                # v867f5 [PILOT SWITCH LEAVES A GHOST]: selecting a DIFFERENT pilot on the same
+                # session announced the new name's join but never the old name's leave, so every
+                # switch left the previous name in everybody's lobby list (Skyyr 09-27: _Skyyr_
+                # three times, __Skyyr__ once, while only one of him was online). Announce the
+                # old name leaving first - the msg-63 remove and the system line - as a real exit does.
+                if _prev_pilot and _prev_pilot != pname and not s.entered_game:
+                    try:
+                        broadcast_player_leave(_prev_pilot, exclude_sess=s)
+                        broadcast_system(f'[{_prev_pilot}] has left')
+                        db_room_leave(_prev_pilot)
+                        log('POST-AUTH', f'pilot switch {_prev_pilot} -> {pname}: old name announced as left')
+                    except Exception:
+                        logx('POST-AUTH', 'pilot-switch leave announce failed')
                 s.current_pilot = pname; s.current_slot = slot
                 log('POST-AUTH', f'Pilot {"re-" if _reselect else ""}selected: "{pname}" slot={slot}')
                 if _enforce_ban_on_select(s, pname): return
@@ -27881,6 +28212,20 @@ while running:
     if not data: continue
     pt=data[0]; sz=len(data)
     _perf['rx'] += 1; _perf['rxb'] += sz          # v399f5
+    # v864f5 [ARE WE KEEPING UP?]: was another datagram already waiting when this one was taken?
+    # If so the receive thread is BEHIND (head-of-line blocking: a slow handler ahead delayed this
+    # packet). Counted as 'backlog' reads; the PERF line shows what share of packets were read
+    # late and the longest run of consecutive backlog reads.
+    try:
+        if select.select([sock], [], [], 0)[0]:
+            _perf['rx_backlog'] += 1
+            _perf['_bl_run'] = _perf.get('_bl_run', 0) + 1
+            if _perf['_bl_run'] > _perf['rx_backlog_run']:
+                _perf['rx_backlog_run'] = _perf['_bl_run']
+        else:
+            _perf['_bl_run'] = 0
+    except Exception:
+        pass
     if sz==912 and pt==0:
         threading.Thread(target=_guarded, args=(handle_syn, data, addr), daemon=True).start()
     elif sz==8 and data[2]==2: _guarded(on_pkt, data, addr)
