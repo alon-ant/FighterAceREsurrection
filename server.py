@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v875f5'
+VERSION = 'v876f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6600,26 +6600,30 @@ def handle_squadron_members_request(s, squadron_id):
     # only the members request - so the roster arrived for a squadron the dialog had not been
     # switched to and was dropped (Alon 09-28 04:32: sqn 27 blank, 20 and 9 fine, each preceded
     # by a notes request). If we did not just send notes for this squadron, send them first.
-    # v872f5: ALWAYS notes then roster, from ONE thread, in that order. v870 only sent notes first
-    # when none had gone out recently; but the client sends the notes request and the members
-    # request together (3 ms apart), the two replies left from two threads and RACED - whenever the
-    # roster overtook the notes reply the dialog had not switched yet and dropped it ('sometimes
-    # members display, sometimes not', Alon 09-28). A repeated notes reply only repaints the box.
-    _need_notes = True
+    # v876f5: ORDER without the cost. v872 always re-sent the notes and slept 250 ms before the
+    # roster - about a second per selection on a 165 ms link once each reliable send waits for its
+    # ACK ('still not responsive enough', Alon 09-28). Now one per-session lock serialises every
+    # squadron reply: the notes handler holds it while its reply is ACKed, the members handler
+    # takes it next, sends the notes only if none went out for this squadron in the last 3 s, and
+    # sends the roster immediately after. Same guaranteed order, roughly half the time.
+    _lk = s.__dict__.get('_sqn_send_lock')
+    if _lk is None:
+        _lk = s.__dict__['_sqn_send_lock'] = threading.Lock()
     def _send():
-        if _need_notes:
-            try:
-                _row = db_get_squadron(int(squadron_id))
-                if _row:
-                    send_rel(s, build_squadron_notes(int(squadron_id), _row[4] or ''),
-                             f'<- 0xd7 squadron notes (before members, sqn={squadron_id})', to=5.0)
-                    s._last_notes_sqn = (int(squadron_id), time.time())
-                    time.sleep(0.25)
-            except Exception:
-                logx('SQNMGT', 'notes-before-members failed')
-        send_rel(s, pkt, f'<- 0xd9 members({len(names)}) sqn={squadron_id}', to=5.0)
+        with _lk:
+            _ln = s.__dict__.get('_last_notes_sqn')
+            if _ln is None or _ln[0] != int(squadron_id) or time.time() - _ln[1] > 3.0:
+                try:
+                    _row = db_get_squadron(int(squadron_id))
+                    if _row:
+                        send_rel(s, build_squadron_notes(int(squadron_id), _row[4] or ''),
+                                 f'<- 0xd7 squadron notes (before members, sqn={squadron_id})', to=5.0)
+                        s._last_notes_sqn = (int(squadron_id), time.time())
+                except Exception:
+                    logx('SQNMGT', 'notes-before-members failed')
+            send_rel(s, pkt, f'<- 0xd9 members({len(names)}) sqn={squadron_id}', to=5.0)
     threading.Thread(target=_send, daemon=True).start()
-    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s) (notes first, in order)')
+    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s) (ordered)')
 
 def build_squadron_remove_result(ok):
     """REMOVE-MEMBER RESULT (0xdb) parsed by FUN_004f0090. Convention is INVERTED like the join:
@@ -26840,11 +26844,15 @@ def handle_post_auth(s, cmd, pl):
                 _d7row = db_get_squadron(_d7id) if _d7id else None
                 if _d7row:
                     _notes = _d7row[4] or ''
-                    s._last_notes_sqn = (int(_d7id), time.time())      # v870f5
-                    threading.Thread(target=lambda: send_rel(
-                        s, build_squadron_notes(_d7id, _notes),
-                        f'<- 0xd7 squadron notes ({_d7row[1]}, id={_d7id})', to=5.0),
-                        daemon=True).start()
+                    _lk7 = s.__dict__.get('_sqn_send_lock')
+                    if _lk7 is None:
+                        _lk7 = s.__dict__['_sqn_send_lock'] = threading.Lock()
+                    def _send_notes(_id=_d7id, _n=_notes, _nm=_d7row[1]):
+                        with _lk7:                                     # v876f5: serialised with the roster
+                            send_rel(s, build_squadron_notes(_id, _n),
+                                     f'<- 0xd7 squadron notes ({_nm}, id={_id})', to=5.0)
+                            s._last_notes_sqn = (int(_id), time.time())
+                    threading.Thread(target=_send_notes, daemon=True).start()
                     log('SQNMGT', f'notes request id={_d7id} ({_d7row[1]}) -> {_notes!r}')
                     return
                 # sub=0xd7 = FUN_004f0570 "SetArena" (5 bytes: [0xd7][GameIndex 4B])
