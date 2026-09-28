@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v880f5'
+VERSION = 'v881f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -20280,8 +20280,32 @@ def handle_compound(s, outer_cmd, pl):
     # (messages16). A blanket in-game swallow instead froze the world build at ~97%
     # (messages20), because the client waits for replies to some build/spawn messages.
     # Only the genuine fire-and-forget crashers are suppressed by the no-echo set above.
+    # v881f5 [THE COMPOUND WHITELIST ATE ONE REQUEST IN THREE]: COMPOUND_CMDS = {530, 578, 4610} are
+    # not compound markers - they are three of the values the attached-TIME wrapper's bytes 2-3 take
+    # as the client's time-index counter runs (0x0212, 0x0242, 0x1202). Any message that happened
+    # to be sent while the counter read one of those was routed here, matched no inner handler and
+    # was ECHOED to its sender instead of answered (Alon 09-28 14:44: seqs 11-13 = two notes
+    # requests and a members request, all echoed; the news request echoed as 'in 202'1'). Every
+    # other counter value goes through the prefixed re-frame and works. Instead of echoing an
+    # unknown inner message, hand it to the ordinary dispatcher as a DIRECT frame (cmd 0), which
+    # is what the re-frame does for the other counter values; only inner subs with no direct
+    # handler still get the echo, exactly as before.
+    if _compound_known_direct(inner_sub):
+        log('COMPOUND', f'inner sub=0x{inner_sub:02x} -> re-dispatched as a direct frame (v881f5)')
+        try:
+            handle_post_auth(s, 0, bytes(inner))
+        except Exception:
+            logx('COMPOUND', 're-dispatch failed')
+        return
     log('COMPOUND', f'unknown inner -> echo inner')
     threading.Thread(target=lambda: send_rel(s, inner, '<- compound echo unknown inner', to=5.0), daemon=True).start()
+
+def _compound_known_direct(sub):
+    """v881f5: inner subs that the direct dispatcher answers (so a compound-routed copy must be
+    re-dispatched, not echoed). Lobby requests, squadron actions, in-game requests with a direct
+    handler, and everything on the prefixed re-frame list."""
+    return (sub in PREFIXED_REFRAME_SUBS or sub in (0xca, 0xe4, 0xe1, 0x44, 0x14, 0x40, 0x17, 0x43,
+                                                   0x66, 0x6e, 0x64, 0x3a, 0x20, 0x77, 0x28, 0x2e))
 
 
 GROUND_HP = {}   # (room_id, static-object idx) -> accumulated damage from msg 31 (v199, PvE part 1)
