@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v881f5'
+VERSION = 'v882f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -25487,8 +25487,20 @@ def handle_post_auth(s, cmd, pl):
     # Switching them all on at once is exactly how you break a working lobby - one of them decodes
     # to sub=0xd4 = LEAVE. So re-frame the DELETE, which is the demonstrated bug, and LOG every
     # other prefixed message so the rest can be tackled one at a time, on evidence.
-    _pfx = (cmd and cmd not in COMPOUND_CMDS and len(pl) >= 9
-            and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0)
+    # v882f5 [COMPOUND_CMDS ARE WRAPPER VALUES, NOT MESSAGE TYPES]: 530/578/4610 are three values the
+    # attached-TIME wrapper's bytes 2-3 take as the client's time-index runs. Excluding them from
+    # the re-frame sent every request that happened to carry one of them down the compound path,
+    # where the sub reads as 0 and a scan handler (or `elif cmd==530: pass`) swallowed it (Alon
+    # 09-28 14:44 and 14:56: notes/members/news requests, seqs 11-13 and 9-11, all silent; v881's
+    # compound fallback never got to see them). When the inner message is one the re-frame list
+    # knows, re-frame it here like any other wrapper value; the genuine compound forms (pilot
+    # create/rename/delete, exit, disconnect, pilot list/select) are not on that list and still go
+    # to handle_compound.
+    _pfx_known = (cmd in COMPOUND_CMDS and len(pl) >= 9
+                  and (pl[8] == 0xca or (pl[8] in PREFIXED_REFRAME_SUBS and pl[8] not in (0xe2, 0xe3, 0xe7)))
+                  and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0)
+    _pfx = ((cmd and cmd not in COMPOUND_CMDS and len(pl) >= 9
+             and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0) or _pfx_known)
     if _pfx:
         _isub = pl[8]
         if _isub in PREFIXED_REFRAME_SUBS:      # 0x03 + the no-pl[8]-fallback subs (v340)
