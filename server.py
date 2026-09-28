@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v882f5'
+VERSION = 'v886f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4482,13 +4482,24 @@ def console_handler():
                     log('CONSOLE', 'usage: trace <pilot> [seconds]')
             elif cmd == 'tick':
                 # v856f5: tick extrap on|off - the v835 stalled-receiver re-stamp
-                global STALE_TICK_EXTRAP
+                # v883f5: tick project on|off | tick lead <n> | tick mono on|off
+                global STALE_TICK_EXTRAP, RELAY_TICK_PROJECT, RELAY_TICK_LEAD, RELAY_TICK_MONOTONIC, AI_TICK_PROJECT
                 _a = (parts[1].split() if len(parts) > 1 else [])
-                if _a and _a[0] == 'extrap' and len(_a) > 1:
-                    STALE_TICK_EXTRAP = _a[1].lower() in ('on', '1', 'true', 'yes')
-                    log('CONSOLE', f'tick extrap = {STALE_TICK_EXTRAP}')
-                else:
-                    log('CONSOLE', f'usage: tick extrap on|off   (now {STALE_TICK_EXTRAP})')
+                _on = (len(_a) > 1 and _a[1].lower() in ('on', '1', 'true', 'yes'))
+                if _a and _a[0] == 'ai' and len(_a) > 1:          # v884f5: AI objects on the projected clock
+                    AI_TICK_PROJECT = _on
+                elif _a and _a[0] == 'extrap' and len(_a) > 1:
+                    STALE_TICK_EXTRAP = _on
+                elif _a and _a[0] == 'project' and len(_a) > 1:
+                    RELAY_TICK_PROJECT = _on
+                elif _a and _a[0] == 'mono' and len(_a) > 1:
+                    RELAY_TICK_MONOTONIC = _on
+                elif _a and _a[0] == 'lead' and len(_a) > 1 and _a[1].lstrip('-').isdigit():
+                    RELAY_TICK_LEAD = max(0, min(20, int(_a[1])))
+                elif _a:
+                    log('CONSOLE', 'usage: tick extrap|project|mono|ai on|off | tick lead <0-20>')
+                log('CONSOLE', f'tick: project={RELAY_TICK_PROJECT} ai={AI_TICK_PROJECT} mono={RELAY_TICK_MONOTONIC} '
+                               f'lead={RELAY_TICK_LEAD} extrap={STALE_TICK_EXTRAP}')
             elif cmd == 'chute':
                 # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
                 # server-driven descent, frame-after-create, delete settle) as one switch
@@ -4933,6 +4944,22 @@ def console_handler():
                         log('CONSOLE', f'tc ppt: tank={PPT_CLASS_TANK} soldier={PPT_CLASS_SOLDIER} aa={PPT_CLASS_AA}')
                     except (IndexError, ValueError):
                         log('CONSOLE', 'usage: tc ppt <tank> <soldier> <aa>  (0..31)')
+                elif _a[0] == 'tankahead':
+                    # v886f5: tc tankahead <seconds> - the tank position look-ahead
+                    try:
+                        global TANK_LOOKAHEAD_S
+                        TANK_LOOKAHEAD_S = max(0.0, min(2.0, float(_a[1])))
+                        log('CONSOLE', f'tc tankahead: {TANK_LOOKAHEAD_S:.2f}s')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc tankahead <seconds 0..2>')
+                elif _a[0] == 'soldierahead':
+                    # v885f5: tc soldierahead <seconds> - the soldier position look-ahead
+                    try:
+                        global SOLDIER_LOOKAHEAD_S
+                        SOLDIER_LOOKAHEAD_S = max(0.0, min(2.0, float(_a[1])))
+                        log('CONSOLE', f'tc soldierahead: {SOLDIER_LOOKAHEAD_S:.2f}s')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc soldierahead <seconds 0..2>')
                 elif _a[0] == 'soldier':
                     # v593f5: tc soldier <throttle 0..1> <state> <rate1> <rate2> - live knobs for the
                     # soldier update's control fields (walking animation experiments)
@@ -8856,6 +8883,11 @@ def _perf_stats_loop():
             # longest such run, and GC pauses (count / total ms / longest ms) in the window
             _mem_s += (f' rx_late={100.0 * w["rx_backlog"] / max(1, w["rx"]):.1f}%(run{w["rx_backlog_run"]})'
                        f' gc={w["gc_n"]}/{1000.0 * w["gc_t"]:.0f}ms/max{1000.0 * w["gc_max"]:.0f}ms')
+            # v883f5: re-stamp health - stamps written, clamped (would have gone backwards),
+            # duplicated (same tick twice), and sender ticks rejected as late/duplicate
+            if w.get('stamp_n') or w.get('ai_stamp_n'):
+                _mem_s += (f' stamps={w.get("stamp_n", 0)} ai_stamps={w.get("ai_stamp_n", 0)} clamped={w.get("stamp_clamped", 0)}'
+                           f' dup={w.get("stamp_dup", 0)} tick_rej={w.get("tick_reject", 0)}')
             with sl:
                 _pp = []
                 for x in list(sids.values()):
@@ -9742,7 +9774,120 @@ _TELEM_MARK = b'\x05\x42\x00\x00\x07'
 # couple cycles behind -> smooth dead-reckon-forward interpolation. 0 already gives a
 # small +delta (the recipient's tick is from a few ms ago); a tiny lead adds margin so
 # we never cross into the <-12 'future' error window that snapped the plane.
+# v883f5 RE OF THE CONSUMER (FA.exe FUN_007e4a20, read 09-28): per frame, for an object with a
+# fresh network state, behind = (short)(globalTick - stamp) (FUN_007cf0f0; globalTick advances
+# elapsed/TickLength in Timer.cpp FUN_007cf180). The client does NOT interpolate between buffered
+# samples - it CATCHES UP: the extra cycles beyond this frame are re-simulated from the received
+# state (physics stepped cycle by cycle while < 11, 5 steps + a jump for 11-20, a single jump
+# 21-199, reset + 'Move2' log at 200+). A NEGATIVE behind (stamp in the receiver's future) down to
+# -19 MOVES THE OBJECT BACKWARDS (vtable+0x18 with the negative count); below -12 or above 1000
+# logs 'n=%i Object(%i) Object->nMoveCycles=%i' and resets. So stamp jitter = catch-up jitter =
+# the wobble in the films, and a lead is latency compensation, not a buffer: keep lead + the
+# receiver's round trip (~8-9 cycles at 165 ms) under 11 so the catch-up stays fully simulated -
+# 0 for internet pilots, a few cycles at most for LAN.
 RELAY_TICK_LEAD = 0
+RELAY_TICK_PROJECT = True       # v883f5: re-stamp from the receiver's PROJECTED clock (see _relay_stamp_for)
+RELAY_TICK_MONOTONIC = True     # v883f5: never stamp an object earlier than its previous stamp to that receiver
+RELAY_TICK_PROJECT_MAX_S = 10.0 # v883f5: projection cap (= STALE_TICK_EXTRAP_MAX_S; beyond it the sender's tick passes)
+AI_TICK_PROJECT = True          # v884f5: server-simulated objects (tanks/trains/soldiers/driven chutes) use the projected clock too
+
+def _s16(d):
+    """v883f5: wrap-aware signed difference of two 16-bit ticks."""
+    d &= 0xFFFF
+    return d - 0x10000 if d >= 0x8000 else d
+
+def _harvest_tick(src, pl):
+    """v883f5: record the SENDER's conductor tick (telemetry[5:7]) - rejecting duplicates and
+    datagrams that arrived out of order (on UDP a late one rewound this session's clock, and
+    every packet relayed TO him was then stamped in the past). A legitimate counter reset
+    (respawn, re-entry) is accepted after 8 rejections in a row or 1 s without an accepted tick.
+    The tick RATE is measured over >= 1 s windows (v835's per-frame test needed a 0.15 s gap
+    between frames 77 ms apart and so almost never updated)."""
+    t = int.from_bytes(pl[5:7], 'little'); now = time.time()
+    prev = getattr(src, 'last_telem_tick', None)
+    if prev is not None:
+        d = _s16(t - prev)
+        if d == 0:
+            return False                      # same frame (several objects share one conductor tick)
+        if d < 0:
+            rej = src.__dict__.get('_tick_reject', 0) + 1
+            src._tick_reject = rej
+            _perf['tick_reject'] = _perf.get('tick_reject', 0) + 1
+            if rej < 8 and now - getattr(src, 'last_telem_time', now) <= 1.0:
+                return False
+            log('TICK-RESYNC', f'{getattr(src, "current_pilot", "?")}: conductor tick reset {prev} -> {t} '
+                               f'({rej} rejected) - new origin')
+            src.__dict__.pop('_tick_anchor', None)
+            src.__dict__.pop('_stamp_last', None)
+    src._tick_reject = 0
+    _a = src.__dict__.get('_tick_anchor')
+    if _a is None or _s16(t - _a[0]) < 0:
+        src._tick_anchor = (t, now)
+    elif now - _a[1] >= 1.0:
+        _r = _s16(t - _a[0]) / (now - _a[1])
+        if 10.0 <= _r <= 200.0:
+            _old = getattr(src, '_tick_rate', None)
+            src._tick_rate = _r if _old is None else (0.8 * _old + 0.2 * _r)
+        src._tick_anchor = (t, now)
+    src.last_telem_tick = t
+    src.last_telem_time = now
+    return True
+
+def _relay_stamp_for(p, onum):
+    """v883f5: the tick to write into a frame relayed TO peer p for object onum: p's own clock
+    projected to now from his last harvest at his measured rate, minus RELAY_TICK_LEAD, never
+    earlier than the previous stamp for this object to p. None = leave the sender's tick."""
+    base = getattr(p, 'last_telem_tick', None)
+    if base is None:
+        return None
+    age = time.time() - getattr(p, 'last_telem_time', 0.0)
+    if age > RELAY_TICK_PROJECT_MAX_S or (age > STALE_TICK_WARN_S and not STALE_TICK_EXTRAP):
+        return None
+    rate = getattr(p, '_tick_rate', None) or TICK_RATE_DEFAULT
+    stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD) & 0xFFFF
+    if RELAY_TICK_MONOTONIC:
+        sl = p.__dict__.setdefault('_stamp_last', {})
+        last = sl.get(onum)
+        if last is not None:
+            dd = _s16(stamp - last)
+            if dd < 0:
+                _perf['stamp_clamped'] = _perf.get('stamp_clamped', 0) + 1
+                stamp = last
+            elif dd == 0:
+                _perf['stamp_dup'] = _perf.get('stamp_dup', 0) + 1
+        sl[onum] = stamp
+    _perf['stamp_n'] = _perf.get('stamp_n', 0) + 1
+    return stamp
+
+def _ai_stamp(sess, onum):
+    """v884f5 [AI RUBBER-BANDING]: the stamp for a SERVER-simulated object (tank, train, soldier,
+    server-driven chute) sent to sess. Those frames used the same last-SAMPLED receiver tick as
+    planes did before v883, so each correction was caught up by a random 0-4 extra cycles
+    (FUN_007e4a20) and the object stepped back and forth. The server computes an AI position at
+    the instant it sends it, so the right stamp is simply the receiver's clock NOW - the projected
+    clock, no lead. Falls back to the old form if projection is off or the clock is unusable."""
+    rt = getattr(sess, 'last_telem_tick', None)
+    if RELAY_TICK_PROJECT and AI_TICK_PROJECT:
+        st = None
+        try:
+            base = rt
+            age = time.time() - getattr(sess, 'last_telem_time', 0.0)
+            if base is not None and 0.0 <= age <= RELAY_TICK_PROJECT_MAX_S:
+                rate = getattr(sess, '_tick_rate', None) or TICK_RATE_DEFAULT
+                st = (int(base) + int(age * rate)) & 0xFFFF
+                if RELAY_TICK_MONOTONIC:
+                    sl = sess.__dict__.setdefault('_stamp_last', {})
+                    last = sl.get(('ai', onum))
+                    if last is not None and _s16(st - last) < 0:
+                        _perf['stamp_clamped'] = _perf.get('stamp_clamped', 0) + 1
+                        st = last
+                    sl[('ai', onum)] = st
+                _perf['ai_stamp_n'] = _perf.get('ai_stamp_n', 0) + 1
+        except Exception:
+            st = None
+        if st is not None:
+            return st
+    return ((rt if rt is not None else 0) - RELAY_TICK_LEAD) & 0xFFFF
 
 # v485f5 [CREATE-BEFORE-TELEMETRY]: hold a sender's relayed telemetry to a peer until that
 # peer's CREATE-OBJECT has had time to arrive. The relay fires the create async-reliable
@@ -9892,7 +10037,11 @@ TANK_DEFAULT_MPS  = 11.0           # 'goto' speed in world units (m) per second 
 # The driver now sends throttle/steer and integrates the SAME motion server-side, so the
 # position it sends is a small correction the client lerps through, not a snap.
 TANK_TURN_RATE_DPS = 40.0          # server-side heading slew (deg/s) - approximates the client
-TANK_LOOKAHEAD_S   = 0.25          # v596f5: position look-ahead per update (one interval)
+TANK_LOOKAHEAD_S   = 0.0           # v596f5: position look-ahead per update (one interval)
+                                   # v886f5: 0.25 -> 0. Latency is compensated by the client's catch-up from the
+                                   # even-clock stamp (v884); 0.25 s on top put a column tank ~2.75 m ahead at
+                                   # 11 m/s, pulled back at every stop, turn and follower speed change.
+                                   # `tc tankahead <s>` restores it live.
 TANK_STEER_GAIN    = 2.0           # steer = clamp(gain * sin(heading error))
 TANK_SPEED_SEED    = True          # send aux[3] = speed fraction alongside the throttle
 TANK_FALLBACK_MAX_MPS = 12.0       # per-class max speed when the dump has no phys block
@@ -10777,7 +10926,7 @@ def send_tank_update(onum, tick_for, payload26):
     rt = getattr(tick_for, 'last_telem_tick', None)
     if rt is None:
         return False
-    frame = build_tank_update((rt - RELAY_TICK_LEAD) & 0xFFFF, onum, payload26)
+    frame = build_tank_update(_ai_stamp(tick_for, onum), onum, payload26)   # v884f5
     seq = tick_for.nundgram()                                   # v813f5: the one datagram counter
     pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
     try:
@@ -14312,12 +14461,23 @@ SOLDIER_SPREAD_M      = 6.0
 # figure; sending a throttle while walking lets the client animate and move it between our
 # corrections (sent at 4 Hz while moving). The exact state/rate meanings are knob-tunable:
 # console `tc soldier <throttle 0..1> <state> <rate1> <rate2>`.
-SOLDIER_WALK_THROTTLE = 1.0     # the byte at 0xc is the walk ANIMATION speed (user probe: 1 = walk, 0 = stand)
+SOLDIER_CLIENT_MPS    = 2.778   # v885f5: the soldier class record's first speed float (+0x28, 2.778 = 10 km/h,
+                                # classes 170-174 alike) - read as the client's walk speed at throttle 1.0
+                                # (inferred from the class table; `tc soldier <throttle>` overrides live)
+SOLDIER_WALK_THROTTLE = min(1.0, PARA_WALK_MPS / SOLDIER_CLIENT_MPS)
+                                # v885f5: was 1.0 - the client walked the figure at 2.78 m/s while the
+                                # server moved him 2.4 m/s, so every 1 Hz correction pulled him ~0.4 m BACK
+                                # (soldiers 'still rubber band' after v884 fixed the stamp, user 09-28).
+                                # Throttle scaled so the client's own walk matches the server's.
 SOLDIER_WALK_STATE    = 1
 SOLDIER_WALK_RATE1    = 0
 SOLDIER_WALK_RATE2    = 0
 SOLDIER_OBST_MARGIN   = 1.5     # v594f5: infantry clearance around buildings/trees (tanks 6 m)
-SOLDIER_LOOKAHEAD_S   = 0.3     # v596f5: position look-ahead in each update (rubber-band)
+SOLDIER_LOOKAHEAD_S   = 0.0     # v596f5: position look-ahead in each update (rubber-band)
+                                # v885f5: 0.3 -> 0. Latency is now compensated by the client's own catch-up
+                                # from the even-clock stamp (v884); 0.3 s on top put the figure ~0.7 m
+                                # ahead of the truth, pulled back at every stop and turn.
+                                # `tc soldierahead <s>` restores it live.
 SOLDIER_RING_MIN      = 110.0   # defenders take a perimeter ring around the scene
 SOLDIER_RING_MAX      = 170.0
 SOLDIER_STAND_OFF     = 60.0    # attackers close to this distance from their soft target
@@ -14361,9 +14521,10 @@ def _send_unrel_frame_to(sess, onum, payload):
     rt = getattr(sess, 'last_telem_tick', None)
     if rt is None:
         return False
+    _st = _ai_stamp(sess, onum)                             # v884f5: even clock, as for planes
     size = 1 + 2 + 2 + len(payload)
     frame = (bytes([size // 16, ((size % 16) << 4) | 0x02, 0, 0, 0x07])
-             + struct.pack('<HH', (rt - RELAY_TICK_LEAD) & 0xFFFF, onum & 0xffff) + bytes(payload))
+             + struct.pack('<HH', _st, onum & 0xffff) + bytes(payload))
     seq = sess.nundgram()                                   # v813f5: the one datagram counter
     try:
         _p = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
@@ -15549,7 +15710,7 @@ def _chute_keepalive_loop():
                             b2 = bytearray(body)
                             rt = p.last_telem_tick
                             if rt is not None and len(b2) >= 9:
-                                struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)   # peer-relative tick
+                                struct.pack_into('<H', b2, 5, _ai_stamp(p, int.from_bytes(b2[7:9], 'little')))   # v884f5
                             seq = p.nundgram()                                      # v813f5
                             pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2)
                             sock.sendto(pkt, p.addr); n += 1
@@ -15620,7 +15781,7 @@ def send_crew_parachuter_create_for(src, dst, onum):
             b2 = bytearray(_lf[8:])
             rt = dst.last_telem_tick
             if rt is not None and len(b2) >= 9:
-                struct.pack_into('<H', b2, 5, (int(rt) - RELAY_TICK_LEAD) & 0xffff)
+                struct.pack_into('<H', b2, 5, _ai_stamp(dst, int.from_bytes(b2[7:9], 'little')))   # v884f5
             seq = dst.nundgram()                                                    # v813f5
             sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2), dst.addr)
         except OSError:
@@ -18445,8 +18606,7 @@ def relay_telemetry(src, data, _split_obj=None):
         # v547f5: split into single-record frames and relay each one (see TELEM_SPLIT_MULTI).
         _subs = _telem_split_records(src, pl)
         if _subs:
-            src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
-            src.last_telem_time = time.time()
+            _harvest_tick(src, pl)                      # v883f5
             _seen = src.__dict__.setdefault('_telem_split_logged', set())
             _key = tuple(o for o, _ in _subs)
             if _key not in _seen:
@@ -18481,8 +18641,7 @@ def relay_telemetry(src, data, _split_obj=None):
         # STALE-TICK warns while the tick was advancing 24107->24580 at a healthy
         # ~52/s) - which also suspends re-stamping of peer telemetry TOWARD the
         # bailer for the entire descent. Harvest fixes both; relay policy unchanged.
-        src.last_telem_tick = int.from_bytes(pl[5:7], 'little')
-        src.last_telem_time = time.time()
+        _harvest_tick(src, pl)                          # v883f5
         if not getattr(src, '_telem_bc_logged', False):
             src._telem_bc_logged = True
             log('TELEM-GUARD', f'{src.current_pilot} sent a MULTI-RECORD telemetry frame '
@@ -18492,15 +18651,7 @@ def relay_telemetry(src, data, _split_obj=None):
         return
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
-    # v835f5: and learn his tick RATE (ticks per second, EMA) so a stalled tick can be extrapolated
-    _pt, _ptt = getattr(src, 'last_telem_tick', None), getattr(src, 'last_telem_time', 0.0)
-    _nt = int.from_bytes(pl[5:7], 'little'); _now_t = time.time()
-    if _pt is not None and 0.15 <= (_now_t - _ptt) <= 2.0:
-        _r = ((_nt - _pt) & 0xFFFF) / (_now_t - _ptt)
-        if 10.0 <= _r <= 200.0:
-            src._tick_rate = _r if getattr(src, '_tick_rate', None) is None else (0.8 * src._tick_rate + 0.2 * _r)
-    src.last_telem_tick = _nt
-    src.last_telem_time = _now_t
+    _harvest_tick(src, pl)                              # v883f5 (see _harvest_tick)
     if _split_obj is None and len(pl) >= 9 and 34 <= len(pl) - 7 <= 90:
         # v547f5: learn this object's record size from its single-record frames (feeds the splitter)
         src.__dict__.setdefault('_rec_size_by_obj', {})[int.from_bytes(pl[7:9], 'little')] = len(pl) - 7
@@ -18778,7 +18929,21 @@ def relay_telemetry(src, data, _split_obj=None):
         # tripped the nMoveCycles error that snapped the plane + stalled the sim.
         relayed = bytearray(pl)
         rt = p.last_telem_tick
-        if rt is not None:
+        if rt is not None and RELAY_TICK_PROJECT and len(relayed) >= 9:
+            # v883f5 [AN EVEN CLOCK FOR THE RE-STAMP] (Skyyr/Shadow film analysis 09-28): the stamp
+            # was the receiver's LAST SAMPLED tick - it only advances when one of HIS frames arrives,
+            # ~13/s in 4-tick steps, so consecutive relays of one sender got stamps whose age varied
+            # 0-77 ms at random (and repeated, and occasionally stepped back on a reordered frame).
+            # The client dead-reckons each update by (its tick - stamp), so that jitter moved the
+            # drawn plane back and forth: 4-17 % of rendered frames reverse direction on the other
+            # pilot's screen against 0-2 % in his own film (measured on both films, both ways).
+            # Now: the receiver's clock PROJECTED to this instant from his last harvest at his
+            # measured rate, minus RELAY_TICK_LEAD, and never earlier than the previous stamp for
+            # the same object to the same receiver.
+            _st = _relay_stamp_for(p, _gate_obj if _gate_obj is not None else int.from_bytes(pl[7:9], 'little'))
+            if _st is not None:
+                struct.pack_into('<H', relayed, 5, _st)
+        elif rt is not None:
             # v234: NEVER re-stamp with a DEAD tick. If we stop recognising a peer's telemetry, their
             # last_telem_tick freezes; re-stamping with it makes every relayed packet look
             # progressively staler to that peer until its client drops the object outright (this is
