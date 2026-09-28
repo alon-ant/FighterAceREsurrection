@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v877f5'
+VERSION = 'v878f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4438,6 +4438,27 @@ def console_handler():
                         send_lobby_news(_t, form=(int(_a[1]) if len(_a) > 1 else None), reason='(console)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: news <pilot> [form] | news probe <pilot> [form] [text] | news reload')
+            elif cmd == 'rxtrace':
+                # v878f5: rxtrace <pilot> [seconds] - log EVERY inbound packet from that pilot's address
+                # (type, size, head) for a while. Two post-login stalls today (Alon 09-28 14:09 and
+                # 14:20: 16-20 s with nothing from the client at INFO level, no unknown-address
+                # packets either) - this shows whether time-sync pings or anything else still arrive.
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].count('.') == 3:
+                    # by IP - so it can be armed BEFORE the pilot logs in
+                    _secs = float(_a[1]) if len(_a) > 1 else 120.0
+                    _RX_TRACE[_a[0]] = time.time() + _secs
+                    log('CONSOLE', f'rxtrace: inbound packets from {_a[0]} logged for {_secs:.0f}s (RX/TRACE)')
+                elif _a:
+                    _t = next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == _a[0]), None)
+                    if _t is None:
+                        log('CONSOLE', f'rxtrace: no session for {_a[0]}')
+                    else:
+                        _secs = float(_a[1]) if len(_a) > 1 else 120.0
+                        _RX_TRACE[_t.addr[0]] = time.time() + _secs
+                        log('CONSOLE', f'rxtrace: inbound packets from {_t.addr[0]} logged for {_secs:.0f}s (RX/TRACE)')
+                else:
+                    log('CONSOLE', 'usage: rxtrace <pilot> [seconds]')
             elif cmd == 'desync':
                 # v862f5: list the automatic desync events of this run
                 if not _DESYNC_EVENTS:
@@ -27610,6 +27631,7 @@ def handle_post_auth(s, cmd, pl):
 # --- Packet receiver ----------------------------------------------------------
 
 _UNKNOWN_ADDR_LOG = {}     # v877f5: addr -> last time we logged an unknown-address packet from it
+_RX_TRACE = {}             # v878f5: ip -> until (time); every inbound packet from that ip is logged
 
 def _match_session_by_ip(addr, connid=None):
     """v214: find a session whose IP matches addr[0] even if the PORT differs. The client can
@@ -27635,6 +27657,13 @@ def _match_session_by_ip(addr, connid=None):
 
 def on_pkt(data, addr):
     sz=len(data)
+    if _RX_TRACE and time.time() < _RX_TRACE.get(addr[0], 0.0):
+        try:                                             # v878f5: `rxtrace <pilot>`
+            _dw = struct.unpack_from('>I', data, 4)[0] if sz >= 8 else 0
+            log('RX/TRACE', f'{addr[0]}:{addr[1]} sz={sz} flags=0x{data[2]:02x} type={(_dw >> 29) & 7} '
+                            f'head={data[:12].hex()} {"known" if get_s(addr) is not None else "UNKNOWN-ADDR"}')
+        except Exception:
+            pass
     # v214 DIAGNOSTIC: log EVERY raw inbound packet's addr + head, so we can SEE time-sync pings
     # that arrive from an unexpected port (the old code dropped unknown-addr packets silently).
     if RAW_RX_LOG:
