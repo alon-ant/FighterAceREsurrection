@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v867f5'
+VERSION = 'v869f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -25313,8 +25313,23 @@ PREFIXED_NORMALISE_SUB = True
 # three are newly LIVE traffic - the v436f5 Type=1 flip re-enabled the client's Msn_Prod
 # emitters - and the internet (GCP) path wraps pervasively (v364f5), so without the re-frame a
 # wrapped spawn-time msg-59 would silently miss the resupply reply.
+PREFIXED_LOBBY_SUBS = {0xcb, 0xce, 0xd2, 0xd4, 0xd5, 0xd7, 0xd9, 0xdb, 0xdf, 0xd1, 0xd8, 0xe0}
+    # v868f5 [LOBBY ON A REAL LINK]: arena list 0xd2, game list 0xcb, squadron list 0xce, GAME_DEF
+    # 0xd4, arena players 0xd5, squadron notes/join/leave/members/remove/motto 0xd7/0xd1/0xd8/0xd9/
+    # 0xdb/0xdf, HQ popup 0xe0. The client sends the DIRECT form first and the PREFIXED form on its
+    # retries; on a LAN the first copy is answered, on the internet the retry IS the normal path -
+    # and only a handful of these had a prefixed handler. Alon 09-28 03:31: three prefixed arena-
+    # list requests a second apart, unanswered -> blank Arenas and Squadrons pages. Every one of
+    # these direct handlers reads its fields at pl[5:9]/pl[9:] of the DIRECT frame, so the
+    # re-frame (drop the 4-byte prefix, release cmd) hands them exactly what they expect.
+PREFIXED_INGAME_SUBS = {0x22, 0x1a, 0x33, 0x39, 0x46, 0x2a, 0x70}
+    # v869f5: the in-game requests still arriving PREFIXED with no handler for that form (online
+    # 09-25..28: msg 34 nearest-enemy 757x, msg 26 map-box poll 325x, msg 57 map icons 69x, msg 70 big
+    # map 20x, msg 51 object HIT 14x). Each direct handler reads the direct frame; re-framed like
+    # the lobby set. A lost 0x33 is a hit on a tank that never counted; a lost 0x1a is a map that
+    # stops refreshing for that pilot.
 PREFIXED_REFRAME_SUBS = {0x03, 0x04, 0x1c, 0x3b, 0x45, 0x47, 0x49, 0x7d,
-                         0xe2, 0xe3, 0xe7}   # v636f5: lobby pilot create/delete/rename - the client's
+                         0xe2, 0xe3, 0xe7} | PREFIXED_LOBBY_SUBS | PREFIXED_INGAME_SUBS   # v636f5: lobby pilot create/delete/rename - the client's
                                              # retry after a refusal arrives PREFIXED (run_20260911_003815
                                              # 00:41-00:42: five creates dropped -> 'timeout, clicking create
                                              # again works')
@@ -25380,8 +25395,8 @@ def handle_post_auth(s, cmd, pl):
                               if PREFIXED_REFRAME_RELEASES_CMD else '') + _extra)
             pl = pl[4:]
             bc = pl[0]; tb = pl[1]; sub = pl[4] if len(pl) > 4 else 0
-            if _isub in (0xe2, 0xe3, 0xe7):
-                stored = bytes(pl)                  # v636f5: the lobby echo must be the INNER frame
+            if _isub in (0xe2, 0xe3, 0xe7) or _isub in PREFIXED_LOBBY_SUBS or _isub in PREFIXED_INGAME_SUBS:
+                stored = bytes(pl)                  # v636f5/v868f5: the handlers read `stored` as the INNER frame
             if PREFIXED_REFRAME_RELEASES_CMD:
                 # v411f5: the frame is now byte-identical to a direct arrival - let it
                 # dispatch like one (the whole in-game handler block is gated on cmd == 0).
