@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v876f5'
+VERSION = 'v877f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -27609,6 +27609,8 @@ def handle_post_auth(s, cmd, pl):
 
 # --- Packet receiver ----------------------------------------------------------
 
+_UNKNOWN_ADDR_LOG = {}     # v877f5: addr -> last time we logged an unknown-address packet from it
+
 def _match_session_by_ip(addr, connid=None):
     """v214: find a session whose IP matches addr[0] even if the PORT differs. The client can
     move its source port mid-session - e.g. IOCInitializeTimeSynchronization's failure path rebinds
@@ -27655,7 +27657,36 @@ def on_pkt(data, addr):
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
             log('RX/PORTMOVE', f'{"attached" if sz > 12 else "standalone"} time-ping from {addr[0]}:{addr[1]} '
                                f'(connid 0x{_cid:04x}) adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
-    if not s: return
+    if s is None and sz >= 8 and not (data[2] & 0x10):
+        # v877f5 [NAT PORT CHANGE, ANY PACKET]: v840 re-attached a moved port only on a time-sync
+        # ping, which the lobby client sends rarely - Alon 09-28 14:09:34-53 on a STABLE line: the
+        # server kept reaching him on the old port (in 205/204/213 on his side) while every packet
+        # from his new port was dropped for 20 s (no requests, no STATUS replies) until something
+        # re-attached it. Every client packet carries its connection id in bytes 0-1, so any
+        # non-SYN packet from an unknown port whose id matches a session on the same IP (or the
+        # only session on that IP) re-attaches at once. SYNs (flag 0x10) are new connections.
+        _cid = struct.unpack_from('>H', data, 0)[0]
+        s = _match_session_by_ip(addr, connid=_cid)
+        if s is not None:
+            _old = s.addr
+            with sl:
+                sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
+            log('RX/PORTMOVE', f'packet from {addr[0]}:{addr[1]} (connid 0x{_cid:04x}, flags 0x{data[2]:02x}) '
+                               f'adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
+    if not s:
+        # v877f5: say so (rate-limited) - a packet from an address that matches no session is the
+        # evidence for a NAT port change that the adoption above could not resolve
+        try:
+            _t = time.time()
+            if _t - _UNKNOWN_ADDR_LOG.get(addr, 0.0) > 10.0:
+                _UNKNOWN_ADDR_LOG[addr] = _t
+                if len(_UNKNOWN_ADDR_LOG) > 200:
+                    _UNKNOWN_ADDR_LOG.clear()
+                log('RX/UNKNOWN', f'packet from unknown address {addr[0]}:{addr[1]} sz={sz} head={hx(data[:8])} '
+                                  f'(sessions on that IP: {sum(1 for a in list(sadrs) if a[0] == addr[0])}) - dropped')
+        except Exception:
+            pass
+        return
     s.last_rx = time.time()   # v387f5: liveness beacon for the idle reaper (time-pings keep it fresh)
     # v467f5 [D: DATA-LOSS GAUGE] RX counters - the receive-side twin of the sendto wrapper. Count
     # every datagram + the client's 0x1c-per-packet byte formula so both ends tick the same units.
