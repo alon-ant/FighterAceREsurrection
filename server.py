@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v871f5'
+VERSION = 'v873f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6569,8 +6569,12 @@ def handle_squadron_members_request(s, squadron_id):
     # only the members request - so the roster arrived for a squadron the dialog had not been
     # switched to and was dropped (Alon 09-28 04:32: sqn 27 blank, 20 and 9 fine, each preceded
     # by a notes request). If we did not just send notes for this squadron, send them first.
-    _ln = s.__dict__.get('_last_notes_sqn')
-    _need_notes = (_ln is None or _ln[0] != int(squadron_id) or time.time() - _ln[1] > 30.0)
+    # v872f5: ALWAYS notes then roster, from ONE thread, in that order. v870 only sent notes first
+    # when none had gone out recently; but the client sends the notes request and the members
+    # request together (3 ms apart), the two replies left from two threads and RACED - whenever the
+    # roster overtook the notes reply the dialog had not switched yet and dropped it ('sometimes
+    # members display, sometimes not', Alon 09-28). A repeated notes reply only repaints the box.
+    _need_notes = True
     def _send():
         if _need_notes:
             try:
@@ -6579,13 +6583,12 @@ def handle_squadron_members_request(s, squadron_id):
                     send_rel(s, build_squadron_notes(int(squadron_id), _row[4] or ''),
                              f'<- 0xd7 squadron notes (before members, sqn={squadron_id})', to=5.0)
                     s._last_notes_sqn = (int(squadron_id), time.time())
-                    time.sleep(0.15)
+                    time.sleep(0.25)
             except Exception:
                 logx('SQNMGT', 'notes-before-members failed')
         send_rel(s, pkt, f'<- 0xd9 members({len(names)}) sqn={squadron_id}', to=5.0)
     threading.Thread(target=_send, daemon=True).start()
-    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s)'
-                  f'{" (notes sent first)" if _need_notes else ""}')
+    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s) (notes first, in order)')
 
 def build_squadron_remove_result(ok):
     """REMOVE-MEMBER RESULT (0xdb) parsed by FUN_004f0090. Convention is INVERTED like the join:
@@ -26015,8 +26018,10 @@ def handle_post_auth(s, cmd, pl):
                     if _mrow:
                         _notes = build_squadron_notes(_msid, _mrow[4] or '')
                         def _ce_send(_r=resp, _l=label, _y=_notes, _id=_msid, _nm=_mrow[1]):
-                            send_rel(s, _r, _l, to=5.0); time.sleep(0.05)
+                            send_rel(s, _r, _l, to=5.0)
+                            time.sleep(0.6)      # v873f5: was 0.05 - give a remote client time to build the page from the list
                             send_rel(s, _y, f'<- 0xd7 squadron notes ({_nm}, id={_id})', to=5.0)
+                            s._last_notes_sqn = (int(_id), time.time())
                         threading.Thread(target=_ce_send, daemon=True).start()
                         log('CE', f'pushed notes for {_mrow[1]!r} (id={_msid}) to {s.current_pilot!r}')
                         return
