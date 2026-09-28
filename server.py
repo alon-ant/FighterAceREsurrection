@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v873f5'
+VERSION = 'v875f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -420,6 +420,16 @@ STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = 
                            # client was built around ('jumpy', Bama 09-25). The 1-2% jitter reading
                            # on the loss gauge is the lesser evil; it was always cosmetic.
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
+RTT_CFG_TUNED = True       # v875f5: send the client a sane retransmit configuration (see build_synack)
+RTT_TIMEOUT_MIN_MS = 250   # v875f5: floor of the client's retransmit timeout (was effectively 5000)
+RTT_TIMEOUT_MAX_MS = 3000  # ceiling (was effectively 200 - below the RTT)
+RTT_FACTOR_MIN = 100       # timeout = avgRTT x factor/100: 1x RTT on a clean link ...
+RTT_FACTOR_MAX = 300       # ... up to 3x after duplicate ACKs; also the starting value
+RTT_FACTOR_DEC_PER_SAMPLE = 10   # % taken off the factor per RTT sample (was 16)
+RTT_DUPACKS_PER_STEP = 4   # duplicate ACKs before the factor is stretched (was 100)
+RTT_FACTOR_STEP = 25       # % added per stretch (was 16)
+RTT_MAX_RESENDS = 12       # resends before 'LOST CONNECTION' (was 10)
+RTT_MAX_AGE_MS = 30000     # age of an unacknowledged packet before 'LOST CONNECTION' (unchanged)
 REL_RX_INORDER = True      # v812f5: in-order reliable delivery + ACK only the contiguous prefix (see pt==1)
 REL_RX_HOLE_S  = 6.0       # v812f5: a missing client seq not retransmitted within this is given up on
 REL_RX_BUF_MAX = 48        # v812f5: or when this many later packets are held behind it
@@ -5809,6 +5819,27 @@ def build_synack(fixed_fa=None):
     # finally safe to enable (RTT_SAMPLING, step 2). While RTT_SAMPLING=False this fix is inert (the
     # ring never advances), so step 1 just proves the 92-byte SYNACK doesn't disturb connect.
     RTT_RING_CAP = 32   # cfg+0x40 == packet byte 88; must be 1..64 (64 = array ends right before the callback ptr)
+    if RTT_CFG_TUNED:
+        # v875f5 [THE CLIENT'S RETRANSMIT TIMER IS OURS TO SET]. RecvSYNReply (vcncNet FUN_10003cd3)
+        # copies 17 dwords from packet byte 24 into the connection parameters, and the RTT object
+        # (FUN_10006e9b / FUN_10006f2d / FUN_10006f55 / FUN_10006ff8) is built from them:
+        #   timeout = avgRTT * factor/100, clamped to [cfg+0x1c, cfg+0x20];
+        #   factor starts at cfg+0x28, drops cfg+0x30 per RTT sample down to cfg+0x24, rises
+        #   cfg+0x38 after every cfg+0x34 duplicate ACKs; cfg+0x14 resends / cfg+0x18 ms then
+        #   'LOST CONNECTION'.
+        # The block below was always written 8 bytes EARLY, so the client read min=5000 ms and
+        # max=200 ms (inverted): timeout 5 s on any normal link (one lost packet = 5 s stall, the
+        # 14 s LAN login, the 18.9 s squadron-page stall, Alon 09-28 - read live with fa_rtt.py),
+        # or 200 ms (< the RTT) once the factor was pushed up. Now written at the TRUE offset with
+        # sane values: timeout RTT x 1..3, floor 250 ms, ceiling 3 s.
+        for off, val in [(0x0c, 8), (0x10, 5000), (0x14, RTT_MAX_RESENDS), (0x18, RTT_MAX_AGE_MS),
+                         (0x1c, RTT_TIMEOUT_MIN_MS), (0x20, RTT_TIMEOUT_MAX_MS),
+                         (0x24, RTT_FACTOR_MIN), (0x28, RTT_FACTOR_MAX), (0x2c, 16),
+                         (0x30, RTT_FACTOR_DEC_PER_SAMPLE), (0x34, RTT_DUPACKS_PER_STEP),
+                         (0x38, RTT_FACTOR_STEP), (0x3c, 100), (0x40, RTT_RING_CAP)]:
+            struct.pack_into('>I', p, 24 + off, val)
+        struct.pack_into('>I', p, 16, 30)               # bytes 16-23 as before (outside the cfg copy)
+        return bytes(p), fa_s, fa_frac
     for off,val in [(0,30),(0x14,8),(0x18,5000),(0x1C,10),(0x20,30000),
                     (0x24,5000),(0x28,200),(0x2C,50),(0x30,100),(0x34,16),(0x38,16),(0x3C,100),
                     (0x40,RTT_RING_CAP)]:
@@ -27857,7 +27888,31 @@ def on_pkt(data, addr):
                     _nx = (max(_buf, key=lambda k: (k - _nx) & 0x1FF) + 1) & 0x1FF
                     _buf.clear(); s._rx_next = _nx; s.__dict__.pop('_rx_hole_at', None)
             else:
-                pass                          # behind the window: already delivered - ack only
+                # behind the window: already delivered - ack only.
+                # v874f5 [MEASURE THE CLIENT'S RETRANSMIT TIMER]: a duplicate is the client re-sending a
+                # packet we already ACKed - our ACK was lost or came too late for its timer. The time
+                # since the original arrival is that timer, which vcncNet seeds from the RTT and
+                # STRETCHES on every duplicate ACK; Alon 09-28 04:51: one lost request stalled the
+                # channel 18.9 s on a 0.16 s link. Logged at INFO, rate-limited, with the count so far.
+                try:
+                    _seen = s.__dict__.setdefault('_rx_seen_at', {})
+                    _orig = _seen.get(cs9)
+                    s._retx_n = s.__dict__.get('_retx_n', 0) + 1
+                    if _orig is not None and (s._retx_n <= 20 or (s._retx_n % 20) == 0):
+                        log('RETX', f'{getattr(s, "current_pilot", "?")}: client retransmitted seq {cs9} '
+                                    f'{_now - _orig:.2f}s after the original (#{s._retx_n} this session, '
+                                    f'rtt~{getattr(s, "_rtt_ms", "?")}ms)')
+                except Exception:
+                    pass
+            try:
+                _seen = s.__dict__.setdefault('_rx_seen_at', {})
+                if cs9 not in _seen:
+                    _seen[cs9] = _now
+                if len(_seen) > 256:
+                    for _k in sorted(_seen, key=_seen.get)[:64]:
+                        _seen.pop(_k, None)
+            except Exception:
+                pass
             _contig = ((getattr(s, '_rx_next', (cs9 + 1) & 0x1FF)) - 1) & 0x1FF
             if _buf and s.__dict__.get('_rx_hole_at') is not None:
                 if s.__dict__.get('_rx_hole_logged') != _contig:
