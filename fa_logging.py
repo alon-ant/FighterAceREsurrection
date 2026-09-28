@@ -35,6 +35,11 @@ from datetime import datetime
 _TAG_LEVELS = {
     'ERROR': logging.ERROR, 'RELDROP': logging.WARNING, 'STALL-WATCH': logging.WARNING,
     'RX/DROP': logging.WARNING, 'REAP': logging.WARNING,
+    # v879f5: diagnostics that must reach the INFO file - the RX/RELAY prefix rules below had been
+    # hiding them (port moves, unknown addresses, the desync traces and relay gaps were all
+    # invisible online while their code said 'logged')
+    'RX/PORTMOVE': logging.INFO, 'RX/UNKNOWN': logging.INFO, 'RX/TRACE': logging.INFO,
+    'RELAY-GAP': logging.INFO, 'RELAY-TRACE': logging.INFO,
     'TX': logging.DEBUG, 'RX': logging.DEBUG, 'RELAY': logging.DEBUG,
     'SIM13': logging.DEBUG, 'GAMEDEF212': logging.DEBUG, 'GDFDUMP': logging.DEBUG,
     'POST-AUTH': logging.DEBUG, 'COMPOUND': logging.DEBUG, 'RELRX': logging.DEBUG,
@@ -92,6 +97,9 @@ class _ConsoleFilter(logging.Filter):
 # ── the logging objects ───────────────────────────────────────────────────────
 _logger = None
 _console_handler = None
+_file_handlers = []     # v328: the level-filtered file handlers (server.log + run_*.log),
+                        # kept so set_file_level() can retune them at runtime. The WARNING+
+                        # error file is deliberately NOT in here - it must never be turned down.
 _initialised = False
 
 def init_logging(log_dir='logs', console_level='INFO', file_level='DEBUG',
@@ -117,6 +125,7 @@ def init_logging(log_dir='logs', console_level='INFO', file_level='DEBUG',
     fh.setLevel(getattr(logging, file_level, logging.DEBUG))
     fh.setFormatter(plain)
     _logger.addHandler(fh)
+    _file_handlers.append(fh)
 
     # error file: WARNING+ only, so a crash is one glance away
     eh = logging.handlers.RotatingFileHandler(
@@ -133,6 +142,7 @@ def init_logging(log_dir='logs', console_level='INFO', file_level='DEBUG',
         rh.setLevel(getattr(logging, file_level, logging.DEBUG))
         rh.setFormatter(plain)
         _logger.addHandler(rh)
+        _file_handlers.append(rh)
 
     # console handler — colored, level-filtered, mutable
     _console_handler = logging.StreamHandler(stream=sys.stdout)
@@ -192,6 +202,28 @@ def set_console_level(level):
         _console_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
         return True
     return False
+
+def set_file_level(level):
+    """v328: retune the FILE log level at runtime (server.log + the current run_*.log).
+    The default is now INFO because DEBUG writes a line per packet, synchronously, on the
+    packet path - 55 MB for one 8-player session, and worse than linear as players rise.
+    Flip to DEBUG for a reproduction run and back to INFO afterwards; no restart needed.
+    The WARNING+ error file is untouched by design, so failures are always captured.
+    NOTE the ring buffer that feeds the web live console is populated BEFORE handler
+    filtering, so the on-screen console still shows DEBUG lines even while the file is at
+    INFO - you keep live visibility without paying the disk cost."""
+    lvl = getattr(logging, level.upper(), None)
+    if lvl is None or not _file_handlers:
+        return False
+    for h in _file_handlers:
+        h.setLevel(lvl)
+    return True
+
+def get_levels():
+    """(console_level, file_level) as names, for the `loglevel` command with no args."""
+    c = logging.getLevelName(_console_handler.level) if _console_handler else '?'
+    f = logging.getLevelName(_file_handlers[0].level) if _file_handlers else '?'
+    return c, f
 
 def mute_tag(tag):
     with _state_lock: _muted_tags.add(tag)

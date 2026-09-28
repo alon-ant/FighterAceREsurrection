@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v879f5'
+VERSION = 'v880f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -27660,7 +27660,7 @@ def on_pkt(data, addr):
     if _RX_TRACE and time.time() < _RX_TRACE.get(addr[0], 0.0):
         try:                                             # v878f5: `rxtrace <pilot>`
             _dw = struct.unpack_from('>I', data, 4)[0] if sz >= 8 else 0
-            log('RX/TRACE', f'{addr[0]}:{addr[1]} sz={sz} flags=0x{data[2]:02x} type={(_dw >> 29) & 7} '
+            log('TRACE-RX', f'{addr[0]}:{addr[1]} sz={sz} flags=0x{data[2]:02x} type={(_dw >> 29) & 7} '
                             f'head={data[:12].hex()} {"known" if get_s(addr) is not None else "UNKNOWN-ADDR"}')
         except Exception:
             pass
@@ -27684,7 +27684,7 @@ def on_pkt(data, addr):
             _old = s.addr
             with sl:
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
-            log('RX/PORTMOVE', f'{"attached" if sz > 12 else "standalone"} time-ping from {addr[0]}:{addr[1]} '
+            log('PORTMOVE', f'{"attached" if sz > 12 else "standalone"} time-ping from {addr[0]}:{addr[1]} '
                                f'(connid 0x{_cid:04x}) adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if s is None and sz >= 8 and not (data[2] & 0x10):
         # v877f5 [NAT PORT CHANGE, ANY PACKET]: v840 re-attached a moved port only on a time-sync
@@ -27700,7 +27700,7 @@ def on_pkt(data, addr):
             _old = s.addr
             with sl:
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
-            log('RX/PORTMOVE', f'packet from {addr[0]}:{addr[1]} (connid 0x{_cid:04x}, flags 0x{data[2]:02x}) '
+            log('PORTMOVE', f'packet from {addr[0]}:{addr[1]} (connid 0x{_cid:04x}, flags 0x{data[2]:02x}) '
                                f'adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if not s:
         # v877f5: say so (rate-limited) - a packet from an address that matches no session is the
@@ -27711,7 +27711,7 @@ def on_pkt(data, addr):
                 _UNKNOWN_ADDR_LOG[addr] = _t
                 if len(_UNKNOWN_ADDR_LOG) > 200:
                     _UNKNOWN_ADDR_LOG.clear()
-                log('RX/UNKNOWN', f'packet from unknown address {addr[0]}:{addr[1]} sz={sz} head={hx(data[:8])} '
+                log('UNKNOWN-ADDR', f'packet from unknown address {addr[0]}:{addr[1]} sz={sz} head={hx(data[:8])} '
                                   f'(sessions on that IP: {sum(1 for a in list(sadrs) if a[0] == addr[0])}) - dropped')
         except Exception:
             pass
