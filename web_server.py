@@ -2645,6 +2645,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             SRV['log']('WEB', f'{user} updated the lobby news '
                               f'({len(qs.get("news", [""])[0].splitlines())} news line(s), '
                               f'{len(qs.get("welcome", [""])[0].strip())} welcome chars)')
+            # v870f5: NO push to connected clients here - the News pane is append-only until the client
+            # re-opens the page and asks again (0xca), and an unsolicited push would double the text.
+            # The request is now always answered (the pilot-select push that swallowed it is gone),
+            # so pilots see the edit the next time they open the News tab.
             self.send_response(302); self.send_header('Location', '/admin/lobby_news?saved=1'); self.end_headers()
             return
 
@@ -2744,8 +2748,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 if _trow is None:
                     conn.close(); return self.send_error(404)
                 _trole = _trow[0]
-                if _myrole == 'officer' and (_trole == 'commander' or op == 'setrole'):
-                    conn.close(); return self.send_error(403)      # officers manage members, not the CO or roles
+                # v871f5: an officer may not REMOVE or re-ROLE the commander, but may set anyone's tag
+                # (the CO's ^CO included) - the blanket rule refused an officer tagging his own CO (403)
+                if _myrole == 'officer' and (op == 'setrole' or (_trole == 'commander' and op == 'remove')):
+                    conn.close(); return self.send_error(403)
                 msg = ''
                 if op == 'setrole':
                     role = qs.get('role', ['member'])[0].strip()
@@ -3559,9 +3565,10 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
-                     server_py=None, version=None):
+                     server_py=None, version=None, push_lobby_news_fn=None):
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console
+    SRV['push_lobby_news'] = push_lobby_news_fn   # v870f5: (reason) -> n clients pushed
     SRV['db_path'] = db_path
     SRV['get_existing_ticket'] = get_ticket_fn
     SRV['generate_ticket'] = gen_ticket_fn

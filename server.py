@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v869f5'
+VERSION = 'v871f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6063,6 +6063,19 @@ def build_lobby_news_202(text, form=None):
         body = bytes([0xca]) + b + b'\x00'
     return build_appspace_pkt(body)
 
+def push_lobby_news_all(reason=''):
+    """v870f5: re-send the lobby news to every connected client that is in the lobby (not in an
+    arena) - called by the web editor on save. Returns the number pushed."""
+    n = 0
+    for x in list(get_all_sessions()):
+        try:
+            if getattr(x, 'auth_done', False) and getattr(x, 'current_pilot', None) and not getattr(x, 'entered_game', False):
+                threading.Thread(target=send_lobby_news, args=(x,), kwargs={'reason': reason}, daemon=True).start()
+                n += 1
+        except Exception:
+            pass
+    return n
+
 def send_lobby_news(s, text=None, form=None, reason=''):
     """v731f5 (probe-verified 09-16): msg 202 = [0xca][pane][text\0]. pane 0 REPLACES the left
     welcome pane (the 'you are in offline mode' text); pane non-zero APPENDS one line to the right
@@ -6550,9 +6563,29 @@ def handle_squadron_members_request(s, squadron_id):
         (int(squadron_id),)).fetchall()]
     conn.close()
     pkt = build_squadron_members(squadron_id, names)
-    threading.Thread(target=lambda: send_rel(s, pkt, f'<- 0xd9 members({len(names)}) sqn={squadron_id}',
-                     to=5.0), daemon=True).start()
-    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s)')
+    # v870f5 [FIRST 'DISPLAY MEMBERS' AFTER LOGIN WAS BLANK]: the client fills the member list only
+    # for the squadron its dialog is currently on, and the notes reply (0xd7) is what switches it.
+    # For the row that is already selected when the page opens the client sends NO notes request,
+    # only the members request - so the roster arrived for a squadron the dialog had not been
+    # switched to and was dropped (Alon 09-28 04:32: sqn 27 blank, 20 and 9 fine, each preceded
+    # by a notes request). If we did not just send notes for this squadron, send them first.
+    _ln = s.__dict__.get('_last_notes_sqn')
+    _need_notes = (_ln is None or _ln[0] != int(squadron_id) or time.time() - _ln[1] > 30.0)
+    def _send():
+        if _need_notes:
+            try:
+                _row = db_get_squadron(int(squadron_id))
+                if _row:
+                    send_rel(s, build_squadron_notes(int(squadron_id), _row[4] or ''),
+                             f'<- 0xd7 squadron notes (before members, sqn={squadron_id})', to=5.0)
+                    s._last_notes_sqn = (int(squadron_id), time.time())
+                    time.sleep(0.15)
+            except Exception:
+                logx('SQNMGT', 'notes-before-members failed')
+        send_rel(s, pkt, f'<- 0xd9 members({len(names)}) sqn={squadron_id}', to=5.0)
+    threading.Thread(target=_send, daemon=True).start()
+    log('SQNMGT', f'{s.current_pilot} display-members sqn={squadron_id} -> {len(names)} member(s)'
+                  f'{" (notes sent first)" if _need_notes else ""}')
 
 def build_squadron_remove_result(ok):
     """REMOVE-MEMBER RESULT (0xdb) parsed by FUN_004f0090. Convention is INVERTED like the join:
@@ -19870,7 +19903,10 @@ def handle_compound(s, outer_cmd, pl):
             log('COMPOUND', f'Pilot selected: "{pname}" slot={slot}')
             if _enforce_ban_on_select(s, pname): return
             push_myrights(s, '(compound pilot select)')   # v301: no-op for normal pilots
-            threading.Timer(1.5, lambda: send_lobby_news(s, reason='(compound pilot select)')).start()   # v732f5
+            # v870f5: no push at pilot select any more - the client ALWAYS asks (0xca) a second
+            # later, and the push + v741's duplicate filter dropped that request (145 of 352 news
+            # requests over 09-25..28 'skipped (duplicate)'); on a real link the push can land before
+            # the News page exists and the page then stays blank ('news not always updating')
             # v543f5: stamp the pilot's own SquadronId into the echo, EXACTLY like the appspace
             # 0x62/0xe4 path (the u32 at [6:10] -> FUN_004ee120 -> DAT_00cb06dc -> local plane's
             # squadron at the 201 grant + 'Your squadron'). This compound framing previously echoed
@@ -26660,9 +26696,7 @@ def handle_post_auth(s, cmd, pl):
                     broadcast_player_join(pname, exclude_sess=s)
                 threading.Thread(target=lambda: send_initial_ui_list(s), daemon=True).start()
                 threading.Thread(target=lambda: send_active_list(s), daemon=True).start()
-                # v732f5: push the lobby news/welcome at pilot selection - the client only asks (0xca)
-                # when the News page is opened, so a pilot who never clicks the tab never saw it.
-                threading.Timer(1.5, lambda: send_lobby_news(s, reason='(pilot select)')).start()
+                # v732f5 pushed the lobby news here; v870f5 removed it - see the compound path
             # v491f5 [PERSONA RESTORE - the wrong-aircraft/toggling fix] RE (FA.exe
             # FUN_004ee120 reply handler + FUN_004f88f0 VNET::JoinToGameAnswerCB): the 0xe4
             # reply layout is [4]=0xe4 [5]=status [6:10]=u32 LE selection id. The client
@@ -26770,6 +26804,7 @@ def handle_post_auth(s, cmd, pl):
                 _d7row = db_get_squadron(_d7id) if _d7id else None
                 if _d7row:
                     _notes = _d7row[4] or ''
+                    s._last_notes_sqn = (int(_d7id), time.time())      # v870f5
                     threading.Thread(target=lambda: send_rel(
                         s, build_squadron_notes(_d7id, _notes),
                         f'<- 0xd7 squadron notes ({_d7row[1]}, id={_d7id})', to=5.0),
@@ -28120,6 +28155,7 @@ threading.Thread(
             'arena_reset_fn': lambda rid, winner, by: arena_reset(rid, winner_camp=winner, by=by),   # v640f5
             'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX),           # v686f5
             'server_py': os.path.abspath(__file__),         # v731f5: the lobby-news editor writes next to it
+            'push_lobby_news_fn': push_lobby_news_all,      # v870f5: web save -> push to lobby clients
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()
