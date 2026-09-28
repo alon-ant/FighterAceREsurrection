@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v889f5'
+VERSION = 'v890f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3404,14 +3404,17 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             _nend = d.find(0, _noff)
             if 0 < _noff < len(d) and _nend > _noff:
                 _old_env = _nend - _noff
-                _new = room_name.encode('ascii', 'replace')[:31]
-                if len(_new) <= _old_env:
-                    d[_noff:_nend] = _new + b'\x00' * (_old_env - len(_new))
-                elif not getattr(build_lz_gamedef, '_name_toolong_logged', False):
-                    build_lz_gamedef._name_toolong_logged = True
-                    log('GAMEDEF212', f'room_name {room_name!r} ({len(_new)}B) exceeds the stored '
-                                      f'name field ({_old_env}B) - in-arena name left as stored '
-                                      f'(lobby list shows the new name; logged once)')
+                _new = room_name.encode('ascii', 'replace')[:31].replace(b'\x00', b'')
+                # v890f5: SPLICE, never NUL-pad. The fields after the name are consecutive cstrings, so
+                # padding a SHORTER name with NULs produced extra empty strings and shifted every later
+                # field - arena 134 renamed 'TC Reborn Beta II' -> 'TC Reborn Beta' (09-28 16:05) and
+                # every client CTD'd in the lobby on 'Len>=0' GameDef.cpp:1900. Length-changing is safe
+                # here for the same reason the password write is: the struct is recompressed at the
+                # end and every later patch re-walks it. Longer names are accepted the same way.
+                if _new and _new != bytes(d[_noff:_nend]):
+                    d[_noff:_nend] = _new
+                    if len(_new) != _old_env:
+                        log('GAMEDEF-GUARD', f'in-arena name spliced {_old_env}B -> {len(_new)}B ({room_name!r})')
         except Exception:
             pass
     # ARENA PASSWORD (web override): if settings_json carries a 'password' key, stamp it into the
@@ -3677,6 +3680,33 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                 _go, _gold = _gr
                 log('GAMEDEF212', f'game-type @+{_go}: {_gold} -> {_gt} '
                                   f'(+0xa8 panel gate; 1=TC 2=custom 3=training)')
+    # v890f5 [GAME_DEF GUARD]: the served blob must walk like the client's deserializer does
+    # (_gamedef_aa_offset replays FUN_0057bee0 to the AA bytes). Arena 134 ('TC Reborn Beta',
+    # created on the web 09-28 14:05) failed that walk after our patches and every client that
+    # received it CTD'd in the lobby on 'Len>=0' GameDef.cpp:1900 (Taurus 16:07, 16:14). If the
+    # PATCHED blob does not walk but the stored template does, our patches broke it: serve the
+    # template with only the creation-time stamp. If the template itself does not walk, the arena
+    # is kept OUT of the arena list (GAMEDEF_BAD_ROOMS) - an arena the client cannot parse must
+    # never reach it.
+    if _gamedef_aa_offset(d) is None:
+        try:
+            _raw = bytearray(fa_decompress(b[v - 6:], len(b) - v + 6))
+        except Exception:
+            _raw = None
+        if _raw is not None and _gamedef_aa_offset(_raw) is not None:
+            log('GAMEDEF-GUARD', f'[warn] patched GAME_DEF ({room_name!r}) no longer walks - serving the '
+                                 f'UNPATCHED template (creation time only); arena settings not applied')
+            d = _raw
+            if len(d) >= 13:
+                struct.pack_into('<I', d, 5, _ct_ms); struct.pack_into('<I', d, 9, _ct_s)
+        else:
+            log('GAMEDEF-GUARD', f'[warn] stored GAME_DEF ({room_name!r}) does not walk even unpatched - '
+                                 f'not served; the arena is left out of the list')
+            if room_name:
+                GAMEDEF_BAD_NAMES.add(room_name)
+            return None, 0, 0
+    elif room_name:
+        GAMEDEF_BAD_NAMES.discard(room_name)
     D_orig = len(d)
     # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
@@ -7009,9 +7039,17 @@ ARENA_LIST_PASSWORD_FLAG = 0x01   # bit0 -> desc+0x10 = padlock (password protec
 # screenshot maps all three bits -> icons at once. MUST be False in normal operation.
 ARENA_LIST_ICON_BIT_PROBE = False
 
+GAMEDEF_BAD_NAMES = set()      # v890f5: room names whose stored GAME_DEF does not walk - kept out of the arena list
+
 def build_arenalist(rooms):
     """Build the 0xd2 arena/room list response (the Arenas tab's list)."""
     data = bytearray([0xd2])
+    if rooms and GAMEDEF_BAD_NAMES:
+        _n0 = len(rooms)
+        rooms = [r for r in rooms if (r[1] or 'Arena') not in GAMEDEF_BAD_NAMES]
+        if len(rooms) != _n0:
+            log('GAMEDEF-GUARD', f'arena list: {_n0 - len(rooms)} arena(s) left out (GAME_DEF does not walk): '
+                                 f'{sorted(GAMEDEF_BAD_NAMES)}')
     if not rooms:
         log('ARENALIST', f'0xd2 -> empty (0 rooms)')
         return build_appspace_pkt(bytes([0xd2]))
