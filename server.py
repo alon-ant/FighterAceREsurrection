@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v886f5'
+VERSION = 'v889f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3014,6 +3014,26 @@ def apply_runway_angle(d, deg=60):
     except Exception:
         return None
 
+def _gamedef_tail_ok(d):
+    """v888f5: True if the GAME_DEF tail has the known layout (the same test apply_craters_vanish
+    uses: [Oxygen1 f32 @len-80][Oxygen2 f32 @len-76][3 small bytes][CratersVanishDelay][Number]).
+    Every writer that addresses a byte by its distance from the END must require this - arena 134
+    ('TC Reborn Beta', created 09-28 14:05 from a different template) failed it, but the
+    RunwayCollisions writer's 3-byte anchor still matched and set bit 0x20 in a byte that is NOT the
+    flags byte there: every client that received that arena's GAME_DEF CTD'd on
+    'Assertion failed (Len>=0)' GameDef.cpp:1900 (Taurus 09-28 16:07 and others)."""
+    try:
+        n = len(d)
+        if n < 100:
+            return False
+        off = n - 72
+        ccd, pmt, get_, cvd, cvn = d[off - 3], d[off - 2], d[off - 1], d[off], d[off + 1]
+        ox1, ox2 = struct.unpack_from('<ff', d, off - 11)
+        return (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
+                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 < ox2)
+    except Exception:
+        return False
+
 def apply_runway_collisions(d, on=True):
     r"""v821f5/v822f5: set/clear [Game] RunwayCollisions in a DECOMPRESSED GAME_DEF. With it 'no' (every
     arena template) a plane rolls straight through a bomb crater - the crater (OBJECTS\Crater\
@@ -3566,7 +3586,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     else:
         _sgo_skip = False
     _sgo = SHOW_GROUND_OBJECTS_DEFAULT if _sgo is None else bool(int(_sgo))
-    _sg = None if _sgo_skip else apply_show_ground_objects(d, _sgo)
+    _sg = None if (_sgo_skip or not _gamedef_tail_ok(d)) else apply_show_ground_objects(d, _sgo)   # v888f5: tail gate
     if _sgo_skip:
         log('MAP57', 'ShowGroundObjects: FFA arena - left as the template has it')
     elif _sg:
@@ -3578,6 +3598,9 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     _rwc = (arena_settings or {}).get('runway_collisions')
     if _rwc is None and (is_ffa or force_ffa or tc_room is False):
         log('CRATER', 'RunwayCollisions/RunwayAngle: not a TC arena - left as the template has it')
+    elif not _gamedef_tail_ok(d):
+        # v888f5: never address tail bytes in a blob whose tail layout is not the known one
+        log('CRATER', f'RunwayCollisions/RunwayAngle: tail layout not recognised (len {len(d)}) - left as-is')
     else:
         _rwc = RUNWAY_COLLISIONS_DEFAULT if _rwc is None else bool(int(_rwc))
         _rw = apply_runway_collisions(d, _rwc)
@@ -4504,8 +4527,17 @@ def console_handler():
                 # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
                 # server-driven descent, frame-after-create, delete settle) as one switch
                 _a = (parts[1].split() if len(parts) > 1 else [])
-                global CHUTE_DRIVE_ENABLED, CHUTE_NO_PARENT
-                if _a and _a[0] == 'noparent' and len(_a) > 1:
+                global CHUTE_DRIVE_ENABLED, CHUTE_NO_PARENT, CHUTE_NEAR_HZ, CHUTE_NEAR_M
+                if _a and _a[0] == 'near' and len(_a) > 1:
+                    # v887f5: chute near <hz> [metres] - driven-canopy cadence for nearby observers
+                    try:
+                        CHUTE_NEAR_HZ = max(1.0, min(10.0, float(_a[1])))
+                        if len(_a) > 2:
+                            CHUTE_NEAR_M = max(0.0, float(_a[2]))
+                    except ValueError:
+                        pass
+                    log('CONSOLE', f'chute near = {CHUTE_NEAR_HZ:g} Hz within {CHUTE_NEAR_M:.0f} m')
+                elif _a and _a[0] == 'noparent' and len(_a) > 1:
                     CHUTE_NO_PARENT = _a[1].lower() in ('on', '1', 'true', 'yes')
                     log('CONSOLE', f'chute noparent = {CHUTE_NO_PARENT}')
                 elif _a and _a[0] == 'drive' and len(_a) > 1:
@@ -15630,10 +15662,17 @@ CHUTE_MIN_Z        = 20.0         # v814f5: never drive a canopy below this (no 
 CHUTE_OPEN_FRAMES  = 6            # v815f5: a chute with fewer real frames than this has no reliable opened state
 CHUTE_ORPHAN_S     = 15.0         # v820f5: a silent chute this long past its predicted landing is deleted by the server
 CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
+CHUTE_NEAR_HZ      = 2.0          # v887f5 [CHUTE STEPPING]: the client holds a driven canopy still between frames
+                                  # v889f5: HELD (user 09-28) - 2.0 = the v886 cadence for everyone, i.e. the fix is
+                                  # inert until tested; `chute near 6` on the console turns it on live.
+CHUTE_NEAR_M       = 2000.0       # (v806 note above), so at 2 Hz a 6.6 m/s descent moved in visible 3.3 m steps -
+                                  # the troop 'parachute jitter'. Observers within CHUTE_NEAR_M now get the frames
+                                  # at CHUTE_NEAR_HZ (1.1 m steps); farther ones keep CHUTE_KEEPALIVE_S. A 14-chute
+                                  # stick costs a nearby observer ~6 KB/s for the ~40 s descent. `chute near <hz> [m]`.
 
 def _chute_keepalive_loop():
     while running:
-        time.sleep(0.25)                                   # v808f5: was 1.0 - capped the cadence at 1 Hz
+        time.sleep(0.1)                                    # v887f5: was 0.25 (v808) - room for the near cadence
         if not CHUTE_DRIVE_ENABLED:
             continue
         try:
@@ -15682,7 +15721,7 @@ def _chute_keepalive_loop():
                         log('PARA', f'{s.current_pilot} chute 0x{onum:04x}: owner silent {now - t0:.0f}s and never deleted it '
                                     f'- server sent the delete to peers (orphan)')
                         continue
-                    if now - ent.get('_ka_at', t0) < CHUTE_KEEPALIVE_S:
+                    if now - ent.get('_ka_at', t0) < min(CHUTE_KEEPALIVE_S, 1.0 / max(1.0, CHUTE_NEAR_HZ)) - 0.02:
                         continue
                     ent['_ka_at'] = now
                     # v806f5/v814f5: the canopy is driven straight down at the TERMINAL sink rate with
@@ -15702,10 +15741,17 @@ def _chute_keepalive_loop():
                     except Exception:
                         continue
                     _peers = (s.__dict__.get('_para_created_peers') or {}).get(onum, set())
+                    _kap = ent.setdefault('_ka_peer', {})             # v887f5: per-observer cadence
                     n = 0
                     for p in get_sessions_in_room(s.current_room):
                         if p is s or getattr(p, 'addr', None) not in _peers:
                             continue
+                        _ppos = p.__dict__.get('_pos_xy')
+                        _near = (_ppos is not None and math.hypot(_ppos[0] - _x, _ppos[1] - _y) <= CHUTE_NEAR_M)
+                        _iv = (1.0 / max(1.0, CHUTE_NEAR_HZ)) if _near else CHUTE_KEEPALIVE_S
+                        if now - _kap.get(p.addr, 0.0) < _iv - 0.02:
+                            continue
+                        _kap[p.addr] = now
                         try:
                             b2 = bytearray(body)
                             rt = p.last_telem_tick
