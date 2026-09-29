@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v890f5'
+VERSION = 'v895f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4844,6 +4844,12 @@ def console_handler():
                         global TRAIN_CLIENT_INTEGRATE
                         TRAIN_CLIENT_INTEGRATE = (_a[1].lower() in ('on', '1', 'true', 'yes'))
                         log('CONSOLE', f'train: client integration {"ON (packet speed)" if TRAIN_CLIENT_INTEGRATE else "OFF (server-positioned, speed 0)"}')
+                    elif _a and _a[0] == 'wagonkg':                         # v894f5
+                        _kg = max(500, min(60000, int(float(_a[1]))))
+                        for _c in (146, 147, 148):
+                            WAGON_CAP[_c] = _kg
+                        log('CONSOLE', f'train: cargo wagon capacity now {_kg} kg (metal/fuel/ammo; 2 of each per train '
+                                       f'= {2 * _kg} kg per kind) - applies to the next load')
                     elif _a and _a[0] == 'speedmult':                       # v723f5
                         TRAIN_CLIENT_SPEED_MULT = float(_a[1])
                         log('CONSOLE', f'train: client speed multiplier now {TRAIN_CLIENT_SPEED_MULT:g} (packet speed = model speed / mult)')
@@ -6513,6 +6519,126 @@ def db_squadron_role(squadron_id, account_name):
     conn.close()
     return r[0] if r else None
 
+# --- v891f5: PLAYER / SQUADRON OF THE WEEK / MONTH ---------------------------------------------
+# One row per (UTC day, pilot, arena): seconds in the world, plane kills, TC triggers, and the
+# squadron he was flying under at the last update. The admin web page (/admin/leaders) sums these
+# for this/last week and this/last month, per arena or across all arenas, for pilots and squadrons.
+# Online time is sampled every STATS_ONLINE_TICK_S for every pilot in an arena's world (not the
+# lobby); kills come from the same place the Country Scores do; triggers from tc_trigger_scene.
+STATS_ONLINE_TICK_S = 60
+_STATS_TABLE_OK = False
+
+def _stats_conn():
+    global _STATS_TABLE_OK
+    conn = sqlite3.connect(DB_PATH, timeout=5)
+    if not _STATS_TABLE_OK:
+        conn.execute("CREATE TABLE IF NOT EXISTS pilot_stats_daily (day TEXT NOT NULL, pilot TEXT NOT NULL, "
+                     "room_id INTEGER NOT NULL DEFAULT 0, squadron_id INTEGER DEFAULT 0, online_s INTEGER DEFAULT 0, "
+                     "kills INTEGER DEFAULT 0, triggers INTEGER DEFAULT 0, PRIMARY KEY (day, pilot, room_id))")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_psd_day ON pilot_stats_daily(day)")
+        conn.commit()
+        _STATS_TABLE_OK = True
+    return conn
+
+def stats_add_many(rows):
+    """rows: [(pilot, room_id, online_s, kills, triggers)] - one transaction."""
+    if not rows:
+        return
+    day = time.strftime('%Y-%m-%d', time.gmtime())
+    conn = _stats_conn()
+    _sqc = {}                                        # v892f5: one squadron lookup per pilot per flush
+    try:
+        for pilot, room_id, on, k, tr in rows:
+            if not pilot:
+                continue
+            if pilot not in _sqc:
+                try:
+                    _sqc[pilot] = int(db_pilot_squadron_id(pilot) or 0)
+                except Exception:
+                    _sqc[pilot] = 0
+            sid = _sqc[pilot]
+            conn.execute("INSERT INTO pilot_stats_daily (day, pilot, room_id, squadron_id, online_s, kills, triggers) "
+                         "VALUES (?,?,?,?,?,?,?) ON CONFLICT(day, pilot, room_id) DO UPDATE SET "
+                         "online_s=online_s+excluded.online_s, kills=kills+excluded.kills, "
+                         "triggers=triggers+excluded.triggers, squadron_id=excluded.squadron_id",
+                         (day, pilot, int(room_id or 0), sid, int(on), int(k), int(tr)))
+        conn.commit()
+    finally:
+        conn.close()
+
+def stats_add(pilot, room_id=None, online_s=0, kills=0, triggers=0):
+    """v892f5: QUEUED - kills and triggers are recorded on the packet path, so the database write
+    (open, upsert, commit = an fsync) happens on the stats thread within STATS_FLUSH_S instead."""
+    if not pilot:
+        return
+    if room_id is None:
+        s = next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == pilot), None)
+        room_id = getattr(s, 'current_room', None) if s is not None else None
+    with _STATS_Q_LOCK:
+        _STATS_Q.append((pilot, room_id or 0, online_s, kills, triggers))
+
+_STATS_Q = []
+_STATS_Q_LOCK = threading.Lock()
+STATS_FLUSH_S = 5.0
+
+def _stats_online_loop():
+    _next_online = time.time() + STATS_ONLINE_TICK_S
+    while running:
+        time.sleep(STATS_FLUSH_S)
+        try:
+            with _STATS_Q_LOCK:
+                rows = list(_STATS_Q); _STATS_Q.clear()
+            if time.time() >= _next_online:
+                _next_online += STATS_ONLINE_TICK_S
+                rows += [(x.current_pilot, x.current_room, STATS_ONLINE_TICK_S, 0, 0)
+                         for x in list(get_all_sessions())
+                         if getattr(x, 'entered_game', False) and getattr(x, 'current_room', None) is not None
+                         and getattr(x, 'current_pilot', None)]
+            stats_add_many(rows)
+        except Exception:
+            logx('STATS', 'stats writer failed')
+
+# --- v891f5: MESSAGE OF THE DAY -------------------------------------------------------------------
+# motd.txt next to server.py (edited on the admin web page /admin/motd): every non-blank line is sent
+# as a yellow server line (send_system_msg, the `say` channel) to each pilot a few seconds after he
+# enters an arena's world - once per arena entry, not on every respawn. Empty file = no message.
+MOTD_DELAY_S = 4.0
+MOTD_LINE_GAP_S = 0.6
+
+def motd_lines():
+    try:
+        p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'motd.txt')
+        if not os.path.exists(p):
+            return []
+        with open(p, 'r', encoding='utf-8', errors='replace') as fh:
+            return [ln.rstrip()[:74] for ln in fh.read().splitlines() if ln.strip()][:8]
+    except Exception:
+        return []
+
+def motd_on_spawn(s):
+    """v891f5/v893f5: once per ARENA VISIT on this connection - the flag is cleared when the pilot
+    enters an arena (SendEnterToGame) and when he leaves it (handle_leave_arena), so leaving and
+    rejoining always re-sends. v891 cleared it only from a once-a-minute check, so a pilot who left
+    and came back within the minute got nothing ('motd doesn't always show', user 09-28). HQ trips
+    and respawns inside the same visit do not repeat it."""
+    room = getattr(s, 'current_room', None)
+    if room is None or s.__dict__.get('_motd_room') == room:
+        return
+    lines = motd_lines()
+    if not lines:
+        return
+    s._motd_room = room
+    def _send(_s=s, _lines=lines, _room=room):
+        time.sleep(MOTD_DELAY_S)
+        for ln in _lines:
+            if not getattr(_s, 'entered_game', False) or getattr(_s, 'current_room', None) != _room:
+                _s.__dict__.pop('_motd_room', None)      # left before it was shown - show it next time
+                return
+            send_system_msg(_s, ln)
+            time.sleep(MOTD_LINE_GAP_S)
+        log('MOTD', f'{getattr(_s, "current_pilot", "?")}: message of the day sent ({len(_lines)} line(s))')
+    threading.Thread(target=_send, daemon=True).start()
+
 def db_pilot_squadron_id(pilot_name):
     """The approved squadron id this pilot belongs to (0 if none). Drives the in-game plane tag /
     squad colour via the client record's Squadron field (build_client_record), and is the basis for
@@ -6862,7 +6988,9 @@ def handle_squadron_join(s, selector, submitted_pw):
         log('SQNJOIN', f'{s.current_pilot} join {name}: squadron not approved')
         _reply(False, sid); return
     if stored_pw and submitted_pw != stored_pw:
-        log('SQNJOIN', f'{s.current_pilot} join {name}: WRONG password (got {submitted_pw!r})')
+        # 2026-09-29 SECURITY: never log the typed password (logs were publicly readable via the
+        # leaked web token; a wrong guess is often a near-miss or a reused password).
+        log('SQNJOIN', f'{s.current_pilot} join {name}: WRONG password ({len(submitted_pw or "")} chars)')
         _reply(False, sid); return
     acct = (s.current_pilot or '') or getattr(s, 'account', '')
     # Founding rule: joiner becomes COMMANDER iff the squadron has no current commander MEMBER. Check
@@ -9706,6 +9834,7 @@ def _maybe_grant_create_entry(s):
     if s.entered_game or s.client_granted or s.current_room is None:
         return False
     s.entered_game = True
+    s.__dict__.pop('_motd_room', None)          # v893f5
     s.nation = None                                   # "In Menu" until a side is picked
     assign_player_slot(s, s.current_room)
     s.client_granted = True
@@ -11949,6 +12078,11 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     pname = getattr(pilot_sess, 'current_pilot', None) or 'a pilot'
     txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
     TRIGGERS[key] = {'at': now, 'by': pname, 'camp': tcamp, 'attacker': pcamp, 'columns': []}
+    try:
+        if pilot_sess is not None and getattr(pilot_sess, 'current_pilot', None):
+            stats_add(pilot_sess.current_pilot, room_id=room_id, triggers=1)   # v891f5
+    except Exception:
+        pass
     log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" (camp {tcamp}) TRIGGERED by {pname} '
               f'(camp {pcamp}) {reason}')
     _kind = tc_scene_kind_word(txy[2])
@@ -12870,7 +13004,18 @@ TRAIN_PER_CAMP_MAX    = 3
 TRAIN_CHAT_EMPTY_STOPS = True   # v699f5: also report stops where nothing was exchanged
 TRAIN_WAGONS_DEFAULT  = 8
 WAGON_KIND = {146: 'metal', 147: 'fuel', 148: 'ammo', 140: 'units'}
-WAGON_CAP  = {146: 2000, 147: 2000, 148: 1500, 140: 1000}
+# v894f5 [REAL-WORLD WAGON LOADS] (user 09-28: '4,000 kg per train is low'; 'a train resupplying a
+# damaged airfield brings enough for 2-3 aircraft'). The old figures were the client class records'
+# nominal numbers (2,000 / 2,000 / 1,500 kg per wagon, 2 wagons of each kind) - a tenth of a real
+# wagon. A WWII standard goods wagon carried 15 t (German G10 / Om: max load 15 t, the Omm open wagon
+# 24.5 t), a two-axle tank wagon 12-20 t of fuel. 15 t per cargo wagon -> 30 t of each kind per
+# 8-wagon train. Online 09-28 every pickup filled the train to capacity (4,000 fuel / 3,000 ammo in
+# 361 / 384 of 361 / 384 pickups) - capacity, not production, was the limit - while one bomber spawn
+# draws 5,000 kg fuel + 6,500 kg ammo and a fighter 500 + 500: a train load did not cover ONE bomber.
+# At 30 t: ~60 fighter sorties or ~5 bomber sorties of fuel per delivery. Throughput stays bounded
+# by the producers (TRAIN_PICKUP_KEEP) and the destination's storage (TRAIN_DROP_FILL).
+# `train wagonkg <kg>` changes it live.
+WAGON_CAP  = {146: 15000, 147: 15000, 148: 15000, 140: 1000}
 _TRAIN_LOST_AT = {}           # (room, camp, road) -> time the train died (respawn timer)
 
 def rail_stations(terrain):
@@ -14073,6 +14218,11 @@ def camp_stat_add(room_id, camp, row, n=1):
         d[row] = int(d.get(row, 0)) + int(n)
 
 def camp_stat_for_pilot(pilot_name, row, n=1):
+    try:
+        if row in ('fighters_destroyed', 'bombers_destroyed') and n:
+            stats_add(pilot_name, kills=int(n))          # v891f5: player/squadron of the week/month
+    except Exception:
+        pass
     s = next((x for x in get_all_sessions() if x.current_pilot == pilot_name), None)
     if s is not None:
         camp_stat_add(getattr(s, 'current_room', None), getattr(s, 'nation', None), row, n)
@@ -19561,6 +19711,7 @@ def handle_leave_arena(s):
                     continue
                 _submit_send(send_rel, sess, rem_pkt, rem_label, to=3.0)
     s.entered_game = False
+    s.__dict__.pop('_motd_room', None)          # v893f5: left the arena -> the next entry gets the MOTD again
     # v260: ARENA ISOLATION - clear current_room on leave so a subsequent arena JOIN resolves the
     # new arena fresh. Previously current_room kept pointing at the OLD room, and the enter handler
     # only resolved a room 'if not s.current_room', so an arena SWITCH left current_room stale ->
@@ -20421,6 +20572,7 @@ def handle_compound(s, outer_cmd, pl):
             if pname not in existing:
                 db_room_join(s.current_room, pname, s.account or '')
         s.entered_game = True
+        s.__dict__.pop('_motd_room', None)      # v893f5: a new arena entry on this connection
         s.entering_gidx = game_idx
         s.nation = None                       # enters "In Menu" until a side is picked
         assign_player_slot(s, s.current_room)
@@ -21916,6 +22068,10 @@ def _fire_server_confirm(s, via='', ident=None):
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s.__dict__['_obj_confirmed_at'] = time.time()   # v701f5: fresh-plane guard for stale exit records
+    try:
+        motd_on_spawn(s)                             # v891f5: message of the day, once per arena entry
+    except Exception:
+        logx('MOTD', 'motd on spawn failed')
     s.spawn_pending = False   # v416f5: world rebuilt + player inserted -> refreshes are safe again
     s._sp_confirmed = True    # v479f5: this spawn completed - the SPAWN-WATCH watchdog stands down
     # v556f5: dead-object snapshot for a client whose world may not carry the room's current
@@ -26176,8 +26332,14 @@ def handle_post_auth(s, cmd, pl):
     # yet build that reply - but this type MUST NOT hit the generic echo (an unhandled
     # in-arena reliable type bounced back is the 'Unknown Type' CTD class). Decode, record
     # the raw for the reply RE, swallow. Direct AND type-scan-wrapped forms.
-    _tank_mreq = (tb == 0x92 and sub == 0x47) or \
-                 (sub == 0x00 and len(pl) > 8 and pl[8] == 0x92)
+    # v895f5 CORRECTION: the direct form of this 'tank mission request' was a MISREAD. 0x92 is only
+    # the rotating OUTER type byte (0x32/0x72/0x92/0xd2... per packet) and sub 0x47 is msg 71, the
+    # map's SCENE PRODUCTION QUERY: [0x47][u32][u16] + u16 scene index - the logged raws carry scene
+    # indexes (0x1f = 31, 0x2b = 43, 0x20 = 32...). Those queries are already ANSWERED above by
+    # _handle_scene_prodinfo_query_71 (the PRODQ71 line just before every TANKMISN line); this branch
+    # only added a false log line. The direct match is removed (0x47 stays in NO_ECHO_SUBS, so
+    # nothing reaches the echo); the type-scan wrapped form with an inner 0x92 is kept, unverified.
+    _tank_mreq = (sub == 0x00 and len(pl) > 8 and pl[8] == 0x92)
     if _tank_mreq:
         _arg = int.from_bytes(pl[-2:], 'little') if len(pl) >= 2 else 0
         log('TANKMISN', f'{s.current_pilot} tank-mission request (msg 146/0x92 sub=0x47, '
@@ -27249,6 +27411,7 @@ def handle_post_auth(s, cmd, pl):
             else:
                 log('POST-AUTH', f'VNET::SendEnterToGame (direct) pilot="{pname}" gidx=0x{game_idx:08x} (no room)')
             s.entered_game = True
+            s.__dict__.pop('_motd_room', None)  # v893f5
             s.entering_gidx = game_idx
             s.nation = None                   # enters "In Menu" until a side is picked
             assign_player_slot(s, s.current_room)
@@ -27304,6 +27467,7 @@ def handle_post_auth(s, cmd, pl):
             else:
                 log('POST-AUTH', f'VNET::SendEnterToGame (WRAPPED) inner_bc=0x{sub:02x} GameIndex=0x{game_idx:08x} (no room)')
             s.entered_game = True
+            s.__dict__.pop('_motd_room', None)  # v893f5
             log('POST-AUTH', 'GAME MODE (wrapped VNET) - stopping 0x43, not echoing')
             return
 
@@ -28635,6 +28799,7 @@ threading.Thread(target=_prod40_fast_loop, daemon=True).start()   # v663f5: unit
 threading.Thread(target=_group26_push_loop, daemon=True).start()  # v724f5: map group boxes refreshed every 5 s while the map is open
 threading.Thread(target=_missions_refresh_loop, daemon=True).start()  # v771f5: AI missions follow their columns
 threading.Thread(target=_chute_keepalive_loop, daemon=True).start()   # v803f5: canopies stay alive on peers through the silent descent
+threading.Thread(target=_stats_online_loop, daemon=True).start()      # v891f5: online-time sampler for the leaderboards
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive

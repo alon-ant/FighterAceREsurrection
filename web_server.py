@@ -3,6 +3,15 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-09-29: SECURITY + WEBPERF flood.
+#   * LOG_READ_TOKEN was hardcoded here and the GitHub repo is public -> anyone could read all
+#     logs. Token now loaded from log_token.txt (gitignored) / FA_LOG_TOKEN_FILE; no file =
+#     token access off. Old token burned. Compared with hmac.compare_digest.
+#   * [WEBACCESS] log line for every log-endpoint reader: user, via session|token|BAD-TOKEN,
+#     client IP, user agent; rate-limited to 1 line per (ip, via, user) per 10 min.
+#   * [WEBPERF] threshold applies to BUILD time; lines show '(build Xms + send Yms)'. The
+#     Live Console's 2s logs.json poll (70 KB, ~310 ms of transfer to a far browser) logged
+#     itself every poll and kept the ring INFO-heavy -> self-sustaining flood.
 # 2026-08-15: v418f5 - admin promote/demote from the Users tab.
 #   Each account row gains a Promote (btn-green) / Demote (btn-yellow) toggle POSTing to
 #   /admin/set_admin (admin-only, same guard as every other handler). Two rows never show
@@ -159,6 +168,7 @@ import ssl
 import subprocess
 import sqlite3
 import hashlib
+import hmac
 import secrets
 import json
 import re
@@ -622,17 +632,68 @@ def is_user_admin(username):
 # v464 read-only log access for diagnostics tooling: the four LOG endpoints (logs.json,
 # logfiles.json, log_view, log_download) accept EITHER an admin session OR ?key=<LOG_READ_TOKEN>.
 # Read-only and log-scoped - account/settings/moderation endpoints remain strictly
-# admin-session. Rotate by editing the constant and restarting the web portion.
-LOG_READ_TOKEN = '50b7c538d1a4c104e8b6caa0e93798102eee753a29c74366'
+# admin-session.
+# 2026-09-29 SECURITY: the token used to be a constant HERE, and the repo is public - anyone
+# reading the source could pull every live/archived log (player IPs, account names, typed
+# squadron passwords). The old token is burned (it stays in git history forever). The token
+# now lives in log_token.txt next to this file (gitignored) or the file named by the env var
+# FA_LOG_TOKEN_FILE; >=32 chars. No file = token access DISABLED, admin sessions still work.
+# Rotate: write a new token into the file and restart the web portion.
+#   python3 -c "import secrets;print(secrets.token_hex(24))" > log_token.txt
+def _load_log_token():
+    p = (os.environ.get('FA_LOG_TOKEN_FILE')
+         or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log_token.txt'))
+    try:
+        with open(p, encoding='ascii') as f:
+            t = f.read().strip()
+        return t if len(t) >= 32 else None
+    except (OSError, UnicodeDecodeError):
+        return None
+
+LOG_READ_TOKEN = _load_log_token()
+
+# 2026-09-29 SECURITY [WEBACCESS]: who read the logs, and how. The HTTP layer's log_message is
+# silenced and WEBPERF never had a client address, so 'was that poll us or an outsider?' was
+# unanswerable. One line per (ip, method, user) per WEBACCESS_QUIET_S - an open Live Console
+# polling every 2s costs one line per 10 min, not a flood. BAD-TOKEN = a wrong ?key= (probing).
+WEBACCESS_QUIET_S = 600
+_ACCESS_SEEN = {}
+_ACCESS_LOCK = threading.Lock()
+
+def _log_access(handler, user, via):
+    try:
+        ip = handler.client_address[0]
+        k, now = (ip, via, user), time.time()
+        with _ACCESS_LOCK:
+            if now - _ACCESS_SEEN.get(k, 0) < WEBACCESS_QUIET_S:
+                return
+            _ACCESS_SEEN[k] = now
+            if len(_ACCESS_SEEN) > 4096:            # scanner churn: drop stale keys
+                for kk in [kk for kk, t in _ACCESS_SEEN.items() if now - t > WEBACCESS_QUIET_S]:
+                    _ACCESS_SEEN.pop(kk, None)
+        ua = (handler.headers.get('User-Agent') or '')[:80]
+        SRV['log']('WEBACCESS', f'{handler.path.split("?")[0]} by {user or "-"} '
+                                f'via {via} from {ip} ua={ua!r}')
+    except Exception:
+        pass
 
 def _log_read_ok(handler, user):
     if is_user_admin(user):
+        _log_access(handler, user, 'session')
         return True
     try:
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query)
-        return qs.get('key', [''])[0] == LOG_READ_TOKEN
+        key = qs.get('key', [''])[0]
     except Exception:
+        key = ''
+    if not key:
         return False
+    if LOG_READ_TOKEN and hmac.compare_digest(key.encode('utf-8', 'replace'),
+                                              LOG_READ_TOKEN.encode('ascii')):
+        _log_access(handler, user, 'token')
+        return True
+    _log_access(handler, user, 'BAD-TOKEN')
+    return False
 
 def arena_owner_account(room_id):
     """Return the account_name that created a room, or '' if unknown."""
@@ -874,6 +935,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         return None
 
     def send_html(self, content):
+        self._perf_ready = time.time()   # 2026-09-29 WEBPERF: page built, transfer starts
         self.send_response(200)
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
@@ -913,17 +975,33 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         # takes 4-5s with multiple refreshes' report was unanswerable from logs. Anything
         # >=200ms gets a WEBPERF line (path only, query stripped); one page load now names
         # the slow request(s) directly. Wraps the real handler; POST likewise.
+        # 2026-09-29: split BUILD vs SEND. wfile.write on TLS blocks until the kernel takes the
+        # whole body, so over a long-RTT link the 70 KB logs.json poll 'took' ~310 ms of pure
+        # transfer and logged itself every 2 s - and each such INFO line kept the next poll at
+        # 70 KB (feedback loop, the 2026-09-29 flood). Handlers stamp self._perf_ready when they
+        # start sending (send_html does it for every page); the 200 ms threshold now applies
+        # to server-side build time. Unstamped handlers keep the old total-time behaviour.
         _t0 = time.time()
+        self._perf_ready = None
         try:
             self._do_GET_inner()
         finally:
-            _dt = time.time() - _t0
-            if _dt >= 0.2:
-                try:
-                    SRV['log']('WEBPERF', f'GET {self.path.split("?")[0]} '
-                                          f'took {_dt*1000:.0f}ms')
-                except Exception:
-                    pass
+            self._perf_log('GET', _t0)
+
+    def _perf_log(self, method, t0):
+        _end = time.time()
+        _ready = getattr(self, '_perf_ready', None)
+        if _ready is not None and not (t0 <= _ready <= _end):
+            _ready = None                       # stale stamp from an earlier keep-alive request
+        _build = (_ready - t0) if _ready is not None else (_end - t0)
+        if _build >= 0.2:
+            try:
+                _split = (f' (build {_build*1000:.0f}ms + send {(_end - _ready)*1000:.0f}ms)'
+                          if _ready is not None else '')
+                SRV['log']('WEBPERF', f'{method} {self.path.split("?")[0]} '
+                                      f'took {(_end - t0)*1000:.0f}ms{_split}')
+            except Exception:
+                pass
 
     def _do_GET_inner(self):
         user = self.get_current_user()
@@ -1402,6 +1480,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 <div class="nav"><a href="/">&larr; Back to Dashboard</a> |
                     <a href="/admin/logs" style="color:#17a2b8;">Live Console</a> |
                     <a href="/admin/lobby_news" style="color:#6f42c1;">Lobby News</a> |
+                    <a href="/admin/motd" style="color:#b8860b;">Message of the Day</a> |
+                    <a href="/admin/leaders" style="color:#198754;">Leaderboards</a> |
                     <a href="/admin/badwords" style="color:#dc3545;">Chat Filter</a> |
                     Logged in as <strong>{hesc(str(user))}</strong></div>
                 <h1>Server Administration</h1>
@@ -2350,6 +2430,121 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </div>"""
             self.send_html(content)
 
+        elif self.path.startswith('/admin/motd'):
+            # v891f5: message of the day - yellow server lines sent to each pilot entering an arena's world
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><a href='/'>&larr; Back</a>"); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            try:
+                with open(os.path.join(_dir, 'motd.txt'), 'r', encoding='utf-8', errors='replace') as f:
+                    _cur = f.read()
+            except Exception:
+                _cur = ''
+            _saved = 'saved' in urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            content = f"""
+                <div class="nav"><a href="/admin">&larr; Back to Administration</a></div>
+                <h1>Message of the Day</h1>
+                {'<p style="color:#198754;"><strong>Saved.</strong> Pilots get it the next time they enter an arena.</p>' if _saved else ''}
+                <div class="card">
+                  <p style="color:#888; max-width:680px;">Each line below is shown to every pilot, in the small yellow
+                  server text, a few seconds after he enters an arena's world (once per arena entry, not on every
+                  respawn). Up to <strong>8 lines</strong> of up to <strong>74 characters</strong> each (the limit of the
+                  client's system-message line); longer lines are cut. Blank lines are skipped. Leave it empty to send nothing.</p>
+                  <form method="POST" action="/admin/motd">
+                    <textarea name="motd" rows="9" maxlength="700" style="width:100%; font-family:monospace;">{hesc(_cur)}</textarea>
+                    <p><button type="submit">Save</button></p>
+                  </form>
+                </div>"""
+            self.send_html(content)
+
+        elif self.path.startswith('/admin/leaders'):
+            # v891f5: player / squadron of the week / month from pilot_stats_daily
+            if not is_user_admin(user):
+                self.send_html("<h2>Access Denied</h2><a href='/'>&larr; Back</a>"); return
+            _q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            _period = _q.get('period', ['week'])[0]
+            _room = _q.get('room', ['all'])[0]
+            import datetime as _dt
+            _today = _dt.datetime.utcnow().date()
+            _mon = _today - _dt.timedelta(days=_today.weekday())
+            _m1 = _today.replace(day=1)
+            _periods = {
+                'week':       ('This week',  _mon, _today),
+                'lastweek':   ('Last week',  _mon - _dt.timedelta(days=7), _mon - _dt.timedelta(days=1)),
+                'month':      ('This month', _m1, _today),
+                'lastmonth':  ('Last month', (_m1 - _dt.timedelta(days=1)).replace(day=1), _m1 - _dt.timedelta(days=1)),
+            }
+            if _period not in _periods:
+                _period = 'week'
+            _plabel, _d0, _d1 = _periods[_period]
+            conn = sqlite3.connect(SRV['db_path'])
+            try:
+                _has = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='pilot_stats_daily'").fetchone()
+                _rooms = conn.execute("SELECT room_id, room_name FROM rooms ORDER BY room_name").fetchall()
+                _rname = {int(r[0]): (r[1] or f'Arena {r[0]}') for r in _rooms}
+                _sq = {int(r[0]): (r[1], r[2]) for r in conn.execute("SELECT squadron_id, name, tag FROM squadrons").fetchall()}
+                _where = "day >= ? AND day <= ?"
+                _args = [_d0.isoformat(), _d1.isoformat()]
+                if _room != 'all' and _room.isdigit():
+                    _where += " AND room_id = ?"; _args.append(int(_room))
+                def _top(col, by_squad, extra=''):
+                    if not _has:
+                        return []
+                    if by_squad:
+                        return conn.execute(f"SELECT squadron_id, SUM({col}) v FROM pilot_stats_daily WHERE {_where} "
+                                            f"AND squadron_id > 0 {extra} GROUP BY squadron_id HAVING v > 0 ORDER BY v DESC LIMIT 10",
+                                            _args).fetchall()
+                    return conn.execute(f"SELECT pilot, SUM({col}) v FROM pilot_stats_daily WHERE {_where} {extra} "
+                                        f"GROUP BY pilot HAVING v > 0 ORDER BY v DESC LIMIT 10", _args).fetchall()
+                # TC triggers only count in TC rooms (the trigger hook only fires there anyway)
+                _boards = [
+                    ('Most time online', 'online_s', 'time'),
+                    ('Most kills', 'kills', 'n'),
+                    ('Most TC triggers', 'triggers', 'n'),
+                ]
+                def _fmt(v, kind):
+                    if kind == 'time':
+                        v = int(v or 0); return f'{v // 3600}h {(v % 3600) // 60:02d}m'
+                    return str(int(v or 0))
+                def _table(title, rows, kind, squad):
+                    if not rows:
+                        return f"<div class='card' style='flex:1; min-width:280px;'><h3 style='margin-top:0;'>{title}</h3><p style='color:#888;'>No data yet.</p></div>"
+                    trs = ''
+                    for i, (k, v) in enumerate(rows):
+                        if squad:
+                            nm, tg = _sq.get(int(k), (f'Squadron {k}', ''))
+                            label = hesc(str(nm)) + (f' [{hesc(str(tg))}]' if tg else '')
+                        else:
+                            label = hesc(str(k))
+                        star = ' &#9733;' if i == 0 else ''
+                        style = " style='font-weight:bold; background:#fff8dc;'" if i == 0 else ''
+                        trs += f"<tr{style}><td>{i + 1}</td><td>{label}{star}</td><td style='text-align:right;'>{_fmt(v, kind)}</td></tr>"
+                    return (f"<div class='card' style='flex:1; min-width:280px;'><h3 style='margin-top:0;'>{title}</h3>"
+                            f"<table><tr><th>#</th><th>{'Squadron' if squad else 'Pilot'}</th><th></th></tr>{trs}</table></div>")
+                _html = ''
+                for title, col, kind in _boards:
+                    _html += (f"<h2>{title}</h2><div style='display:flex; gap:16px; flex-wrap:wrap;'>"
+                              + _table('Player', _top(col, False), kind, False)
+                              + _table('Squadron', _top(col, True), kind, True) + "</div>")
+            finally:
+                conn.close()
+            _popts = ''.join(f"<option value='{k}'{' selected' if k == _period else ''}>{v[0]}</option>" for k, v in _periods.items())
+            _ropts = "<option value='all'>All arenas</option>" + ''.join(
+                f"<option value='{rid}'{' selected' if str(rid) == _room else ''}>{hesc(nm)}</option>" for rid, nm in _rname.items())
+            content = f"""
+                <div class="nav"><a href="/admin">&larr; Back to Administration</a></div>
+                <h1>Player &amp; Squadron of the {'Week' if 'week' in _period else 'Month'}</h1>
+                <form method="GET" action="/admin/leaders" style="margin-bottom:12px;">
+                  <select name="period" style="padding:6px;">{_popts}</select>
+                  <select name="room" style="padding:6px;">{_ropts}</select>
+                  <button type="submit" style="width:auto; padding:6px 14px;">Show</button>
+                </form>
+                <p style="color:#888;">{_plabel}: {_d0.isoformat()} to {_d1.isoformat()} (UTC days, weeks start Monday).
+                Time online counts time inside an arena's world, not the lobby. A pilot's squadron is the one he
+                flew under when the time or kill was recorded. The starred row is the player / squadron of the period.</p>
+                {_html}"""
+            self.send_html(content)
+
         elif self.path.startswith('/admin/lobby_news'):
             # v731f5: edit the lobby News page (msg 202): the right-hand news lines and the left
             # welcome pane. Files live next to server.py so the game server picks them up live.
@@ -2482,6 +2677,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     counts = None
             body = json.dumps({'lines': lines, 'players': counts,
                                'version': SRV.get('version')}).encode('utf-8')     # v798f5: server build on the console
+            self._perf_ready = time.time()     # 2026-09-29 WEBPERF: built; the rest is transfer
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Cache-Control', 'no-store')
@@ -2597,17 +2793,12 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
-        _t0 = time.time()   # v475 [WEBPERF] - see do_GET
+        _t0 = time.time()   # v475 [WEBPERF] - see do_GET (2026-09-29 build/send split)
+        self._perf_ready = None
         try:
             self._do_POST_inner()
         finally:
-            _dt = time.time() - _t0
-            if _dt >= 0.2:
-                try:
-                    SRV['log']('WEBPERF', f'POST {self.path.split("?")[0]} '
-                                          f'took {_dt*1000:.0f}ms')
-                except Exception:
-                    pass
+            self._perf_log('POST', _t0)
 
     def _do_POST_inner(self):
         content_length = int(self.headers.get('Content-Length', 0))
@@ -2628,6 +2819,21 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 SRV['log']('WEB', f'badwords save failed: {e!r}')
             self.send_response(302); self.send_header('Location', '/admin/badwords?saved=1'); self.end_headers()
+            return
+
+        if self.path == '/admin/motd':
+            # v891f5: save the message of the day (admin only)
+            if not is_user_admin(user):
+                self.send_response(302); self.send_header('Location', '/'); self.end_headers(); return
+            _dir = os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__))
+            _txt = qs.get('motd', [''])[0].replace('\r\n', '\n')
+            try:
+                with open(os.path.join(_dir, 'motd.txt'), 'w', encoding='utf-8') as f:
+                    f.write(_txt)
+                SRV['log']('WEB', f'{user} updated the message of the day ({len([l for l in _txt.splitlines() if l.strip()])} line(s))')
+            except Exception as e:
+                SRV['log']('WEB', f'motd save failed: {e!r}')
+            self.send_response(302); self.send_header('Location', '/admin/motd?saved=1'); self.end_headers()
             return
 
         if self.path == '/admin/lobby_news':

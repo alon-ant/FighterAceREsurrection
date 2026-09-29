@@ -46,6 +46,113 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-28 (c): v893f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v893f5.py'. (Previous: v890f5.)
+    DEPLOY server.py AND web_server.py (the two admin pages below live in web_server.py).
+
+v891f5-v893f5 [LEADERBOARDS, MESSAGE OF THE DAY] (09-28)
+    * PLAYER / SQUADRON OF THE WEEK / MONTH (v891/v892): table pilot_stats_daily (UTC day, pilot,
+      room_id, squadron_id, online_s, kills, triggers), created on first use. Online time: every
+      60 s each pilot inside an arena's world (entered_game, not the lobby) gets 60 s for that
+      arena. Kills: plane kills, hooked in camp_stat_for_pilot (the Country Scores credit point).
+      TC triggers: hooked in the trigger routine (TC rooms only). squadron_id = the squadron he flew
+      under when the row was updated. Writes are QUEUED (v892) and flushed by one thread every 5 s -
+      no database commit on the packet path. Admin page /admin/leaders: this/last week (Mon-Sun),
+      this/last month, all arenas or one; boards for time online, kills, TC triggers, each with a
+      player and a squadron top 10, #1 starred.
+    * MESSAGE OF THE DAY (v891/v893): motd.txt next to server.py, edited on /admin/motd (up to 8
+      lines x 74 chars - the 0xc9 system line limit). Sent as yellow server lines (send_system_msg,
+      the `say` channel) 4 s after the pilot's plane first appears in an arena's world. Once per
+      ARENA VISIT per connection: the marker is cleared on every SendEnterToGame path and in
+      handle_leave_arena (v893 - v891 cleared it from a once-a-minute check, so a quick rejoin got
+      nothing); HQ trips and respawns inside a visit do not repeat it; leaving during the delay
+      re-arms it; an empty file marks nothing.
+
+==============================================================================
+*** BANKED 2026-09-28 (b): v890f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v890f5.py'. (Previous: v882f5.)
+
+    CREDIT: the fix for the warping / rubber-banding of AI objects (and of other pilots' planes)
+    and the fixing of the login today were made possible by the research and hard work of
+    Skyyr / Shadow. His two-film telemetry analysis (Fighter_Ace_Telemetry_Lag_Project: frame-by-
+    frame comparison of the same fight recorded from both sides, reversal-rate measurement,
+    revcheck.py) located the re-stamping jitter in relay_telemetry and drove the transport and
+    client-timing investigation of the day. He deserves the credit.
+
+v883f5-v890f5 [SMOOTH MOTION, LOBBY CTD] (09-28)
+    * EVEN-CLOCK RE-STAMP (v883, planes): the tick written into a relayed frame was the receiver's
+      LAST SAMPLED conductor tick (advances only when one of his ~13/s frames arrives), so its age
+      varied 0-77 ms at random and repeated / stepped back on reordered frames. Now: the receiver's
+      clock projected to the send instant at his measured rate (_harvest_tick: late/duplicate ticks
+      rejected with a resync hatch, rate over >=1 s windows - v835's rate EMA never updated),
+      minus RELAY_TICK_LEAD, monotonic per (receiver, object). PERF: stamps/clamped/dup/tick_rej.
+    * CONSUMER RE (FA.exe FUN_007e4a20, FUN_007cf0f0, Timer.cpp FUN_007cf180): the client does NOT
+      interpolate - it CATCHES UP (globalTick - stamp) cycles from the received state: stepped physics
+      < 11 cycles, 5 steps + jump 11-20, one jump 21-199, reset at 200+; a NEGATIVE value (stamp in
+      the future) down to -19 MOVES THE OBJECT BACKWARDS; < -12 or > 1000 logs nMoveCycles and resets.
+      So stamp jitter = the wobble; the lead is latency compensation - keep lead + RTT < 11 cycles
+      (lead 0 for internet pilots).
+    * AI OBJECTS (v884): tanks, trains, soldiers, driven chutes stamped from the projected clock, no
+      lead (the server computes the position at the send instant). SOLDIERS (v885): throttle scaled
+      to PARA_WALK_MPS / 2.778 (the class record's walk speed) - the client walked them 0.4 m/s faster
+      and every 1 Hz correction pulled them back; look-ahead 0.3 -> 0. TANKS (v886): look-ahead
+      0.25 -> 0 (speed already matched per class since v672). Live switches: tick project|ai|mono,
+      tick lead N, tc soldier <thr>, tc soldierahead <s>, tc tankahead <s>.
+    * TROOP CHUTES (v887): 6 Hz frames for observers within 2 km (the client holds a driven canopy
+      still between frames -> 3.3 m steps at 2 Hz). HELD in v889: CHUTE_NEAR_HZ = 2.0 (inert) until
+      tested; `chute near 6` turns it on live.
+    * LOBBY CTD 'Len>=0' GameDef.cpp:1900 (v888/v890): the v473 in-arena name stamp NUL-padded a
+      SHORTER name, creating extra empty cstrings that shifted every later field (arena 134 renamed
+      'TC Reborn Beta II' -> 'TC Reborn Beta', 16:05; every client reaching the lobby crashed). Now
+      spliced at the real length (longer names accepted too). GAME_DEF GUARD: a served blob that does
+      not walk (_gamedef_aa_offset) falls back to the unpatched template; a template that does not
+      walk keeps its arena out of the list. Tail writers (RunwayCollisions/RunwayAngle/
+      ShowGroundObjects) require _gamedef_tail_ok.
+
+==============================================================================
+*** BANKED 2026-09-28: v882f5 is the STABLE BANKING POINT (user-approved, confirmed online:
+    every lobby request answered, 6 wrapper-value requests re-framed, 0 echoed, 0 errors).
+    Snapshot server.py -> 'old files\server_v882f5.py'. (Previous: v851f5.)
+
+v852f5-v882f5 [TRANSPORT, LOBBY RELIABILITY, TC ECONOMY, DIAGNOSTICS] (09-25 .. 09-28)
+    * RELIABLE CHANNEL - THE CLIENT'S RETRANSMIT TIMER (v875): RecvSYNReply (vcncNet FUN_10003cd3)
+      copies 17 dwords from SYN-reply byte 24 into the RTT object (FUN_10006e9b/f2d/f55/ff8). Our
+      block was written 8 bytes EARLY for 2 years: the client read timeout min 5000 ms / max 200 ms
+      (inverted) -> every lost reliable packet = a 5 s stall, the 14 s LAN login, 18.9 s lobby
+      stalls. Now written at the true offset: timeout = RTT x 1..3, floor 250 ms, ceiling 3 s
+      (RTT_* constants; RTT_CFG_TUNED=False reverts). Verified live with fa_rtt.py (new tool:
+      reads vcncNet+0x20360 from a running client): TIMEOUT 250 ms at RTT 165 ms online.
+    * WRAPPER VALUES ARE NOT MESSAGE TYPES (v868/v869/v881/v882): the attached-TIME wrapper's
+      bytes 2-3 cycle with the client's time index. (a) the prefixed re-frame now covers every
+      lobby request (0xcb 0xce 0xd2 0xd4 0xd5 0xd7 0xd9 0xdb 0xdf 0xd1 0xd8 0xe0) and the in-game
+      requests with direct handlers (0x22 0x1a 0x33 0x39 0x46 0x2a 0x70); (b) COMPOUND_CMDS
+      {530,578,4610} are three of those counter values - a request carrying one was sent down the
+      compound path and swallowed (~1 click in 4 on the internet). v882 re-frames known inner
+      messages before the compound branch; genuine compound forms (pilot create/rename/delete,
+      exit, disconnect, pilot list/select) unchanged; v881 fallback re-dispatches instead of echo.
+    * LOBBY: squadron notes before roster, serialised per session (v870/v872/v876); own squadron's
+      notes pushed after the list (v873); news no longer pushed at pilot select (the push +
+      duplicate filter ate the client's own request, v870); lobby ghost on pilot switch (v867);
+      squadron join notes request answered in prefixed form (v857); officer may tag the CO (v871).
+    * STATUS cadence back to 2 s (v855 - the 6 s of v839 tripled the client's 'receive' readout).
+    * NAT/port: any non-SYN packet from a moved port re-attaches by connection id (v877);
+      unknown-address packets logged. Diagnostics renamed off the RX/RELAY prefixes, which
+      fa_logging files at DEBUG (v879/v880: PORTMOVE, UNKNOWN-ADDR, TRACE-RX, RELAY-GAP/TRACE).
+    * DIAGNOSTICS: automatic desync detection - a hit scored > 1.5 km apart in the server's view,
+      and a pilot's own frames jumping > 350 m/s - each writes logs/desync_<utc>_<a>_hits_<b>.log
+      with 30 s of both pilots' frames before and 20 s of relayed frames after (v861-v863);
+      PERF line: rx_late % / GC pauses (v864); RETX (client retransmit timing, v874);
+      rxtrace <ip|pilot> [s] (v878); per-pair RELAY-GAP (v837, now visible).
+    * TC: trains - loco 1200 / wagon 600 HP, no MG cut, hits on wrecked cars go to the nearest
+      live car (v852); an enemy station cuts a rail line - trains serve only their own segment
+      (v853). Ammo/fuel bunkers do not shoot paratroops (v854). Map boxes carry their column's
+      mission code so a new trigger's line starts at the new column (v858). NO tank cap: tanks
+      are what factories produce; destroying a producer's building removes its value share of
+      stored units (v860; object-number reserve 200 kept). Transport repair: multi-record frame
+      no longer counted as the bombsight form; a special-form 119 is deferred, not refused
+      (v865/v866). Stalled-receiver tick extrapolation switchable, 10 s (v856).
+
+==============================================================================
 *** BANKED 2026-09-25: v851f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v851f5.py'. (Previous: v816f5.)
 

@@ -1,1 +1,3 @@
 falauncher/launcher_stage.txt
+# 2026-09-29 SECURITY: web log-read token lives here on each box, never in git (repo is public)
+log_token.txt
