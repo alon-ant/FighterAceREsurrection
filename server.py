@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v896f5'
+VERSION = 'v900f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12124,8 +12124,16 @@ def tc_check_defend(room_id, sidx, reason=''):
     if frac * 100.0 + 1e-6 < TC_DEFEND_PERCENT:
         return False
     tr['defended'] = True
-    log('TC', f'room {room_id}: scene {sidx} damage {frac * 100:.0f}% >= {TC_DEFEND_PERCENT}% - raising the defence {reason}')
-    gd = tc_raise_column(room_id, tr['camp'], TC_TANKS_DEFEND, sidx, 'defend', tr.get('by'))
+    log('TC', f'room {room_id}: scene {sidx} damage {frac * 100:.0f}% >= {TC_DEFEND_PERCENT}% - raising the defence {reason} '
+              f'(credited to AI - the defence is the owner\'s reaction, not the attacker\'s trigger)')
+    # v898f5 [DEFENCE CREDIT] (user decision 09-30, option B): the defence is the scene OWNER's
+    # reaction to its damage, not a trigger by the pilot who made the attack - the 2009 client's own
+    # DefenseTrigger(camp, scene, name) prints 'AI' when no name is given and fires with an empty name
+    # itself at a tank capture (ttattack.cpp), and the GAME_DEF carries a separate DefensePercent.
+    # It used to be credited to the ATTACK trigger's pilot (tr['by']): a third country pushing a GE-
+    # triggered JP base past 80% raised a JP defence 'triggered by' the GE pilot (user report 09-30).
+    # Now no pilot is named on the defence column's lines or missions.
+    gd = tc_raise_column(room_id, tr['camp'], TC_TANKS_DEFEND, sidx, 'defend', None)
     if gd is not None:
         tr['columns'].append(gd)
     return gd is not None
@@ -12317,7 +12325,10 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
     # capture (user: after the capture, not during the attack) - once each.
     try:
         _trg = TRIGGERS.get((room_id, int(sidx))) or {}
-        for _hn in sorted(_trg.get('helpers') or ()):
+        # v899f5: only when the capturing country IS the triggering one - a third country's capture
+        # (its paratroops took a base someone else triggered) is not helped by the triggerer's side
+        _helpers = sorted(_trg.get('helpers') or ()) if _trg.get('attacker') == int(camp) else []
+        for _hn in _helpers:
             if _hn == by_pilot:
                 continue                                  # the trigger pilot got the trigger line
             _hs = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == _hn), None)
@@ -12326,6 +12337,7 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
     except Exception:
         logx('TC', 'capture helper lines failed')
     TRIGGERS.pop((room_id, int(sidx)), None)
+    _TC_CAPTURED_AT[(room_id, int(sidx))] = time.time()      # v897f5: post-capture trigger grace
     return True
 
 def _tc_engagement_tick():
@@ -15334,7 +15346,19 @@ def _tc_para_capture_tick():
             if time.time() - st['_hold_since'] < PARA_CAPTURE_HOLD_S:
                 continue
             trig = TRIGGERS.get((rid, int(sidx))) or {}
-            tc_capture_scene(rid, sidx, camp, by_pilot=trig.get('by') or st.get('by'), assist_pilot=st.get('by'))   # v607f5
+            # v899f5 [THIRD-COUNTRY PARATROOP CAPTURE] (user 09-30: 'it should capture'): a stick of any
+            # country other than the owner can take a triggered scene - it always could - but the
+            # +2000 went to the ORIGINAL trigger pilot even when HIS country was not the one capturing.
+            # The trigger pilot is credited only when the stick is his own country's; otherwise the
+            # stick's pilot gets the capture (and no separate assist).
+            if trig.get('attacker') == int(camp) and trig.get('by'):
+                _cap_by, _cap_assist = trig.get('by'), st.get('by')
+            else:
+                _cap_by, _cap_assist = st.get('by'), None
+                if trig:
+                    log('TC', f'room {rid}: scene {sidx} taken by camp {camp} paratroops on a scene triggered by '
+                              f'camp {trig.get("attacker")} ({trig.get("by")}) - capture credited to {_cap_by}')
+            tc_capture_scene(rid, sidx, camp, by_pilot=_cap_by, assist_pilot=_cap_assist)   # v607f5/v899f5
         else:
             st['_hold_since'] = None
 
@@ -15370,10 +15394,31 @@ def send_trigger_104(room_id, sub, camp, sidx, pilot_name=''):
             _submit_send(send_rel, p, pkt, f'<- TRIGGER 104 sub {sub} camp {camp} scene {sidx} by {pilot_name!r}', to=3.0); n += 1
     log('TC', f'room {room_id}: msg 104 {"attack" if sub == 2 else "defence"}_scene({sidx}, camp {camp}, {pilot_name!r}) -> {n} session(s)')
 
+TC_POST_CAPTURE_GRACE_S = 120.0   # v897f5: no trigger on a scene this soon after it changed hands
+_TC_CAPTURED_AT = {}              # (room, scene) -> time of the last capture
+
 def tc_check_scene_trigger(room_id, sidx, pilot_sess):
     """Called from the ground-damage path after a kill: trigger when damage >= AttackPercent."""
     if not TC_TRIGGERS or room_id is None or sidx is None or sidx < 0:
         return
+    # v897f5 [POST-CAPTURE SECONDARY BLASTS] (user report 09-30): fuel / ammo objects explode a few
+    # seconds after they die, the blast is simulated by the pilots' CLIENTS and reported as damage
+    # by the reporting pilot's own plane (atk = his object). When the scene flipped in between, that
+    # splash pushed the new owner's scene over the trigger line in the reporter's name - online
+    # 09-30 00:33: scene 2 captured by US tanks at :18, Skyyr's client reported the storage blast at
+    # :51 (atk=1624 = his plane), scene 2 TRIGGERED by _Skyyr_ 33 s after the flip. A report cannot
+    # be told from a real hit, so a scene cannot be TRIGGERED for TC_POST_CAPTURE_GRACE_S after it
+    # changed hands (the damage itself still counts; later real attacks trigger normally).
+    _cap = _TC_CAPTURED_AT.get((room_id, int(sidx)))
+    if _cap is not None and time.time() - _cap < TC_POST_CAPTURE_GRACE_S:
+        _k = ('_pcg_logged', room_id, int(sidx))
+        if not _TC_CAPTURED_AT.get(_k):
+            _TC_CAPTURED_AT[_k] = True
+            log('TC', f'room {room_id}: scene {sidx} damage from {getattr(pilot_sess, "current_pilot", "?")} '
+                      f'{time.time() - _cap:.0f}s after its capture - no trigger inside the '
+                      f'{TC_POST_CAPTURE_GRACE_S:.0f}s post-capture grace (secondary blasts)')
+        return
+    _TC_CAPTURED_AT.pop(('_pcg_logged', room_id, int(sidx)), None)
     try:
         frac = trn_scene_damage_frac(room_id, sidx)
         # v702f5: compare the ROUNDED percent (what the map and the log show) - scene 43 read 60%
@@ -15384,9 +15429,11 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
             tc_pretrigger_warn(room_id, sidx, pilot_sess, frac)                 # v600f5
         if (room_id, int(sidx)) in TRIGGERS:
             terrain = _probe_terrain_for_room(room_id)
-            if pilot_sess is not None and getattr(pilot_sess, 'nation', None) != scene_camp(terrain, sidx):
+            if pilot_sess is not None and getattr(pilot_sess, 'nation', None) != scene_camp(terrain, sidx) \
+                    and getattr(pilot_sess, 'nation', None) == TRIGGERS[(room_id, int(sidx))].get('attacker'):
                 # v678f5: remember the contributing pilot; the 'helps capture' line is sent AT the
-                # capture (tc_capture_scene), not on every hit
+                # capture (tc_capture_scene), not on every hit. v898f5: only pilots of the ATTACKING
+                # country - a third country's hits no longer make him a 'helper' of someone else's capture
                 TRIGGERS[(room_id, int(sidx))].setdefault('helpers', set()).add(pilot_sess.current_pilot)
         tc_check_defend(room_id, sidx, reason='(plane damage)')     # v587f5
     except Exception:
@@ -17943,10 +17990,14 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         _ks = db_get_pilot_stat25(killer.current_pilot)
         _vs = db_get_pilot_stat25(victim.current_pilot) if victim.current_pilot else {'rank': 0}
         if TC_ECONOMY_2004:
-            # v374f5: 2004 model - a kill is the FLAT Destroy Plane Bonus. The victim's plane value
-            # is NOT the killer's reward (it is the victim's loss); there is no rank-ratio bonus in
-            # the 2004 tables. _base/_bonus kept only for the log line's shape.
-            _pts, _base, _bonus = DESTROY_PLANE_BONUS_2004, DESTROY_PLANE_BONUS_2004, 0
+            # v900f5 [KILL = PLANE VALUE + BONUS] (Shadow/Skyyr 09-30: 'kills grant a fixed 500'). The
+            # 2004 scoring page (ACWIKI 'Fighter Ace Scoring Info'): the per-plane value is 'the base
+            # value you receive when you KILL that plane IN ADDITION TO the base value you LOSE when you
+            # get shot down in it', and the event table adds a +500 Destroy Plane Bonus. v374 had read
+            # the bonus as the WHOLE reward. Now: the victim plane's value in this arena's column
+            # (FFA / TC, the Scoring Reference tables) + the bonus. Gains are never rank-scaled.
+            _base = plane_value(getattr(victim, 'plane_type', None), _smode)
+            _pts, _bonus = _base + DESTROY_PLANE_BONUS_2004, DESTROY_PLANE_BONUS_2004
         else:
             _pts, _base, _bonus = kill_score(getattr(victim, 'plane_type', None),
                                              int(_vs.get('rank', 0)), int(_ks.get('rank', 0)))
@@ -17960,7 +18011,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                if isinstance(getattr(victim, 'plane_type', None), int)
                and 0 <= victim.plane_type < len(PLANE_ROSTER) else '?')
         if TC_ECONOMY_2004:
-            log('SCORE', f'{killer.current_pilot} +{_pts} = Destroy Plane Bonus (killed {_vn}) '
+            log('SCORE', f'{killer.current_pilot} +{_pts} = {_base} (value of the {_vn}) + {_bonus} Destroy Plane Bonus '
                          f'-> {"BOMBER" if _killer_bomber else "FIGHTER"} score (flying {_pn}) '
                          f'| total {_sc}')
         else:
@@ -17986,13 +18037,16 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
             # rank/scoring table is the only rank effect now (no level differences).
             _rmod = rank_loss_modifier_2004(_vs_victim_rank(victim))
             _plane_cost = int(round(_base_cost * _rmod))
-            _pilot_pen = 0 if _pilot_survives else PILOT_LOSS_PENALTY_2004
+            # v900f5: the rank percentage applies to the pilot-death penalty too - the 2004 page's
+            # example: a Cadet losing a 500-point plane AND his pilot pays (500+500) x 5% = 50.
+            # v374 scaled only the plane, so every death cost a flat 500 on top whatever the rank.
+            _pilot_pen = 0 if _pilot_survives else int(round(PILOT_LOSS_PENALTY_2004 * _rmod))
             _loss = _plane_cost + _pilot_pen
             _sc, _rk, _old = db_apply_score_delta(victim.current_pilot, -_loss,
                                                   bomber=_victim_bomber, mode=_smode)
             log('SCORE', f'{victim.current_pilot} -{_loss} = {_plane_cost} '
                          f'(plane {_base_cost} x {int(_rmod*100)}% rank)'
-                         f'{"" if _bailed else f" + {_pilot_pen} (pilot loss)"}'
+                         f'{"" if _bailed else f" + {_pilot_pen} (pilot loss {PILOT_LOSS_PENALTY_2004} x {int(_rmod*100)}%)"}'
                          f'{" [BAILED OUT - pilot survived]" if _bailed else ""} | total {_sc}')
         else:
             _loss = _base_cost + (0 if _pilot_survives else PILOT_DEATH_PENALTY)

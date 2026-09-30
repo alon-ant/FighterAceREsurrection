@@ -2666,8 +2666,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     Arenas in any other category (including <em>Custom Arenas</em>) do
                     <strong>not</strong> change global scores, kills, deaths, aces or ranks at all
                     &mdash; unless the arena's editor forces a scoring mode.
-                    A kill always pays the killer the flat Destroy Plane Bonus; the plane's value is
-                    what its OWNER loses, scaled by the owner's rank percentage below.</p>
+                    A kill pays the killer the shot-down plane's value <em>plus</em> the Destroy Plane
+                    Bonus (points gained are never reduced by rank). A loss costs the owner his plane's
+                    value, and the Pilot Death penalty if he died, both scaled by his rank percentage below.</p>
                 </div>
                 <div class="card" style="padding:0;">
                     <div style="padding:15px 15px 0;"><h2 style="margin:0;">Ranks</h2>
@@ -2681,8 +2682,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 </div>
                 <div class="card" style="padding:0;">
                     <div style="padding:15px 15px 0;"><h2 style="margin:0;">Plane values</h2>
-                    <p style="color:#666; font-size:0.9em;">The value is what the plane's owner
-                    loses when it goes down (before the rank percentage). Blank-TC planes in the
+                    <p style="color:#666; font-size:0.9em;">The value is what the killer GAINS for
+                    shooting the plane down (on top of the Destroy Plane Bonus) and what its owner
+                    LOSES when it goes down (before the rank percentage). Blank-TC planes in the
                     original table fall back to their FFA value.</p>
                     <input type="text" id="planeSearch" placeholder="Search planes..."
                            style="width:100%; padding:10px; margin:0 0 10px; box-sizing:border-box;

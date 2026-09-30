@@ -46,6 +46,65 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-09-30 (b): v900f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v900f5.py'. (Previous: v899f5.)
+    DEPLOY server.py AND web_server.py (the Scoring Reference page text changed with the scoring).
+    OPEN, for later (user): parachute skipping / lag in flight.
+
+v900f5 [KILL / DEATH SCORING PER THE 2004 PAGE] (09-30)
+    * Report (Shadow/Skyyr): kills paid a fixed value and deaths looked fixed. Online 09-30:
+      'RGP_JOLLY +500 = Destroy Plane Bonus (killed Tempest)' for every kill; '_Skyyr_ -920 = 420 (plane
+      1400 x 30% rank) + 500 (pilot loss)'. ACWIKI 'Fighter Ace Scoring Info' (the 2004 page): the
+      per-plane value is 'the base value you receive when you KILL that plane IN ADDITION TO the base
+      value you LOSE when you get shot down in it', plus a +500 Destroy Plane Bonus event; and its Cadet
+      example scales plane AND pilot death together ((500+500) x 5% = 50). v374 had read the +500 bonus
+      as the whole kill reward and left the pilot penalty unscaled.
+    * KILL = victim plane's value in the arena's column (PLANE_VALUE_FFA / _TC via plane_value(),
+      the Scoring Reference tables) + DESTROY_PLANE_BONUS_2004. Gains are never rank-scaled.
+    * DEATH = (own plane value + PILOT_LOSS_PENALTY_2004 if the pilot died) x rank_loss_modifier_2004;
+      a survived bail still costs the plane only. Examples: Tempest kill +500 -> +2300; a 1400 plane lost
+      at 30% -920 -> -570.
+    * web_server.py /scoring text updated to match. Earlier scores are NOT recalculated (possible from
+      the logged SCORE lines if ever wanted).
+
+==============================================================================
+*** BANKED 2026-09-30: v899f5 is the STABLE BANKING POINT (user-approved). Snapshot
+    server.py -> 'old files\server_v899f5.py'. (Previous: v893f5.)
+    OPEN, for later (user): parachute skipping / lag in flight (troop canopies still step; see v887/v896).
+
+v894f5-v899f5 [TRAIN LOADS, CHUTE CADENCE, THREE-WAY TC RULES] (09-29 .. 09-30)
+    * TRAINS (v894): cargo wagons 15 t each (WWII standard goods wagon: G10 / Om max load 15 t; Omm
+      24.5 t; two-axle tank wagons 12-20 t) -> 30 t of each kind per train (was 4 t / 4 t / 3 t, the
+      client class records' nominal figures). Online 09-28 every pickup filled the train to its limit
+      while one bomber sortie draws 5,000 kg fuel + 6,500 kg ammo - a delivery did not cover one bomber.
+      Throughput still bounded by TRAIN_PICKUP_KEEP (producers) and TRAIN_DROP_FILL (destination).
+      `train wagonkg <kg>` live. Side effect: a 30 t metal delivery repairs most of a bombed field.
+    * TANKMISN WAS A MISREAD (v895): 0x92 is only the rotating OUTER type byte; sub 0x47 is msg 71, the
+      map's scene PRODUCTION QUERY [0x47][u32][u16] + u16 scene index - already answered by
+      _handle_scene_prodinfo_query_71 (PRODQ71). The direct 'tank mission request' match only added a
+      false log line (251 a day); removed. The wrapped inner-0x92 form stays logged, unverified.
+    * CHUTE CADENCE (v896, feature still HELD at CHUTE_NEAR_HZ = 2): the drive loop woke every 0.1 s, so
+      every `chute near` value from 5 to 9 really ran at 5 Hz; now 20 ms. RE: the parachuter's catch-up
+      (FUN_004a3110 via FUN_007e4a20) moves the canopy ONCE per received frame by velocity x cycles and
+      holds it between frames - server-driven canopies always step; only the frame rate shrinks the step
+      (0.66 m at 10 Hz). `chute near <hz> [m]` live, `chute near 2` = off.
+    * POST-CAPTURE GRACE (v897): fuel/ammo objects explode seconds after they die; the blast is
+      simulated by the pilots' CLIENTS and reported as damage by the REPORTER's own plane. Online 09-30
+      00:33 scene 2 flipped to US at :18 and was TRIGGERED by _Skyyr_ (SU) at :51 from his client's blast
+      report. A report cannot be told from a hit, so no trigger for TC_POST_CAPTURE_GRACE_S = 120 s after
+      a scene changes hands (damage still counts).
+    * DEFENCE CREDIT (v898, user option B): the defence is the scene OWNER's reaction and is credited to
+      NOBODY (the client's DefenseTrigger(camp, scene, name) prints 'AI' for an empty name and fires one
+      itself at a tank capture; GAME_DEF has a separate DefensePercent). It used to name the ATTACK
+      trigger's pilot even when a third country pushed the scene past 80%. Capture 'helpers' = pilots of
+      the attacking country only.
+    * THIRD-COUNTRY PARATROOP CAPTURE (v899): any country's stick can take a triggered scene (it always
+      could); the +2000 now goes to the CAPTURING country's transport pilot - the trigger pilot only when
+      the stick is his own country's; no 'helps capture' lines to the triggering side for someone
+      else's capture. Rule 4 CONFIRMED by the user: every other country's ground units must be cleared
+      before anyone captures (tanks and soldiers target all of them, so a three-way base is fought out).
+
+==============================================================================
 *** BANKED 2026-09-28 (c): v893f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v893f5.py'. (Previous: v890f5.)
     DEPLOY server.py AND web_server.py (the two admin pages below live in web_server.py).
