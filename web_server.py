@@ -3,6 +3,12 @@
 # main server file). Login / launcher / ladder / admin panel / arena settings / live console.
 #
 # CHANGELOG
+# 2026-09-30: /auth - login API for the game website / forum.
+#   POST /auth (JSON account_name + password) -> authorization token + the account's pilots;
+#   GET /auth (Authorization: Bearer) re-checks a token; OPTIONS /auth answers the CORS
+#   preflight. Callers are limited to auth_domains.txt (Origin host for browsers, resolved
+#   address for a backend), optional shared key in auth_api_key.txt, HTTPS only, failed-login
+#   limiter, [WEBAUTH] log lines. Full contract in the block above WebInterfaceHandler.
 # 2026-09-29: SECURITY + WEBPERF flood.
 #   * LOG_READ_TOKEN was hardcoded here and the GitHub repo is public -> anyone could read all
 #     logs. Token now loaded from log_token.txt (gitignored) / FA_LOG_TOKEN_FILE; no file =
@@ -924,6 +930,365 @@ def _rank_name_for_score(ref, score):
     except Exception:
         return ''
 
+# =============================================================================
+# 2026-09-30: /auth - login API for the game WEBSITE / forum (a separate site).
+#   The website checks a player's login against THIS server's accounts table and gets back an
+#   authorization token plus the pilots on that account. Nothing here touches the admin panel:
+#   the token is NOT a 'session' cookie and opens no /admin or dashboard page.
+#
+#   POST /auth      Content-Type: application/json
+#                   {"account_name": "...", "password": "..."}
+#     200 {"ok": true, "account": "...", "is_admin": false,
+#          "authorization": {"type": "Bearer", "token": "...", "expires_in": 43200,
+#                            "expires_at": 1790000000},
+#          "pilots": [{"pilot_name", "rank", "squadron", "score", "bomber_score",
+#                      "total_score", "kills", "deaths", "slot"}, ...]}
+#     401 {"ok": false, "error": "invalid_credentials"}   (same answer for 'no such account',
+#                                                          'no web password' and 'wrong password')
+#   GET /auth       Authorization: Bearer <token>
+#     200 the same body without a new token (pilots re-read from the DB) / 401 invalid_token
+#   OPTIONS /auth   CORS preflight for a browser calling from an approved site.
+#
+#   WHO MAY CALL (fail-closed: no auth_domains.txt, or an empty one = the endpoint answers 403):
+#     auth_domains.txt next to this file, one entry per line, '#' comments. An entry is a host
+#     name (forum.example.com), a wildcard (*.example.com = any sub-domain, not the bare
+#     domain) or a literal IP. The file is re-read when it changes - no restart needed.
+#       * a request WITH an Origin header (a browser): the Origin's host must be listed and
+#         the scheme must be https (http is accepted for localhost / 127.0.0.1 only). The
+#         reply then carries Access-Control-Allow-Origin for exactly that origin.
+#       * a request WITHOUT Origin (the website's own backend): the caller's IP must be a
+#         listed IP or one of the addresses a listed host name resolves to (cached 5 min).
+#     Origin is a BROWSER rule: it stops other websites' pages from using the endpoint, but a
+#     script can type any Origin it likes. What actually stops password guessing is the limiter
+#     below, and - for a backend-only integration - the optional shared key:
+#     auth_api_key.txt (>=32 chars, keep it out of git). When that file exists every POST/GET
+#     must also send 'X-Auth-Key: <key>'. Do not use the key from browser JavaScript.
+#
+#   CREDENTIALS IN TRANSIT: JSON body only (never the URL - URLs end up in logs), refused over
+#   plain HTTP unless the caller is loopback, body capped at 4 KB, never logged.
+#   LIMITER: 8 failed logins per account and (browser path) 30 per IP in 10 minutes -> 429
+#   with Retry-After. The per-IP bucket is skipped on the backend path, where every player's
+#   login arrives from the website's one address.
+#   TOKENS live in memory (12 h): a process restart logs website users out, nothing else.
+# =============================================================================
+AUTH_DOMAINS_FILE  = os.path.join(_WEB_DIR, 'auth_domains.txt')
+AUTH_KEY_FILE      = os.path.join(_WEB_DIR, 'auth_api_key.txt')
+AUTH_TOKEN_TTL_S   = 12 * 3600
+AUTH_MAX_BODY      = 4096
+AUTH_FAIL_WINDOW_S = 600
+AUTH_FAIL_MAX_ACCT = 8
+AUTH_FAIL_MAX_IP   = 30
+AUTH_DNS_TTL_S     = 300
+AUTH_REQUIRE_TLS   = True
+
+_AUTH_LOCK   = threading.Lock()
+_AUTH_CFG    = {'loaded': False, 'mtime': None, 'hosts': frozenset(), 'wild': (),
+                'key_mtime': None, 'key': None}
+_AUTH_DNS    = {}     # host -> (expires, {ip, ...})
+_AUTH_TOKENS = {}     # token -> (account_name, expires)
+_AUTH_FAILS  = {}     # ('acct'|'ip', value) -> [failure timestamps]
+_AUTH_QUIET  = {}     # (ip, why) -> last time a denial was logged
+
+def _auth_config():
+    """-> (hosts frozenset, wildcard suffixes tuple, api key or None). Both files are re-read
+    whenever their mtime changes, so the allowlist can be edited on a live server."""
+    def _mt(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return None
+    dm, km = _mt(AUTH_DOMAINS_FILE), _mt(AUTH_KEY_FILE)
+    with _AUTH_LOCK:
+        c = _AUTH_CFG
+        if not c['loaded'] or dm != c['mtime']:
+            hosts, wild = set(), []
+            if dm is not None:
+                try:
+                    with open(AUTH_DOMAINS_FILE, encoding='utf-8') as f:
+                        for line in f:
+                            e = line.split('#', 1)[0].strip().lower()
+                            if not e:
+                                continue
+                            if '://' in e:                  # tolerate a pasted URL
+                                e = e.split('://', 1)[1]
+                            e = e.split('/', 1)[0].rstrip('.')
+                            if e.count(':') == 1:           # host:port (leave IPv6 literals alone)
+                                e = e.split(':', 1)[0]
+                            if e.startswith('*.') and len(e) > 2:
+                                wild.append(e[1:])          # '.example.com'
+                            elif e and '*' not in e:
+                                hosts.add(e)
+                except (OSError, UnicodeDecodeError):
+                    hosts, wild = set(), []
+            c['hosts'], c['wild'], c['mtime'] = frozenset(hosts), tuple(wild), dm
+            _AUTH_DNS.clear()
+        if not c['loaded'] or km != c['key_mtime']:
+            key = None
+            if km is not None:
+                try:
+                    with open(AUTH_KEY_FILE, encoding='ascii') as f:
+                        key = f.read().strip()
+                except (OSError, UnicodeDecodeError):
+                    key = None
+                if key is not None and len(key) < 32:
+                    key = ''            # file present but unusable: '' can never match = locked
+            c['key'], c['key_mtime'] = key, km
+        c['loaded'] = True
+        return c['hosts'], c['wild'], c['key']
+
+def _auth_client_ip(handler):
+    ip = handler.client_address[0]
+    return ip[7:] if ip.startswith('::ffff:') else ip
+
+def _auth_domain_ips(hosts):
+    """Addresses the listed host names resolve to right now (5-minute cache per name). A failed
+    lookup keeps the previous answer, so a DNS blip does not lock the website out."""
+    now, out = time.time(), set()
+    for h in hosts:
+        ent = _AUTH_DNS.get(h)
+        if ent is None or ent[0] < now:
+            try:
+                ips = {ai[4][0] for ai in socket.getaddrinfo(h, None)}
+            except (OSError, UnicodeError):
+                ips = ent[1] if ent else set()
+            ent = (now + AUTH_DNS_TTL_S, ips)
+            _AUTH_DNS[h] = ent
+        out |= ent[1]
+    return out
+
+def _auth_gate(handler, need_key=True):
+    """The approved-domains check. -> (ok, cors_origin or None, via, why)."""
+    hosts, wild, key = _auth_config()
+    ip = _auth_client_ip(handler)
+    if AUTH_REQUIRE_TLS and not isinstance(handler.connection, ssl.SSLSocket) \
+            and ip not in ('127.0.0.1', '::1'):
+        return False, None, '', 'https_required'
+    if not hosts and not wild:
+        return False, None, '', 'no_allowlist'
+    origin = (handler.headers.get('Origin') or '').strip()
+    if origin:
+        via, cors = 'origin', None
+        try:
+            u = urllib.parse.urlsplit(origin)
+            host = (u.hostname or '').lower().rstrip('.')
+            scheme = u.scheme.lower()
+        except ValueError:
+            host, scheme = '', ''
+        local = host in ('localhost', '127.0.0.1')
+        if host and (scheme == 'https' or (scheme == 'http' and local)) \
+                and (host in hosts or any(host.endswith(s) for s in wild)):
+            cors = origin
+        if cors is None:
+            return False, None, via, 'origin_not_approved'
+    else:
+        via, cors = 'ip', None
+        if ip not in hosts and ip not in _auth_domain_ips(hosts):
+            return False, None, via, 'address_not_approved'
+    if need_key and key is not None:
+        got = handler.headers.get('X-Auth-Key') or ''
+        if not key or not hmac.compare_digest(got.encode('utf-8', 'replace'),
+                                              key.encode('ascii')):
+            return False, cors, via, 'bad_api_key'
+    return True, cors, via, ''
+
+def _auth_send(handler, code, obj, origin=None, headers=()):
+    body = json.dumps(obj).encode('utf-8') if obj is not None else b''
+    handler._perf_ready = time.time()
+    handler.send_response(code)
+    if body:
+        handler.send_header('Content-Type', 'application/json; charset=utf-8')
+    handler.send_header('Content-Length', str(len(body)))
+    handler.send_header('Cache-Control', 'no-store')
+    handler.send_header('Vary', 'Origin')
+    if origin:
+        handler.send_header('Access-Control-Allow-Origin', origin)
+    for k, v in headers:
+        handler.send_header(k, v)
+    handler.end_headers()
+    if body:
+        handler.wfile.write(body)
+
+def _auth_deny(handler, via, why, origin=None):
+    """403 for a caller that fails the gate. One log line per (ip, reason) per 10 minutes."""
+    try:
+        ip, now = _auth_client_ip(handler), time.time()
+        with _AUTH_LOCK:
+            quiet = now - _AUTH_QUIET.get((ip, why), 0) < WEBACCESS_QUIET_S
+            if not quiet:
+                _AUTH_QUIET[(ip, why)] = now
+                if len(_AUTH_QUIET) > 4096:
+                    for k in [k for k, t in _AUTH_QUIET.items() if now - t > WEBACCESS_QUIET_S]:
+                        _AUTH_QUIET.pop(k, None)
+        if not quiet:
+            SRV['log']('WEBAUTH', f'DENIED {why} from {ip} via {via or "-"} '
+                                  f'origin={(handler.headers.get("Origin") or "")[:80]!r} '
+                                  f'ua={(handler.headers.get("User-Agent") or "")[:80]!r}')
+    except Exception:
+        pass
+    _auth_send(handler, 403, {'ok': False, 'error': why}, origin)
+
+def _auth_limited(key, limit):
+    """Seconds until this bucket may try again, 0 if it is not limited."""
+    now = time.time()
+    with _AUTH_LOCK:
+        ts = [t for t in _AUTH_FAILS.get(key, ()) if now - t < AUTH_FAIL_WINDOW_S]
+        if ts:
+            _AUTH_FAILS[key] = ts
+        else:
+            _AUTH_FAILS.pop(key, None)
+        if len(ts) >= limit:
+            return max(1, int(AUTH_FAIL_WINDOW_S - (now - ts[0])) + 1)
+    return 0
+
+def _auth_note_fail(key):
+    now = time.time()
+    with _AUTH_LOCK:
+        _AUTH_FAILS.setdefault(key, []).append(now)
+        if len(_AUTH_FAILS) > 4096:             # guessing churn: drop buckets that have expired
+            for k in [k for k, ts in _AUTH_FAILS.items()
+                      if not ts or now - ts[-1] > AUTH_FAIL_WINDOW_S]:
+                _AUTH_FAILS.pop(k, None)
+
+def _auth_account_view(acct):
+    """(canonical account name, is_admin, pilots list) for the reply, or None if the account
+    is gone. Columns are guarded like the ladder's, so an un-migrated DB still answers."""
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT account_name, COALESCE(is_admin,0) FROM accounts "
+                           "WHERE account_name=?", (acct,)).fetchone()
+        if not row:
+            return None
+        pcols = [r[1] for r in conn.execute("PRAGMA table_info(pilots)").fetchall()]
+        def _gc(col, dflt='0'):
+            return ("COALESCE(" + col + "," + dflt + ")") if col in pcols else dflt
+        rows = conn.execute(
+            "SELECT pilot_name, " + _gc('score') + ", " + _gc('bomber_score') + ", "
+            + _gc('kills') + ", " + _gc('deaths') + ", " + _gc('squadron', "''") + ", "
+            + _gc('slot_index') + " FROM pilots WHERE account_name=? "
+            "ORDER BY 7, pilot_name", (row[0],)).fetchall()
+    finally:
+        conn.close()
+    ref = _scoring_ref()
+    pilots = []
+    for name, f_score, b_score, kills, deaths, sq, slot in rows:
+        total = (f_score or 0) + (b_score or 0)
+        pilots.append({'pilot_name': name,
+                       'rank': _rank_name_for_score(ref, total) if ref else '',
+                       'squadron': sq or '',
+                       'score': f_score or 0, 'bomber_score': b_score or 0,
+                       'total_score': total, 'kills': kills or 0, 'deaths': deaths or 0,
+                       'slot': slot or 0})
+    return row[0], bool(row[1]), pilots
+
+def _auth_handle_options(handler):
+    if handler.path.split('?')[0] != '/auth':
+        return handler.send_error(404)
+    ok, origin, via, why = _auth_gate(handler, need_key=False)   # a preflight carries no key
+    if not ok or not origin:
+        return _auth_deny(handler, via, why or 'origin_required')
+    _auth_send(handler, 204, None, origin, (
+        ('Access-Control-Allow-Methods', 'POST, GET, OPTIONS'),
+        ('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Auth-Key'),
+        ('Access-Control-Max-Age', '600')))
+
+def _auth_handle_get(handler):
+    """Token check: Authorization: Bearer <token> -> the account and its current pilots."""
+    ok, origin, via, why = _auth_gate(handler)
+    if not ok:
+        return _auth_deny(handler, via, why, origin)
+    hdr = (handler.headers.get('Authorization') or '').strip()
+    token = hdr[7:].strip() if hdr[:7].lower() == 'bearer ' else ''
+    now = time.time()
+    with _AUTH_LOCK:
+        ent = _AUTH_TOKENS.get(token) if token else None
+        if ent and ent[1] <= now:
+            _AUTH_TOKENS.pop(token, None)
+            ent = None
+    view = _auth_account_view(ent[0]) if ent else None
+    if not view:
+        return _auth_send(handler, 401, {'ok': False, 'error': 'invalid_token'}, origin)
+    _auth_send(handler, 200, {'ok': True, 'account': view[0], 'is_admin': view[1],
+                              'expires_in': int(ent[1] - now), 'expires_at': int(ent[1]),
+                              'pilots': view[2]}, origin)
+
+def _auth_handle_post(handler):
+    """Login: JSON {account_name, password} -> authorization token + pilots."""
+    ok, origin, via, why = _auth_gate(handler)
+    if not ok:
+        return _auth_deny(handler, via, why, origin)
+    def _bad(code, err, headers=()):
+        _auth_send(handler, code, {'ok': False, 'error': err}, origin, headers)
+    # JSON only: a cross-site HTML form cannot send this content type, and it forces a browser
+    # to preflight, so a page on an unapproved site never gets its POST through.
+    if (handler.headers.get('Content-Type') or '').split(';')[0].strip().lower() != 'application/json':
+        return _bad(415, 'json_required')
+    try:
+        n = int(handler.headers.get('Content-Length') or 0)
+    except ValueError:
+        n = 0
+    if n <= 0:
+        return _bad(400, 'bad_request')
+    if n > AUTH_MAX_BODY:
+        return _bad(413, 'too_large')
+    try:
+        d = json.loads(handler.rfile.read(n).decode('utf-8'))
+    except (ValueError, OSError):
+        return _bad(400, 'bad_json')
+    if not isinstance(d, dict):
+        return _bad(400, 'bad_json')
+    acct = d.get('account_name', d.get('username'))
+    pwd = d.get('password')
+    if not isinstance(acct, str) or not isinstance(pwd, str):
+        return _bad(400, 'bad_request')
+    # .strip() on both: /register and /login strip them, so the stored hash is of the stripped
+    # password - hashing the raw value here would fail logins the dashboard accepts.
+    acct, pwd = acct.strip(), pwd.strip()
+    if not acct or not pwd or len(acct) > 64 or len(pwd) > 256:
+        return _bad(400, 'bad_request')
+
+    ip = _auth_client_ip(handler)
+    k_acct, k_ip = ('acct', acct.lower()), ('ip', ip)
+    wait = _auth_limited(k_acct, AUTH_FAIL_MAX_ACCT)
+    if not wait and via == 'origin':
+        wait = _auth_limited(k_ip, AUTH_FAIL_MAX_IP)
+    if wait:
+        SRV['log']('WEBAUTH', f'LIMITED {acct[:32]!r} from {ip} via {via} (retry in {wait}s)')
+        return _bad(429, 'too_many_attempts', (('Retry-After', str(wait)),))
+
+    conn = _connect()
+    try:
+        rec = conn.execute("SELECT account_name, web_password FROM accounts "
+                           "WHERE account_name=?", (acct,)).fetchone()
+    finally:
+        conn.close()
+    # Hash and compare even when the account is missing or has no web password, so the three
+    # failure cases cost the same and give the same answer (no account-name probing).
+    stored = (rec[1] if rec and rec[1] else '')
+    good = hmac.compare_digest(hash_password(pwd).encode('ascii'),
+                               stored.encode('utf-8', 'replace')) and bool(stored)
+    view = _auth_account_view(rec[0]) if good else None
+    if not view:
+        _auth_note_fail(k_acct)
+        if via == 'origin':
+            _auth_note_fail(k_ip)
+        SRV['log']('WEBAUTH', f'FAIL {acct[:32]!r} from {ip} via {via}')
+        return _bad(401, 'invalid_credentials')
+
+    now = time.time()
+    token = secrets.token_urlsafe(32)
+    with _AUTH_LOCK:
+        _AUTH_FAILS.pop(k_acct, None)
+        for t in [t for t, e in _AUTH_TOKENS.items() if e[1] <= now]:
+            _AUTH_TOKENS.pop(t, None)
+        _AUTH_TOKENS[token] = (view[0], now + AUTH_TOKEN_TTL_S)
+    SRV['log']('WEBAUTH', f'OK {view[0]!r} from {ip} via {via} ({len(view[2])} pilot(s))')
+    _auth_send(handler, 200, {
+        'ok': True, 'account': view[0], 'is_admin': view[1],
+        'authorization': {'type': 'Bearer', 'token': token,
+                          'expires_in': AUTH_TOKEN_TTL_S,
+                          'expires_at': int(now + AUTH_TOKEN_TTL_S)},
+        'pilots': view[2]}, origin)
+
 class WebInterfaceHandler(BaseHTTPRequestHandler):
     def get_current_user(self):
         cookie_header = self.headers.get('Cookie')
@@ -1003,7 +1368,13 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def do_OPTIONS(self):
+        # 2026-09-30: CORS preflight for the website login API; every other path is a 404.
+        _auth_handle_options(self)
+
     def _do_GET_inner(self):
+        if self.path.split('?')[0] == '/auth':      # 2026-09-30: website login API (token check)
+            return _auth_handle_get(self)
         user = self.get_current_user()
         
         if self.path == '/':
@@ -2801,6 +3172,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self._perf_log('POST', _t0)
 
     def _do_POST_inner(self):
+        if self.path.split('?')[0] == '/auth':      # 2026-09-30: website login API - JSON body,
+            return _auth_handle_post(self)          # read by the handler itself, not as a form
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length).decode('utf-8')
         qs = urllib.parse.parse_qs(post_data)

@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v895f5'
+VERSION = 'v896f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15860,7 +15860,9 @@ CHUTE_NEAR_M       = 2000.0       # (v806 note above), so at 2 Hz a 6.6 m/s desc
 
 def _chute_keepalive_loop():
     while running:
-        time.sleep(0.1)                                    # v887f5: was 0.25 (v808) - room for the near cadence
+        time.sleep(0.02)                                   # v896f5: was 0.1 (v887) - with a 0.1 s tick every
+                                                           # 'chute near' value between 5 and 9 Hz really ran at
+                                                           # 5 Hz (0.167 s rounds up to two ticks); 20 ms honours it
         if not CHUTE_DRIVE_ENABLED:
             continue
         try:
