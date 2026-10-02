@@ -41,6 +41,20 @@ _TAG_LEVELS = {
     'RX/PORTMOVE': logging.INFO, 'RX/UNKNOWN': logging.INFO, 'RX/TRACE': logging.INFO,
     'RELAY-GAP': logging.INFO, 'RELAY-TRACE': logging.INFO,
     'TX': logging.DEBUG, 'RX': logging.DEBUG, 'RELAY': logging.DEBUG,
+    # v905f5 [READABLE INFO LOG]: one 41 h run = 624k lines, the ten tags below = 400k of them. All
+    # of these are per-packet / per-event bookkeeping that was INFO for a past investigation; the
+    # mechanisms are proven, so they go to DEBUG (still in the file at `loglevel file DEBUG`).
+    'SUPPLY-CAP': logging.DEBUG, 'PROTOWATCH': logging.DEBUG, 'JOINSEQ': logging.DEBUG,
+    'PANELTX': logging.DEBUG, 'PANELSEQ': logging.DEBUG, 'SUPPLY69': logging.DEBUG,
+    'PRODQ71': logging.DEBUG, 'PROD71': logging.DEBUG, 'CHUTEFRAME': logging.DEBUG,
+    'CREATE-ORDER': logging.DEBUG, 'MAP57': logging.DEBUG, 'GROUP26': logging.DEBUG,
+    'MISSION': logging.DEBUG, 'SEQ9': logging.DEBUG, 'STAT25': logging.DEBUG, 'ACE88': logging.DEBUG,
+    'ARENA213': logging.DEBUG, 'ARENACNT': logging.DEBUG, 'SUPPLYTICK': logging.DEBUG,
+    'SUPPLY60': logging.DEBUG, 'GROUND31': logging.DEBUG, 'AUTOPVE': logging.DEBUG,
+    'CREATE2': logging.DEBUG, 'REFRAME': logging.DEBUG, 'STATLOSS-RAW': logging.DEBUG,
+    'TANKCULL': logging.DEBUG, 'UNITS': logging.DEBUG, 'PARAWATCH': logging.DEBUG,
+    'TANKPATH': logging.DEBUG, 'PARA-REC': logging.DEBUG, 'REPAIR-TX': logging.DEBUG,
+    'SUPPLY-REPAIR': logging.DEBUG,
     'SIM13': logging.DEBUG, 'GAMEDEF212': logging.DEBUG, 'GDFDUMP': logging.DEBUG,
     'POST-AUTH': logging.DEBUG, 'COMPOUND': logging.DEBUG, 'RELRX': logging.DEBUG,
 }

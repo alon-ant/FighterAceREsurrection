@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v900f5'
+VERSION = 'v906f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -507,6 +507,14 @@ _falog.init_logging(
     file_level=os.environ.get('FA_FILE_LEVEL', FILE_LOG_LEVEL_DEFAULT))
 log  = _falog.log     # drop-in: same signature log(tag, msg[, level=...])
 logx = _falog.logx    # log + traceback, for use inside except blocks
+
+# v906f5: the build banner is the FIRST thing in every log - three lines that cannot be missed when
+# a run log is opened (a 30-line INIT preamble used to come first and the version sat on line ~40).
+_BANNER_RULE = '=' * 78
+log('VERSION', _BANNER_RULE)
+log('VERSION', f'>>>  FIGHTER ACE LAN SERVER  {VERSION}  <<<   started {time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())} UTC   '
+               f'port {PORT}   log level file={os.environ.get("FA_FILE_LEVEL", FILE_LOG_LEVEL_DEFAULT)}')
+log('VERSION', _BANNER_RULE)
 
 def hx(d, n=None): return binascii.hexlify(bytes(d) if n is None else bytes(d[:n])).decode()
 def fa_timestamp():
@@ -7779,6 +7787,14 @@ def build_add_player_62(records):
 # record skipped with ZERO side effects (no add, no delete, no camp write).
 DUMMY_PLAYER_INDEX = 0xFFFFFFFE
 
+def _benign_fill_payload():
+    """v903f5: a reliable payload the client ACKs and then IGNORES - one msg-63 record with
+    DUMMY_PLAYER_INDEX (FUN_007fcac0 lookup fails -> 'Unknown RemotePlayer' -> skipped, no add, no
+    delete, no camp write; proven by the v187 padding records). Used to fill a reliable SEQ whose
+    original in-game payload must no longer be delivered after the client left the arena, so the
+    client's strictly in-order reliable RX never sits on a hole."""
+    return build_change_player_63([(DUMMY_PLAYER_INDEX, None, 0)])
+
 MSG63_TRUE_LENGTH = True   # send msg-63 as the real 'in 63'8' (true-length in-game framing).
                            # Set False to fall back to the legacy bc*16+1 padded form.
 def build_change_player_63(records):
@@ -9418,7 +9434,7 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
     holds seq N, nrel() reuses N and mke(N) re-keys the event - the keeper's own Event is
     never set and it runs to the cap. 512 sends into a wedged downlink means the session is
     dead regardless; the cap bounds the cost."""
-    t0 = time.time(); retx = blocking_retx; outcome = None
+    t0 = time.time(); retx = blocking_retx; outcome = None; _benign = False   # v903f5
     with s._lock:
         s._relkeep_held = getattr(s, '_relkeep_held', 0) + 1   # v419f5: STALL-WATCH trigger
     log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} not ACKed in the blocking window '
@@ -9432,8 +9448,11 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         # messages89: 'in 3'4 -> delete object 120' -> Length=-11). Post-leave lobby sends have a
         # later t0 and are untouched. A DESKTOP exit never hit this (it sets s.closing, socket shut).
         _left = getattr(s, '_arena_left_at', 0.0)
-        if _left and _left > t0:
-            outcome = 'arena left - stale in-game reliable dropped [v502f5]'; break
+        if _left and _left > t0 and not _benign:
+            # v903f5: same as send_rel - fill the seq with a benign msg-63 instead of leaving a hole
+            pkt = build_rel(_benign_fill_payload(), seq); _benign = True
+            log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} post-leave: stale in-game payload '
+                           f'replaced by a benign filler (keeps the in-order queue moving) ({label})')
         if e.wait(timeout=REL_KEEPER_INTERVAL_S):
             outcome = f'ACKed after {time.time()-t0:.1f}s'; break
         if time.time() - t0 > REL_KEEPER_MAX_S:
@@ -9577,7 +9596,7 @@ def send_rel(s, payload, label='', to=5.0):
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
     _rec(s, 'S->C', 'RELTX',
          f'seq={seq} type=0x{payload[1]:02x} bc={bc} {label} pl={binascii.hexlify(bytes(payload[:24])).decode()}')
-    deadline=time.time()+to; retx=0; ok=False
+    deadline=time.time()+to; retx=0; ok=False; _benign=False
     while True:
         rem=deadline-time.time()
         if rem<=0: break
@@ -9588,9 +9607,17 @@ def send_rel(s, payload, label='', to=5.0):
         # has left the arena (msg-64) - it would land in the client's ~GAME_DEF teardown and CTD it
         # (messages89). Matches the keeper guard; a packet queued after the leave has a later
         # deadline-to and is untouched.
+        # v903f5 [THE v502 HOLE WEDGED THE DOWNLINK]: abandoning the SEQ left a hole the client's
+        # strictly in-order reliable RX waited ~60 s on, holding EVERY later packet (the 218 lobby
+        # re-attach, arena list, GAME_DEFs) - Taurus 10-01 19:24: back-to-lobby took 59 s, 'TimeOut',
+        # 'no planes available'. Keep the seq alive with a BENIGN payload instead: a msg-63 record
+        # with DUMMY_PLAYER_INDEX, which the client skips with no side effect ('Unknown
+        # RemotePlayer', proven v187). The stale in-game content is still never delivered.
         _left = getattr(s, '_arena_left_at', 0.0)
-        if _left and _left > deadline - to:
-            break
+        if _left and _left > deadline - to and not _benign:
+            pkt = build_rel(_benign_fill_payload(), seq); _benign = True
+            log('TX/RELIABLE', f'seq={seq} post-leave: stale in-game payload replaced by a benign '
+                               f'filler (keeps the client\'s in-order queue moving) {label}')
         try:
             sock.sendto(pkt,s.addr)
             _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5 (retx)
@@ -9651,6 +9678,7 @@ def get_sessions_in_room(room_id):
 SLOT_REUSE_COOLDOWN_S = 3600.0   # a freed slot stays reserved this long for its old pilot
 SLOT_INDEX_SOFT_MAX   = 120      # never let the cooldown push allocation past this index
 _SLOT_RETIRED = {}               # (room_id, idx) -> (pilot_name, t_freed)
+_SLOT_RETIRED_PILOT = {}         # v901f5: (room_id, idx) -> last pilot to hold it (for the stale-slot scrub)
 
 def _retire_room_slot(s, why=''):
     """Record that this session's room slot was freed, so assign_player_slot can hold it
@@ -9766,6 +9794,7 @@ def assign_player_slot(s, room_id):
     # damage attributed by player index lands on the wrong plane or nowhere.
     # `sl` is a plain Lock (not RLock), so the peer scan is INLINED here rather than
     # calling get_sessions_in_room() - calling it under `sl` would self-deadlock.
+    _last_pilot_for_log = None       # v901f5: previous holder of the reused slot, for the log line below
     with sl:
         peers = [x for x in sids.values()
                  if x is not s and x.auth_done and not x.closing and x.entered_game
@@ -9806,6 +9835,17 @@ def assign_player_slot(s, room_id):
         s.client_number = idx
         s.player_index  = idx
         _npeers, _kept = len(peers), (prev == idx)
+        # v901f5 [STALE SLOT -> WRONG NAME / LOST DAMAGE]: when a slot goes to a DIFFERENT pilot than
+        # the one who last held it, peers may still have the OLD pilot bound to that index (they were
+        # never sent a REMOVE - a crash/timeout exit, or a reuse after the cooldown). Their station
+        # table then names the wrong pilot on hits/chat (flakmagic saw 'Jayse' for PhiD's kill,
+        # 09-30: Jayse freed slot 1 at 21:36, PhiD took it at 22:39) and damage addressed to that
+        # index lands on the wrong object or nowhere ('a page of hits, no damage'). Decide here, send
+        # below (outside `sl`): if a peer could hold someone else here, REMOVE the index first.
+        _last = _SLOT_RETIRED_PILOT.get((room_id, idx))
+        s.__dict__['_slot_clean_needed'] = (not _kept) and _last is not None and _last != _pn
+        _last_pilot_for_log = _last
+        _SLOT_RETIRED_PILOT[(room_id, idx)] = _pn
     # Log outside the lock - never hold the session lock across I/O.
     _fb = s.__dict__.pop('_slot_fallback_note', None)
     if _fb is not None:
@@ -9813,6 +9853,45 @@ def assign_player_slot(s, room_id):
                     f'fell back to first-free {_fb} for "{getattr(s, "current_pilot", "?")}"')
     # Log outside the lock - never hold the session lock across I/O.
     s.__dict__['_craters_have'] = set()        # v825f5: a fresh arena entry has no craters yet
+    # v901f5 [STALE SLOT -> WRONG NAME / LOST DAMAGE] (fixed form): scrub a reused slot on peers
+    # BEFORE this pilot is advertised there, with a bare player REMOVE (NOT an object delete).
+    # Why this is safe, and why a bare REMOVE is both necessary and sufficient:
+    #   * idx is chosen OUTSIDE `taken` (every live peer's current index), so the server knows no
+    #     live session sits here - the scrub only clears a binding the server has already released.
+    #   * The client's own AddPlayer-62 for an OCCUPIED index is a no-op ('Add existing
+    #     REMOTE_PLAYER'), so without a prior REMOVE the NEW pilot never binds to the index and the
+    #     stale name stays. The REMOVE frees the index so the join-62 that follows binds correctly.
+    #   * A peer that has nothing on this index ignores the REMOVE (handler logs 'Unknown
+    #     RemotePlayer' and skips) - no effect on anyone.
+    #   * NO object delete is sent: the stale PLANE object (if any) is removed by its OWNER's
+    #     teardown or the peer's own silence-cull, each of which carries the correct object number;
+    #     the server cannot know that number here, and fabricating a delete is what would risk
+    #     making a live plane vanish. A REMOVE keyed by player index can only ever drop a roster
+    #     entry, never a plane the recipient is actively flying against (that player is on a
+    #     DIFFERENT index, which this never touches).
+    if s.__dict__.pop('_slot_clean_needed', False):
+        try:
+            # v902f5: the 2009 STATION delete for the reused index (msg 3, bit15 entry), then the
+            # roster REMOVE. The station delete is what actually clears a stale NAME on a peer
+            # (the name lives in the CLIENT table, which only this message frees); it also
+            # cascades any ghost object the station still held. Safe for the same reason as
+            # before: idx is outside `taken`, so no live session is on it.
+            _cdel = build_delete_object_3(onumber=None, client_number=idx)
+            _rem = build_change_player_63([(idx, None, CP_OP_REMOVE)])
+            _nrem = 0
+            for _p in get_sessions_in_room(room_id):
+                if _p is not s:
+                    def _scrub(_q=_p, _c=_cdel, _r=_rem, _i=idx):
+                        send_rel(_q, _c, f'<- DELETE3 stale client St={_i} (slot reuse scrub)', to=3.0)
+                        send_rel(_q, _r, f'<- ChangePlayer 63 REMOVE stale slot {_i}', to=3.0)
+                    _submit_send(_scrub)
+                    _nrem += 1
+            if _nrem:
+                log('SLOT', f'room {room_id}: slot {idx} reused by "{getattr(s, "current_pilot", "?")}" '
+                            f'(was "{_last_pilot_for_log}") - sent station DELETE + REMOVE to {_nrem} peer(s) '
+                            f'(2009 form; idx not held by a live peer)')
+        except Exception:
+            logx('SLOT', 'stale-slot scrub failed')
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
@@ -10998,7 +11077,7 @@ def _tank_driver_loop():
                             _wps = tank_plan_path(_terr, x, y, gx, gy)
                             t['_wps'] = _wps; t['_planned_at'] = now; t['_wp_goal'] = goal
                             if _wps and len(_wps) > 1:
-                                log('TANK', f'0x{onum:04x} path: {len(_wps)} waypoint(s), next ({_wps[0][0]:.0f},{_wps[0][1]:.0f})')
+                                log('TANKPATH', f'0x{onum:04x} path: {len(_wps)} waypoint(s), next ({_wps[0][0]:.0f},{_wps[0][1]:.0f})')
                             elif not _wps and now - t.get('_noroute_logged', 0.0) > 10.0:
                                 t['_noroute_logged'] = now
                                 log('TANK', f'0x{onum:04x} path: no route found in window - driving straight (retry every {TANK_PATH_RETRY_S:g}s)')
@@ -11167,7 +11246,7 @@ def _ai_cull_list(s, ids):
             _note_client_cull(s, onum, _cx, _cy)
         except Exception:
             pass
-        log('TANK', f'{s.current_pilot} dropped {_kind} 0x{onum:04x} (client cull list) - re-created when back within {REJOIN_RADIUS_M / 1000:.0f} km')
+        log('TANKCULL', f'{s.current_pilot} dropped {_kind} 0x{onum:04x} (client cull list) - re-created when back within {REJOIN_RADIUS_M / 1000:.0f} km')
     try:
         _rid = getattr(s, 'current_room', None)
         _still = (any(t['room'] == _rid and addr in t['peers'] for t in TANKS.values())
@@ -15040,6 +15119,53 @@ def ai_peers_forget(s, reason=''):
         log('TC', f'{s.current_pilot}: forgot on {n} AI object(s) {reason} - re-created at his next ServerConfirm / in range')
     return n
 
+def ai_peers_forget_addr(addr, reason=''):
+    """v904f5 [INVISIBLE TANKS AFTER A RECONNECT]: AI objects remember which peers hold them by
+    ADDRESS (ip, port). A session that ended without a clean leave (CTD, timeout, reap) left its
+    address in every tank/soldier/train 'peers' set, and a NEW connection from the same address
+    (FA clients bind a fixed local port; a static NAT mapping gives the same public port) was then
+    treated as already holding every one of them: no create at ServerConfirm, updates sent anyway
+    -> 'Get coord for missing object' x8,337 on Bama's client (10-01 23:00-23:33) for a column
+    raised the day before. Called when a NEW session takes an address."""
+    if addr is None:
+        return 0
+    n = 0
+    for coll in (TANKS, SOLDIERS, TRAINS):
+        for on, o in coll.items():
+            if addr in o['peers']:
+                o['peers'].discard(addr); n += 1
+            _pl = o.get('_peer_last')
+            if _pl:
+                _pl.pop(addr, None)
+            _ss = o.get('_silent_since')
+            if _ss:
+                _ss.pop(addr, None)
+            _hu = o.get('hold_until')
+            if _hu:
+                _hu.pop(addr, None)
+    if n:
+        log('TC', f'new session from {addr[0]}:{addr[1]}: forgot that address on {n} AI object(s) {reason}')
+    return n
+
+def ai_peers_rekey_addr(old, new):
+    """v904f5: a session whose address moved (NAT port change adoption) keeps holding the objects it
+    had - carry its membership to the new address, or the next ServerConfirm would re-create
+    everything it already has (duplicate creates the client refuses / asserts on)."""
+    if old is None or new is None or old == new:
+        return 0
+    n = 0
+    for coll in (TANKS, SOLDIERS, TRAINS):
+        for on, o in coll.items():
+            if old in o['peers']:
+                o['peers'].discard(old); o['peers'].add(new); n += 1
+            for key in ('_peer_last', '_silent_since', 'hold_until'):
+                _d = o.get(key)
+                if _d and old in _d:
+                    _d[new] = _d.pop(old)
+    if n:
+        log('TC', f'port move {old[1]} -> {new[1]}: AI object membership carried on {n} object(s)')
+    return n
+
 def ai_objects_reset_for(s, reason=''):
     """v594f5: the client's tank/soldier gun AI decides friend-or-foe from the object's nation
     vs the player's side AT CREATE TIME (a GB stick ignored its dropper after he switched to
@@ -15733,7 +15859,7 @@ def build_parachuter_record(body, st, onumber, owner_obj=None):
     if PARA_DEPLOY_BYTE9 is not None and len(b) > 9:
         # v259: body[9] -> ctor param_6 (deploy/model). 0=freefall, 1=deployed canopy, >=2=cargo.
         _bb = bytearray(b); _bb[9] = PARA_DEPLOY_BYTE9 & 0xFF; b = bytes(_bb)
-        log('PARA', f'record body[9] set to {PARA_DEPLOY_BYTE9} (deploy/model selector) '
+        log('PARA-REC', f'record body[9] set to {PARA_DEPLOY_BYTE9} (deploy/model selector) '
                     f'-> body={hx(b)}')
     if PARA_FIX_OWNER_REF and owner_obj is not None and len(b) > 3:
         # v261: body[2:4] is the OWNER object number the factory (FUN_004f26b0 case 2) resolves via
@@ -15745,7 +15871,7 @@ def build_parachuter_record(body, st, onumber, owner_obj=None):
         # PEER-VISIBLE plane object number (src.my_obj_number) so the bind resolves and the pilot name
         # renders on the deployed canopy - matching the real game (every chute is named).
         _bb = bytearray(b); struct.pack_into('<H', _bb, 2, owner_obj & 0xffff); b = bytes(_bb)
-        log('PARA', f'record body[2:4] set to owner plane 0x{owner_obj & 0xffff:04x} '
+        log('PARA-REC', f'record body[2:4] set to owner plane 0x{owner_obj & 0xffff:04x} '
                     f'(name bind) -> body={hx(b)}')
     rec = bytearray(b) + bytearray(13)
     struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 0, st & 0xffff)        # St      @ [10]
@@ -18219,7 +18345,8 @@ def try_bail_kill_now(s):
 
 def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
                               followup_pkt=None, followup_label='', killer=None,
-                              exit_byte=None, exit_entry=None, killer_plain_delete=False):
+                              exit_byte=None, exit_entry=None, killer_plain_delete=False,
+                              delete_client=False):
     """Remove s's NetPlane (object + client station) from every peer in the room.
 
     clear_peer_created: True for exit-to-HQ (we wiped our whole world, so peers must
@@ -18235,6 +18362,12 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
     'Test1 leaving game' before any DelObject)."""
     if s.my_obj_number is None or s.current_room is None:
         return
+    # v902f5: optional STATION delete (see _send below). Only when the station is really going
+    # away (leave / teardown), never on an in-place death+respawn where the station lives on.
+    _client_del_pkt = None; _client_del_label = ''
+    if delete_client and getattr(s, 'client_number', None) is not None:
+        _client_del_pkt = build_delete_object_3(onumber=None, client_number=s.client_number)
+        _client_del_label = f'<- DELETE3 client St={s.client_number} ({s.current_pilot})'
     _banner76_pkt = None   # v531f5: set in the synth-kill block; sent pre-delete to the killer
     # SINGLE entry only (object). A 2nd entry trips the handler's variable-length branch
     # and crashes the PEER ('Length=-1', messages77: 'delete object 257' OK then bogus
@@ -18439,13 +18572,19 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         else:
             _delpkt, _dl2 = pkt, _dlabel
         def _send(_s=sess, _del=_delpkt, _dl=_dl2, _fu=followup_pkt, _fl=followup_label,
-                  _b76=(_banner76_pkt if sess is killer else None)):
+                  _b76=(_banner76_pkt if sess is killer else None), _cd=_client_del_pkt, _cl=_client_del_label):
             if _b76 is not None:
                 # v531f5: killer's cyan msg-76 FIRST (lower rel seq) - the victim's object must
                 # still exist client-side when the handler resolves it; the delete follows.
                 send_rel(_s, _b76, f'<- KILL_BANNER 76 (cyan, pre-delete) to {_s.current_pilot}',
                          to=3.0)
             send_rel(_s, _del, _dl, to=3.0)
+            if _cd is not None:
+                # v902f5: the 2009 host's STATION delete (msg 3, bit15 entry) - frees the CLIENT slot
+                # on the peer so its name can never go stale; cascades any object the station
+                # still holds. Sent as its OWN msg-3 (a 2nd entry in the object delete would be
+                # parsed as exit-tail bytes). Order per messages04: object -> client -> REMOVE.
+                send_rel(_s, _cd, _cl, to=3.0)
             if _fu is not None:
                 send_rel(_s, _fu, _fl, to=3.0)
         _submit_send(_send)
@@ -19759,13 +19898,21 @@ def handle_leave_arena(s):
         rem_label = f'<- ChangePlayer 63 REMOVE ({s.current_pilot})'
         if s.my_obj_number is not None:
             broadcast_object_delete_3(s, reason='(back to lobby)',
-                                      followup_pkt=rem_pkt, followup_label=rem_label)
+                                      followup_pkt=rem_pkt, followup_label=rem_label,
+                                      delete_client=True)          # v902f5: 2009 station delete
             free_obj_number(s.my_obj_number)   # recycle the Number on exit-to-HQ too
         else:
+            # v902f5: no plane, but the station still exists on peers - delete it, then REMOVE
+            _cdp = build_delete_object_3(onumber=None, client_number=s.client_number) \
+                if getattr(s, 'client_number', None) is not None else None
             for sess in get_sessions_in_room(room_id):
                 if sess is s:
                     continue
-                _submit_send(send_rel, sess, rem_pkt, rem_label, to=3.0)
+                def _leave_send(_p=sess, _c=_cdp, _r=rem_pkt, _rl=rem_label):
+                    if _c is not None:
+                        send_rel(_p, _c, f'<- DELETE3 client St={s.client_number} ({s.current_pilot}, no plane)', to=3.0)
+                    send_rel(_p, _r, _rl, to=3.0)
+                _submit_send(_leave_send)
     s.entered_game = False
     s.__dict__.pop('_motd_room', None)          # v893f5: left the arena -> the next entry gets the MOTD again
     # v260: ARENA ISOLATION - clear current_room on leave so a subsequent arena JOIN resolves the
@@ -19982,17 +20129,27 @@ def teardown_ingame_presence(s, why='(disconnected)'):
             # v191 ordering: the NetPlane holds a pointer to the REMOTE_PLAYER, so the type-3
             # DELETE must reach a peer BEFORE the msg-63 REMOVE or a flying peer
             # use-after-frees the dangling plane. broadcast_object_delete_3 sends both on one
-            # thread with the DELETE first.
+            # thread with the DELETE first. v902f5: plus the 2009 STATION delete in between.
             broadcast_object_delete_3(s, reason=why, followup_pkt=rem_pkt,
-                                      followup_label=rem_label)
+                                      followup_label=rem_label, delete_client=True)
         else:
+            _cdp = build_delete_object_3(onumber=None, client_number=s.client_number) \
+                if getattr(s, 'client_number', None) is not None else None
             for _p in [t for t in get_sessions_in_room(s.current_room) if t is not s]:
-                _submit_send(send_rel, _p, rem_pkt, rem_label, to=3.0)
+                def _td_send(_q=_p, _c=_cdp, _r=rem_pkt, _rl=rem_label):
+                    if _c is not None:
+                        send_rel(_q, _c, f'<- DELETE3 client St={s.client_number} ({s.current_pilot}, teardown)', to=3.0)
+                    send_rel(_q, _r, _rl, to=3.0)
+                _submit_send(_td_send)
         log('TEARDOWN', f'{s.current_pilot} PI={s.player_index} St={s.client_number} '
                         f'obj={"0x%04x" % s.my_obj_number if s.my_obj_number is not None else "none"} '
                         f'-> peers in room {s.current_room} told to drop plane+player {why}')
         s._presence_advertised = False   # v355: peers no longer hold this player
         _retire_room_slot(s, f'(presence teardown {why})')   # v441f5: hold the slot for this pilot
+        try:
+            ai_peers_forget(s, f'(teardown {why})')          # v904f5: his world is gone with him
+        except Exception:
+            pass
         return True
     except Exception as _e:
         log('TEARDOWN', f'[warn] in-game teardown failed for '
@@ -20129,6 +20286,10 @@ def handle_syn(data, addr):
         with sl: active = len([x for x in sids.values() if x.auth_done and not x.closing])
         log('SYN',f'Ready: account="{acct}" {len(pilots)} pilot(s) [sid={s.sid}, active_sessions={active}]')
     else: log('SYN','WARNING: unknown account')
+    try:
+        ai_peers_forget_addr(addr, '(new SYN)')          # v904f5: a fresh connection holds nothing
+    except Exception:
+        pass
     with sl: sids[s.sid]=s; sadrs[addr]=s
     time.sleep(0.015)
     _now = time.time(); s._ntp_epoch = _now; s._ntp_last_reanchor = _now  # v211: base<->epoch same instant
@@ -21433,7 +21594,7 @@ def repair_objects(room_id, objs, reason='', force=False):
         si = trn_scene_info(room_id, sc) or {}
         log('REPAIR', f'room {room_id}: scene {sc} "{si.get("name")}" repaired {names} -> '
                       f'damage now {int(round(frac * 100))}% {reason}')
-    log('REPAIR', f'room {room_id}: msg 30 RESTORE x{len(done)} -> {len(sess)} session(s) {reason}')
+    log('REPAIR-TX', f'room {room_id}: msg 30 RESTORE x{len(done)} -> {len(sess)} session(s) {reason}')
     return done
 
 def obj_repair_due(room_id=None):
@@ -23997,7 +24158,7 @@ def supply_on_building_repaired(room_id, obj_idx):
                         cl.pop(r, None)
                     if not cl:
                         _SCENE_CAP_LOSS.pop(key, None)
-            log('SUPPLY', f'scene {key[1]}: obj {obj_idx} repaired - {r} capacity +{vol}')
+            log('SUPPLY-REPAIR', f'scene {key[1]}: obj {obj_idx} repaired - {r} capacity +{vol}')
             return
     except Exception:
         logx('SUPPLY', 'capacity restore failed')
@@ -28189,6 +28350,10 @@ def on_pkt(data, addr):
             _old = s.addr
             with sl:
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
+            try:
+                ai_peers_rekey_addr(_old, addr)                  # v904f5
+            except Exception:
+                pass
             log('PORTMOVE', f'{"attached" if sz > 12 else "standalone"} time-ping from {addr[0]}:{addr[1]} '
                                f'(connid 0x{_cid:04x}) adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if s is None and sz >= 8 and not (data[2] & 0x10):
@@ -28205,6 +28370,10 @@ def on_pkt(data, addr):
             _old = s.addr
             with sl:
                 sadrs.pop(_old, None); sadrs[addr] = s; s.addr = addr
+            try:
+                ai_peers_rekey_addr(_old, addr)                  # v904f5
+            except Exception:
+                pass
             log('PORTMOVE', f'packet from {addr[0]}:{addr[1]} (connid 0x{_cid:04x}, flags 0x{data[2]:02x}) '
                                f'adopted into session (was {_old[1]}) ({getattr(s,"current_pilot","?")})')
     if not s:
@@ -28360,7 +28529,7 @@ def on_pkt(data, addr):
                     s._loss_ul_tx  = getattr(s,'_loss_ul_tx',0)  + _c_txd
                     s._loss_ul_rx  = getattr(s,'_loss_ul_rx',0)  + (_s_rxd or 0)
                 s._statreply_n = getattr(s, '_statreply_n', 0) + 1
-                if (s._statreply_n % 16) == 1:
+                if (s._statreply_n % 64) == 1:      # v905f5: was 16 - one loss summary per pilot per ~2 min
                     _dt = s._loss_dl_tx if getattr(s,'_loss_dl_tx',0) else 1
                     _ut = s._loss_ul_tx if getattr(s,'_loss_ul_tx',0) else 1
                     log('STATLOSS', f'{getattr(s,"current_pilot","?")} '
@@ -28690,7 +28859,7 @@ def _stall_watch():
 
 # --- Main loop ----------------------------------------------------------------
 
-log('SERVER',f'Fighter Ace LAN Server {VERSION} on {HOST}:{PORT}')
+log('SERVER',f'Fighter Ace LAN Server {VERSION} on {HOST}:{PORT} - init complete, serving')
 log('WEAPONMAP', f'{weapon_map_load()} weapon-obj anchor(s) from weapon_map.json'
                  + ('' if WEAPON_MAP else ' - auto-destroy will skip every obj until anchors '
                                           'exist (corr watch -> corr map <obj> <sceneIdx>)'))
