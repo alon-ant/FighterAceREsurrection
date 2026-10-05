@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v918f5'
+VERSION = 'v919f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -16124,13 +16124,13 @@ CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (
 # last plane position), v801 delete settle, v803..v808 server-driven descent frames, v804 frame
 # after create. `chute drive on|off` on the console flips it live for a controlled test.
 CHUTE_DRIVE_ENABLED = True         # v810f5: ON by default - with v808's terminal sink rate and 2 Hz cadence the
-CHUTE_NO_PARENT = True             # v816f5 switch, ON since v917f5 (user 10-05): a crew chute created WITH a parent
-                                   # plane is bound by the peer's factory (FUN_004f26b0 case 2 -> chute+0x128) to
-                                   # the TRANSPORT PILOT's score record - his name tag on every trooper, and his
-                                   # plane treated as pilot-less (no padlock, '<plane>(p) has bailed out'). 2009
-                                   # (messages04 7451/7462): a crew chute confirms as '(B-17G(2)(p), B-17G(2)(p))',
-                                   # no bound owner; only the pilot's own bail chute carries his name. Parent -1
-                                   # = the client's own no-parent path. `chute noparent off` reverts live.
+CHUTE_NO_PARENT = False            # v816f5 switch. v917f5 turned it ON (troop tag = transport pilot, plane padlock
+                                   # lost); v919f5 turned it OFF again (user 10-05): without a parent the client has
+                                   # no position to place the canopy at, so it spawned in the wrong place and
+                                   # caught up in jumps - the parent is what positions a new canopy. The nicer
+                                   # 'C47 p' tag comes only with the no-parent path. OPEN: find what in the peer's
+                                   # factory (FUN_004f26b0 case 2 -> chute+0x128 bind) marks the transport pilot-
+                                   # less, and break that bind without losing the parent position.
                                    # chutes came out 'almost entirely' smooth in the 09-22 test (user); the
                                    # switch stays for A/B ('chute drive off' = v793 delivery)
 # v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
