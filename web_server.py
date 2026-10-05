@@ -240,7 +240,7 @@ LOG_CONSOLE_PAGE = """
                 </h1>
                 <div class="card" style="padding:12px;">
                   <label>Min level:
-                    <select id="lvl" onchange="reload()">
+                    <select id="lvl" onchange="reload()" autocomplete="off">
                       <option value="INFO" selected>INFO+</option>
                       <option value="DEBUG">DEBUG (all)</option>
                       <option value="WARNING">WARNING+</option>

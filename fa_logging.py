@@ -55,6 +55,11 @@ _TAG_LEVELS = {
     'TANKCULL': logging.DEBUG, 'UNITS': logging.DEBUG, 'PARAWATCH': logging.DEBUG,
     'TANKPATH': logging.DEBUG, 'PARA-REC': logging.DEBUG, 'REPAIR-TX': logging.DEBUG,
     'SUPPLY-REPAIR': logging.DEBUG,
+    # v907f5: per-GAME_DEF-serve patch confirmations (3 lines x every arena x every lobby visit) and
+    # the one-off telemetry-form captures. The 'tail layout not recognised' and GAMEDEF-GUARD lines
+    # stay at INFO - those are the ones that mean something is wrong.
+    'AAPATCH': logging.DEBUG, 'CRATERS': logging.DEBUG, 'GDPATCH': logging.DEBUG,
+    'TELEM8': logging.DEBUG, 'TELEM8-TRANS': logging.DEBUG,
     'SIM13': logging.DEBUG, 'GAMEDEF212': logging.DEBUG, 'GDFDUMP': logging.DEBUG,
     'POST-AUTH': logging.DEBUG, 'COMPOUND': logging.DEBUG, 'RELRX': logging.DEBUG,
 }

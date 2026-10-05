@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v906f5'
+VERSION = 'v918f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -640,7 +640,8 @@ def init_db():
     for _c in ('kills_fighters', 'kills_bombers', 'planes_lost', 'planes_lost_ai',
                'kills_in_a_row', 'bomber_score', 'ai_fighters', 'ai_bombers',
                'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings',
-               'ai_trains', 'captures'):                                  # v714f5: ladder tallies
+               'ai_trains', 'captures',                                  # v714f5: ladder tallies
+               'assists'):                                               # v909f5: msg-25 f5 (was fed kills)
         if _c not in pcols:
             conn.execute(f"ALTER TABLE pilots ADD COLUMN {_c} INTEGER NOT NULL DEFAULT 0")
             log('DB', f'pilots: added missing `{_c}` column (default 0) [msg-25 stat block]')
@@ -3608,7 +3609,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # otherwise; FFA arenas only when explicitly set
     _rwc = (arena_settings or {}).get('runway_collisions')
     if _rwc is None and (is_ffa or force_ffa or tc_room is False):
-        log('CRATER', 'RunwayCollisions/RunwayAngle: not a TC arena - left as the template has it')
+        log('GDPATCH', 'RunwayCollisions/RunwayAngle: not a TC arena - left as the template has it')
     elif not _gamedef_tail_ok(d):
         # v888f5: never address tail bytes in a blob whose tail layout is not the known one
         log('CRATER', f'RunwayCollisions/RunwayAngle: tail layout not recognised (len {len(d)}) - left as-is')
@@ -3616,9 +3617,9 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
         _rwc = RUNWAY_COLLISIONS_DEFAULT if _rwc is None else bool(int(_rwc))
         _rw = apply_runway_collisions(d, _rwc)
         if _rw:
-            log('CRATER', f'RunwayCollisions @+{_rw[0]}: flags 0x{_rw[1]:02x} -> 0x{_rw[2]:02x} ({"yes" if _rwc else "no"})')
+            log('GDPATCH', f'RunwayCollisions @+{_rw[0]}: flags 0x{_rw[1]:02x} -> 0x{_rw[2]:02x} ({"yes" if _rwc else "no"})')
         else:
-            log('CRATER', f'RunwayCollisions: not located or already {"yes" if _rwc else "no"}; left as-is')
+            log('GDPATCH', f'RunwayCollisions: not located or already {"yes" if _rwc else "no"}; left as-is')
         # v823f5: RunwayAngle with it (per-arena 'runway_angle', default 60)
         _ra = (arena_settings or {}).get('runway_angle')
         _ra = RUNWAY_ANGLE_DEFAULT if _ra in (None, '') else int(_ra)
@@ -8081,7 +8082,15 @@ STAT25_MAP = {
     'kills_fighters':  2,   # u16    Kills > Fighters
     'kills_bombers':   3,   # u16    Kills > Bombers
     'planes_lost':     4,   # u16    Planes Lost TO PLAYERS   -- HQ shows f4 + f13
-    'kills':           5,   # u16    Kills (total)
+    # v909f5 [f5 IS FIGHTER ASSISTS, NOT TOTAL KILLS] (Skyyr 10-02: '10 kills = 10 kills + 10 fighter
+    # assists; 10 bomber kills = 10 bomber kills + 10 FIGHTER assists'). The v238 probe set f2=2, f3=3,
+    # f5=5 and read 'Kills 5' on the HQ screen - but 2+3 = 5: the HQ row is the client's SUM of f2+f3,
+    # and f5 is the in-flight Scores tab's FIGHTER ASSISTS row (bomber kills landing in 'fighter
+    # assists' is only explicable if f5 is a single counter we were filling with ALL kills). The
+    # 2004 rule: an assist = 20%+ of the damage on a plane someone else killed - not tracked yet, so
+    # f5 is the pilots.assists column (0 until the assist rule is built; db_bump_pilot_counter
+    # 'assists' increments it). Total kills are no longer sent anywhere - the client adds f2+f3.
+    'assists':         5,   # u16    Fighter Assists (in-flight Scores tab); HQ 'Kills' = f2+f3 (client)
     'kills_in_a_row':  7,   # u8     Kills In A Row
     'aces':            8,   # u8     Aces
     'fighter_score':   9,   # FLOAT  Fighter Score   (proven: float 1234.0 -> screen read 1234)
@@ -8113,7 +8122,7 @@ def db_get_pilot_stat25(name):
     """v240: read every column that feeds the msg-25 stat block (the HQ Scores career screen).
     Returns a dict keyed by STAT25_MAP's keys, so send_stat_block_25 is a straight copy. Missing
     columns read as 0, so this is safe on an un-migrated DB."""
-    keys = ('rank', 'deaths', 'kills_fighters', 'kills_bombers', 'planes_lost', 'kills',
+    keys = ('rank', 'deaths', 'kills_fighters', 'kills_bombers', 'planes_lost', 'assists',
             'kills_in_a_row', 'aces', 'score', 'bomber_score', 'ai_fighters', 'ai_bombers',
             'planes_lost_ai', 'ai_ships', 'ai_tanks', 'ai_ground', 'ai_buildings')
     out = {k: 0 for k in keys}
@@ -10067,6 +10076,8 @@ RELAY_TICK_LEAD = 0
 RELAY_TICK_PROJECT = True       # v883f5: re-stamp from the receiver's PROJECTED clock (see _relay_stamp_for)
 RELAY_TICK_MONOTONIC = True     # v883f5: never stamp an object earlier than its previous stamp to that receiver
 RELAY_TICK_PROJECT_MAX_S = 10.0 # v883f5: projection cap (= STALE_TICK_EXTRAP_MAX_S; beyond it the sender's tick passes)
+CLOCK_DRIFT_WARN_PCT = 2.0      # v912f5: a client conductor this far off TICK_RATE_DEFAULT is logged as drifting
+CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5 min
 AI_TICK_PROJECT = True          # v884f5: server-simulated objects (tanks/trains/soldiers/driven chutes) use the projected clock too
 
 def _s16(d):
@@ -10106,6 +10117,22 @@ def _harvest_tick(src, pl):
         if 10.0 <= _r <= 200.0:
             _old = getattr(src, '_tick_rate', None)
             src._tick_rate = _r if _old is None else (0.8 * _old + 0.2 * _r)
+            # v912f5 [CLIENT CLOCK DRIFT]: the conductor should run at TICK_RATE_DEFAULT. A client
+            # whose rate sits more than CLOCK_DRIFT_WARN_PCT off it is running fast or slow against
+            # everyone else - every relayed stamp to/from him is then that much off, and his view
+            # of events lags or leads (Skyyr 10-03: 'objects destroyed 3-5 s late, relog fixed it';
+            # that session was 9 h old and his tick reset BACKWARDS by 125 s at 02:23). Logged once
+            # per CLOCK_DRIFT_LOG_S per pilot while it persists.
+            try:
+                _dev = abs(src._tick_rate - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
+                if _dev >= CLOCK_DRIFT_WARN_PCT and now - src.__dict__.get('_clock_warned', 0.0) >= CLOCK_DRIFT_LOG_S:
+                    src._clock_warned = now
+                    log('CLOCK', f'{getattr(src, "current_pilot", "?")}: conductor running at {src._tick_rate:.2f}/s '
+                                 f'({_dev:+.1f}% vs {TICK_RATE_DEFAULT:.0f}) - his clock is '
+                                 f'{"FAST" if src._tick_rate > TICK_RATE_DEFAULT else "SLOW"}; events will '
+                                 f'{"lead" if src._tick_rate > TICK_RATE_DEFAULT else "lag"} on his screen (relog resets it)')
+            except Exception:
+                pass
         src._tick_anchor = (t, now)
     src.last_telem_tick = t
     src.last_telem_time = now
@@ -11383,6 +11410,13 @@ def _handle_tank_hit_51(s, pl):
                                 if getattr(q, 'my_obj_number', None) == victim), None)
                     if _vs is not None and _vs is not s and dmg > 0:
                         PLANE_LAST_HIT[victim] = (attacker, time.time(), s.current_pilot)
+                        # v910f5: per-attacker damage on this plane, for the 2004 ASSIST rule
+                        try:
+                            _pd = PLANE_DMG.setdefault(victim, {})
+                            _pd[s.current_pilot] = _pd.get(s.current_pilot, 0) + int(dmg)
+                            PLANE_DMG_AT[victim] = time.time()
+                        except Exception:
+                            pass
                         try:
                             _desync_check(s, _vs)              # v862f5 (see _desync_check)
                         except Exception:
@@ -11444,6 +11478,9 @@ def defence_dps():
     return max(0.1, float(SOLDIER_HP) / max(1.0, DEFENCE_TTK_S))
 
 PLANE_LAST_HIT = {}          # v799f5: victim obj -> (attacker obj, time, attacker pilot) from msg-33 hit reports
+PLANE_DMG = {}               # v910f5: victim obj -> {attacker pilot: damage total} from msg-33 hits (assist rule)
+PLANE_DMG_AT = {}            # v910f5: victim obj -> time of the last hit (stale records expire)
+ASSIST_WINDOW_S = 600.0      # v910f5: damage older than this before the death does not count towards an assist
 HIT_RANGE_ANOMALY_M = 1500.0 # v862f5: a scored hit with the two planes further apart than this (server view) is a desync
 DESYNC_TRACE_S = 20.0        # v862f5: relay trace switched on for both pilots after a desync event
 SENDER_JUMP_MPS = 350.0      # v862f5: a pilot's own frames implying more than this is a jump (no WWII plane does it)
@@ -12236,6 +12273,7 @@ TC_TANK_VS_TANK_DPS  = 60.0     # per second per shooter on an enemy tank (1000 
 TC_TANK_VS_SOLDIER_DPS = 6.0    # v746f5: a tank's fire on enemy infantry holding a scene
 TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent setting
 TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
+TC_ARRIVE_ENGAGE_M   = 1200.0   # v911f5: a column that has stopped this close to its target engages even outside TC_ENGAGE_RADIUS
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
 CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
@@ -12440,6 +12478,21 @@ def _tc_engagement_tick():
         if not members:
             continue
         near = [t for _o, t in members if math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) <= TC_ENGAGE_RADIUS]
+        # v911f5 [COLUMN PARKED OUTSIDE THE ENGAGE RADIUS] (Skyyr 10-05: 'tanks randomly stop at the
+        # scene and never damage it; if a pilot damages it to 50% it captures'): the drive ends where
+        # the road / planner puts the column, and when that is 350-400 m from the scene centre the
+        # tanks were INSIDE the capture radius (400) but OUTSIDE the engage radius (350): never
+        # 'engaged', so no per-tank targets, no fire - yet they counted for the capture. Random
+        # because it depends on where the road ends. A column that has STOPPED (no tank has a goal)
+        # within TC_ARRIVE_ENGAGE_M of its target is engaged too, and the per-tank targeting then
+        # drives each tank to its own stand-off.
+        if purpose == 'attack' and not near and not col.get('engaged'):
+            _stopped = all(t.get('goal') is None for _o, t in members)
+            _dl = min(math.hypot(t['pos'][0] - txy[0], t['pos'][1] - txy[1]) for _o, t in members)
+            if _stopped and _dl <= TC_ARRIVE_ENGAGE_M:
+                near = [t for _o, t in members]
+                log('TC', f'column {gid}: stopped {_dl:.0f} m from scene {sidx} (outside the {TC_ENGAGE_RADIUS:.0f} m '
+                          f'engage radius) - engaging from here [v911f5]')
         # v594f5: defenders / garrisons deploy on a perimeter ring instead of sitting in a huddle
         if purpose in ('defend', 'hold') and near and not col.get('deployed'):
             col['deployed'] = now
@@ -12594,15 +12647,52 @@ def _tc_engagement_tick():
                                     f'Battalion at {tc_grid(lx, ly)} switch strategy to defend {tc_camp_tag(col["camp"])} '
                                     f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}')
         elif purpose == 'hold' and now - col.get('held_at', now) > TC_HOLD_AFTER_CAPTURE_S:
-            log('TC', f'column {gid}: garrison withdrawn from scene {sidx}')
-            column_delete(gid, reason='(garrison withdrawn)')
+            # v908f5 [DEFENDERS LEFT AS THE ATTACK ARRIVED] (Taurus 10-02): the 10-min garrison hold
+            # and the 20-min idle stand-down ran on the clock alone, so a garrison withdrew while an
+            # enemy column was two grids out (online 10-02: captures 12:52 / 13:00 / 13:02, garrisons
+            # gone at 13:02 / 13:10 / 13:12 to the second, attackers still on the road). Neither
+            # timer may fire while an ENEMY THREAT exists: an enemy column whose target is this
+            # scene, or enemy ground units within TC_THREAT_RADIUS_M. The clock is simply reset.
+            if _tc_scene_threatened(room_id, sidx, col['camp']):
+                col['held_at'] = now
+            else:
+                log('TC', f'column {gid}: garrison withdrawn from scene {sidx}')
+                column_delete(gid, reason='(garrison withdrawn)')
         elif purpose == 'defend' and col.get('deployed'):
             # v604f5: idle defenders don't live forever (48 tanks accumulated live on 09-09)
-            if any(t.get('_target_tank') in TANKS for _o, t in members):
-                col['_last_contact'] = now
+            if any(t.get('_target_tank') in TANKS for _o, t in members) or _tc_scene_threatened(room_id, sidx, col['camp']):
+                col['_last_contact'] = now       # v908f5: an inbound enemy column counts as contact
             elif now - col.get('_last_contact', col.get('deployed', now)) > TC_DEFEND_IDLE_S:
                 log('TC', f'column {gid}: defenders of scene {sidx} stood down after {TC_DEFEND_IDLE_S:.0f}s without contact')
                 column_delete(gid, reason='(defence stood down)')
+
+TC_THREAT_RADIUS_M = 8000.0     # v908f5: enemy ground units this close keep a garrison / defence in place
+
+def _tc_scene_threatened(room_id, sidx, camp):
+    """v908f5: True when an enemy column is heading for this scene (any live attacking column of
+    another camp with target == sidx) or enemy tanks / soldiers are within TC_THREAT_RADIUS_M of it.
+    Used to hold a garrison or defence instead of withdrawing it on the clock."""
+    try:
+        for _g, _c in COLUMNS.items():
+            if _c.get('room') == room_id and _c.get('camp') != camp and _c.get('target') == sidx \
+                    and _c.get('purpose') in ('attack', None) \
+                    and any(o in TANKS and not TANKS[o].get('dead') for o in _c.get('members', [])):
+                return True
+        terrain = _probe_terrain_for_room(room_id)
+        sxy = tc_scene_xy(terrain, sidx)
+        if not sxy:
+            return False
+        for t in TANKS.values():
+            if t.get('room') == room_id and not t.get('dead') and t.get('camp') != camp \
+                    and math.hypot(t['pos'][0] - sxy[0], t['pos'][1] - sxy[1]) <= TC_THREAT_RADIUS_M:
+                return True
+        for sd in SOLDIERS.values():
+            if sd.get('room') == room_id and not sd.get('dead') and sd.get('camp') != camp \
+                    and math.hypot(sd['pos'][0] - sxy[0], sd['pos'][1] - sxy[1]) <= TC_THREAT_RADIUS_M:
+                return True
+    except Exception:
+        pass
+    return False
 
 def tank_killed_by_tank(onum, shooter_onum):
     """AI-on-AI kill: same kill-entry delete, hunter = the shooting tank (AI station)."""
@@ -15145,7 +15235,27 @@ def ai_peers_forget_addr(addr, reason=''):
                 _hu.pop(addr, None)
     if n:
         log('TC', f'new session from {addr[0]}:{addr[1]}: forgot that address on {n} AI object(s) {reason}')
-    return n
+    # v913f5 [INVISIBLE PILOTS AFTER A RECONNECT] (Skyyr 10-03: Pilot_Error and MILHOUSE invisible,
+    # relog fixed it; his previous session from the same address, sid 192 at 16:45, was never torn
+    # down before sid 195 at 17:37). Every PLANE and CANOPY keeps the same kind of per-address
+    # 'already created on' set, so the new session inherited them: no create, updates only. Scrub
+    # the address from every session's plane / parachuter / crew-chute created sets as well.
+    m = 0
+    try:
+        for x in list(get_all_sessions()):
+            _cp = x.__dict__.get('_created_peers')
+            if _cp and addr in _cp:
+                _cp.discard(addr); m += 1
+            _pp = x.__dict__.get('_para_created_peers')
+            if _pp:
+                for _on, _st in list(_pp.items()):
+                    if addr in _st:
+                        _st.discard(addr); m += 1
+    except Exception:
+        pass
+    if m:
+        log('TC', f'new session from {addr[0]}:{addr[1]}: forgot that address on {m} plane/canopy create set(s) {reason}')
+    return n + m
 
 def ai_peers_rekey_addr(old, new):
     """v904f5: a session whose address moved (NAT port change adoption) keeps holding the objects it
@@ -15164,6 +15274,19 @@ def ai_peers_rekey_addr(old, new):
                     _d[new] = _d.pop(old)
     if n:
         log('TC', f'port move {old[1]} -> {new[1]}: AI object membership carried on {n} object(s)')
+    # v913f5: planes and canopies too - the moved session still has every peer's plane
+    try:
+        for x in list(get_all_sessions()):
+            _cp = x.__dict__.get('_created_peers')
+            if _cp and old in _cp:
+                _cp.discard(old); _cp.add(new)
+            _pp = x.__dict__.get('_para_created_peers')
+            if _pp:
+                for _on, _st in list(_pp.items()):
+                    if old in _st:
+                        _st.discard(old); _st.add(new)
+    except Exception:
+        pass
     return n
 
 def ai_objects_reset_for(s, reason=''):
@@ -16001,7 +16124,13 @@ CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (
 # last plane position), v801 delete settle, v803..v808 server-driven descent frames, v804 frame
 # after create. `chute drive on|off` on the console flips it live for a controlled test.
 CHUTE_DRIVE_ENABLED = True         # v810f5: ON by default - with v808's terminal sink rate and 2 Hz cadence the
-CHUTE_NO_PARENT = False            # v816f5: troop chutes created without a parent plane (see send_crew_parachuter_create_for)
+CHUTE_NO_PARENT = True             # v816f5 switch, ON since v917f5 (user 10-05): a crew chute created WITH a parent
+                                   # plane is bound by the peer's factory (FUN_004f26b0 case 2 -> chute+0x128) to
+                                   # the TRANSPORT PILOT's score record - his name tag on every trooper, and his
+                                   # plane treated as pilot-less (no padlock, '<plane>(p) has bailed out'). 2009
+                                   # (messages04 7451/7462): a crew chute confirms as '(B-17G(2)(p), B-17G(2)(p))',
+                                   # no bound owner; only the pilot's own bail chute carries his name. Parent -1
+                                   # = the client's own no-parent path. `chute noparent off` reverts live.
                                    # chutes came out 'almost entirely' smooth in the 09-22 test (user); the
                                    # switch stays for A/B ('chute drive off' = v793 delivery)
 # v803f5 [CHUTE DESCENT KEEP-ALIVE] - THE WARP. The transport's client sends a chute's frames only
@@ -17941,7 +18070,14 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     _pilot_survives = _bailed or (PILOT_FATE_SCORING and not pilot_lost)
 
     # 1) EXACT: the victim's exit entry named its killer (long form only).
-    if hunter_obj is not None and hunter_obj > 0 and hunter_obj != 0xffff:
+    # v909f5: a hunter that is the VICTIM'S OWN object ('You have killed yourself' - own bomb blast,
+    # own collision) is nobody's kill: skip attribution, book a solo death. Without this the
+    # retired-Number history could hand the victim his own kill.
+    _self_hunter = (hunter_obj is not None and hunter_obj == (victim_obj if victim_obj is not None
+                                                               else getattr(victim, 'my_obj_number', None)))
+    if _self_hunter:
+        log('KILL', f'attribution: hunter obj 0x{hunter_obj:04x} is the victim\'s own plane -> self-kill, no credit')
+    if hunter_obj is not None and hunter_obj > 0 and hunter_obj != 0xffff and not _self_hunter:
         for p in get_sessions_in_room(victim.current_room):
             if p is not victim and getattr(p, 'my_obj_number', None) == hunter_obj:
                 killer = p
@@ -18106,6 +18242,36 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                      f'{"AA/AI ground fire" if _lost_to_ai else "no creditable shooter"} '
                      f'(exit=0x{_exitb:02x}, MEC&0xf={_mec}) -> '
                      f'{"planes_lost_ai" if _lost_to_ai else "planes_lost"} +1')
+    # v910f5 [ASSISTS - THE 2004 RULE]: 'the kill is awarded to the attacker who did the MOST damage;
+    # if another attacker did 20% OR MORE of the damage as well, he is awarded an Assist.' Damage per
+    # attacker is accumulated from the msg-33 hit reports (PLANE_DMG). Every OTHER pilot with
+    # >= ASSIST_DAMAGE_FRACTION of the total damage on this plane gets an assist: pilots.assists
+    # (msg-25 f5, the Scores tab's Fighter Assists) and the Country Scores fighter/bomber assists
+    # row by what the VICTIM flew. No points - the 2004 scoring page lists none for an assist.
+    try:
+        _vo_a = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+        _dm = PLANE_DMG.pop(_vo_a, None) if _vo_a is not None else None
+        _dm_at = PLANE_DMG_AT.pop(_vo_a, 0.0) if _vo_a is not None else 0.0
+        if _dm and (time.time() - _dm_at) <= ASSIST_WINDOW_S:
+            _tot = float(sum(_dm.values())) or 1.0
+            _kn = killer.current_pilot if killer is not None else None
+            for _an, _ad in sorted(_dm.items(), key=lambda kv: -kv[1]):
+                if _an == _kn or _an == victim.current_pilot:
+                    continue
+                _share = _ad / _tot
+                if _share >= ASSIST_DAMAGE_FRACTION:
+                    db_bump_pilot_counter(_an, 'assists', 1)
+                    try:
+                        camp_stat_for_pilot(_an, 'bomber_assists' if _victim_bomber else 'fighter_assists', 1)
+                    except Exception:
+                        pass
+                    log('SCORE', f'{_an} ASSIST on {victim.current_pilot} ({_share * 100:.0f}% of the damage; '
+                                 f'killer {_kn or "none"})')
+                    _as = next((x for x in get_sessions_in_room(victim.current_room) if x.current_pilot == _an), None)
+                    if _as is not None:
+                        send_stat_block_25(_as, reason='(assist)')
+    except Exception:
+        logx('SCORE', 'assist booking failed')
 
     # ---- v249: OFFICIAL SCORING. Points are no longer a flat 100 per kill and 50 per death.
     #   KILL  = value of the plane you shot down  +  (target rank value / your rank value) x 100
@@ -18675,6 +18841,7 @@ STALE_TICK_EXTRAP_MAX_S = 10.0  # v835f5/v856f5: extrapolate a stalled receiver 
 STALE_TICK_EXTRAP = True        # v856f5: `tick extrap on|off` on the console - two CTDs coincided with a server-wide
                                 #   inbound stall (09-26 20:12) during which this fired for every pilot; unproven, switchable
 RELAY_GAP_WARN_S = 2.0          # v837f5: log when one pilot's frames stop reaching another for this long
+RELAY_GAP_MAX_DIST_M = 25000.0  # v912f5: RELAY-GAP only for pairs inside this distance (the far tier is silent by design)
 
 # v343: START-PLACE / DEATH RACE. In every captured case the client sends its StartPlace
 # request (0x17) a few MILLISECONDS BEFORE it reports its own death (0x03), then the KILL
@@ -18794,6 +18961,32 @@ def _telem_split_records(src, pl):
                     return r
         return None
     recs = fit(0, [], 0)
+    if not recs or len(recs) < 2:
+        # v916f5 [UNIQUE TILING NEEDS NO OWNERSHIP] (CHARGER 10-03 02:41:41, four peers CTD): a
+        # 75 B frame = chute(34) + crew chute(34) was refused by the v584 ownership rule - at that
+        # instant one of the two canopy numbers was not in the sender's known set - and fell through
+        # to the raw relay. RE of the sender (FUN_007e5980 -> FUN_007e45b0): every record is its
+        # TYPE's fixed size, so a plane can never be 34 bytes, and a payload whose ONLY tiling is
+        # all-34 (no plane size fits) cannot have a garbage boundary: the boundaries are forced. For
+        # such a payload accept the tiling without the ownership test, provided every record number
+        # is a plausible object number; log it so the missing-ownership cause can be found.
+        n_rest = len(rest)
+        if n_rest % TELEM_PARA_RECORD == 0 and n_rest // TELEM_PARA_RECORD >= 2 \
+                and not any((n_rest - k * TELEM_PARA_RECORD) in [s for s in TELEM_RECORD_SIZES if s != TELEM_PARA_RECORD]
+                            for k in range(0, n_rest // TELEM_PARA_RECORD)):
+            _alt = []
+            for i in range(0, n_rest, TELEM_PARA_RECORD):
+                _on = int.from_bytes(rest[i:i+2], 'little')
+                if _on == 0 or _on >= 0x0800:
+                    _alt = []; break
+                _alt.append((_on, rest[i:i+TELEM_PARA_RECORD]))
+            if len(_alt) >= 2:
+                _unk = [f'0x{o:04x}' for o, _ in _alt if o not in owned]
+                log('TELEM-SPLIT', f'{src.current_pilot}: {len(pl)}B frame tiled as {len(_alt)} x {TELEM_PARA_RECORD} '
+                                   f'without the ownership test (unique tiling); records not in the known set: '
+                                   f'{_unk or "none"} (plane 0x{(_mine or 0):04x}, chute '
+                                   f'0x{(_pn or 0):04x}, crew {sorted(src.__dict__.get("crew_para_objs") or {})}) [v916f5]')
+                recs = _alt
     if not recs or len(recs) < 2:
         return []
     out = []
@@ -19058,6 +19251,21 @@ def relay_telemetry(src, data, _split_obj=None):
                     continue
                 relay_telemetry(src, _hdr8 + _sub, _split_obj=_onum)
             return
+        # v915f5 [UNKNOWN RECORD SHAPE -> DROP, NEVER RELAY RAW] (Sean/_Hickapotamus_ 10-03 02:41:42:
+        # 'bounds error ARR<NET::OBJECT*,2048>[23455]' on 'in 7'71' - a 64-byte record from CHARGER six
+        # seconds after his bail, which no tiling fits). The frame was not a known single shape, the
+        # split found nothing, and bc=4 slipped under the TELEM_MAX_BC guard below - so it was relayed
+        # RAW and every peer read a plane out of 64 bytes. A record the server cannot name is never
+        # safe to forward: harvest the tick, log it ONCE per (sender, size) with the hex, and drop.
+        _harvest_tick(src, pl)                              # the tick is still good
+        _odd = src.__dict__.setdefault('_telem_odd_logged', set())
+        if _rec_len not in _odd:
+            _odd.add(_rec_len)
+            log('TELEM-GUARD', f'{src.current_pilot}: {len(pl)}B frame with a {_rec_len}-byte record of unknown '
+                               f'shape (not a canopy, not a plane, no multi-record tiling) -> NOT relayed; '
+                               f'hex={hx(bytes(pl[:48]))} (plane 0x{(src.my_obj_number or 0):04x}, chute '
+                               f'0x{(getattr(src, "para_obj_number", None) or 0):04x}, crew {sorted(src.__dict__.get("crew_para_objs") or {})}) [v915f5]')
+        return
     if pl[0] > TELEM_MAX_BC:
         # v362f5: HARVEST THE TICK BEFORE REJECTING THE FRAME. The multi-record form
         # shares the standard header layout - tick at [5:7], ONumber at [7:9] - proven
@@ -19100,7 +19308,11 @@ def relay_telemetry(src, data, _split_obj=None):
                 # a pilot who keeps doing it is the one the others see jumping.
                 try:
                     _prev = src.__dict__.get('_pos_xy'); _prev_t = src.__dict__.get('_pos_at')
-                    if _prev is not None and _prev_t:
+                    _prev_obj = src.__dict__.get('_pos_obj')
+                    # v914f5: only within ONE life - every 'own frames jumped' logged so far was a
+                    # respawn at another field (16-60 km in 0.5 s, old plane -> new plane); a real
+                    # jump is the same object teleporting
+                    if _prev is not None and _prev_t and _prev_obj == _co_onum:
                         _dtj = time.time() - _prev_t
                         if 0.05 <= _dtj <= 5.0:
                             _jump = math.hypot(_ox - _prev[0], _oy - _prev[1])
@@ -19112,7 +19324,7 @@ def relay_telemetry(src, data, _split_obj=None):
                                                   f'(#{_nj} this session)')
                 except Exception:
                     pass
-                src._pos_xy = (_ox, _oy); src._pos_z = _oz; src._pos_at = time.time()
+                src._pos_xy = (_ox, _oy); src._pos_z = _oz; src._pos_at = time.time(); src._pos_obj = _co_onum
                 # v863f5: ring of the pilot's own frames for the desync event file
                 _fr = src.__dict__.setdefault('_frame_ring', [])
                 _fr.append((time.time(), int.from_bytes(pl[5:7], 'little'), _ox, _oy, _oz))
@@ -19429,7 +19641,11 @@ def relay_telemetry(src, data, _split_obj=None):
             _rg = src.__dict__.setdefault('_relay_last_to', {})
             _lt = _rg.get(p.addr)
             _rg[p.addr] = _now_relay
-            if _lt is not None and (_now_relay - _lt) >= RELAY_GAP_WARN_S:
+            if _lt is not None and (_now_relay - _lt) >= RELAY_GAP_WARN_S \
+                    and _dd is not None and _dd <= RELAY_GAP_MAX_DIST_M:
+                # v912f5: only pairs that SHOULD be getting frames - beyond the silent far tier (and
+                # with no position known) the gap is the tier design, not a delivery problem; those
+                # lines were 3,600 a day of noise
                 _rgw = src.__dict__.setdefault('_relay_gap_warned', {})
                 if _now_relay - _rgw.get(p.addr, 0.0) >= 30.0:
                     _rgw[p.addr] = _now_relay
@@ -22928,11 +23144,31 @@ def _ingame_own_object_removed(s, tb, stored):
                 # phantom cockpit death (run_20260829_153730: empty plane MEC=1 -> aces wiped). A
                 # solo bail leaves NO PENDING_KILL 'bail' marker, so score_on_death's own _bailed
                 # can't catch it - the on-chute check is what does.
-                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
-                                                   victim_obj=_onum, pilot_lost=False)
+                # v918f5 (Skyyr's analysis, FIX 1, 10-05): if THIS life's pilot was already reported
+                # killed in the cockpit (MEC 4 from his own client), a later canopy cannot carry a
+                # live pilot - book the pilot as lost even on the on-chute path. Three days of logs
+                # (58 cockpit kills) show no such sequence, so this guards a path the client should
+                # not take rather than fixing an observed loss; it costs nothing to be right.
+                _ck_on_chute = s.__dict__.pop('_cockpit_kill_t', None) is not None
+                _ckh2 = s.__dict__.pop('_cockpit_kill_hunter', None)
+                _killer, _kbailed = score_on_death(s, stored,
+                                                   hunter_obj=(_hunter if _hunter is not None else _ckh2),
+                                                   victim_obj=_onum, pilot_lost=_ck_on_chute)
                 log('DEATH', f'{s.current_pilot} bailed plane down (MEC&0xf={mec_nib}) -> plane '
-                             f'counted + shooter credited; pilot on chute, fate pending [PILOT_FATE]')
-            elif scored or (mec_nib == 1 and _flying2):
+                             f'counted + shooter credited; '
+                             + ('pilot was ALREADY KILLED in the cockpit -> pilot lost [v918f5]' if _ck_on_chute
+                                else 'pilot on chute, fate pending [PILOT_FATE]'))
+            elif scored or mec_nib == 1:
+                # v909f5 [KILLED YOURSELF = A DEATH] (Skyyr 10-02): MEC 1 is the client's crash /
+                # explosion exit. It was a death only while FLYING (movement >= CRASH_MOVEMENT_MIN);
+                # parked it fell through to 'clean exit' - so blowing yourself up on the ground (own
+                # bombs released parked, a blast you set off) cost nothing: no loss, no lost pilot, aces
+                # kept (Taurus 10-02 17:39:38: MEC 1 SE 1 five seconds after a parked loadout restore).
+                # A parked plane that EXITS cleanly sends MEC 0xa (or 9), never 1 - so MEC 1 parked is
+                # a destruction. Plane and pilot lost; a named shooter is still credited.
+                if mec_nib == 1 and not _flying2:
+                    log('DEATH', f'{s.current_pilot} destroyed while PARKED (MEC 1, movement {_move2:.0f}) -> '
+                                 f'plane AND pilot lost (self-destruction unless a shooter is named) [v909f5]')
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
                                                    victim_obj=_onum, pilot_lost=True)
             elif s.__dict__.pop('_cockpit_kill_t', None) is not None:
