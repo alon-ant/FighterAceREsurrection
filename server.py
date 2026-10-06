@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v919f5'
+VERSION = 'v920f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -16118,6 +16118,8 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
 CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
 CREW_CHUTE_DELETE_SETTLE_S = 1.5   # v801f5: a delete of a chute younger than this waits, so it cannot beat its own create
 CHUTE_CAPTURE_N = 60               # v802f5: raw chute frames logged per chute (CHUTEFRAME tag); 0 = off
+CHUTE_DRIVE_WRITE_VEL = True       # v920f5: driven frames carry the drive's own velocity (0, -sink, 0) - see the loop
+CHUTE_VEL_UNIT_MPS = 0.01          # v920f5: m/s per count of the record's s16 velocity fields (measured 0.0100-0.0107)
 # v809f5 [CHUTE DELIVERY BACK TO v793]: all parachutes - troops AND bailed pilots - went jumpy after
 # the 09-22 work; the delivery is put back to what it was and the experiments are behind this one
 # switch (off): v794 per-object relay tier/limiter (a bailed pilot's chute was being tiered by his
@@ -16230,6 +16232,23 @@ def _chute_keepalive_loop():
                     try:
                         body[7:9] = (int(onum) & 0xffff).to_bytes(2, 'little')   # v815f5: this chute's own number
                         body[9:18] = pack_plane_pos9(_x, _y, _z)
+                        # v920f5 [THE JUMPING TROOPERS - WRONG VELOCITY IN THE DRIVEN FRAMES] (user
+                        # 10-05: troopers jump, a bailed pilot's / a bomber crew's canopies do not).
+                        # The parachuter record (unpack FUN_004a3ba0) carries a VELOCITY at body
+                        # +0x14/+0x16/+0x18 (s16 each, x / UP / y, x CHUTE_VEL_UNIT_MPS - measured 0.010
+                        # m/s per count from position deltas) and an angular velocity at +0x1a..+0x1f.
+                        # The receiving client DEAD-RECKONS every object between frames with that
+                        # velocity (FUN_004a3110 / FUN_007e4a20). The driven frames reused the owner's
+                        # LAST frame, i.e. the free-fall / opening velocity (40-80 m/s forward, 12-25 m/s
+                        # down), so between two of our 2 Hz frames the client flew the canopy 20-40 m
+                        # forward and down, and our next frame snapped it back: the jump. Owner-driven
+                        # canopies (pilot bail, bomber crew) keep getting the owner's true velocity at
+                        # 4 Hz, which is why they are smooth. Write the velocity the drive actually
+                        # applies: no drift, CHUTE_DESCENT_MPS straight down, no rotation.
+                        if CHUTE_DRIVE_WRITE_VEL:
+                            _vup = int(round(-CHUTE_DESCENT_MPS / CHUTE_VEL_UNIT_MPS))
+                            struct.pack_into('<hhh', body, 9 + 0x14, 0, max(-32768, _vup), 0)
+                            struct.pack_into('<hhh', body, 9 + 0x1a, 0, 0, 0)
                     except Exception:
                         continue
                     _peers = (s.__dict__.get('_para_created_peers') or {}).get(onum, set())
