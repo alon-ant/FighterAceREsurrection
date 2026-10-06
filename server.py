@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v920f5'
+VERSION = 'v921f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4566,8 +4566,29 @@ def console_handler():
                 # v809f5: chute drive on|off - the 09-22 chute experiments (per-object relay tier,
                 # server-driven descent, frame-after-create, delete settle) as one switch
                 _a = (parts[1].split() if len(parts) > 1 else [])
-                global CHUTE_DRIVE_ENABLED, CHUTE_NO_PARENT, CHUTE_NEAR_HZ, CHUTE_NEAR_M
-                if _a and _a[0] == 'near' and len(_a) > 1:
+                global CHUTE_DRIVE_ENABLED, CHUTE_NO_PARENT, CHUTE_NEAR_HZ, CHUTE_NEAR_M, \
+                    CHUTE_DESCENT_MPS, CHUTE_DRIVE_WRITE_VEL, CHUTE_VEL_UNIT_MPS
+                if _a and _a[0] == 'sink' and len(_a) > 1:
+                    # v921f5: chute sink <m/s> - the driven descent rate (also the velocity written
+                    # into the driven frames since v920, so the client's dead reckoning matches)
+                    try:
+                        CHUTE_DESCENT_MPS = max(1.0, min(20.0, float(_a[1])))
+                        log('CONSOLE', f'chute sink = {CHUTE_DESCENT_MPS:.1f} m/s (applies to every driven frame from now)')
+                    except ValueError:
+                        log('CONSOLE', 'usage: chute sink <m/s 1..20>')
+                elif _a and _a[0] == 'vel' and len(_a) > 1:
+                    # v921f5: chute vel on|off - write the drive's velocity into the frames (v920), or
+                    # leave the owner's last velocity in them (the pre-v920 jumping form, for A/B)
+                    CHUTE_DRIVE_WRITE_VEL = _a[1].lower() in ('on', '1', 'true', 'yes')
+                    log('CONSOLE', f'chute vel = {CHUTE_DRIVE_WRITE_VEL}')
+                elif _a and _a[0] == 'velunit' and len(_a) > 1:
+                    # v921f5: chute velunit <m/s per count> - the s16 velocity scale (measured 0.0100-0.0107)
+                    try:
+                        CHUTE_VEL_UNIT_MPS = max(0.001, min(1.0, float(_a[1])))
+                        log('CONSOLE', f'chute velunit = {CHUTE_VEL_UNIT_MPS:.4f} m/s per count')
+                    except ValueError:
+                        log('CONSOLE', 'usage: chute velunit <0.001..1>')
+                elif _a and _a[0] == 'near' and len(_a) > 1:
                     # v887f5: chute near <hz> [metres] - driven-canopy cadence for nearby observers
                     try:
                         CHUTE_NEAR_HZ = max(1.0, min(10.0, float(_a[1])))
