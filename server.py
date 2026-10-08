@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v921f5'
+VERSION = 'v925f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12759,7 +12759,10 @@ def tank_killed_by_tank(onum, shooter_onum):
 # Neither is required for the drop itself.
 MSG_PARA_TO_SOLDIER_112 = 0x70
 PARATROOPS           = True
-TRANSPORT_PLANE_NAMES = {'C-47A', 'Dakota_Mk.II', 'Li-2', 'Ju-52/3m'}
+TRANSPORT_PLANE_NAMES = {'C-47A', 'Dakota_Mk.II', 'Li-2', 'Ju-52/3m',
+                         'L2D2'}      # v922f5: the Japanese transport was missing - JP drops never formed a
+                                      # stick (chutes handled as bomber crew, no soldiers; camps 0-3 had
+                                      # 236/208/10/48 spawns in two days, camp 4 none - user 10-08)
 TRANSPORT_PLANE_IDS   = {i for i, n in enumerate(PLANE_ROSTER) if n in TRANSPORT_PLANE_NAMES}
 PARA_STICK_WINDOW_S   = 20.0    # chutes landing within this of each other form one stick
 PARA_WALK_MPS         = 2.4     # v596f5: 1.5 -> 2.4 (user: faster)
@@ -18876,7 +18879,9 @@ TELEM_RESTAMP_MAX_LEN = 100  # v253: only re-stamp the telemetry FORM WE KNOW. T
                              #   parse - that is the same mistake as hand-authoring the record.
 STALE_TICK_WARN_S = 3.0      # warn if we re-stamp using a peer tick this old (the failure above was
                              #   silent for ~3 minutes; never let a frozen tick go unnoticed again)
-TICK_RATE_DEFAULT = 52.0        # v835f5: conductor ticks per second when a session's own rate is not yet measured
+TICK_RATE_DEFAULT = 50.0        # v925f5: 52 -> 50. Three clients (flak, Moira, Skyyr) measured 49.9-50.1/s and the
+                                # physics step is 1/50 s; 52 was one September reading. CLOCK warned '3.8% slow'
+                                # on everyone against the wrong reference. (v835: the fallback until measured.)
 STALE_TICK_EXTRAP_MAX_S = 10.0  # v835f5/v856f5: extrapolate a stalled receiver tick this long (was 30), then pass the sender's tick
 STALE_TICK_EXTRAP = True        # v856f5: `tick extrap on|off` on the console - two CTDs coincided with a server-wide
                                 #   inbound stall (09-26 20:12) during which this fired for every pilot; unproven, switchable
@@ -19915,26 +19920,44 @@ def _alloc_start_place(s, af, n_req):
     first (airfield change / respawn). N=0xff = assign lowest free; an explicit N is
     honoured when free, else the next free index >= N (wrapping to 0) - v454f5: the
     msg-93 TAB cycle asks for OldSP+1 explicitly, and two players tabbing must not
-    stack on one spot. Returns the granted index."""
+    stack on one spot. Returns the granted index.
+    v923f5 [THE 'WAITING FOR POSITION' LOOP] (Moira 10-05 14:45, others): a place the client
+    REFUSED (spawned, exited with code 9 within seconds, asked again) is skipped for this
+    session on this airfield for SP_REFUSED_TTL_S. The occupancy table only knows about other
+    players; a parked plane, a garrisoned tank or a soldier standing on the spot is invisible
+    to it, and because this function frees the session's own slot first, the refused place was
+    handed straight back - four spawns on place 2 in eight seconds, each refused."""
     _free_start_place(s)
     room = s.current_room
+    _now = time.time()
+    _ref = s.__dict__.setdefault('_sp_refused', {})          # (room, af, n) -> time refused
+    for _k in [k for k, t in _ref.items() if _now - t > SP_REFUSED_TTL_S]:
+        _ref.pop(_k, None)
+    def _bad(k):
+        return (room, af, k) in _ref
     with _sp_lock:
         occ = _sp_occupied.setdefault((room, af), set())
         if n_req != 0xff:
             n = n_req % SP_MAX
             _tries = 0
-            while n in occ and _tries < SP_MAX:
+            while (n in occ or _bad(n)) and _tries < SP_MAX:
                 n = (n + 1) % SP_MAX
                 _tries += 1
         else:
             n = 0
-            while n in occ and n < SP_MAX:
+            while (n in occ or _bad(n)) and n < SP_MAX:
                 n += 1
             if n >= SP_MAX:           # more than SP_MAX players on one airfield - reuse slot 0
                 n = 0
         occ.add(n)
+    if _ref and any(k[0] == room and k[1] == af for k in _ref):
+        log('FLY23', f'{s.current_pilot}: start place(s) {sorted(k[2] for k in _ref if k[0] == room and k[1] == af)} '
+                     f'on AF {af} skipped (refused by his client recently) -> granting {n} [v923f5]')
     s.__dict__['sp_room'] = room; s.__dict__['sp_af'] = af; s.__dict__['sp_n'] = n
     return n
+
+SP_REFUSED_TTL_S = 120.0         # v923f5: how long a client-refused start place stays skipped for that pilot
+SP_REFUSE_WINDOW_S = 8.0         # v923f5: an exit code 9 this soon after a grant counts as refusing that place
 
 def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     """FLY: msg 23 (0x17) StartPlaceList - AND (v454f5) msg 93 (0x5d), the Ctrl+Tab
@@ -19975,7 +19998,13 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
         return
     s._last_sp_ask = (_ask_key, _now_ask)
     old_af  = s.__dict__.get('sp_af')
-    grant_n = _alloc_start_place(s, af, n)      # distinct spot per player on this airfield
+    # v924f5 [CTRL+TAB ASKS WITH THE CURRENT PLACE, NOT THE NEXT] (Moira 10-05, 'pilots cannot
+    # Ctrl+Tab'): the client's own log for the TAB form reads 'TAB. Asking (1) SP on AF 3 ...
+    # OldSP=2' while the record carries N=2 - N is the place he is ON, and kind (1) means 'the
+    # next one'. v454 read N as the place wanted and granted it back, so Ctrl+Tab re-inserted the
+    # plane on the same spot every time. For the TAB form (msg 93) the wanted place is N+1.
+    _n_want = ((n + 1) % SP_MAX) if (reply_sub == 0x5d and n != 0xff) else n
+    grant_n = _alloc_start_place(s, af, _n_want)      # distinct spot per player on this airfield
     af_changed = (old_af is not None and old_af != af)
     # v205: DO NOT rebase NET-time here. v204 called s.tsync_rebase() on every fly-grant, which
     # reset the ms counter to 0 mid-session -> the client saw server time jump BACKWARD by the full
@@ -23235,6 +23264,18 @@ def _ingame_own_object_removed(s, tb, stored):
             else:
                 log('DEATH', f'{s.current_pilot} clean exit (MEC&0xf={mec_nib} SE={se}) -> no loss '
                              f'[PILOT_FATE]')
+                # v923f5: an exit with code 9 within SP_REFUSE_WINDOW_S of a start-place grant is
+                # the client refusing that place ('Waiting for position on airfield') - remember
+                # it so the next ask gets a different one (see _alloc_start_place)
+                try:
+                    _g = s.__dict__.get('_last_sp_grant')
+                    if mec_nib == 9 and _g and time.time() - _g[0] <= SP_REFUSE_WINDOW_S:
+                        _, _, _gaf, _gmid, _gn = _g
+                        s.__dict__.setdefault('_sp_refused', {})[(s.current_room, _gaf, _gn)] = time.time()
+                        log('FLY23', f'{s.current_pilot}: exit code 9 {time.time() - _g[0]:.1f}s after the grant of '
+                                     f'start place {_gn} on AF {_gaf} -> place marked refused; next ask gets another [v923f5]')
+                except Exception:
+                    pass
         elif scored:
             # Shot down - unambiguous (the entry names the HUNTER). Always a death.
             _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum)
