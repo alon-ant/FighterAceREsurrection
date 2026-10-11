@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v925f5'
+VERSION = 'v929f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -421,15 +421,31 @@ STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = 
                            # on the loss gauge is the lesser evil; it was always cosmetic.
 RTT_SAMPLING = True        # v217.2 (STEP 2): re-enable RTT sampling now that the SYNACK cap fix
 RTT_CFG_TUNED = True       # v875f5: send the client a sane retransmit configuration (see build_synack)
-RTT_TIMEOUT_MIN_MS = 250   # v875f5: floor of the client's retransmit timeout (was effectively 5000)
+# v928f5 [v875 MADE THE CLIENT DROP THE LINK AFTER A 3 s UPSTREAM HICCUP]. Event night 10-10 +
+# flakmagic 10-09 23:51:50 (messages61(6)) + Kahuna 10-11 01:32:26 (messages01(3)): red 'Server
+# Disconnection / Your connection to the server has been lost. Please restart your game' =
+# vcncNet FM_LOSTCONNECTION, raised by the CLIENT when one of its reliable packets has been resent
+# RTT_MAX_RESENDS times. With v875's 12 resends x a timeout at the 250 ms floor (or = 1.0 x avg RTT
+# once the factor had decayed to RTT_FACTOR_MIN=100) the client gave up ~3 s after its ACKs stopped
+# arriving: flakmagic's uplink stalled 23:51:46-50 (server RELAY-GAP 4.3-5.1 s, then 9 copies of his
+# seq 278/279 arrived in 20 ms when the queue flushed) -> his client had already declared the
+# connection dead at 23:51:50.118 while server->client traffic was still flowing on his screen;
+# Kahuna's first login packet was unanswered for 2.8 s (12 x 0.25) -> FATALLOSTCONNECTION before
+# the lobby. The old (mis-offset) block the client read before v875 tolerated 10 x 5 s = 50 s.
+# Also: factor floor 100 = timeout EQUAL to the mean RTT, so on any jittery link half the packets
+# timed out before their ACK could arrive - Kahuna's client re-sent every reliable packet at
+# 0.25-0.3 s intervals all evening (311 RETX lines), doubling his uplink and feeding dup-ACKs.
+# Now: timeout >= 2 x avg RTT and never under 400 ms; a link is dead after RTT_MAX_AGE_MS (20 s)
+# of no ACK, and RTT_MAX_RESENDS is set high enough that the AGE limit, not the count, decides.
+RTT_TIMEOUT_MIN_MS = 400   # floor of the client's retransmit timeout (v875: 250; pre-v875 effectively 5000)
 RTT_TIMEOUT_MAX_MS = 3000  # ceiling (was effectively 200 - below the RTT)
-RTT_FACTOR_MIN = 100       # timeout = avgRTT x factor/100: 1x RTT on a clean link ...
+RTT_FACTOR_MIN = 200       # timeout = avgRTT x factor/100: never below 2x RTT (v875: 1x = half the packets time out)
 RTT_FACTOR_MAX = 300       # ... up to 3x after duplicate ACKs; also the starting value
 RTT_FACTOR_DEC_PER_SAMPLE = 10   # % taken off the factor per RTT sample (was 16)
 RTT_DUPACKS_PER_STEP = 4   # duplicate ACKs before the factor is stretched (was 100)
 RTT_FACTOR_STEP = 25       # % added per stretch (was 16)
-RTT_MAX_RESENDS = 12       # resends before 'LOST CONNECTION' (was 10)
-RTT_MAX_AGE_MS = 30000     # age of an unacknowledged packet before 'LOST CONNECTION' (unchanged)
+RTT_MAX_RESENDS = 50       # resends before 'LOST CONNECTION' (v875: 12 = ~3 s; 50 x 0.4 s floor = 20 s, same as the age limit)
+RTT_MAX_AGE_MS = 20000     # age of an unacknowledged packet before 'LOST CONNECTION' (was 30000; the server idle-reaps at ~60 s)
 REL_RX_INORDER = True      # v812f5: in-order reliable delivery + ACK only the contiguous prefix (see pt==1)
 REL_RX_HOLE_S  = 6.0       # v812f5: a missing client seq not retransmitted within this is given up on
 REL_RX_BUF_MAX = 48        # v812f5: or when this many later packets are held behind it
@@ -8471,18 +8487,39 @@ def broadcast_player_join_62(joiner, reason=''):
         return
     peers = [x for x in get_sessions_in_room(room_id) if x is not joiner]
     if not peers:
+        joiner.__dict__.pop('_slot_scrub', None)      # v926f5: nobody to scrub; never carry it over
         log('PLAYER62', f'no peers in room {room_id} to announce {joiner.current_pilot} to '
                         f'{(reason or "").strip()}')
         return
     rec = [(joiner.player_index, joiner.nation, joiner.current_pilot or 'Player')]
-    pkt = build_msg13(build_add_player_62(rec))       # WRAP in msg-13 batch (was sent raw -> bc=62)
+    sub62 = build_add_player_62(rec)                  # RAW sub-message (sent raw -> bc=62 CTD)
+    # v926f5 [SLOT-REUSE SCRUB RIDES IN THE JOIN BATCH]: when assign_player_slot gave this pilot
+    # an index another pilot last held, peers may still bind the OLD name to it. The 2009 form
+    # to free it is a station delete (msg 3, bit15 entry) + roster REMOVE (63 op!=1). Sending
+    # those as separate reliable frames from a pool worker RACED this broadcast (send_rel blocks
+    # on the ACK, so the join-62 took the seq between them and the REMOVE then erased the new
+    # pilot - Bama/PhiD 10-05). One msg-13 batch per peer = one seq, members dispatched in
+    # order: [3 delete St][63 REMOVE idx][62 add]. A peer with nothing on the index ignores the
+    # first two ('Unknown RemotePlayer' / no station) and just adds.
+    _scrub = joiner.__dict__.pop('_slot_scrub', None)
+    _scrub_tag = ''
+    if _scrub is not None and _scrub[0] == joiner.player_index:
+        _i = int(_scrub[0])
+        sub3 = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', (_i & 0x7fff) | 0x8000)
+        sub63 = (bytes([MSG_CHANGE_PLAYER_63]) + (_i & 0xFFFFFFFF).to_bytes(4, 'little')
+                 + bytes([0xff, 0x00, CP_OP_REMOVE & 0xff]))
+        pkt = build_msg13(sub3, sub63, sub62)
+        _scrub_tag = f' +scrub St={_i} (was "{_scrub[1]}")'
+    else:
+        pkt = build_msg13(sub62)                      # WRAP in msg-13 batch
     n = 0
     for sess in peers:
         _submit_send(send_rel, sess, pkt,
-                     f'<- AddPlayer 62 (joiner {joiner.current_pilot}){(" " + reason) if reason else ""}',
+                     f'<- AddPlayer 62 (joiner {joiner.current_pilot}){_scrub_tag}'
+                     f'{(" " + reason) if reason else ""}',
                      to=3.0)
         n += 1
-    log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}')
+    log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}{_scrub_tag}')
     # v355: peers now hold this player at their PlayerIndex. A later re-join MUST retract that
     # before taking the slot again, or the msg-62 add lands on an occupied index and the client
     # no-ops it ("Add existing REMOTE_PLAYER") - see the block in the slot-assignment function.
@@ -9900,28 +9937,29 @@ def assign_player_slot(s, room_id):
     #     entry, never a plane the recipient is actively flying against (that player is on a
     #     DIFFERENT index, which this never touches).
     if s.__dict__.pop('_slot_clean_needed', False):
-        try:
-            # v902f5: the 2009 STATION delete for the reused index (msg 3, bit15 entry), then the
-            # roster REMOVE. The station delete is what actually clears a stale NAME on a peer
-            # (the name lives in the CLIENT table, which only this message frees); it also
-            # cascades any ghost object the station still held. Safe for the same reason as
-            # before: idx is outside `taken`, so no live session is on it.
-            _cdel = build_delete_object_3(onumber=None, client_number=idx)
-            _rem = build_change_player_63([(idx, None, CP_OP_REMOVE)])
-            _nrem = 0
-            for _p in get_sessions_in_room(room_id):
-                if _p is not s:
-                    def _scrub(_q=_p, _c=_cdel, _r=_rem, _i=idx):
-                        send_rel(_q, _c, f'<- DELETE3 stale client St={_i} (slot reuse scrub)', to=3.0)
-                        send_rel(_q, _r, f'<- ChangePlayer 63 REMOVE stale slot {_i}', to=3.0)
-                    _submit_send(_scrub)
-                    _nrem += 1
-            if _nrem:
-                log('SLOT', f'room {room_id}: slot {idx} reused by "{getattr(s, "current_pilot", "?")}" '
-                            f'(was "{_last_pilot_for_log}") - sent station DELETE + REMOVE to {_nrem} peer(s) '
-                            f'(2009 form; idx not held by a live peer)')
-        except Exception:
-            logx('SLOT', 'stale-slot scrub failed')
+        # v902f5: the 2009 STATION delete for the reused index (msg 3, bit15 entry), then the
+        # roster REMOVE. The station delete is what actually clears a stale NAME on a peer
+        # (the name lives in the CLIENT table, which only this message frees); it also
+        # cascades any ghost object the station still held. Safe for the same reason as
+        # before: idx is outside `taken`, so no live session is on it.
+        # v926f5 [SCRUB RACED THE JOIN-62 -> NEW PILOT INVISIBLE IN CHAT/ROSTER]: the two scrub
+        # sends used to go out from a pool worker as two BLOCKING send_rel calls while the
+        # join-62 broadcast ran on another thread. send_rel waits for the ACK, so on a peer
+        # with a real RTT the seq order became DELETE3 -> (join-62 slipped in) -> REMOVE-63, and
+        # the REMOVE then deleted the pilot it was meant to make room for. Bama 10-05 22:54:32
+        # (messages95): 'in 3'11 Server require delete client 0' / 'in 62'20 PhiD entering game'
+        # / 'in 63'8 PhiD leaving game' within 140 ms; server SLOT 22:54:29.020, PLAYER62
+        # 22:54:29.085. PhiD's plane later created ('Create client 0') but his REMOTE_PLAYER was
+        # gone -> every chat line from him dropped ('ChatMessage from unknown player'), no roster
+        # entry, no camp line. The scrub now RIDES IN THE SAME msg-13 BATCH as the join-62, per
+        # peer (broadcast_player_join_62): [3 station delete][63 REMOVE][62 add] in one reliable
+        # seq - the client dispatches batch members in order, so the order can never flip again.
+        s.__dict__['_slot_scrub'] = (idx, _last_pilot_for_log)
+        log('SLOT', f'room {room_id}: slot {idx} reused by "{getattr(s, "current_pilot", "?")}" '
+                    f'(was "{_last_pilot_for_log}") - station DELETE + REMOVE will ride in the '
+                    f'join-62 batch to each peer (2009 form; idx not held by a live peer)')
+    else:
+        s.__dict__.pop('_slot_scrub', None)
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
@@ -10099,6 +10137,10 @@ RELAY_TICK_MONOTONIC = True     # v883f5: never stamp an object earlier than its
 RELAY_TICK_PROJECT_MAX_S = 10.0 # v883f5: projection cap (= STALE_TICK_EXTRAP_MAX_S; beyond it the sender's tick passes)
 CLOCK_DRIFT_WARN_PCT = 2.0      # v912f5: a client conductor this far off TICK_RATE_DEFAULT is logged as drifting
 CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5 min
+TICK_RATE_CLAMP_PCT = 10.0      # v929f5: the projection never uses a measured rate more than this far from
+                                # TICK_RATE_DEFAULT. 10-10: Kindschi 42..79/s, RGP_Cobra 44..62/s, Cowgirl 72/s -
+                                # a frozen client catching up, or frames arriving in bursts, not a conductor that
+                                # really runs at 79 Hz; projecting a 1 s silence at 79/s stamps 29 cycles too far.
 AI_TICK_PROJECT = True          # v884f5: server-simulated objects (tanks/trains/soldiers/driven chutes) use the projected clock too
 
 def _s16(d):
@@ -10159,6 +10201,14 @@ def _harvest_tick(src, pl):
     src.last_telem_time = now
     return True
 
+def _tick_rate_clamped(sess):
+    """v929f5: the receiver's measured conductor rate for clock projection, held within
+    TICK_RATE_CLAMP_PCT of TICK_RATE_DEFAULT (see the constant)."""
+    r = getattr(sess, '_tick_rate', None) or TICK_RATE_DEFAULT
+    lo = TICK_RATE_DEFAULT * (1.0 - TICK_RATE_CLAMP_PCT / 100.0)
+    hi = TICK_RATE_DEFAULT * (1.0 + TICK_RATE_CLAMP_PCT / 100.0)
+    return lo if r < lo else hi if r > hi else r
+
 def _relay_stamp_for(p, onum):
     """v883f5: the tick to write into a frame relayed TO peer p for object onum: p's own clock
     projected to now from his last harvest at his measured rate, minus RELAY_TICK_LEAD, never
@@ -10169,7 +10219,7 @@ def _relay_stamp_for(p, onum):
     age = time.time() - getattr(p, 'last_telem_time', 0.0)
     if age > RELAY_TICK_PROJECT_MAX_S or (age > STALE_TICK_WARN_S and not STALE_TICK_EXTRAP):
         return None
-    rate = getattr(p, '_tick_rate', None) or TICK_RATE_DEFAULT
+    rate = _tick_rate_clamped(p)
     stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD) & 0xFFFF
     if RELAY_TICK_MONOTONIC:
         sl = p.__dict__.setdefault('_stamp_last', {})
@@ -10199,7 +10249,7 @@ def _ai_stamp(sess, onum):
             base = rt
             age = time.time() - getattr(sess, 'last_telem_time', 0.0)
             if base is not None and 0.0 <= age <= RELAY_TICK_PROJECT_MAX_S:
-                rate = getattr(sess, '_tick_rate', None) or TICK_RATE_DEFAULT
+                rate = _tick_rate_clamped(sess)
                 st = (int(base) + int(age * rate)) & 0xFFFF
                 if RELAY_TICK_MONOTONIC:
                     sl = sess.__dict__.setdefault('_stamp_last', {})
@@ -12296,6 +12346,7 @@ TC_CAPTURE_PERCENT   = 50       # fallback when the room has no capture_percent 
 TC_CAPTURE_RADIUS    = 400.0    # >= engage radius: a parked attacker counts
 TC_ARRIVE_ENGAGE_M   = 1200.0   # v911f5: a column that has stopped this close to its target engages even outside TC_ENGAGE_RADIUS
 TC_HOLD_AFTER_CAPTURE_S = 600.0 # captured-scene garrison lifetime before the column is withdrawn
+TC_FIRE_HOLD_S       = 120.0    # v927f5: a scene with a kill on it this recent is 'under active fire' - no repairs (0 = off)
 CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
 TC_MAX_TANKS_PER_ROOM = 64      # v860f5: NO LONGER ENFORCED (production is the limit; see tc_raise_column) - kept for the console
@@ -19331,6 +19382,25 @@ def relay_telemetry(src, data, _split_obj=None):
                                f'relayed (tick harvested). Relaying these CTDs every recipient '
                                f'(logged once per session)')
         return
+    # v929f5 [SENDER-SILENT = THE REAL UPLINK-STALL METRIC]: 94% of the 7,069 RELAY-GAP lines of
+    # 10-10 coincided with a death / respawn / HQ visit of the sender or the receiver - the per-pair
+    # 'last relayed' clock was never reset, so every respawn printed one gap per peer and buried the
+    # real stalls. Now: a sender whose OWN frames paused >= RELAY_GAP_WARN_S while flying is logged
+    # once as SENDER-SILENT (his uplink or his client froze - flakmagic 23:51:46-50 was exactly this),
+    # and his per-pair clocks are reset so the pause is not re-reported as N relay gaps. A pause
+    # across a respawn / HQ visit is the client's own silence and is reset without a line.
+    try:
+        _prev_ft = getattr(src, 'last_telem_time', 0.0)
+        if _prev_ft and _split_obj is None:
+            _pause = time.time() - _prev_ft
+            if _pause >= RELAY_GAP_WARN_S:
+                if getattr(src, 'flying', False) and not src.__dict__.pop('_silence_expected', False):
+                    _perf['sender_silent'] = _perf.get('sender_silent', 0) + 1
+                    log('SENDER-SILENT', f'{src.current_pilot}: no frames from him for {_pause:.1f}s while flying '
+                                         f'(uplink stall or client freeze) - peers saw him frozen that long')
+                src.__dict__.pop('_relay_last_to', None)
+    except Exception:
+        pass
     # Record the SENDER's own conductor tick (telemetry[5:7]). We use each player's
     # latest tick to re-stamp packets we relay TO them, so the tick lands on THEIR clock.
     _harvest_tick(src, pl)                              # v883f5 (see _harvest_tick)
@@ -19650,7 +19720,7 @@ def relay_telemetry(src, data, _split_obj=None):
                 # earlier, STALE-TICK at 18:15:30). Extrapolate the receiver's tick instead: last
                 # tick + elapsed x his measured rate, capped at STALE_TICK_EXTRAP_MAX_S.
                 if len(relayed) >= 9 and _age <= STALE_TICK_EXTRAP_MAX_S and STALE_TICK_EXTRAP:
-                    _rate = getattr(p, '_tick_rate', None) or TICK_RATE_DEFAULT
+                    _rate = _tick_rate_clamped(p)                       # v929f5
                     _rt_est = (int(rt) + int(round(_age * _rate))) & 0xFFFF
                     struct.pack_into('<H', relayed, 5, (_rt_est - RELAY_TICK_LEAD) & 0xFFFF)
             else:
@@ -20068,6 +20138,9 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                 if _pcp is not None:
                     _pcp.discard(s.addr)
                 _forget_canopies_on(_p, s)      # v551f5: their canopy is gone from our world too
+                _rlt = _p.__dict__.get('_relay_last_to')     # v929f5: our HQ visit is not a relay gap
+                if _rlt is not None:
+                    _rlt.pop(s.addr, None)
         # v564f5: NO tank peer-drop here. The client KEEPS NetTanks across an HQ re-entry /
         # same-field refly (only far ones go, via its distance cull + msg-3 notify); assuming
         # a drop and re-creating hit '!Objects[no->Number()]' (Network.cpp:391 CTD). The
@@ -21890,6 +21963,18 @@ def obj_repair_due(room_id=None):
         items = list(_OBJ_DEAD_AT.items())
     due = []
     contested_cache = {}
+    # v927f5 [UNDER ACTIVE FIRE]: the newest kill on each scene. While something on the scene was
+    # destroyed within TC_FIRE_HOLD_S the scene is being worked over right now (a bomber between
+    # passes, tanks shelling it) and nothing on it repairs; once the fire stops the clocks resume.
+    last_hit = {}
+    if TC_FIRE_HOLD_S > 0:
+        for (rid, obj), t0 in items:
+            oi = trn_obj_info(rid, obj)
+            sc = oi.get('scene') if oi else None
+            if sc is not None and sc >= 0:
+                k = (rid, int(sc))
+                if t0 > last_hit.get(k, 0.0):
+                    last_hit[k] = t0
     for (rid, obj), t0 in items:
         if room_id is not None and rid != room_id:
             continue
@@ -21898,6 +21983,8 @@ def obj_repair_due(room_id=None):
             sc = oi.get('scene') if oi else None
             if sc is not None and sc >= 0:
                 key = (rid, int(sc))
+                if now - last_hit.get(key, 0.0) < TC_FIRE_HOLD_S:
+                    continue                              # scene under active fire
                 if key not in contested_cache:
                     contested_cache[key] = tc_scene_contested(rid, sc)
                 if contested_cache[key]:
@@ -21930,6 +22017,12 @@ def tc_scene_contested(room_id, sidx):
     v673f5: or when an ENGAGED attacking column targets it (73,BC 09-13: the attackers worked the
     airfield from stand-off spots beyond the presence radius and the 5-min AA clock kept undoing
     their kills - damage oscillated 8..32%)."""
+    # v927f5 RULE (user decision 10-09): a scene repairs unless it is UNDER ACTIVE FIRE. A trigger,
+    # or an attack column still rolling towards it, does NOT hold the repairs - the owner keeps
+    # rebuilding while the tanks are on the road (SpUn 10-07: scene 46 triggered at 65%, column 29
+    # raised 23.8 km away, field repaired to 22% within 5 min - by this rule that is correct).
+    # 'Active fire' = an ENGAGED attack column (v673f5), enemy ground units inside the presence
+    # radius (below), or recent hits on the scene from anyone (TC_FIRE_HOLD_S, in obj_repair_due).
     try:
         for col in COLUMNS.values():
             if col.get('room') == room_id and col.get('purpose') == 'attack' and col.get('engaged') \
@@ -22570,6 +22663,8 @@ def _fire_server_confirm(s, via='', ident=None):
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s.__dict__['_obj_confirmed_at'] = time.time()   # v701f5: fresh-plane guard for stale exit records
+    s.__dict__['_silence_expected'] = True          # v929f5: the pause before this spawn is not an uplink stall
+    s.__dict__.pop('_relay_last_to', None)          # v929f5: fresh per-pair relay clocks for the new plane
     try:
         motd_on_spawn(s)                             # v891f5: message of the day, once per arena entry
     except Exception:
