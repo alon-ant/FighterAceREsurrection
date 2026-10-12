@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v929f5'
+VERSION = 'v930f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -6701,6 +6701,28 @@ def db_pilot_squadron_id(pilot_name):
         return int(r[0]) if r else 0
     except Exception:
         return 0
+
+def _pilot_select_squadron(s, pname, sqn_id):
+    """v930f5 [SQUADRON TAG FOLLOWS THE PILOT]: s.squadron_id used to be written only by an in-game
+    join/quit and never at pilot select, so after a join as pilot A and a switch to pilot B on the
+    same connection, B's client record went out with A's squadron (build_create_object_2 falls back
+    to s.squadron_id when the DB has no membership for B). Gibson 10-08 20:01: 'Incognito' joined
+    3rd_Squadron, selected 'Alpharius' 16 s later; Duran's client: 'Create client 6, (Alpharius),
+    Squadron=9' - the '3rd_SQD_ Maj Alpharius' tag over a pilot who is not on the roster. Now the
+    session's squadron is re-derived from the DB for the pilot just selected."""
+    try:
+        _old = int(getattr(s, 'squadron_id', 0) or 0)
+        s.squadron_id = int(sqn_id or 0)
+        if s.squadron_id:
+            _row = db_get_squadron(s.squadron_id)
+            s.squadron_name = _row[1] if _row else ''
+        else:
+            s.squadron_name = ''
+        if _old and _old != s.squadron_id:
+            log('SQNMGT', f'{pname}: session squadron {_old} -> {s.squadron_id} at pilot select '
+                          f'(the previous pilot\'s squadron no longer applies)')
+    except Exception:
+        logx('SQNMGT', 'pilot-select squadron reset failed')
 
 def db_squadron_counter_add(pilot_name, col, n=1):
     """v713f5 SQUADRON GROUND TALLIES: mirror a pilot's AI-kill / capture counter onto the squadron
@@ -20949,11 +20971,19 @@ def handle_compound(s, outer_cmd, pl):
             # select at 15:53:09 with no stamp vs Bigalon's appspace select at 15:52:49 with one).
             _e4c = bytearray(inner)
             _sqn_c = db_pilot_squadron_id(pname)
-            if (_sqn_c and len(_e4c) >= 10 and _e4c[4] == 0xe4
-                    and _e4c[6:10] == b'\x00\x00\x00\x00'):
-                struct.pack_into('<I', _e4c, 6, int(_sqn_c) & 0xffffffff)
-                log('SQNMGT', f'{pname} compound pilot-select 0xe4: stamped own SquadronId={_sqn_c}')
-                inner = bytes(_e4c)
+            # v930f5 [SQUADRON TAG FOLLOWS THE PILOT, NOT THE CONNECTION]: the session's squadron id
+            # is re-derived from the DB for the pilot just selected (see _pilot_select_squadron);
+            # the echo carries the DB value whatever the client sent - the client's global was set
+            # by the previous pilot's join/select in the same process (Gibson 10-08: 'Incognito'
+            # joined 3rd_Squadron, switched to 'Alpharius', everyone saw '3rd_SQD_ Alpharius').
+            _pilot_select_squadron(s, pname, _sqn_c)
+            if len(_e4c) >= 10 and _e4c[4] == 0xe4:
+                _had = struct.unpack_from('<I', _e4c, 6)[0]
+                if _had != (int(_sqn_c) & 0xffffffff):
+                    struct.pack_into('<I', _e4c, 6, int(_sqn_c) & 0xffffffff)
+                    log('SQNMGT', f'{pname} compound pilot-select 0xe4: stamped own SquadronId={_sqn_c} '
+                                  f'(client sent {_had})')
+                    inner = bytes(_e4c)
         threading.Thread(target=lambda: send_rel(s, inner, '<- compound pilot select echo', to=5.0), daemon=True).start()
         return
 
@@ -27860,11 +27890,15 @@ def handle_post_auth(s, cmd, pl):
             # which is why the local tag never drew. (The earlier 'persona/last-flown plane' reading
             # of this field was wrong - v491f5b already suspected as much and disabled injection.)
             _sqn_id = db_pilot_squadron_id(pname)
-            if (_sqn_id and len(_resp_e4) >= 10 and _resp_e4[4] == 0xe4
-                    and _resp_e4[6:10] == b'\x00\x00\x00\x00'):
-                struct.pack_into('<I', _resp_e4, 6, int(_sqn_id) & 0xffffffff)
-                log('SQNMGT', f'{pname} pilot-select 0xe4: stamped own SquadronId={_sqn_id} '
-                              f'(was zeros) -> local plane tag / your-squadron')
+            _pilot_select_squadron(s, pname, _sqn_id)        # v930f5: session squadron = this pilot's
+            if len(_resp_e4) >= 10 and _resp_e4[4] == 0xe4:
+                _had = struct.unpack_from('<I', _resp_e4, 6)[0]
+                if _had != (int(_sqn_id) & 0xffffffff):
+                    # v930f5: the DB value always wins (was: fill only when the client sent zeros - a
+                    # client whose global still held the PREVIOUS pilot's squadron kept that tag)
+                    struct.pack_into('<I', _resp_e4, 6, int(_sqn_id) & 0xffffffff)
+                    log('SQNMGT', f'{pname} pilot-select 0xe4: stamped own SquadronId={_sqn_id} '
+                                  f'(client sent {_had}) -> local plane tag / your-squadron')
             _resp_e4 = bytes(_resp_e4)
             threading.Thread(target=lambda:send_rel(s,_resp_e4,'<- echo 0xe4 (+squadron id)',to=5.0),daemon=True).start()
             return
