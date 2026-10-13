@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v930f5'
+VERSION = 'v932f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -2315,24 +2315,95 @@ def _apply_fighters_only_filter(slot_camp, room_id):
             out[slot] = 7          # NU/hidden -> 0x80 in apply_plane_teams (safe, never 0x00)
     return out
 
+# ---------------------------------------------------------------------------------------------
+# v932f5 [AIRCRAFT PER TEAM, PER ARENA - web editor]. The user wants to balance an arena by hand:
+# a full checklist of which aircraft each nation may fly in THIS arena, not just 'fighters only'
+# or a war date. The flyability gate (FA.exe FUN_00438330: byte0 & (1 << camp)) is a MASK, so a
+# plane can be opened to several nations at once (the 'coalition' note in apply_plane_teams).
+# settings_json key 'plane_teams' = {plane_name: [camp, ...]} - only planes that differ from the
+# default nation table are stored; an empty list hides the plane from every side. The blanket
+# filters (war date, fighters only) still apply on top: they can only hide, never open.
+PLANE_TEAMS_WEB_KEY = 'plane_teams'
+HIDDEN_PLANE_MASK = 0x80      # bit 7: no WWII side can fly it; never 0x00 (GameDef.cpp:1902 CTD)
+
+def _room_plane_teams_override(room_id):
+    """{plane_name: [camps]} from the arena's settings_json, validated; {} when none."""
+    if room_id is None:
+        return {}
+    try:
+        st = db_get_room_settings(room_id)
+        ov = st.get(PLANE_TEAMS_WEB_KEY) if isinstance(st, dict) else None
+    except Exception:
+        return {}
+    if not isinstance(ov, dict):
+        return {}
+    out = {}
+    for name, camps in ov.items():
+        if name not in PLANE_ROSTER or not isinstance(camps, (list, tuple)):
+            continue
+        cs = []
+        for c in camps:
+            try:
+                c = int(c)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= c <= 4 and c not in cs:
+                cs.append(c)
+        out[name] = cs
+    return out
+
+def _slot_mask_map(room_id, teams):
+    """{slot: byte0 mask} for an arena: the default nation table (one bit per plane, NU -> 0x80),
+    the arena's per-team checklist on top (OR of its nations' bits, [] -> hidden), then the war
+    date and fighters-only filters (hide only)."""
+    base = _slot_camp_map(teams)
+    filt = _apply_fighters_only_filter(_apply_war_date_filter(base, room_id), room_id)
+    ov = _room_plane_teams_override(room_id)
+    masks = {}
+    for slot, camp in base.items():
+        name = PLANE_ROSTER[slot] if 0 <= slot < len(PLANE_ROSTER) else None
+        if name is not None and name in ov:
+            m = 0
+            for c in ov[name]:
+                m |= (1 << c)
+            m = m or HIDDEN_PLANE_MASK
+        else:
+            m = (1 << camp) if 0 <= camp < 5 else HIDDEN_PLANE_MASK
+        if filt.get(slot, camp) == 7 and camp != 7:        # blanket filter hid it
+            m = HIDDEN_PLANE_MASK
+        masks[slot] = m
+    return masks
+
 def plane_camp_for_room(room):
-    """slot->camp map for this room (per-room override else global), or None if disabled.
-    Out-of-window planes (later than the arena's war date) are remapped to the hidden camp."""
+    """slot->byte0 MASK map for this room (v932f5: was slot->camp), or None if disabled. One bit
+    per nation that may fly the plane (US=0x01 GB=0x02 SU=0x04 GE=0x08 JP=0x10), 0x80 = hidden.
+    Out-of-window planes (later than the arena's war date) and, under 'fighters only', every
+    non-fighter are hidden; the arena's per-team checklist (settings_json plane_teams) decides
+    the rest."""
     if not PLANE_TEAMS_ENABLED:
         return None
-    teams = ROOM_PLANE_TEAMS.get(room[0], PLANE_TEAMS) if room else PLANE_TEAMS
-    base = _slot_camp_map(teams)
-    base = _apply_war_date_filter(base, room[0] if room else None)
-    return _apply_fighters_only_filter(base, room[0] if room else None)   # v391f5
+    rid = room[0] if room else None
+    teams = ROOM_PLANE_TEAMS.get(rid, PLANE_TEAMS) if room else PLANE_TEAMS
+    return _slot_mask_map(rid, teams)
 
 def _session_slot_camp(s):
-    """slot->camp map for the session's current room (per-room override else global table).
-    Used by the 0x3a catalog-echo filter to keep only the player's current side's plane IDs.
-    Also drops war-date-hidden planes from the echo (they map to camp 7, not the player's side)."""
+    """slot->byte0 mask map for the session's current room (v932f5: masks, see plane_camp_for_room).
+    Used by the 0x3a catalog-echo filter to keep only the plane IDs the player's current side may
+    fly: test (mask >> nation) & 1."""
     rid = getattr(s, 'current_room', None)
     teams = ROOM_PLANE_TEAMS.get(rid, PLANE_TEAMS) if rid is not None else PLANE_TEAMS
-    sc = _apply_war_date_filter(_slot_camp_map(teams), rid)
-    return _apply_fighters_only_filter(sc, rid)   # v391f5
+    return _slot_mask_map(rid, teams)
+
+def plane_roster_for_web():
+    """v932f5: the aircraft list for the web arena editor - [(slot, name, default_camp, is_bomber,
+    service_year)] in roster order. default_camp 7 = NU/staff-only. Planes the client never lists
+    in its catalog are left in (harmless: a tick on them changes nothing visible)."""
+    base = _slot_camp_map(PLANE_TEAMS)
+    out = []
+    for slot, name in enumerate(PLANE_ROSTER):
+        out.append((slot, name, int(base.get(slot, 0)), slot in BOMBER_PLANE_IDS,
+                    PLANE_SERVICE_YEAR.get(name)))
+    return out
 
 def _gamedef_plane_block(d):
     """Locate the plane block in a DECOMPRESSED GAME_DEF: returns (start, count, blen) where
@@ -2384,7 +2455,6 @@ def apply_plane_teams(d, slot_camp):
         if PLANE_FILTER_VIA_CATALOG:
             rec[slot * 4] = 0x1f                  # all camps flyable; per-side filter is the 0x3a echo
         else:
-            camp = slot_camp.get(slot, 0) & 7
             # v382f5: write the plane's real camp mask as byte 0. Camps 0..4 -> a single bit
             # (US=0x01 GB=0x02 SU=0x04 GE=0x08 JP=0x10). Camps 5..7 (NU is 7) -> 0x80 (bit 7):
             # a NON-standard camp bit, so FUN_00438330 hides the plane from all five WWII sides,
@@ -2393,9 +2463,11 @@ def apply_plane_teams(d, slot_camp):
             # 0x00: it makes the reader take the 1-byte branch while this fixed 4-byte writer emits
             # 4, desyncing the block -> GameDef.cpp:1902 'Len==0' (the v332 and v380 CTD). 0x80 is
             # NOT special to the reader (it copies the mask verbatim, branching only on mask==0? and
-            # marker==0xff?), so it is as safe as the stock 0x1f. For a future coalition arena, OR
-            # the member camps' bits here instead (US+GB=0x03, GE+JP+SU=0x1c).
-            rec[slot * 4] = (1 << camp) if camp < 5 else 0x80
+            # marker==0xff?), so it is as safe as the stock 0x1f.
+            # v932f5: the map now carries the MASK itself (several nations may share a plane - the
+            # per-arena aircraft checklist); 0 is coerced to the hidden mask, never written.
+            m = int(slot_camp.get(slot, 0) or 0) & 0xff
+            rec[slot * 4] = (m & 0x9f) or HIDDEN_PLANE_MASK
         # marker rec[+1] stays 0xff (no-hascamp form); limits rec[+2],rec[+3] preserved
     d[s + 3:s + 3 + blen] = rec
     return s, blen, blen
@@ -3541,7 +3613,11 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # tab is a property of the arena's GAME_DEF, not of who is looking at it. Length-preserving,
     # so it cannot disturb the pad alignment computed below.
     if PLANE_BYTE0_OVERRIDE_ENABLED and PLANE_BYTE0_OVERRIDE:
-        _nb = apply_plane_byte0_override(d, PLANE_BYTE0_OVERRIDE)
+        # v932f5: an arena whose aircraft checklist OPENS one of these planes to a nation wins over
+        # the global tab override (its mask is then a real nation bit, not the hidden 0x80).
+        _ovr = {_s: _v for _s, _v in PLANE_BYTE0_OVERRIDE.items()
+                if not (plane_camp and (plane_camp.get(_s, HIDDEN_PLANE_MASK) & 0x1f))}
+        _nb = apply_plane_byte0_override(d, _ovr) if _ovr else 0
         if _nb:
             log('GAMEDEF212', 'byte0-override: '
                 + ', '.join(f'{PLANE_ROSTER[s]}(slot {s})=0x{v:02x}'
@@ -21040,7 +21116,7 @@ def handle_compound(s, outer_cmd, pl):
             _hide_c = hidden_plane_ids_for(s) if STAFF_HIDE_VIA_CATALOG else frozenset()
             if PLANE_FILTER_VIA_CATALOG and (_have_side_c or _hide_c):
                 _sc = _session_slot_camp(s) if _have_side_c else {}
-                _kept = [i for i in _ids if (not _have_side_c or _sc.get(i, 0) == s.nation) and i not in _hide_c]
+                _kept = [i for i in _ids if (not _have_side_c or ((_sc.get(i, 0) >> s.nation) & 1)) and i not in _hide_c]   # v932f5 mask
             else:
                 _kept = _ids
             if _kept:
@@ -24924,6 +25000,7 @@ def _supply_tick_loop():
 
 
 PRODINFO_MAX_SCENES = 8       # scenes per msg 71 push; 2009 never sent more than 7 at once
+PRODINFO_PCT_OWN_ROW = True   # v931f5: E = production efficiency %, H = capacity intact % (False = all three % bytes = fill level)
 SUPPLY_QUERY_REPLY = True     # answer msg 69 scene-supply queries (v294)
 # v431f5: the msg-69 query is a continuous POLL (~30x/sec while the panel is open), not a one-
 # shot open event. So we DEBOUNCE: push the panel data (40+71, never the arena-wide 42) at most
@@ -25058,6 +25135,30 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
     caps = tuple(int(p['caps'].get(r, 0)) for r in order)
     rates = tuple(int(p['rates'].get(r, 0)) for r in order)
     pct = tuple(0 if c <= 0 else max(0, min(100, s * 100 // c)) for s, c in zip(stored, caps))
+    # v931f5 [THE % NEXT TO 'STORAGE CAPACITY' IS NOT THE FILL LEVEL] (user 10-12: 'I have 100% metal,
+    # I spawn tanks, the stored amount drops to 80% - but so does the storage capacity'). Every
+    # percent byte (C, E, H) carried stored/capacity, so the capacity row's % moved with the stock
+    # although the capacity itself (G) never changed. Now each % describes ITS OWN row:
+    #   E (next to D 'produces per minute') = production efficiency, surviving producers / all
+    #   H (next to G 'storage capacity')    = capacity intact, effective caps / undamaged caps
+    #   C (complex 'storage %')             = stored / capacity, as before (the wiki's 'resources
+    #                                         available ... shown as a percentage of the storage
+    #                                         capacity of the scene overall')
+    # D itself is the EFFECTIVE rate (table rate x efficiency), so the number and its % agree.
+    # PRODINFO_PCT_OWN_ROW=False restores the old all-fill form (`panelprobe` shows which array
+    # feeds which column if the read-back is ever in doubt).
+    if PRODINFO_PCT_OWN_ROW:
+        try:
+            _eff = scene_efficiency(room_id, scene_id)
+        except Exception:
+            _eff = 1.0
+        _full = scene_profile(terrain, scene_id) or {}
+        _fcaps = tuple(int((_full.get('caps') or {}).get(r, 0)) for r in order)
+        rates = tuple(int(round(r0 * _eff)) for r0 in rates)
+        eff_pct = tuple(int(round(max(0.0, min(1.0, _eff)) * 100)) for _ in order)
+        cap_pct = tuple(100 if fc <= 0 else max(0, min(100, c * 100 // fc)) for c, fc in zip(caps, _fcaps))
+    else:
+        eff_pct = pct; cap_pct = pct
     # v659f5 THE MAPPING, READ BACK FROM THE PANEL (09-12 screenshots, Support Factory 5 + Bomber
     # Airfield 30): COMPLEX block = A stored (sum over the link group), B UNITS in the cost domain
     # (the panel shows B / the camp's average unit cost), C storage %; SINGLE SCENE = D produces
@@ -25079,8 +25180,8 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
     c_units = tuple(int(cunits.get(k, 0)) * int(avg.get(k, 0)) for k in ukinds)   # kept for the log only
     # B stays PER-SCENE: the client's 60 s camp task sums B over all scene nodes for the HQ / Ctrl-L
     # units rows (complex sums there = GB 258 for 33 held, v660). Resources A/C are the link-circle sums.
-    return {'A': c_stored, 'B': held, 'C': c_pct, 'D': rates, 'E': pct,
-            'F': stored, 'G': caps, 'H': pct, 'I': held}
+    return {'A': c_stored, 'B': held, 'C': c_pct, 'D': rates, 'E': eff_pct,
+            'F': stored, 'G': caps, 'H': cap_pct, 'I': held}
 
 
 def broadcast_production_info_71_all(room_id, reason='', to=None):
@@ -28347,7 +28448,7 @@ def handle_post_auth(s, cmd, pl):
                 if _do_filter:
                     sc = _session_slot_camp(s) if _have_side else {}
                     kept = [i for i in ids
-                            if (not _have_side or sc.get(i, 0) == s.nation) and i not in _hide]
+                            if (not _have_side or ((sc.get(i, 0) >> s.nation) & 1)) and i not in _hide]   # v932f5 mask
                 else:
                     kept = ids          # no per-side trim; byte0 gates the side. Just re-encode.
                 if kept:
@@ -29404,6 +29505,7 @@ threading.Thread(
             'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX),           # v686f5
             'server_py': os.path.abspath(__file__),         # v731f5: the lobby-news editor writes next to it
             'push_lobby_news_fn': push_lobby_news_all,      # v870f5: web save -> push to lobby clients
+            'plane_roster_fn': plane_roster_for_web,        # v932f5: aircraft-per-team editor
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()

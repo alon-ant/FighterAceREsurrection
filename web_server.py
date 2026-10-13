@@ -2375,6 +2375,64 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<label style="display:block; margin:8px 0; font-size:0.9em; color:#333;">Arena password<br>'
                 '<input type="text" name="s_password" value="' + hesc(str(cur_pw), quote=True) + '" '
                 'autocomplete="off" style="width:240px; padding:6px;"></label>')
+            # AIRCRAFT PER TEAM (v932f5): a checklist of every aircraft x the five nations. Default
+            # ticks = the server's nation table; the arena stores only the planes that differ
+            # (settings_json 'plane_teams' = {name: [camps]}, [] = hidden from everyone). The game
+            # server turns the ticks into the GAME_DEF byte-0 flyability mask at serve time.
+            planes_html = ''
+            _pt_over = overrides.get('plane_teams') if isinstance(overrides.get('plane_teams'), dict) else {}
+            try:
+                _roster = SRV['plane_roster']() if SRV.get('plane_roster') else []
+            except Exception:
+                _roster = []
+            if _roster:
+                _NAT = [(0, 'US'), (1, 'GB'), (2, 'SU'), (3, 'GE'), (4, 'JP')]
+                _nat_name = {0: 'United States', 1: 'Great Britain', 2: 'Soviet Union', 3: 'Germany', 4: 'Japan', 7: 'Staff / neutral (hidden by default)'}
+                _groups = {}
+                for slot, name, dcamp, is_bomber, year in _roster:
+                    _groups.setdefault(dcamp if dcamp in (0, 1, 2, 3, 4) else 7, []).append((slot, name, dcamp, is_bomber, year))
+                _pt_edited = ' &bull; <span style="color:#c60;">' + str(len(_pt_over)) + ' plane(s) edited</span>' if _pt_over else ''
+                rows = ''
+                for g in (0, 1, 2, 3, 4, 7):
+                    if g not in _groups:
+                        continue
+                    rows += ('<tr style="background:#eef;"><td colspan="7" style="padding:6px 8px; font-weight:bold;">'
+                             + hesc(_nat_name.get(g, str(g))) + ' &mdash; default aircraft</td></tr>')
+                    for slot, name, dcamp, is_bomber, year in _groups[g]:
+                        if name in _pt_over:
+                            cur_set = set(int(c) for c in _pt_over[name] if str(c).lstrip('-').isdigit())
+                            mark = ' <span style="color:#c60;" title="edited for this arena">&#9998;</span>'
+                        else:
+                            cur_set = {dcamp} if dcamp in (0, 1, 2, 3, 4) else set()
+                            mark = ''
+                        cells = ''
+                        for c, tag in _NAT:
+                            cells += ('<td style="text-align:center;"><input type="checkbox" class="pt pt-c' + str(c) + '" '
+                                      'name="pt_' + str(slot) + '_' + str(c) + '" value="1"'
+                                      + (' checked' if c in cur_set else '')
+                                      + ' data-def="' + ('1' if (dcamp == c) else '0') + '"></td>')
+                        rows += ('<tr><td style="padding:3px 8px; white-space:nowrap;">' + hesc(name) + mark
+                                 + ('<span style="color:#888; font-size:0.8em;"> bomber/attacker</span>' if is_bomber else '')
+                                 + ('<span style="color:#aaa; font-size:0.8em;"> ' + hesc(str(year)) + '</span>' if year else '')
+                                 + '</td>' + cells + '<td></td></tr>')
+                heads = ''.join('<th style="width:48px;">' + tag + '<br><a href="#" onclick="ptCol(' + str(c) + ',1);return false;" style="font-size:0.75em; font-weight:normal;">all</a> '
+                                '<a href="#" onclick="ptCol(' + str(c) + ',0);return false;" style="font-size:0.75em; font-weight:normal;">none</a></th>' for c, tag in _NAT)
+                planes_html = (
+                    '<input type="hidden" name="pt_present" value="1">'
+                    '<p style="margin:6px 0;">' + _pt_edited.lstrip(' &bull;') + '</p>'
+                    '<div style="margin:6px 0 10px;">'
+                    '<a href="#" onclick="ptReset();return false;" class="btn-red" style="padding:6px 14px; font-size:0.85em;">Reset all to the default nation table</a>'
+                    ' &nbsp; <a href="#" onclick="ptToggle();return false;" style="font-size:0.85em;">show / hide the list</a></div>'
+                    '<div id="ptbox" style="max-height:520px; overflow:auto; border:1px solid #ccc; padding:4px; display:'
+                    + ('block' if _pt_over else 'none') + ';">'
+                    '<table style="border-collapse:collapse; font-size:0.85em; min-width:560px;">'
+                    '<tr style="position:sticky; top:0; background:#fff;"><th style="text-align:left; padding:4px 8px;">Aircraft</th>' + heads + '<th></th></tr>'
+                    + rows + '</table></div>'
+                    '<script>'
+                    'function ptReset(){document.querySelectorAll("input.pt").forEach(function(e){e.checked=(e.getAttribute("data-def")=="1");});}'
+                    'function ptCol(c,on){document.querySelectorAll("input.pt-c"+c).forEach(function(e){e.checked=!!on;});}'
+                    'function ptToggle(){var b=document.getElementById("ptbox");b.style.display=(b.style.display=="none")?"block":"none";}'
+                    '</script>')
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
@@ -2405,6 +2463,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Fighters only</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
                     {fighters_html}
+                    <h3>Aircraft per team</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">Tick which aircraft each nation may fly in this arena &mdash; a plane can be opened to several nations (coalition) or to none (hidden). The ticks start from the server's nation table; only planes you change are stored for this arena. The war date and Fighters-only filters above still apply on top (they can only hide). Takes effect the next time the arena is entered.</p>
+                    {planes_html}
                     <h3>Exit = crash</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to make LEAVING THE PLANE WHILE AIRBORNE count as a crash (a death and a lost plane) &mdash; pilots must land, and be undamaged, to exit for free. Leave unticked (the default) and an undamaged in-flight exit is a clean bug-out that costs nothing. An exit while <em>damaged</em> is a death either way. Takes effect the next time the arena is entered.</p>
                     {exitcrash_html}
@@ -3789,6 +3850,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             settings['war_enabled'] = 1 if qs.get('s_war_enabled', [''])[0].strip() else 0
             # FIGHTERS ONLY (v391): checkbox only posts when ticked; absence means off.
             settings['fighters_only'] = 1 if qs.get('s_fighters_only', [''])[0].strip() else 0
+            # AIRCRAFT PER TEAM (v932f5): the grid posts pt_<slot>_<camp>=1 for every tick. Store only
+            # the planes whose tick set differs from the server's default nation table; [] = hidden.
+            # The grid is always on the page (pt_present), so a save without it keeps nothing stale.
+            if qs.get('pt_present', [''])[0].strip():
+                try:
+                    _roster = SRV['plane_roster']() if SRV.get('plane_roster') else []
+                except Exception:
+                    _roster = []
+                _pt = {}
+                for slot, name, dcamp, is_bomber, year in _roster:
+                    picked = [c for c in (0, 1, 2, 3, 4) if qs.get('pt_%d_%d' % (slot, c), [''])[0].strip()]
+                    default = [dcamp] if dcamp in (0, 1, 2, 3, 4) else []
+                    if picked != default:
+                        _pt[name] = picked
+                if _pt:
+                    settings['plane_teams'] = _pt
             # EXIT = CRASH (v400f5): checkbox only posts when ticked; absence means off (the
             # default - an undamaged airborne exit is a clean bug-out, not a death).
             settings['exit_is_crash'] = 1 if qs.get('s_exit_is_crash', [''])[0].strip() else 0
@@ -4146,7 +4223,8 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
-                     server_py=None, version=None, push_lobby_news_fn=None):
+                     server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None):
+    SRV['plane_roster'] = plane_roster_fn   # v932f5: () -> [(slot, name, default_camp, is_bomber, year)]
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console
     SRV['push_lobby_news'] = push_lobby_news_fn   # v870f5: (reason) -> n clients pushed
