@@ -46,6 +46,108 @@ they explain why a specific line is the way it is and must stay with it.
     work below is tagged v541f5 in code comments but belongs to THIS chapter.
 
 ==============================================================================
+*** BANKED 2026-10-18: v932f5 is the STABLE BANKING POINT (user-approved: 'plane selection
+    works. that can be banked'). Snapshot server.py -> 'old files\server_v932f5.py'.
+    (Previous: v900f5, 2026-09-30.) DEPLOY server.py, web_server.py AND fa_logging.py together.
+    v901f5-v932f5: THE STRESS-TEST CHAPTER (2026-10-01 .. 10-18) - the 10-10 'TC Event Night'
+    (35 sessions, 33 flying) and the pilot reports around it. Telemetry/relay items credit
+    Skyyr/Shadow's film analysis (see the v883/v890 bank note).
+    OPEN (see the TODO list in server.py): driven troop canopies still bob (v920/v921;
+    `chute velunit`, else RE the parachuter move at vtable+0x24); Flak's 3-8 s destroy delay
+    (client-side after delivery - capture `loglevel file DEBUG` during a strafe); tanks riding
+    trains (the 24 km / 45 min attack column); Redbeard's 'empty plane menu' (no catalog
+    request reached the server - need the screen he saw).
+    ACCEPTED AS IS (user 10-19, 'bank'): troop-chute tag/padlock stays as it is (parent
+    positioning wins); the capture rule stays capture% + a tank inside (not the wiki's 'one
+    tank + defences dead'); metal repair by train/cargo stays; the panel's production % stays
+    the scene HP fraction.
+
+v933f5 [TC WIN: ONE COUNTRY IS ELIMINATED] (10-19)
+    * 'Only one country still owns scenes' (wipeout) never came on a 5-nation map. Replaced by
+      'One country is eliminated': the round ends as soon as any country that had scenes at the
+      start has none left; 'AI: <Country> has been eliminated!' then the usual winner line - the
+      winner is the country that took its last scene(s) (owner now of the scenes it held at the
+      previous once-a-minute check) - then the reset. Neutral/NU scenes are nobody's country.
+      settings_json tc_win_mode 'eliminated'; a stored 'wipeout' is read and re-saved as
+      'eliminated'; the web dropdown renamed.
+
+v926f5-v932f5 [ROSTER SCRUB RACE, REPAIR RULE, RETRANSMIT CONFIG, LAG METRICS, SQUADRON TAG,
+               SUPPLY PANEL, AIRCRAFT PER TEAM] (10-09 .. 10-18)
+    * v926f5 Bama/PhiD 'joined SU, couldn't see him in chat': the v902 slot-reuse scrub (station
+      DELETE + roster REMOVE) ran on a pool worker as two BLOCKING send_rel calls while the join-62
+      broadcast ran on another thread -> on any peer with real RTT the seq order became DELETE3,
+      join-62, REMOVE-63, and the REMOVE deleted the pilot it was clearing the slot for (client:
+      'entering game' then 'leaving game' 140 ms apart, every chat line from him dropped as
+      'unknown player'). Seven such joins on 10-08 alone. Now one msg-13 batch per peer:
+      [3 station delete][63 REMOVE][62 add] in a single reliable seq.
+    * v927f5 repair rule (user decision, confirmed by the wiki 'Tricks of the Trade': 'the enemy
+      scene will be repairing itself while the tanks are driving'): a scene repairs unless UNDER
+      ACTIVE FIRE = engaged attack column, enemy ground units inside the presence radius, or a kill
+      on the scene within TC_FIRE_HOLD_S (120 s). A trigger or an en-route column holds nothing.
+      SpUn's '69% -> 22% moments later' was the first pass's 20-min AA clocks expiring. Metal
+      repair by train/cargo kept as is (user: 'metal helped speed up repair').
+    * v928f5 the v875 retransmit config made clients drop the link after a ~3 s uplink hiccup
+      (12 resends x 250 ms floor; factor floor 1.0 x RTT so half the packets timed out - Kahuna
+      311 RETX lines in one evening, Butterz/RGP_Cobra 660). flakmagic 10-09 23:51:50, Kahuna
+      10-11 01:32, Butterz 10-10 23:31, Redbeard 20:53: all FM_LOSTCONNECTION on the client.
+      Now floor 400 ms, >= 2 x RTT, 50 resends, 20 s age limit (the age decides). Kahuna's
+      10-12 drop (33 s of silence both ways) is his VPN - left at 20 s.
+    * v929f5 lag metrics: 94% of 7,069 RELAY-GAP lines were respawn/HQ artefacts (per-pair clock
+      never reset) -> reset at spawn/world rebuild; new SENDER-SILENT line = a flying pilot's own
+      frames paused >= 2 s (the real uplink-stall metric); _tick_rate_clamped() holds a receiver's
+      measured conductor rate within +-10% of 50 Hz for stamping (Kindschi 42..79/s, Cobra
+      44..62/s = frozen clients catching up, not 79 Hz conductors). Server headroom at the peak:
+      RX thread 9%, dispatch 0.4 ms, relay queue <= 15, send queue 0; desync detector 0 events.
+    * v930f5 '3rd_SQD_ Maj Alpharius' on a pilot not in the squadron: s.squadron_id lived on the
+      CONNECTION - 'Incognito' (same account) joined 3rd_Squadron in-game, switched to 'Alpharius',
+      and his client record went out with squadron 9 (DB said 0, the fallback was the session).
+      _pilot_select_squadron() re-derives it from the DB at every pilot select; the 0xe4 echo now
+      always carries the DB value (was: only filled when the client sent zeros).
+    * v931f5 supply panel: the % next to 'storage capacity' moved with the stock (all three
+      percent bytes carried stored/capacity). Now E = production efficiency, H = capacity intact
+      (effective/undamaged), C = stock/capacity; D = effective rate. PRODINFO_PCT_OWN_ROW flag.
+      User-verified: stock drops, capacity holds.
+    * v932f5 AIRCRAFT PER TEAM, PER ARENA (web Edit Arena -> 'Aircraft per team'): a 121 x 5
+      checklist; settings_json plane_teams = {name: [camps]} stores only the planes that differ
+      from the nation table, [] = hidden. The GAME_DEF byte-0 flyability mask is now a real mask
+      (several nations may share a plane); war date / fighters only still hide on top; the Me-163B
+      tab override yields to an arena that opens it. User-verified: 'plane selection works'.
+
+v901f5-v925f5 [STALE SLOTS, LOGGING, ASSISTS, TELEMETRY SPLIT, CHUTES, START PLACES] (10-01 .. 10-08)
+    * v901f5-v904f5/v913f5 wrong-name kills, lost damage, invisible tanks and pilots, slow exit:
+      a reused slot is scrubbed on peers with the 2009 form (station DELETE msg-3 bit-15 entry +
+      roster REMOVE, decided inside the slot lock, sent outside it); handle_leave_arena /
+      teardown send the station delete; a reliable seq that must not deliver after an arena leave
+      is filled with a benign msg-63 (DUMMY index) instead of being abandoned (the v502 hole wedged
+      the in-order downlink ~60 s: Taurus 'back-to-lobby took 59 s'); per-address peer-created
+      sets (planes, canopies, AI objects) scrubbed on a new SYN and rekeyed on a port move.
+    * v905f5/v907f5 INFO log noise: ~30 tags demoted to DEBUG in fa_logging._TAG_LEVELS; v879/v880
+      RX/RELAY prefixes renamed so rxtrace shows at INFO; VERSION banner is the first log line.
+    * v908f5 garrisons hold while the scene is threatened (TC_THREAT_RADIUS_M 8 km) instead of
+      withdrawing before the attack; v911f5 a column that stopped within TC_ARRIVE_ENGAGE_M (1200 m)
+      engages; v897f5 post-capture grace 120 s; defence credited to nobody; third-country capture.
+    * v909f5/v910f5 assists per the 2004 page: >= 20% of the damage on a plane someone else killed,
+      no points, STAT25 f5 = Fighter Assists (pilots.assists); parked MEC 1 = death; cockpit-kill
+      bail gate: a pilot whose client reported a cockpit death cannot be booked 'pilot safe' on a
+      later bail (Skyyr's write-up, source-proven).
+    * v912f5 CLOCK line: a client conductor more than 2% off the nominal rate is logged (Skyyr's
+      9 h session: a real 125 s TICK-RESYNC and ~1.6% drift); v925f5 TICK_RATE_DEFAULT 52 -> 50
+      (the conductor runs at 50 Hz - FA.exe FUN_007cf180; 52 flagged everyone 3.8% slow).
+    * v915f5/v916f5 mass CTD from a relayed telemetry frame: the fatal 75 B frame was two 34-byte
+      canopy records refused by the ownership rule; _telem_split_records tiles all-34 frames without
+      ownership, unknown shapes are dropped with their hex.
+    * v917f5-v921f5 paratrooper canopies: server-driven descent writes the drive velocity into the
+      record (+0x14/+0x16/+0x18, ~0.01 m/s per count), CHUTE_NEAR_HZ / `chute sink|vel|velunit|near|
+      noparent|drive` console knobs; CHUTE_NO_PARENT reverted (troopers spawned in the wrong place).
+      Still bobbing - OPEN.
+    * v922f5 JP troops spawn soldiers (L2D2 added to TRANSPORT_PLANE_NAMES).
+    * v923f5/v924f5 'Waiting for position on airfield': a start place refused by the client (exit
+      code 9 within 8 s of the grant) is skipped for SP_REFUSED_TTL_S; Ctrl+Tab asks for place N+1.
+    * v914f5-v919f5 misc: ai_peers_forget/rekey on SYN/PORTMOVE; MOTD marker cleared on every
+      SendEnterToGame and leave (v893 follow-up); leaderboards (pilot_stats_daily) and MOTD on the
+      admin site (v891-v893 chapter closed).
+
+==============================================================================
 *** BANKED 2026-09-30 (b): v900f5 is the STABLE BANKING POINT (user-approved). Snapshot
     server.py -> 'old files\server_v900f5.py'. (Previous: v899f5.)
     DEPLOY server.py AND web_server.py (the Scoring Reference page text changed with the scoring).

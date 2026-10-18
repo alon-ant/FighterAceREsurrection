@@ -2321,6 +2321,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + '</select></label>')
             # TC WIN / RESET (v640f5): tc_win_mode + a Reset button (calls the game server's arena_reset)
             _wm = str(overrides.get('tc_win_mode', 'off') or 'off').lower()
+            if _wm == 'wipeout':
+                _wm = 'eliminated'                 # v933f5: the old mode name maps to the new rule
             def _wm_opt(v, label):
                 s = ' selected' if _wm == v else ''
                 return '<option value="' + v + '"' + s + '>' + label + '</option>'
@@ -2329,7 +2331,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<select name="s_tc_win_mode" style="padding:7px; margin-top:3px; min-width:340px;">'
                 + _wm_opt('off', 'Off - the arena runs until reset by hand')
                 + _wm_opt('all', 'One country owns every scene -> it has won, arena resets')
-                + _wm_opt('wipeout', 'Only one country still owns scenes -> it has won, arena resets')
+                + _wm_opt('eliminated', 'One country is eliminated (has no scenes left) -> whoever took its last scene has won, arena resets')
                 + '</select></label>'
                 '<div style="margin:8px 0 16px;"><a href="/admin/arena_reset?room=' + str(room_id) + '" '
                 'onclick="return confirm(\'Reset this arena now? Everyone in it is sent back to the lobby after a 3 s countdown.\');" '
@@ -3878,8 +3880,8 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             if _sm in ('ffa', 'tc', 'none', 'events'):
                 settings['scoring_mode'] = _sm
             _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
-            if _wm in ('off', 'all', 'wipeout'):
-                settings['tc_win_mode'] = _wm
+            if _wm in ('off', 'all', 'eliminated', 'wipeout'):
+                settings['tc_win_mode'] = 'eliminated' if _wm == 'wipeout' else _wm   # v933f5
             for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000)):   # v686f5
                 _cv = qs.get('s_' + _ck, [''])[0].strip()
                 if _cv == '':
