@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v934f5'
+VERSION = 'v935f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4613,6 +4613,31 @@ def console_handler():
                         log('CONSOLE', f'rxtrace: inbound packets from {_t.addr[0]} logged for {_secs:.0f}s (RX/TRACE)')
                 else:
                     log('CONSOLE', 'usage: rxtrace <pilot> [seconds]')
+            elif cmd == 'clocks':
+                # v935f5: every in-game session's measured conductor rate (ticks/s against the
+                # server's wall clock), not just the >2% outliers the CLOCK line reports. The
+                # conductor's time base ONLINE is the vcnc NET clock (FA.exe FUN_007e6470 installs
+                # the time hook DAT_00cb9eac after vcncEnterAppSpace; Timer.cpp FUN_007cf180 then
+                # reads it through FUN_00416be0), i.e. the clock the server synchronises - so a
+                # bias common to every pilot is the sync, not their machines. 10-19 count across
+                # four runs: 395 SLOW lines vs 51 FAST, cluster at 48.4-48.9/s.
+                _rows = []
+                for _s in get_all_sessions():
+                    if not getattr(_s, 'entered_game', False):
+                        continue
+                    _r = getattr(_s, '_tick_rate', None)
+                    _age = time.time() - getattr(_s, 'last_telem_time', 0.0)
+                    _rows.append((_s.current_pilot or '?', _s.current_room, _r, _age,
+                                  getattr(_s, '_rtt_ms', None)))
+                if not _rows:
+                    log('CONSOLE', 'clocks: nobody in-game')
+                for _pn, _rm, _r, _age, _rtt in sorted(_rows, key=lambda x: (x[2] is None, x[2] or 0)):
+                    if _r is None:
+                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: no rate yet (frames {_age:.0f}s old)')
+                    else:
+                        _dev = (_r - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
+                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: {_r:6.2f}/s ({_dev:+.1f}% vs {TICK_RATE_DEFAULT:.0f})'
+                                       f' frames {_age:.1f}s old')
             elif cmd == 'desync':
                 # v862f5: list the automatic desync events of this run
                 if not _DESYNC_EVENTS:
