@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v932f5'
+VERSION = 'v934f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14288,8 +14288,9 @@ def _note_client_cull(s, onum, x, y):
 
 # --- v640f5 ARENA RESET ------------------------------------------------------------------
 # Console `reset <room> [winner_camp]`, the web 'Reset' button, or the TC WIN CHECK (room setting
-# tc_win_mode: 'off' | 'all' = a camp owns every ownable scene | 'wipeout' = a camp that had
-# scenes has none left) -> announce ('<Country> has won!' when there is a winner, then 'Arena
+# tc_win_mode: 'off' | 'all' = a camp owns every ownable scene | 'eliminated' (v933f5, was
+# 'wipeout') = a country that had scenes has none left; the winner is whoever took its last
+# scenes) -> announce ('<Country> has won!' when there is a winner, then 'Arena
 # reset, please leave the arena.'), a 3-2-1 'You will be disconnected in N' countdown, then every
 # session is booted: a flying pilot's plane is ended through the native moderator action (msg
 # 127 sub 1 = the client runs its own death -> HQ), then the 0xDA lobby attach (msg 218, what the
@@ -14525,20 +14526,69 @@ def tc_check_win(room_id):
     if globals().setdefault('_RESET_IN_PROGRESS', set()) and room_id in globals()['_RESET_IN_PROGRESS']:
         return
     start = globals().setdefault('_TC_START_CAMPS', {})
+    last_owner = globals().setdefault('_TC_LAST_OWNER', {})       # v933f5: per-scene owner at the last check
+    # v934f5 [THE ROUND'S COUNTRIES COME FROM THE MAP, NOT FROM WHEN THE SETTING WAS SWITCHED ON]:
+    # the 'had scenes at the start' set was snapshotted at the first check after the mode was set
+    # and the first check returned without deciding. Online 10-19 (room 149 'TC Reborn Beta II'):
+    # the mode was corrected to 'eliminated' with two countries already wiped off the map - the
+    # snapshot then held only the three survivors, nobody was ever 'eliminated' and the round ran
+    # on. Now the countries of the round are the GAME_DEF's ORIGINAL owners (the territory table
+    # arena_reset rebuilds from), the dynamic snapshot is only the fallback for a terrain without
+    # one, and the very first check decides too.
+    _base = {}
+    try:
+        _base = SCENE_TERRITORY_BY_TERRAIN.get(_tbase(tkey)) or {}
+    except Exception:
+        _base = {}
+    _base_camps = sorted({int(c) for c in _base.values() if c is not None and 0 <= int(c) <= 4})
     if room_id not in start:
         start[room_id] = dict(owned)                # camps that had scenes when the check began
-        return
-    winner = None
+    prev = last_owner.get(room_id)                  # None on the very first check
+    last_owner[room_id] = {int(s): int(c) for s, c in table.items() if c is not None and c <= 7}
+    round_camps = _base_camps or sorted(c for c in start[room_id] if c <= 4)
+    winner = None; eliminated = None
     if mode in ('all', 'all_scenes', '1'):
         if len(owned) == 1:
             winner = next(iter(owned))
-    elif mode in ('wipeout', 'wipe', '2'):
-        alive = [c for c in start[room_id] if owned.get(c, 0) > 0]
-        if len(alive) == 1 and len(start[room_id]) > 1:
-            winner = alive[0]
-    if winner is not None:
+    elif mode in ('eliminated', 'elim', 'wipeout', 'wipe', '2'):
+        # v933f5 [ONE COUNTRY IS ELIMINATED] (user 10-19, replaces 'wipeout' = only one country
+        # left, which on a 5-nation map never came): the round ends as soon as ANY country of the
+        # round has no scene left. The winner is the country that took its last scene(s): the
+        # owner now of the scenes it held at the previous check, else (first check, or several
+        # countries already gone) the owner now of most of its ORIGINAL scenes. The eliminated
+        # country is announced either way; neutral / NU scenes are nobody's country.
+        if len(round_camps) > 1:
+            gone = [c for c in round_camps if owned.get(c, 0) == 0]
+            if gone:
+                eliminated = gone[0]
+                takers = {}
+                for sidx, pc in (prev or {}).items():
+                    if pc == eliminated:
+                        nc = table.get(sidx)
+                        if nc is not None and nc != eliminated and nc <= 7:
+                            takers[nc] = takers.get(nc, 0) + 1
+                if not takers:
+                    for sidx, pc in _base.items():
+                        if pc is not None and int(pc) == eliminated:
+                            nc = table.get(int(sidx))
+                            if nc is not None and nc != eliminated and nc <= 7:
+                                takers[nc] = takers.get(nc, 0) + 1
+                if takers:
+                    winner = max(takers, key=lambda k: (takers[k], -k))
+                if len(gone) > 1:
+                    log('TC', f'room {room_id}: {len(gone)} countries have no scenes left {gone} - '
+                              f'ending on {tc_camp_full(eliminated)}')
+    if winner is not None or eliminated is not None:
         globals()['_RESET_IN_PROGRESS'].add(room_id)
-        start.pop(room_id, None)
+        start.pop(room_id, None); last_owner.pop(room_id, None)
+        if eliminated is not None:
+            try:
+                tc_say(room_id, f'AI: {tc_camp_full(eliminated)} has been eliminated!')
+                room_system_msg(room_id, f'{tc_camp_full(eliminated)} has been eliminated!')
+            except Exception:
+                pass
+            log('TC', f'room {room_id}: {tc_camp_full(eliminated)} (camp {eliminated}) ELIMINATED - '
+                      f'winner camp {winner} (took its last scenes) [tc_win_mode={mode}]')
         arena_reset(room_id, winner_camp=winner, reason=f'(tc_win_mode={mode})', by='TC win check')
         threading.Timer(30.0, lambda: globals()['_RESET_IN_PROGRESS'].discard(room_id)).start()
 

@@ -70,6 +70,14 @@ v933f5 [TC WIN: ONE COUNTRY IS ELIMINATED] (10-19)
       previous once-a-minute check) - then the reset. Neutral/NU scenes are nobody's country.
       settings_json tc_win_mode 'eliminated'; a stored 'wipeout' is read and re-saved as
       'eliminated'; the web dropdown renamed.
+    * v934f5 (10-19) online, room 149 'TC Reborn Beta II': the mode was set with two countries already
+      wiped off the map and the round ran on - the server was still v932f5 (web_server.py had been
+      deployed with the new dropdown, server.py had not), and the 'countries of the round' set was a
+      snapshot taken at the first check after the mode was switched on (only the survivors). Now the
+      round's countries come from the GAME_DEF's original territory table (what arena_reset rebuilds
+      from), the first check decides too, and with no previous-check snapshot the winner is the owner
+      now of most of the eliminated country's ORIGINAL scenes. Deploying v934 onto room 149 as it
+      stands ends the round on the first check (two countries gone -> announced, reset).
 
 v926f5-v932f5 [ROSTER SCRUB RACE, REPAIR RULE, RETRANSMIT CONFIG, LAG METRICS, SQUADRON TAG,
                SUPPLY PANEL, AIRCRAFT PER TEAM] (10-09 .. 10-18)
