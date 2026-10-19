@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v936f5'
+VERSION = 'v937f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -413,6 +413,22 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
 STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+# v937f5 [A LOST STATUS COSTS THE CLIENT 2 s OF CLOCK - FOR GOOD]. The STATUS request is plain UDP and
+# we credit base_incr at send; the client adds it to its NET base only if the packet arrives. One lost
+# STATUS -> the client's reconstructed server time (base + A) is 2 s LOW from then on -> its next
+# TimeSync sample reads a -2 s offset step -> tsSlewToNewDriftRate runs its clock at ~70% for 7 s ->
+# ~100 conductor ticks gone, never regained (the fit now believes the new offset). Seen live 10-19
+# 18:12 (v936 `clocks`): Bama's long-baseline rate went 50.00 -> 49.88 (last-second 46.3/s = the
+# slew) and settled at a 2.0 s deficit exactly. During those 7 s every remote object on his screen
+# catches up/jumps - the 'jumping' reports. The client is idempotent (FUN_100076c2 processes a STATUS
+# only when its 9-bit seq CHANGES) and answers EVERY request, changed or not, with a reply carrying
+# the latched seq in wire bytes 2-3 (low 9 bits). So: keep re-sending the IDENTICAL packet (same seq,
+# same base_incr) each heartbeat until a reply echoing that seq arrives; a duplicate is ignored by the
+# client, a lost one gets applied late. The next STATUS is not issued while one is unacked, and when
+# it is, its base_incr covers the whole elapsed time, so the credits still sum to real time.
+# Time replies in the loss window are harmless: they carry st=seq and the client rejects a sample
+# whose st != its latched index (FUN_10007f06 'Status Index' check).
+STATUS_RESEND_MAX = 15     # v937f5: heartbeats (1 s) to keep re-sending an unacked STATUS before giving up
                            # v855f5: back to 2 s. v839 stretched it to 6 s to smooth the clamped loss
                            # gauge - but the client's 'Receive data' readout counts bytes PER STATUS
                            # INTERVAL and shows them as a rate, so every pilot saw 3x ('1k -> over
@@ -21001,7 +21017,32 @@ def login(s):
                         if s._status_base_epoch is None:
                             s._status_base_epoch = _now_st
                             s._status_last = _now_st
-                        if (_now_st - s._status_last) >= STATUS_INTERVAL_S:
+                        # v937f5: an unacked STATUS is re-sent verbatim until the client echoes its seq
+                        # (see STATUS_RESEND_MAX); no new one is issued meanwhile.
+                        _pend = s.__dict__.get('_status_pending')
+                        if _pend is not None:
+                            if s.__dict__.get('_status_acked_seq') == _pend['seq']:
+                                if _pend['resends']:
+                                    s._status_resent_ok = s.__dict__.get('_status_resent_ok', 0) + 1
+                                    log('TX/STATUS', f'seq={_pend["seq"]} acked after {_pend["resends"]} resend(s) - '
+                                                     f'{_pend["incr"]}ms credit delivered late, no clock step '
+                                                     f'({s.current_pilot}, #{s._status_resent_ok} recovered this session)')
+                                s.__dict__.pop('_status_pending', None); _pend = None
+                            elif _pend['resends'] >= STATUS_RESEND_MAX:
+                                log('TX/STATUS', f'[warn] seq={_pend["seq"]} never acked after {_pend["resends"]} resends - '
+                                                 f'giving up; his clock may now sit {_pend["incr"]}ms behind ({s.current_pilot})')
+                                s.__dict__.pop('_status_pending', None); _pend = None
+                            else:
+                                try:
+                                    sock.sendto(_pend['pkt'], s.addr)
+                                    _pend['resends'] += 1
+                                    s._status_resends = s.__dict__.get('_status_resends', 0) + 1
+                                    if _pend['resends'] == 1:
+                                        log('TX/STATUS', f'seq={_pend["seq"]} unacked after {_now_st - _pend["sent"]:.1f}s - '
+                                                         f're-sending the same packet ({s.current_pilot})')
+                                except OSError:
+                                    pass
+                        if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
                             _incr_ms = int((_now_st - s._status_last) * 1000)
                             s._status_last = _now_st
                             s._status_seq = (s._status_seq + 1) & 0x1FF
@@ -21018,8 +21059,12 @@ def login(s):
                             if s._status_seq == 0x1FF:
                                 s._status_seq = 0
                             try:
-                                sock.sendto(build_status_request(s, _incr_ms), s.addr)
+                                _spkt = build_status_request(s, _incr_ms)
+                                sock.sendto(_spkt, s.addr)
                                 s._credited_ms = getattr(s, '_credited_ms', 0) + int(_incr_ms)
+                                s._status_pending = {'seq': s._status_seq, 'pkt': _spkt, 'sent': _now_st,
+                                                     'resends': 0, 'incr': int(_incr_ms)}   # v937f5
+                                s._status_acked_seq = None       # v937f5: only a reply to THIS seq acks it
                                 _hb_n += 1
                                 if (s._status_seq % 8) == 1:
                                     log('TX/STATUS', f'{"in-game" if s.entered_game else "lobby"} seq={s._status_seq} '
@@ -29183,6 +29228,22 @@ def on_pkt(data, addr):
             log('PROTO', f'[warn] {getattr(s, "current_pilot", "?")} sent a LARGE (type 3) packet sz={sz} '
                          f'head={hx(data[:16])} - block transfer not implemented')
         if pt==4 and sz >= 24:
+            # v937f5: the reply echoes the seq the client has LATCHED (processed) in the low 9 bits of
+            # wire bytes 2-3 (RAW dumps: 22 01 / 80 18 00 00 = seq 1; FUN_100076c2 DAT_1001ce70). This
+            # is the ack the heartbeat's STATUS resend waits for.
+            try:
+                _rseq = ((data[2] & 1) << 8) | data[3]
+                s._status_acked_seq = _rseq
+                # a reply to a RE-SENT request repeats the client's previous reply buffer verbatim
+                # (FUN_100076c2 sends DAT_1001ce7c unchanged when the seq did not change), so its
+                # counters must not be paired a second time - skip the loss accounting for it.
+                if s.__dict__.get('_statreply_last_seq') == _rseq:
+                    raise StopIteration
+                s._statreply_last_seq = _rseq
+            except StopIteration:
+                _rseq = None
+            except Exception:
+                _rseq = 0
             # v469f5 [STATLOSS]: the client's STATUS REPLY (subtype 4) - previously ignored. It
             # carries the client's PER-INTERVAL transport counters at the mirrored offsets
             # (vcncnet FUN_100073a4 reply builder: pkts sent u16@12, pkts recvd u16@14, bytes
@@ -29196,6 +29257,8 @@ def on_pkt(data, addr):
             # phantom -> EWMA hovers near 0; real -> EWMA settles at the loss rate. Parsing is
             # non-returning: the packet continues through the normal flow untouched.
             try:
+                if _rseq is None:
+                    raise ValueError('repeat reply to a re-sent STATUS - not paired')   # v937f5 (-> except: pass)
                 # v470f5: RAW dump of the first replies per session. run_203941 exposed that
                 # u16@12/14 of the reply ECHO OUR OWN counters (dl==ul to the digit in every
                 # STATLOSS line - impossible for independent directions), so the client's own

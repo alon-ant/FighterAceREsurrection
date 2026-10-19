@@ -62,6 +62,30 @@ they explain why a specific line is the way it is and must stay with it.
     tank + defences dead'); metal repair by train/cargo stays; the panel's production % stays
     the scene HP fraction.
 
+v937f5 [A LOST STATUS COST THE CLIENT 2 s OF CLOCK - RESEND UNTIL ACKED] (10-19)
+    * First live reading of v936 `clocks` (18:03-18:16, 5 pilots): everyone 50.00 with 0 jitter
+      windows - except Bama, whose long-baseline rate went 50.00 -> 49.88 at 18:12:18 (last-second
+      46.3/s) and then settled at a deficit of exactly 2.0 s (49.88 over 815 s, 49.89 over 920 s).
+      2.0 s = one STATUS_INTERVAL base_incr. Mechanism: STATUS requests are plain UDP and we credit
+      base_incr at send; if the packet is lost the client's NET base never gets it, so its
+      reconstructed server time (base + A) is 2 s LOW from then on, the next TimeSync sample shows a
+      -2 s offset step, tsSlewToNewDriftRate runs its clock at ~70% for 7 s and ~100 conductor ticks
+      are gone for good (the fit believes the new offset). While it slews, every remote object on
+      that screen catches up/jumps - the 'jumping' reports. Bama's measured downlink loss is only
+      0.05-0.3%, but at 1800 STATUS/hour that is 1-5 such steps an hour, each a 7 s stutter.
+    * Fix (server side, idempotent on the client): the heartbeat keeps re-sending the IDENTICAL
+      STATUS packet (same seq, same base_incr) once a second until the client's reply echoes that
+      seq (wire bytes 2-3 low 9 bits; the client answers every request and processes a seq only
+      once - FUN_100076c2). No new STATUS is issued while one is unacked; when it is, its base_incr
+      covers the whole elapsed time, so credits still sum to real time. Gives up after
+      STATUS_RESEND_MAX=15 s with a [warn]. Time replies during the loss window are rejected by the
+      client's Status-Index check, so nothing is poisoned. A repeat reply to a resend is not paired
+      into the STATLOSS loss gauge (the client re-sends its previous reply buffer verbatim).
+    * Log lines: 'seq=N unacked after X s - re-sending', 'seq=N acked after K resend(s) - 2000ms
+      credit delivered late, no clock step', '[warn] seq=N never acked after 15 resends'. Expect the
+      long-baseline `clocks` rate to stay at 50.00 for everyone now; a pilot who still drifts has a
+      different problem.
+
 v935f5-v936f5 [THE 'SLOW CLIENT CLOCK' WAS THE METER: LONG-BASELINE RATE + TICK-JITTER] (10-19)
     * v935f5 `clocks` console command: every in-game session's measured conductor rate, not just the
       >2% outliers the CLOCK line printed.
