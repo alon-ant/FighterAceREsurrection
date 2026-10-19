@@ -62,6 +62,39 @@ they explain why a specific line is the way it is and must stay with it.
     tank + defences dead'); metal repair by train/cargo stays; the panel's production % stays
     the scene HP fraction.
 
+v935f5-v936f5 [THE 'SLOW CLIENT CLOCK' WAS THE METER: LONG-BASELINE RATE + TICK-JITTER] (10-19)
+    * v935f5 `clocks` console command: every in-game session's measured conductor rate, not just the
+      >2% outliers the CLOCK line printed.
+    * v936f5 the 48.4/s 'slow conductor' cluster (395 SLOW CLOCK lines vs 51 FAST across four runs)
+      was the measurement, not the clients. Proof, three ways: (1) FA.exe Timer FUN_007cf180
+      disassembled from the binary - ticks = elapsed/20 with the remainder carried, globalTick written
+      nowhere else, telemetry stamps it at [rec+1] (FUN_007e33d0): a lossless integer of the vcnc NET
+      clock; (2) vcncNet.dll read against its own bytes - the ms<->fraction tables at
+      0x10016824/0x100168a4 are exact ms*2^32/1000 (all 64 entries), the ms output is an exact x1000,
+      the drift fit is plain least-squares; (3) TimeSync logs (vcncNet.ini LogFlags=0x200) from
+      Taurus, Moira and Alon: NET time = 1.00000 x wall clock, offset to the server held under 1 ms
+      for an hour, drift rates 1e-5..1e-4; and `clocks` at 17:30 showed all five pilots at 49.9-50.1
+      - the same pilots CLOCK had called 47.8-48.6 an hour before. What the 1 s EWMA in
+      _harvest_tick actually measures is ARRIVAL JITTER: one frame held up 0.3 s stretches a window
+      to 42-45/s, the 0.8/0.2 EWMA then sits at 48.4-48.9 (= the 49.0 threshold being crossed) and
+      the recovery only brings it back to ~50, never over 51 - hence the one-sided count. Changes:
+      - projection (_relay_stamp_for, _ai_stamp, STALE-TICK extrapolation) now uses a LONG-baseline
+        rate: unwrapped ticks since the origin / seconds since the origin. Jitter and client stalls
+        cannot move it (the ticks all arrive); 50.00 by construction after TICK_RATE_LONG_MIN_S=30 s.
+      - CLOCK only reports a sustained deviation of that long rate after 120 s (a real clock fault).
+      - new TICK-JITTER line (<=1/min/pilot) when a 1 s window is >15% off: 'frames arrived
+        LATE/bunched, delivery held up ~N ms; peers see him catch up/jump for that long' - this is
+        what Bama saw as 'Taurus jumping' (frames arriving late -> FUN_007e4a20 catch-up).
+      - FORWARD reset detection: a conductor restart that lands as a huge forward step mod 65536
+        (39459 -> 3 reads as +26080) is now a TICK-RESYNC too, instead of 26000 phantom ticks
+        entering the baseline (the harness showed 79/s for the rest of the session without it).
+      - `clocks` shows the long rate + baseline, the last-second jitter meter and the count of
+        late/burst windows this session.
+      Verified with a simulated exact-50/s client (jitter, a 2 s stall, a 16-bit wrap, a respawn
+      reset) over 40 seeds: long rate 49.9996, no CLOCK, reset detected, bunching reported.
+      Remaining real cause of 'jumping' = delivery jitter on the sender's uplink or the receiver's
+      downlink; TICK-JITTER now shows the uplink half. No binary/DLL change involved.
+
 v933f5 [TC WIN: ONE COUNTRY IS ELIMINATED] (10-19)
     * 'Only one country still owns scenes' (wipeout) never came on a 5-nation map. Replaced by
       'One country is eliminated': the round ends as soon as any country that had scenes at the

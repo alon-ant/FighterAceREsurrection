@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v935f5'
+VERSION = 'v936f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -4621,23 +4621,29 @@ def console_handler():
                 # reads it through FUN_00416be0), i.e. the clock the server synchronises - so a
                 # bias common to every pilot is the sync, not their machines. 10-19 count across
                 # four runs: 395 SLOW lines vs 51 FAST, cluster at 48.4-48.9/s.
+                # v936f5: the LONG-baseline rate is the clock (what projection uses); the 1 s EWMA is
+                # shown beside it as the jitter meter, with the count of >15% windows this session.
                 _rows = []
                 for _s in get_all_sessions():
                     if not getattr(_s, 'entered_game', False):
                         continue
-                    _r = getattr(_s, '_tick_rate', None)
+                    _r = getattr(_s, '_tick_rate_long', None)
+                    _o = _s.__dict__.get('_tick_origin')
+                    _span = (time.time() - _o[0]) if _o else 0.0
                     _age = time.time() - getattr(_s, 'last_telem_time', 0.0)
-                    _rows.append((_s.current_pilot or '?', _s.current_room, _r, _age,
-                                  getattr(_s, '_rtt_ms', None)))
+                    _rows.append((_s.current_pilot or '?', _s.current_room, _r, _age, _span,
+                                  getattr(_s, '_tick_rate', None), _s.__dict__.get('_tick_jitter_n', 0)))
                 if not _rows:
                     log('CONSOLE', 'clocks: nobody in-game')
-                for _pn, _rm, _r, _age, _rtt in sorted(_rows, key=lambda x: (x[2] is None, x[2] or 0)):
+                for _pn, _rm, _r, _age, _span, _ew, _jn in sorted(_rows, key=lambda x: (x[2] is None, x[2] or 0)):
                     if _r is None:
-                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: no rate yet (frames {_age:.0f}s old)')
+                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: clock baseline {_span:.0f}s (need {TICK_RATE_LONG_MIN_S:.0f}s)'
+                                       f' - frames {_age:.0f}s old')
                     else:
                         _dev = (_r - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
-                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: {_r:6.2f}/s ({_dev:+.1f}% vs {TICK_RATE_DEFAULT:.0f})'
-                                       f' frames {_age:.1f}s old')
+                        log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: clock {_r:6.2f}/s ({_dev:+.2f}% vs {TICK_RATE_DEFAULT:.0f}, '
+                                       f'{_span:.0f}s baseline) | jitter: last-second {(_ew or 0):5.1f}/s, '
+                                       f'{_jn} late/burst windows | frames {_age:.1f}s old')
             elif cmd == 'desync':
                 # v862f5: list the automatic desync events of this run
                 if not _DESYNC_EVENTS:
@@ -10260,6 +10266,31 @@ RELAY_TICK_MONOTONIC = True     # v883f5: never stamp an object earlier than its
 RELAY_TICK_PROJECT_MAX_S = 10.0 # v883f5: projection cap (= STALE_TICK_EXTRAP_MAX_S; beyond it the sender's tick passes)
 CLOCK_DRIFT_WARN_PCT = 2.0      # v912f5: a client conductor this far off TICK_RATE_DEFAULT is logged as drifting
 CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5 min
+# v936f5 [THE 48.4/s 'SLOW CLOCK' WAS THE METER, NOT THE CLOCK]. Three independent proofs on 10-19:
+#   (1) FA.exe Timer FUN_007cf180 (disassembled from the binary): ticks = elapsed/20 with the remainder
+#       carried in lastTickTime, globalTick written nowhere else, telemetry stamps globalTick at [rec+1]
+#       (FUN_007e33d0) - the conductor is a LOSSLESS integer of the vcnc NET clock in ms.
+#   (2) vcncNet.dll: the ms<->fraction tables at 0x10016824/0x100168a4 are exact ms*2^32/1000 (all 64
+#       entries checked against the file), the ms output is an exact x1000 (FUN_1000a2da), and the
+#       drift fit is textbook least-squares over 8 samples.
+#   (3) TimeSync logs (vcncNet.ini LogFlags=0x200) from Taurus, Moira and Alon: NET time advances at
+#       1.00000 x their wall clock and tracks the server to <1 ms for an hour; drift rates 1e-5..1e-4.
+#       And `clocks` at 17:30 showed every pilot at 49.9-50.1/s - the same pilots the CLOCK line had
+#       called 47.8-48.6 an hour earlier.
+# So the per-second EWMA in _harvest_tick measures ARRIVAL JITTER, not clock rate: one frame held up
+# 0.3 s on the way in stretches a 1 s window to 42-45/s, the 0.8/0.2 EWMA lands at 48.4-48.9 (the
+# 'cluster' = the 49.0 threshold being crossed), and the recovery window only brings it back to ~50,
+# never over 51 - hence 395 SLOW lines vs 51 FAST. Two consequences, both fixed here:
+#   - rate for projection (_relay_stamp_for/_ai_stamp/STALE-TICK) now comes from a LONG baseline
+#     (ticks since the origin / seconds since the origin, unwrapped), which jitter and stalls cannot
+#     move - a client that freezes 2 s still delivers all its ticks afterwards. 50.00 by construction.
+#   - CLOCK reports only a sustained deviation of that long rate (a real clock problem); the
+#     short-window dips get their own TICK-JITTER line, because THAT is what Bama saw as 'Taurus
+#     jumping': frames arriving late/bunched -> FUN_007e4a20 catch-up, not a slow clock.
+TICK_RATE_LONG_MIN_S = 30.0     # v936f5: seconds of baseline before the long rate is trusted for projection
+TICK_RATE_CLOCK_MIN_S = 120.0   # v936f5: seconds of baseline before a CLOCK (real drift) line can be logged
+TICK_JITTER_PCT = 15.0          # v936f5: a 1 s window this far off 50/s = a late/bunched frame burst
+TICK_JITTER_LOG_S = 60.0        # v936f5: at most one TICK-JITTER line per pilot per minute
 TICK_RATE_CLAMP_PCT = 10.0      # v929f5: the projection never uses a measured rate more than this far from
                                 # TICK_RATE_DEFAULT. 10-10: Kindschi 42..79/s, RGP_Cobra 44..62/s, Cowgirl 72/s -
                                 # a frozen client catching up, or frames arriving in bursts, not a conductor that
@@ -10293,30 +10324,73 @@ def _harvest_tick(src, pl):
             log('TICK-RESYNC', f'{getattr(src, "current_pilot", "?")}: conductor tick reset {prev} -> {t} '
                                f'({rej} rejected) - new origin')
             src.__dict__.pop('_tick_anchor', None)
+            src.__dict__.pop('_tick_origin', None)              # v936f5: long baseline restarts too
             src.__dict__.pop('_stamp_last', None)
+            prev = None
+        elif d > int(TICK_RATE_DEFAULT * (now - getattr(src, 'last_telem_time', now) + 2.0) * 1.5) + 20:
+            # v936f5 [FORWARD RESET]: a conductor restart lands on an arbitrary 16-bit value, so half
+            # the time the jump reads as a huge FORWARD step (39459 -> 3 is +26080 mod 65536), which
+            # the d<0 test above never sees. A real client can only have advanced ~50 ticks per second
+            # of silence (plus slack), so anything beyond that is a reset: new origin, no 26000-tick
+            # 'advance' folded into the long baseline (it would read as a 79/s clock for the rest of
+            # the session; the 1 s EWMA already ignored it via its 10..200/s filter).
+            log('TICK-RESYNC', f'{getattr(src, "current_pilot", "?")}: conductor tick jumped {prev} -> {t} '
+                               f'(+{d} in {now - getattr(src, "last_telem_time", now):.1f}s) - treated as a reset, new origin')
+            src.__dict__.pop('_tick_anchor', None)
+            src.__dict__.pop('_tick_origin', None)
+            src.__dict__.pop('_stamp_last', None)
+            prev = None
     src._tick_reject = 0
+    # v936f5 [LONG-BASELINE RATE]: unwrapped tick count since the origin / seconds since the origin.
+    # Immune to arrival jitter and to client stalls (the ticks all arrive eventually); converges on
+    # the true conductor rate (50.00 for every client measured) within TICK_RATE_LONG_MIN_S.
+    _o = src.__dict__.get('_tick_origin')
+    if _o is None or prev is None:
+        src._tick_origin = (now, 0)                             # (origin wall time, unwrapped ticks since)
+        src._tick_rate_long = None
+    else:
+        _un = _o[1] + _s16(t - prev)
+        src._tick_origin = (_o[0], _un)
+        _span = now - _o[0]
+        if _span >= TICK_RATE_LONG_MIN_S:
+            src._tick_rate_long = _un / _span
+            # v912f5/v936f5 [CLIENT CLOCK DRIFT - REAL]: only a SUSTAINED deviation of the long rate
+            # is a clock problem (Skyyr 10-03: 9 h session, tick reset backwards 125 s at 02:23).
+            # Short-window dips are arrival jitter and go to TICK-JITTER below.
+            try:
+                _dev = abs(src._tick_rate_long - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
+                if (_span >= TICK_RATE_CLOCK_MIN_S and _dev >= CLOCK_DRIFT_WARN_PCT
+                        and now - src.__dict__.get('_clock_warned', 0.0) >= CLOCK_DRIFT_LOG_S):
+                    src._clock_warned = now
+                    log('CLOCK', f'{getattr(src, "current_pilot", "?")}: conductor running at {src._tick_rate_long:.2f}/s '
+                                 f'over {_span:.0f}s ({_dev:+.1f}% vs {TICK_RATE_DEFAULT:.0f}) - his clock is '
+                                 f'{"FAST" if src._tick_rate_long > TICK_RATE_DEFAULT else "SLOW"}; events will '
+                                 f'{"lead" if src._tick_rate_long > TICK_RATE_DEFAULT else "lag"} on his screen (relog resets it)')
+            except Exception:
+                pass
     _a = src.__dict__.get('_tick_anchor')
     if _a is None or _s16(t - _a[0]) < 0:
         src._tick_anchor = (t, now)
     elif now - _a[1] >= 1.0:
         _r = _s16(t - _a[0]) / (now - _a[1])
         if 10.0 <= _r <= 200.0:
+            # v936f5: the per-second EWMA is kept as a JITTER meter only (see TICK_RATE_LONG_MIN_S).
             _old = getattr(src, '_tick_rate', None)
             src._tick_rate = _r if _old is None else (0.8 * _old + 0.2 * _r)
-            # v912f5 [CLIENT CLOCK DRIFT]: the conductor should run at TICK_RATE_DEFAULT. A client
-            # whose rate sits more than CLOCK_DRIFT_WARN_PCT off it is running fast or slow against
-            # everyone else - every relayed stamp to/from him is then that much off, and his view
-            # of events lags or leads (Skyyr 10-03: 'objects destroyed 3-5 s late, relog fixed it';
-            # that session was 9 h old and his tick reset BACKWARDS by 125 s at 02:23). Logged once
-            # per CLOCK_DRIFT_LOG_S per pilot while it persists.
             try:
-                _dev = abs(src._tick_rate - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
-                if _dev >= CLOCK_DRIFT_WARN_PCT and now - src.__dict__.get('_clock_warned', 0.0) >= CLOCK_DRIFT_LOG_S:
-                    src._clock_warned = now
-                    log('CLOCK', f'{getattr(src, "current_pilot", "?")}: conductor running at {src._tick_rate:.2f}/s '
-                                 f'({_dev:+.1f}% vs {TICK_RATE_DEFAULT:.0f}) - his clock is '
-                                 f'{"FAST" if src._tick_rate > TICK_RATE_DEFAULT else "SLOW"}; events will '
-                                 f'{"lead" if src._tick_rate > TICK_RATE_DEFAULT else "lag"} on his screen (relog resets it)')
+                _jdev = (_r - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
+                if abs(_jdev) >= TICK_JITTER_PCT:
+                    src._tick_jitter_n = src.__dict__.get('_tick_jitter_n', 0) + 1
+                    _perf['tick_jitter'] = _perf.get('tick_jitter', 0) + 1
+                    if now - src.__dict__.get('_jitter_warned', 0.0) >= TICK_JITTER_LOG_S:
+                        src._jitter_warned = now
+                        _win = now - _a[1]
+                        _late = _win - _s16(t - _a[0]) / TICK_RATE_DEFAULT
+                        log('TICK-JITTER', f'{getattr(src, "current_pilot", "?")}: his frames arrived '
+                                           f'{"LATE/bunched" if _jdev < 0 else "in a BURST"} - 1 s window read '
+                                           f'{_r:.1f}/s ({_jdev:+.0f}%), delivery {"held up" if _late > 0 else "compressed"} '
+                                           f'~{abs(_late) * 1000:.0f} ms; peers see him catch up/jump for that long '
+                                           f'(#{src._tick_jitter_n} this session)')
             except Exception:
                 pass
         src._tick_anchor = (t, now)
@@ -10326,8 +10400,9 @@ def _harvest_tick(src, pl):
 
 def _tick_rate_clamped(sess):
     """v929f5: the receiver's measured conductor rate for clock projection, held within
-    TICK_RATE_CLAMP_PCT of TICK_RATE_DEFAULT (see the constant)."""
-    r = getattr(sess, '_tick_rate', None) or TICK_RATE_DEFAULT
+    TICK_RATE_CLAMP_PCT of TICK_RATE_DEFAULT (see the constant). v936f5: the LONG-baseline rate
+    (jitter-proof; see TICK_RATE_LONG_MIN_S) - the per-second EWMA is no longer used for stamps."""
+    r = getattr(sess, '_tick_rate_long', None) or TICK_RATE_DEFAULT
     lo = TICK_RATE_DEFAULT * (1.0 - TICK_RATE_CLAMP_PCT / 100.0)
     hi = TICK_RATE_DEFAULT * (1.0 + TICK_RATE_CLAMP_PCT / 100.0)
     return lo if r < lo else hi if r > hi else r
@@ -19885,7 +19960,7 @@ def relay_telemetry(src, data, _split_obj=None):
                     p._stale_tick_warned = True
                     log('STALE-TICK', f'[warn] {p.current_pilot} conductor tick FROZEN at {rt} '
                                       f'({_age:.1f}s old) - re-stamping from the EXTRAPOLATED tick '
-                                      f'({getattr(p, "_tick_rate", None) or TICK_RATE_DEFAULT:.0f}/s) until his frames resume.')
+                                      f'({_tick_rate_clamped(p):.1f}/s) until his frames resume.')
                 # v835f5 [STALLED RECEIVER TICK]: v234 stopped re-stamping when the receiver's own
                 # frames stopped, passing the SENDER's absolute tick instead - which is skewed by
                 # tens of cycles, so every peer was drawn seconds off (Taurus 09-24 18:16: 'Bama
