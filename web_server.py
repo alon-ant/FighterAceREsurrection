@@ -207,6 +207,7 @@ SRV = {
     'date_read': None,
     'scoring_ref': None,
     'password_read': None,
+    'reality_read': None,     # v948f5: extract_reality_from_gamedef(blob) -> {rw_*}
     'log': print
 }
 
@@ -2264,6 +2265,85 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<input type="number" min="1935" max="1955" name="s_war_year" value="' + hesc(str(war_y))
                 + '" style="width:90px; padding:6px;"></label>'
                 '</div>')
+            # DATE, TIME & WEATHER (v948f5): the client's Options > Misc page is read-only for a
+            # player - every value there is the arena's GAME_DEF [Reality]/[Weather] block. Defaults
+            # come from the stored GAME_DEF (reality_read), overlaid with saved rw_* overrides.
+            _rwb = {}
+            try:
+                if SRV.get('reality_read') and gdef:
+                    _rwb = SRV['reality_read'](bytes(gdef)) or {}
+            except Exception:
+                _rwb = {}
+            _rwv = dict(_rwb); _rwv.update({k: v for k, v in overrides.items() if k.startswith('rw_')})
+            rw_on = bool(overrides.get('rw_enabled'))
+            rw_edited = ' &bull; <span style="color:#c60;">edited</span>' if 'rw_enabled' in overrides else ''
+            def _rwi(key, dflt=''):
+                v = _rwv.get(key, dflt)
+                return hesc('' if v is None else str(v), quote=True)
+            def _rwnum(key, label, lo, hi, step=1, width=90, unit=''):
+                return ('<label style="font-size:0.85em; color:#333;">' + label + '<br>'
+                        '<input type="number" min="' + str(lo) + '" max="' + str(hi) + '" step="' + str(step) + '" '
+                        'name="s_' + key + '" value="' + _rwi(key) + '" style="width:' + str(width) + 'px; padding:6px;">'
+                        + (' <span style="color:#999;">' + unit + '</span>' if unit else '') + '</label>')
+            def _rwsel(key, label, opts):
+                cur = str(_rwv.get(key, ''))
+                h = '<label style="font-size:0.85em; color:#333;">' + label + '<br><select name="s_' + key + '" style="padding:6px;">'
+                for val, text in opts:
+                    h += '<option value="' + str(val) + '"' + (' selected' if cur == str(val) else '') + '>' + hesc(text) + '</option>'
+                return h + '</select></label>'
+            _row = '<div style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin:8px 0;">'
+            # the client's time spinners are LOGARITHMIC: the Time= value in WindParam is an exponent N
+            # and the time is 2^N milliseconds (FUN_00728330: `shl esi, cl` then /3,600,000 for the
+            # 'Nh Mm' label) - so the choices are powers of two, 4 s .. 18.6 h.
+            def _rwdur(n):
+                sec = (1 << n) / 1000.0
+                if sec < 60: return '%d s' % round(sec)
+                if sec < 3600: return '%.1f min' % (sec / 60)
+                return '%dh %02dm' % (int(sec // 3600), int((sec % 3600) // 60))
+            _rwtimes = [(n, _rwdur(n)) for n in range(12, 27)]
+            for _tk in ('rw_wind_rot_time', 'rw_wind_osc_time'):
+                try:
+                    if _rwv.get(_tk) not in (None, '') and not (12 <= int(_rwv[_tk]) <= 26):
+                        _rwv[_tk] = max(12, min(26, int(_rwv[_tk])))
+                except (TypeError, ValueError):
+                    pass
+            _tzopts = [(m, ('UTC' if m == 0 else 'UTC%+03d:%02d' % (int(m / 60), abs(m) % 60))) for m in range(-720, 841, 30)]
+            if _rwv.get('rw_tz') not in (None, '') and int(_rwv.get('rw_tz')) not in [m for m, _ in _tzopts]:
+                _tzopts.append((int(_rwv.get('rw_tz')), 'UTC%+d min' % int(_rwv.get('rw_tz'))))
+            reality_html = (
+                '<label style="display:block; margin:12px 0; font-weight:bold;">'
+                '<input type="checkbox" name="s_rw_enabled" value="1"' + (' checked' if rw_on else '') +
+                '> Override the arena\'s date, time and weather' + rw_edited + '</label>'
+                '<div style="color:#666; font-size:0.85em; margin:4px 0;">Date &amp; time</div>'
+                + _row + _rwnum('rw_day', 'Day', 1, 31) + _rwnum('rw_month', 'Month', 1, 12)
+                + _rwnum('rw_year', 'Year', 1900, 2000, 1, 90) + _rwnum('rw_hour', 'Hour', 0, 23)
+                + _rwnum('rw_minute', 'Minute', 0, 59) + _rwsel('rw_tz', 'Time zone', _tzopts) + '</div>'
+                + _row + _rwnum('rw_time_speed', 'Time speed', 0, 100, 0.1, 90, 'x')
+                + _rwnum('rw_night_speed', 'Night speed', 0, 100, 0.1, 90, 'x')
+                + _rwnum('rw_lat', 'Latitude', -90, 90, 0.01, 100, '&deg; N (negative = S)')
+                + _rwnum('rw_lon', 'Longitude', -180, 180, 0.01, 100, '&deg; E (negative = W)') + '</div>'
+                '<div style="color:#666; font-size:0.85em; margin:10px 0 4px;">Wind &mdash; speeds in m/s (the game shows mph: 2.0 m/s = 4.5 mph). Constant uses speed + direction; Const. rotating uses speed + rotation time; Oscill. rotating uses min/max speed + oscillation time + rotation time. The times are the game&#39;s own spinner steps (powers of two).</div>'
+                + _row + _rwsel('rw_wind_type', 'Wind', [(0, 'Constant'), (1, 'Const. rotating'), (2, 'Oscill. rotating')])
+                + _rwnum('rw_wind_speed', 'Speed', 0, 60, 0.1, 80, 'm/s') + _rwnum('rw_wind_dir', 'Direction', 0, 359, 1, 80, 'deg')
+                + _rwsel('rw_wind_rot_time', 'Dir. rotation time', _rwtimes) + '</div>'
+                + _row + _rwnum('rw_wind_min', 'Oscill. min speed', 0, 60, 0.1, 80, 'm/s')
+                + _rwnum('rw_wind_max', 'Oscill. max speed', 0, 60, 0.1, 80, 'm/s')
+                + _rwsel('rw_wind_osc_time', 'Oscillation time', _rwtimes) + '</div>'
+                '<div style="color:#666; font-size:0.85em; margin:10px 0 4px;">Clouds</div>'
+                + _row + _rwsel('rw_clouds_type', 'Clouds', [(0, 'No clouds'), (1, 'Cumulus'), (2, 'Stratus')])
+                + _rwnum('rw_clouds_density', 'Density', 0, 100, 1, 80, '%')
+                + _rwnum('rw_clouds_min', 'Min. height', 0, 20000, 1, 90, 'm') + _rwnum('rw_clouds_max', 'Max. height', 0, 20000, 1, 90, 'm')
+                + '<label style="font-size:0.85em; color:#333;"><input type="checkbox" name="s_rw_rain" value="1"'
+                + (' checked' if str(_rwv.get('rw_rain', 0)) in ('1', 'True') else '') + '> Rain'
+                + ' <span style="color:#999;">(the game only allows rain with Stratus clouds)</span></label></div>'
+                # per-type field enabling, mirroring the client's own dialog: Constant = speed + direction;
+                # Const. rotating = speed + rotation time; Oscill. rotating = min/max + oscillation + rotation
+                '<script>(function(){var f=document.forms[0];function u(){var t=f.s_rw_wind_type.value;'
+                'var on={s_rw_wind_speed:t!="2",s_rw_wind_dir:t=="0",s_rw_wind_rot_time:t!="0",'
+                's_rw_wind_min:t=="2",s_rw_wind_max:t=="2",s_rw_wind_osc_time:t=="2",s_rw_rain:f.s_rw_clouds_type.value=="2"};'
+                'for(var k in on){var e=f[k];if(e){e.disabled=!on[k];e.style.opacity=on[k]?"1":"0.45";}}}'
+                'f.s_rw_wind_type.addEventListener("change",u);f.s_rw_clouds_type.addEventListener("change",u);'
+                'f.addEventListener("submit",function(){for(var i=0;i<f.elements.length;i++)f.elements[i].disabled=false;});u();})();</script>')
             # FIGHTERS ONLY (v391): opt-in checkbox. The game server hides every non-fighter
             # (bombers, attackers, transports - the BOMBER_PLANE_IDS scoring classification)
             # via the same camp-7/byte0 mechanism as the war-date filter.
@@ -2462,6 +2542,12 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>War date (plane era)</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to restrict this arena to aircraft that had entered service by the date below, and push that date into the arena so the client shows it too (e.g. a 1943 arena hides 1944+ planes). Leave unticked for no restriction (all planes &mdash; today's behaviour). A stopgap for standing arenas; takes effect the next time the arena is entered.</p>
                     {wardate_html}
+                    <h3>Date, time &amp; weather</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">What the client shows read-only under
+                    Options &rarr; Misc: the arena's date and clock, time zone, time and night speed, position on the
+                    globe, wind, clouds and rain. Untick to keep the arena template's own values. Takes effect the
+                    next time the arena is entered (a client that stays in the arena keeps the old sky).</p>
+                    {reality_html}
                     <h3>Fighters only</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
                     {fighters_html}
@@ -3852,6 +3938,27 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             settings['war_enabled'] = 1 if qs.get('s_war_enabled', [''])[0].strip() else 0
             # FIGHTERS ONLY (v391): checkbox only posts when ticked; absence means off.
             settings['fighters_only'] = 1 if qs.get('s_fighters_only', [''])[0].strip() else 0
+            # DATE, TIME & WEATHER (v948f5): checkbox + the rw_* fields; values stored whether or not the
+            # override is on, so toggling it back on remembers them. Blank fields are left out (the
+            # game server keeps the template's value for those).
+            settings['rw_enabled'] = 1 if qs.get('s_rw_enabled', [''])[0].strip() else 0
+            for _rk, _lo, _hi, _isf in (('rw_day', 1, 31, 0), ('rw_month', 1, 12, 0), ('rw_year', 1900, 2000, 0),
+                                        ('rw_hour', 0, 23, 0), ('rw_minute', 0, 59, 0), ('rw_tz', -720, 840, 0),
+                                        ('rw_time_speed', 0, 100, 1), ('rw_night_speed', 0, 100, 1),
+                                        ('rw_lat', -90, 90, 1), ('rw_lon', -180, 180, 1),
+                                        ('rw_wind_type', 0, 2, 0), ('rw_wind_speed', 0, 60, 1), ('rw_wind_dir', 0, 359, 0),
+                                        ('rw_wind_rot_time', 12, 26, 0), ('rw_wind_min', 0, 60, 1), ('rw_wind_max', 0, 60, 1),
+                                        ('rw_wind_osc_time', 12, 26, 0), ('rw_clouds_type', 0, 2, 0),
+                                        ('rw_clouds_density', 0, 100, 0), ('rw_clouds_min', 0, 20000, 0), ('rw_clouds_max', 0, 20000, 0)):
+                _rv = qs.get('s_' + _rk, [''])[0].strip()
+                if _rv == '':
+                    continue
+                try:
+                    _rf = float(_rv)
+                    settings[_rk] = round(max(_lo, min(_hi, _rf)), 3) if _isf else int(round(max(_lo, min(_hi, _rf))))
+                except ValueError:
+                    pass
+            settings['rw_rain'] = 1 if qs.get('s_rw_rain', [''])[0].strip() else 0
             # AIRCRAFT PER TEAM (v932f5): the grid posts pt_<slot>_<camp>=1 for every tick. Store only
             # the planes whose tick set differs from the server's default nation table; [] = hidden.
             # The grid is always on the page (pt_present), so a save without it keeps nothing stale.
@@ -4225,7 +4332,9 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      tail_fields=None, get_logs_fn=None, exec_console_fn=None, log_dir=None,
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
-                     server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None):
+                     server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None,
+                     reality_read_fn=None):
+    SRV['reality_read'] = reality_read_fn   # v948f5: date/time/weather editor defaults
     SRV['plane_roster'] = plane_roster_fn   # v932f5: () -> [(slot, name, default_camp, is_bomber, year)]
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console

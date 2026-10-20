@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v947f5'
+VERSION = 'v948f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3322,6 +3322,232 @@ def apply_war_date(d, day, month, year):
     d[off + 2] = year & 0xff; d[off + 3] = (year >> 8) & 0xff
     return off, (od, om, oy)
 
+# --- v948f5 REALITY & WEATHER (web arena editor -> GAME_DEF [Reality] / [Weather]) ----------
+# The client's Options > Misc page (date, time, time zone, time/night speed, latitude, longitude,
+# wind, clouds, rain) is READ-ONLY for a player - those are the arena's GAME_DEF values. Layout,
+# from the deserialiser FUN_0057bee0 right after the Script cstring that _gamedef_date_offset
+# stops at (verified on room 49's blob, bytes 0x197..0x1cf of the 1196-byte struct):
+#   day u8 | month u8 | year u16 | hour u8 | minute u8 | TimeZone u16 (minutes + 1440: the reader
+#   does `sub edx, 0x5a0` @0x57c341) | TimeSpeed f32 | NightSpeed f32 | Latitude f32 | Longitude
+#   f32 | WindName cstr | WindParam cstr | CloudsType u8 (0 none, 1 Cumulus, 2 Stratus) |
+#   CloudsDensity u8 (%) | CloudsMinHeight u16 (m) | CloudsMaxHeight u16 (m)
+# Rain is bit 0x04 of the packed flag byte at len-52 (the one that also carries ShowGroundObjects
+# 0x08 - FUN_0057bee0 @0x57efee -> GAME_DEF+0x19c, printed as ' Rain=%s').
+# WindName / WindParam come from the client's own weather dialog (WriteWindSettings @0x7287a2):
+#   type 0 'Constant'        '(Speed=%g,Dir=%d)'                     speed m/s, direction deg
+#   type 1 'RotateConstant'  '(Speed=%g,Time=%d)'                     'Const. rotating', dir.rot.time s
+#   type 2 'Rotate'          'Speed(Min=%g,Max=%g,Time=%d),Rotate(Time=%d)'  'Oscill. rotating'
+#   Time= values are EXPONENTS: the dialog's time spinner holds N and the time is 2^N ms
+#   (FUN_00728330 `shl esi, cl`; N=20 -> 17.5 min, 24 -> 4h 40m; Alon's 600 showed as 4h 39m =
+#   2^(600 mod 32)). The web page offers N = 12..26.
+#   (names per the type->name switch FUN_004f4260: 1 -> 'RotateConstant', 2 -> 'Rotate'. The first
+#   cut had the two swapped - Alon 10-21 01:36: 'Const. rotating' came up as 'Oscill. rotating' with
+#   0.0...0.0.) Rain: the client's dialog only enables the Rain box when CloudsType == 2 (Stratus),
+#   FUN_00728a30 `cmp [gd+0x18c], 2` - with Cumulus the box is greyed and shows unchecked whatever
+#   the bit says, so the web page says so and rain is only meaningful with Stratus.
+# (the dialog shows speed in mph = m/s x 2.237). The two strings are length-changing, which is
+# fine here for the same reason as the password: the struct is recompressed at the end and every
+# later patch re-walks it.
+REALITY_ENABLED = True
+WIND_TYPE_NAMES = ('Constant', 'RotateConstant', 'Rotate')
+CLOUD_TYPE_NAMES = ('No clouds', 'Cumulus', 'Stratus')
+REALITY_KEYS = ('rw_day', 'rw_month', 'rw_year', 'rw_hour', 'rw_minute', 'rw_tz', 'rw_time_speed',
+                'rw_night_speed', 'rw_lat', 'rw_lon', 'rw_wind_type', 'rw_wind_speed', 'rw_wind_dir',
+                'rw_wind_rot_time', 'rw_wind_min', 'rw_wind_max', 'rw_wind_osc_time',
+                'rw_clouds_type', 'rw_clouds_density', 'rw_clouds_min', 'rw_clouds_max', 'rw_rain')
+
+def _gamedef_reality_offsets(d):
+    """Offsets of the [Reality]/[Weather] fields in a DECOMPRESSED GAME_DEF (see above), or None
+    when the bytes there do not look like them."""
+    try:
+        n = len(d)
+        p = _gamedef_date_offset(d)
+        if p is None or p + 24 > n:
+            return None
+        o = {'day': p, 'month': p + 1, 'year': p + 2, 'hour': p + 4, 'minute': p + 5, 'tz': p + 6}
+        day, month = d[p], d[p + 1]
+        year = d[p + 2] | (d[p + 3] << 8)
+        hour, minute = d[p + 4], d[p + 5]
+        tzraw = d[p + 6] | (d[p + 7] << 8)
+        if not (1 <= day <= 31 and 1 <= month <= 12 and 1900 <= year <= 2000
+                and hour <= 23 and minute <= 59 and 0 <= tzraw <= 2880):
+            return None
+        p += 8
+        o['time_speed'] = p; o['night_speed'] = p + 4; o['lat'] = p + 8; o['lon'] = p + 12
+        for k in ('time_speed', 'night_speed', 'lat', 'lon'):
+            v = struct.unpack_from('<f', d, o[k])[0]
+            if v != v or abs(v) > 1e6:
+                return None
+        p += 16
+        e = d.index(0, p); o['wind_name'] = (p, e); p = e + 1
+        e = d.index(0, p); o['wind_param'] = (p, e); p = e + 1
+        if p + 6 > n:
+            return None
+        o['clouds_type'] = p; o['clouds_density'] = p + 1; o['clouds_min'] = p + 2; o['clouds_max'] = p + 4
+        if d[p] > 2 or d[p + 1] > 100:
+            return None
+        o['rain'] = (n - 52) if _gamedef_tail_ok(d) else None
+        return o
+    except Exception:
+        return None
+
+def parse_wind_param(wname, wparam):
+    """{'type', 'speed', 'dir', 'rot_time', 'min', 'max', 'osc_time'} from the two cstrings."""
+    r = {'type': 0, 'speed': 2.0, 'dir': 0, 'rot_time': 0, 'min': 0.0, 'max': 0.0, 'osc_time': 0}
+    try:
+        r['type'] = WIND_TYPE_NAMES.index(wname) if wname in WIND_TYPE_NAMES else 0
+        nums = {k.lower(): v for k, v in re.findall(r'([A-Za-z]+)=([-0-9.]+)', wparam or '')}
+        if r['type'] == 2:
+            r['min'] = float(nums.get('min', 0)); r['max'] = float(nums.get('max', 0))
+            times = re.findall(r'Time=([-0-9.]+)', wparam or '')
+            r['osc_time'] = int(float(times[0])) if times else 0
+            r['rot_time'] = int(float(times[1])) if len(times) > 1 else 0
+            r['speed'] = r['max']
+        else:
+            r['speed'] = float(nums.get('speed', 2.0))
+            r['dir'] = int(float(nums.get('dir', 0)))
+            r['rot_time'] = int(float(nums.get('time', 0)))
+    except Exception:
+        pass
+    return r
+
+def wind_param_string(wtype, speed, wdir, rot_time, vmin, vmax, osc_time):
+    """The WindParam cstring the client's own dialog would write for this wind."""
+    wtype = int(wtype)
+    if wtype == 1:
+        return '(Speed=%g,Time=%d)' % (float(speed), int(rot_time))
+    if wtype == 2:
+        return 'Speed(Min=%g,Max=%g,Time=%d),Rotate(Time=%d)' % (float(vmin), float(vmax), int(osc_time), int(rot_time))
+    return '(Speed=%g,Dir=%d)' % (float(speed), int(wdir) % 360)
+
+def extract_reality_from_gamedef(game_def_raw):
+    """Current [Reality]/[Weather] values of a stored (compressed) GAME_DEF as a {rw_*} dict, or
+    None. Read-only - the web editor shows them as the defaults."""
+    d = decompress_gamedef(game_def_raw)
+    if not d:
+        return None
+    o = _gamedef_reality_offsets(d)
+    if o is None:
+        return None
+    try:
+        r = {'rw_day': d[o['day']], 'rw_month': d[o['month']],
+             'rw_year': d[o['year']] | (d[o['year'] + 1] << 8),
+             'rw_hour': d[o['hour']], 'rw_minute': d[o['minute']],
+             'rw_tz': (d[o['tz']] | (d[o['tz'] + 1] << 8)) - 1440,
+             'rw_time_speed': round(struct.unpack_from('<f', d, o['time_speed'])[0], 3),
+             'rw_night_speed': round(struct.unpack_from('<f', d, o['night_speed'])[0], 3),
+             'rw_lat': round(struct.unpack_from('<f', d, o['lat'])[0], 4),
+             'rw_lon': round(struct.unpack_from('<f', d, o['lon'])[0], 4),
+             'rw_clouds_type': d[o['clouds_type']], 'rw_clouds_density': d[o['clouds_density']],
+             'rw_clouds_min': d[o['clouds_min']] | (d[o['clouds_min'] + 1] << 8),
+             'rw_clouds_max': d[o['clouds_max']] | (d[o['clouds_max'] + 1] << 8),
+             'rw_rain': (1 if (d[o['rain']] & 0x04) else 0) if o['rain'] is not None else None}
+        wn = bytes(d[o['wind_name'][0]:o['wind_name'][1]]).decode('latin1')
+        wp = bytes(d[o['wind_param'][0]:o['wind_param'][1]]).decode('latin1')
+        w = parse_wind_param(wn, wp)
+        r.update({'rw_wind_type': w['type'], 'rw_wind_speed': w['speed'], 'rw_wind_dir': w['dir'],
+                  'rw_wind_rot_time': w['rot_time'], 'rw_wind_min': w['min'], 'rw_wind_max': w['max'],
+                  'rw_wind_osc_time': w['osc_time'], 'rw_wind_name': wn, 'rw_wind_param': wp})
+        return r
+    except Exception:
+        return None
+
+def apply_reality_settings(d, settings):
+    """In-place patch of the [Reality]/[Weather] fields from a per-arena settings dict (the web
+    editor's rw_* keys; only keys present are written). Returns a list of 'field old->new' strings
+    (empty = nothing changed), or None when the fields were not located."""
+    if not REALITY_ENABLED or not isinstance(settings, dict) or not settings.get('rw_enabled'):
+        return []
+    o = _gamedef_reality_offsets(d)
+    if o is None:
+        return None
+    changes = []
+    def _i(k, lo, hi):
+        v = settings.get(k)
+        if v in (None, ''):
+            return None
+        try:
+            return max(lo, min(hi, int(round(float(v)))))
+        except (TypeError, ValueError):
+            return None
+    def _f(k, lo, hi):
+        v = settings.get(k)
+        if v in (None, ''):
+            return None
+        try:
+            return max(lo, min(hi, float(v)))
+        except (TypeError, ValueError):
+            return None
+    def _set_u8(k, key, lo, hi):
+        v = _i(key, lo, hi)
+        if v is not None and d[o[k]] != v:
+            changes.append(f'{k} {d[o[k]]}->{v}'); d[o[k]] = v
+    def _set_u16(k, key, lo, hi, bias=0):
+        v = _i(key, lo, hi)
+        if v is None:
+            return
+        raw = v + bias
+        old = (d[o[k]] | (d[o[k] + 1] << 8)) - bias
+        if old != v:
+            changes.append(f'{k} {old}->{v}')
+            d[o[k]] = raw & 0xff; d[o[k] + 1] = (raw >> 8) & 0xff
+    def _set_f32(k, key, lo, hi):
+        v = _f(key, lo, hi)
+        if v is None:
+            return
+        old = struct.unpack_from('<f', d, o[k])[0]
+        if abs(old - v) > 1e-6:
+            changes.append(f'{k} {old:g}->{v:g}'); struct.pack_into('<f', d, o[k], v)
+    # the strings first (length-changing): rebuild the offsets afterwards
+    cur = extract_reality_from_gamedef_struct(d, o)
+    wt = _i('rw_wind_type', 0, 2)
+    if wt is not None or any(settings.get(k) not in (None, '') for k in
+                             ('rw_wind_speed', 'rw_wind_dir', 'rw_wind_rot_time', 'rw_wind_min', 'rw_wind_max', 'rw_wind_osc_time')):
+        wt = cur['rw_wind_type'] if wt is None else wt
+        sp = _f('rw_wind_speed', 0.0, 60.0); sp = cur['rw_wind_speed'] if sp is None else sp
+        wd = _i('rw_wind_dir', 0, 359); wd = cur['rw_wind_dir'] if wd is None else wd
+        rt = _i('rw_wind_rot_time', 1, 31); rt = cur['rw_wind_rot_time'] if rt is None else rt
+        mn = _f('rw_wind_min', 0.0, 60.0); mn = cur['rw_wind_min'] if mn is None else mn
+        mx = _f('rw_wind_max', 0.0, 60.0); mx = cur['rw_wind_max'] if mx is None else mx
+        ot = _i('rw_wind_osc_time', 1, 31); ot = cur['rw_wind_osc_time'] if ot is None else ot
+        new_name = WIND_TYPE_NAMES[wt].encode('ascii')
+        new_param = wind_param_string(wt, sp, wd, rt, mn, mx, ot).encode('ascii')
+        s0, e0 = o['wind_param']
+        if bytes(d[s0:e0]) != new_param:
+            changes.append(f'WindParam {bytes(d[s0:e0]).decode("latin1")!r}->{new_param.decode()!r}')
+            d[s0:e0] = new_param
+        s1, e1 = o['wind_name']
+        if bytes(d[s1:e1]) != new_name:
+            changes.append(f'WindName {bytes(d[s1:e1]).decode("latin1")!r}->{new_name.decode()!r}')
+            d[s1:e1] = new_name
+        o = _gamedef_reality_offsets(d)
+        if o is None:
+            return changes
+    _set_u8('day', 'rw_day', 1, 31); _set_u8('month', 'rw_month', 1, 12)
+    _set_u16('year', 'rw_year', 1900, 2000)
+    _set_u8('hour', 'rw_hour', 0, 23); _set_u8('minute', 'rw_minute', 0, 59)
+    _set_u16('tz', 'rw_tz', -720, 840, bias=1440)
+    _set_f32('time_speed', 'rw_time_speed', 0.0, 100.0); _set_f32('night_speed', 'rw_night_speed', 0.0, 100.0)
+    _set_f32('lat', 'rw_lat', -90.0, 90.0); _set_f32('lon', 'rw_lon', -180.0, 180.0)
+    _set_u8('clouds_type', 'rw_clouds_type', 0, 2); _set_u8('clouds_density', 'rw_clouds_density', 0, 100)
+    _set_u16('clouds_min', 'rw_clouds_min', 0, 20000); _set_u16('clouds_max', 'rw_clouds_max', 0, 20000)
+    rain = _i('rw_rain', 0, 1)
+    if rain is not None and o.get('rain') is not None:
+        old = 1 if (d[o['rain']] & 0x04) else 0
+        if old != rain:
+            changes.append(f'Rain {old}->{rain}')
+            d[o['rain']] = (d[o['rain']] | 0x04) if rain else (d[o['rain']] & ~0x04 & 0xff)
+    return changes
+
+def extract_reality_from_gamedef_struct(d, o):
+    """Like extract_reality_from_gamedef but on an already-decompressed struct + its offsets."""
+    wn = bytes(d[o['wind_name'][0]:o['wind_name'][1]]).decode('latin1')
+    wp = bytes(d[o['wind_param'][0]:o['wind_param'][1]]).decode('latin1')
+    w = parse_wind_param(wn, wp)
+    return {'rw_wind_type': w['type'], 'rw_wind_speed': w['speed'], 'rw_wind_dir': w['dir'],
+            'rw_wind_rot_time': w['rot_time'], 'rw_wind_min': w['min'], 'rw_wind_max': w['max'],
+            'rw_wind_osc_time': w['osc_time']}
+
 def war_date_from_settings(arena_settings):
     """(enabled, day, month, year) from a per-arena settings dict, or (False, ...) if the arena
     hasn't opted in. Defaults day/month to 1/1 when only a year is set."""
@@ -3745,6 +3971,16 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             log('CARGO', f'CargoPercent @+{_cr2[0]}: {_cr2[1]} -> {_cp}')
         else:
             log('CARGO', f'CargoPercent: not located or already {_cp}; left as-is')
+    # v948f5 REALITY & WEATHER (web editor): date/time/zone/speeds/position, wind, clouds, rain.
+    # Runs before the war date so an enabled war date still wins the date bytes.
+    try:
+        _rw = apply_reality_settings(d, arena_settings)
+        if _rw is None:
+            log('GAMEDEF212', 'reality/weather: fields not located in this GAME_DEF - left as-is')
+        elif _rw:
+            log('GAMEDEF212', 'reality/weather: ' + '; '.join(_rw))
+    except Exception:
+        logx('GAMEDEF212', 'reality/weather patch failed')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -10512,21 +10748,30 @@ RELAY_CREATE_SETTLE_S = 0.5   # seconds to hold telemetry to a peer after firing
 #   [28..29] St  (owner ClientNumber, u16)   [30..31] ONumber (u16)   [32..40] 0
 # Delivered inside a msg-13 batch (real host: in 13 { 62, 62, 2 }).
 SEND_CREATE_OBJECT = True    # emit msg 2 so the remote plane exists (relay then drives it)
+PEER_CREATE_PAYLOAD = True   # v948f5: peer creates carry the owner's payload words (False = the old six zeros)
 PLANE_OBJ_TYPE     = 1       # object Type (HeaderSize 28). If CTD / no plane, try 8.
 PLANE_TYPE_ID      = 1       # PLN_INFO plane id - TUNE: must be a plane in the loaded set.
 DEFAULT_SKIN       = 0
 
-def build_object_record(st, onumber, nation, plane_type, pos, skin):
+def build_object_record(st, onumber, nation, plane_type, pos, skin, payload24=None):
     """41-byte PLANE object record (Type 1/8, HeaderSize 28 + 13-byte trailer).
     tag=0x80|Type|nation @[0] (bit7=human-owned: name tag + score binding - v202),
-    PLN_INFO id @[1], skin @[3], 6xfloat32 pos/orient @[4:28],
-    St (owner ClientNumber u16) @[28], ONumber u16 @[30]."""
+    PLN_INFO id @[1], skin @[3], the 24-byte ORDNANCE PAYLOAD @[4:28] (v948f5 - see below),
+    St (owner ClientNumber u16) @[28], ONumber u16 @[30].
+    v948f5 [BYTES 4..27 ARE THE PAYLOAD, NOT A POSITION]: the ctor (FUN_004f26b0 @0x4f27d3)
+    copies record[4:28] straight into NetPlane+0xaf0..+0xb04 - the six payload words that
+    PLANE::LoadPayload turns into the pylons - and the owner's own record builder
+    (FUN_004c8840) fills them from its +0xaf0. We sent six 0.0 floats, so every peer plane was
+    born EMPTY; the msg-73 relay then hung the real rockets/bombs on it but FUN_004c8420 puts
+    the create-time words back into +0xaf0 afterwards -> '4 rocks[i] PlnID:57; 1, FG_BoogDog;
+    iPLi:0' once a second on every peer (3,227 lines in messages78). payload24 = the owner's
+    words from its out-4 (pl[11:35]) or its latest msg 73 (block[0xd:0x25])."""
     rec = bytearray(41)
     rec[0] = 0x80 | (PLANE_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)   # v202: bit7 = HUMAN-owned
     rec[1] = plane_type & 0xff
     rec[3] = skin & 0xff
-    px, py, pz = pos
-    struct.pack_into('<6f', rec, 4, px, py, pz, 0.0, 0.0, 0.0)   # position + orientation
+    if PEER_CREATE_PAYLOAD and payload24 and len(payload24) >= 24:
+        rec[4:28] = bytes(payload24[:24])
     struct.pack_into('<H', rec, 28, st & 0xffff)                 # St (owner ClientNumber)
     struct.pack_into('<H', rec, 30, onumber & 0xffff)            # ONumber
     return bytes(rec)
@@ -10547,14 +10792,15 @@ def build_client_record(st, player_index, name, squadron=0):
     return bytes(rec)
 
 def build_create_object_2(st, onumber, nation, player_index=0, name='Player',
-                          plane_type=None, pos=None, skin=DEFAULT_SKIN, with_client=True, squadron=0):
+                          plane_type=None, pos=None, skin=DEFAULT_SKIN, with_client=True, squadron=0,
+                          payload24=None):
     """msg 2 CREATE-OBJECT. First spawn = 83-byte [0x02]+client(41)+object(41) (the real
     'in 2'83'): registers the owner NET::CLIENT station THEN the plane bound to it.
     Respawn (with_client=False) = 42-byte [0x02]+object(41) ('in 2'42'). The 0x02 msg-id
     IS the handler's skip byte - NO extra byte (an extra 0 -> tag 0 -> client-create path
     -> bounds-crash; that was the v187 first-attempt CTD on Test1)."""
     pt = PLANE_TYPE_ID if plane_type is None else plane_type
-    obj = build_object_record(st, onumber, nation, pt, pos or (0.0, 0.0, 0.0), skin)
+    obj = build_object_record(st, onumber, nation, pt, pos or (0.0, 0.0, 0.0), skin, payload24=payload24)
     body = bytes([0x02])
     if with_client:
         body += build_client_record(st, player_index, name, squadron=squadron)
@@ -12699,13 +12945,16 @@ TC_MAX_TANKS_PER_CAMP = 24      # v860f5: NO LONGER ENFORCED
 #     class 0,1,2,11,12,13 -> player types (string 0x27 'unknown plane' when no pilot resolves)
 #     class 3,4,5          -> string 0x28 = 'anti-aircraft'   <- why tank kills read 'Anti-aircraft'
 #     class 7 -> 0x29   class 9 -> 0x2a   class 10,14 -> 0x44   class 6 -> 0x119   class 8 -> 0x11d   class 15 -> 0x112
-# The words themselves live in TXT\*.str inside the PRF-packed Data0N.all, which no tool here opens, so
-# which of the six is 'tank' is settled in game: `tc ppt <tank> <soldier> <aa>` switches the class live,
-# a tank-vs-tank kill prints the word. 9 (0x2a, the next classic id after plane/anti-aircraft) is the
-# first candidate; then 15, 6, 8 (TC-era ids 0x112/0x119/0x11d), 7, 10.
-PPT_CLASS_TANK    = 9
-PPT_CLASS_SOLDIER = 7
+# v947f5: the words READ from Data00.all TXT\Texts.str (PRF reader _scratch/prf_pack.py, FileR.cpp RE):
+#     0x27 plane   0x28 anti-aircraft   0x29 tank   0x2a Train AA   0x44 ship   0x112 soldier
+#     0x119 car    0x11d submarine
+# so PPT class 7 = tank, 15 = soldier, 3/4/5 = anti-aircraft, 9 = Train AA, 6 = car, 8 = submarine,
+# 10/14 = ship. (v945 guessed 9 for the tank = 'Train AA', and soldier 7 = 'tank'.) `tc ppt` stays as
+# the live override.
+PPT_CLASS_TANK    = 7
+PPT_CLASS_SOLDIER = 15
 PPT_CLASS_AA      = 4
+PPT_CLASS_TRAINAA = 9
 TC_DEFEND_RING_M     = 220.0    # v594f5: perimeter radius floor; v596f5: the real ring is the scene's own
                                 # extent (farthest object from the centre) + TC_RING_PAD - airfields are big
 TC_RING_PAD          = 150.0
@@ -16487,7 +16736,8 @@ def send_create_object_for(src, dst, with_client=True):
                  + struct.pack('<H', src.my_obj_number & 0xFFFF)
         _obj = build_object_record(src.client_number, src.my_obj_number, (src.nation or 0),
                                    getattr(src, 'plane_type', PLANE_TYPE_ID),
-                                   (0.0, 0.0, 0.0), DEFAULT_SKIN)
+                                   (0.0, 0.0, 0.0), DEFAULT_SKIN,
+                                   payload24=src.__dict__.get('_payload24'))     # v948f5
         pkt = build_msg13(_del_raw, bytes([0x02]) + _obj)
         send_rel(dst, pkt, f'<- ATOMIC predel+create obj 0x{src.my_obj_number:04x} '
                            f'({src.current_pilot} -> {dst.current_pilot})', to=3.0)
@@ -16502,7 +16752,8 @@ def send_create_object_for(src, dst, with_client=True):
                                 player_index=src.player_index,
                                 name=(src.current_pilot or 'Player'),
                                 plane_type=getattr(src, 'plane_type', PLANE_TYPE_ID),
-                                with_client=with_client, squadron=_sqn)
+                                with_client=with_client, squadron=_sqn,
+                                payload24=src.__dict__.get('_payload24'))        # v948f5
     _form = 'client+object' if with_client else 'object-only'
     send_rel(dst, pkt, f'<- CreateObject 2 ({_form}: {src.current_pilot} St={src.client_number} '
                        f'PI={src.player_index} ONumber={src.my_obj_number} -> {dst.current_pilot})', to=3.0)
@@ -20670,6 +20921,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                                                 # -> no object created -> players invisible to each other
     s.__dict__.pop('_created_peers', None)      # respawn = new ONumber -> re-create on peers
     s.__dict__.pop('_loadout73', None)          # v849f5: the new plane sends its own loadout block
+    s.__dict__.pop('_payload24', None)          # v948f5: the new out-4 brings the new payload words
     # In-world AIRFIELD CHANGE: the client rebuilds its world and DelObject's the peers'
     # planes too (the 'Get coord for missing object N' flood) - so each peer must re-
     # advertise its object to us. Drop our addr from every peer's object-created set; the
@@ -27110,7 +27362,15 @@ PREFIXED_LOBBY_SUBS = {0xcb, 0xce, 0xd2, 0xd4, 0xd5, 0xd7, 0xd9, 0xdb, 0xdf, 0xd
     # list requests a second apart, unanswered -> blank Arenas and Squadrons pages. Every one of
     # these direct handlers reads its fields at pl[5:9]/pl[9:] of the DIRECT frame, so the
     # re-frame (drop the 4-byte prefix, release cmd) hands them exactly what they expect.
-PREFIXED_INGAME_SUBS = {0x22, 0x1a, 0x33, 0x39, 0x46, 0x2a, 0x70}
+PREFIXED_INGAME_SUBS = {0x22, 0x1a, 0x33, 0x39, 0x46, 0x2a, 0x70,
+                        0x6a, 0x69, 0x71}   # v948f5: cargo 106 / air-drop 105 / paratroop 113 (see below)
+    # v948f5 [FLOWN-IN CARGO NEVER LANDED]: Moira 10-20 16:40:22 unloaded 917 kg x3 at Front Airfield
+    # 43 - the client logged 'out 106'19' and 69 ms later 'in 106'19' + 'Unknown Type 106': the request
+    # came back as an ECHO. No CARGO line on the server. The three pick-ups that session arrived
+    # DIRECT and were answered; the drop arrived in the time-wrapper (PREFIXED) form, 0x6a was not on
+    # this list, so the re-frame skipped it, cmd stayed non-zero, and the compound fallback echoed the
+    # 'unknown inner'. Same hole for the air-drop (0x69) and the paratroop request (0x71): every
+    # prefixed copy was lost. No DROP had been logged in any run since v882. Re-framed like 0x33.
     # v869f5: the in-game requests still arriving PREFIXED with no handler for that form (online
     # 09-25..28: msg 34 nearest-enemy 757x, msg 26 map-box poll 325x, msg 57 map icons 69x, msg 70 big
     # map 20x, msg 51 object HIT 14x). Each direct handler reads the direct frame; re-framed like
@@ -27432,11 +27692,16 @@ def handle_post_auth(s, cmd, pl):
                 if _camp is not None and _t.get('camp') != _camp:
                     continue
                 _recs.append(_rec(_t['pos'][0], _t['pos'][1], _t['pos'][2] if len(_t['pos']) > 2 else 0.0, _t.get('camp', 0), _t.get('class', 131)))
-            # v946f5 [LOCOMOTIVE ON THE BIG MAP] (user 10-20: 'there has to be a locomotive icon'): the
-            # big-map record carries the unit CLASS and the client picks the icon from its class table,
-            # so the live trains go out under their locomotive class (141..145) - the glyph the client
-            # has for that class, if any, is the one we are after. The msg-26 group box cannot do it:
-            # its kind field is 3 bits (tank/fighter/bomber/destroyer/soldier/sub/lorry), no train.
+            # v946f5 [TRAINS ON THE BIG MAP] (user 10-20: 'there has to be a locomotive icon'): the
+            # live trains go out under their locomotive class (141..145). v947f5 RE of the drawer
+            # (Map.cpp FUN_0048d770): the msg-70 record is NOT drawn with a glyph at all - the class
+            # only decides plane-or-ground via the class table (0xc6e8e4, type 0/1 = aircraft) and
+            # an aircraft is two lines, anything else a small square (vtbl +0x20) in the camp colour.
+            # So this plots the train as a box like a tank. The icon atlas (JPG\MapIcons.bmp in
+            # data.q6, 64x64 DXT1, 16-px cells) has the locomotive only as the Railwaystation SCENE
+            # glyph (cell 4); moving units can only show cells 8-14 (group kinds 1..7, 14 = lorry), so
+            # trains carry the lorry glyph unless the client's atlas is patched - see change.log
+            # v947f5 'LOCOMOTIVE ICON' (_scratch/data.q6.loco.patch.json puts the loco in cell 14).
             if BIGMAP_TRAINS:
                 try:
                     _rails = rails_for(_probe_terrain_for_room(s.current_room))
@@ -27472,6 +27737,8 @@ def handle_post_auth(s, cmd, pl):
             _on = struct.unpack_from('<H', stored, 5)[0]
             if _on == getattr(s, 'my_obj_number', None):
                 s.__dict__['_loadout73'] = bytes(stored[4:])     # v849f5: kept for peers who re-create the plane
+                if len(stored) >= 4 + 0x25:
+                    s.__dict__['_payload24'] = bytes(stored[4 + 0xd:4 + 0x25])   # v948f5: latest payload words
                 _pk = build_ingame_pkt(bytes(stored[4:]))          # v847f5: exact length, as the client sent it
                 _nr = 0
                 for _p in get_sessions_in_room(s.current_room):
@@ -27991,6 +28258,12 @@ def handle_post_auth(s, cmd, pl):
                 if len(pl) >= 9:
                     s.plane_type = pl[8]
                     log('PLANE', f'{s.current_pilot} selected plane index {pl[8]} (out-4 byte[8])')
+                if len(pl) >= 35:
+                    # v948f5: out-4 = [0x04][ident u16][tag][type][state][skin][payload 24B][St u16]
+                    # (the owner's record builder FUN_004c8840 + the 2-byte tail); keep the payload
+                    # words so the peers' create carries the same ordnance (build_object_record).
+                    s.__dict__['_payload24'] = bytes(pl[11:35])
+                    log('PLANE', f'{s.current_pilot} spawn payload {bytes(pl[11:35]).hex()}')
                     # v491f5: record the pilot's last-flown plane for the 0xe4 persona restore
                     _persona_set_plane(getattr(s, 'account', None), s.current_pilot, pl[8])
                 _fire_server_confirm(s, ident=_ident)   # DIRECT out-4; double-wrapped variant caught earlier
@@ -30071,6 +30344,7 @@ threading.Thread(
             'server_py': os.path.abspath(__file__),         # v731f5: the lobby-news editor writes next to it
             'push_lobby_news_fn': push_lobby_news_all,      # v870f5: web save -> push to lobby clients
             'plane_roster_fn': plane_roster_for_web,        # v932f5: aircraft-per-team editor
+            'reality_read_fn': extract_reality_from_gamedef,   # v948f5: date/time/weather editor defaults
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()

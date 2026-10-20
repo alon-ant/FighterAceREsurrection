@@ -1,3 +1,75 @@
+v948f5 [WEB: DATE, TIME & WEATHER PER ARENA] (10-21)
+    * User 10-21 (Options > Misc screenshot): the client shows the arena's date/clock/time zone/time &
+      night speed/latitude/longitude/wind/clouds/rain READ-ONLY - they are GAME_DEF [Reality]/[Weather]
+      values. New 'Date, time & weather' section on /admin/arena_settings (checkbox + fields,
+      defaults read from the stored GAME_DEF, saved as rw_* keys in settings_json; blank = keep the
+      template's value).
+    * Layout (deserialiser FUN_0057bee0 after the Script cstring, where _gamedef_date_offset stops):
+      day u8, month u8, year u16, hour u8, minute u8, TimeZone u16 = minutes + 1440 (`sub edx,0x5a0`
+      @0x57c341), TimeSpeed/NightSpeed/Latitude/Longitude f32, WindName cstr, WindParam cstr,
+      CloudsType u8 (0 none/1 Cumulus/2 Stratus), CloudsDensity u8, CloudsMin/Max u16 m; Rain = bit
+      0x04 of the flag byte at len-52 (next to ShowGroundObjects 0x08). WindName/WindParam are the
+      client dialog's own strings (WriteWindSettings @0x7287a2): 'Constant' '(Speed=%g,Dir=%d)',
+      'Rotate' '(Speed=%g,Time=%d)', 'RotateConstant' 'Speed(Min=%g,Max=%g,Time=%d),Rotate(Time=%d)';
+      speeds in m/s (the dialog shows mph). The two strings are spliced (length-changing, recompressed
+      like the password/name). apply_reality_settings runs in build_lz_gamedef before the war date,
+      so an enabled war date still wins the date bytes. Kill switch REALITY_ENABLED.
+    * Verified offline on the local rooms: every blob reads 22-6-1941 11:00 UTC+2, 1.0/4.0, 48.8N 2.4E,
+      Constant 2.0 m/s, Cumulus 20% 1000-2000 m, no rain (= the client's printed dump); a full patch
+      round-trips and the [TC] walk still lands after the length change.
+    * First local test (Alon 10-21 01:36, local v948): date/time/zone/speeds/position/clouds density all
+      arrived; wind came up 'Oscill. rotating 0.0...0.0' and Rain stayed off. Two findings: (1) the
+      type->name switch FUN_004f4260 is 1 -> 'RotateConstant' (Const. rotating), 2 -> 'Rotate' (Oscill.
+      rotating) - the first cut had them swapped, so the client read a Const.-rotating param string
+      with the oscillating parser; fixed. (2) the client's dialog only enables the Rain box with
+      Stratus clouds (FUN_00728a30: `cmp [gd+0x18c], 2`) - with Cumulus it is greyed and unchecked
+      whatever the bit says; the page now says so. The rain bit itself lands (0xa0 -> 0xa4 at len-52).
+    * Second test (01:46): wind type and rain right; dir.rot.time showed 4h 39m for '600'. The client's
+      time spinners are LOGARITHMIC - WindParam Time=N means 2^N milliseconds (FUN_00728330 `shl esi,
+      cl`, then /3,600,000 for the 'Nh Mm' label; 600 mod 32 = 24 -> 2^24 ms = 4h 39m). The page now
+      offers the rotation/oscillation times as the spinner's own steps (N = 12..26: 4 s .. 18h 38m).
+    * Verify: Const. rotating shows speed 4.5 mph / dir.rot.time as chosen for 2.0 m/s / 600 s; Stratus +
+      Rain ticked shows rain; the server log has 'GAMEDEF212 reality/weather: ...' at DEBUG level.
+
+v948f5 [PEER PLANES BORN EMPTY: '4 rocks[i] ... iPLi:0' ONCE A SECOND] (10-20)
+    * Chuckdiver's messages78/79 and Alon's messages36 all print 'ERROR: 4 rocks[i] PlnID:57; 1,
+      FG_BoogDog; iPLi:0' every second while BoogDog is in range (3,227 lines in one session).
+      FUN_004ac160 checks a station's rocket count against the plane's payload words at +0xaf0;
+      iPLi = those words = 0.
+    * Cause (RE): the create record's bytes 4..27 are not 'position/orientation' - the NetPlane ctor
+      (FUN_004f26b0 @0x4f27d3) copies them into +0xaf0 and PLANE::LoadPayload builds the pylons
+      from them; the owner's own record builder (FUN_004c8840) fills them from its +0xaf0. We sent
+      six 0.0 floats, so every peer plane was created with no ordnance. The v844 msg-73 relay then
+      hung the real rockets on it, but FUN_004c8420 restores the create-time words to +0xaf0 after
+      LoadPayload -> stations say 4 rockets, +0xaf0 says none -> the error on every weapon-state
+      update. (Only pilots with ordnance trip it - BoogDog's rockets.)
+    * Fix: keep the owner's payload words (out-4 pl[11:35]; refreshed from each msg 73 block[0xd:0x25])
+      as _payload24 and write them into record[4:28] of every peer create (first create and the
+      atomic predel+create). Verify: no 'rocks[i]' lines on peers after a fresh spawn; peers see the
+      bombs/rockets from the moment the plane appears (not only after the 73 arrives).
+      Peers already holding a plane created before the deploy keep the old copy until that pilot
+      respawns.
+
+v948f5 [FLOWN-IN CARGO, AIR-DROPS AND PARATROOP REQUESTS LOST IN THE PREFIXED FORM] (10-20)
+    * User 10-20 (screenshots of Front Airfield 43 at 62,BC): 'even if you fly in supplies they do
+      not restock the base'. Local messages36 16:40:22: 'EVENT Cargo has been unloaded', 'out 106'19',
+      then 'in 106'19' + 'NET::MESSAGE with Unknown Type 106' 69 ms later - the server ECHOED the drop
+      request instead of handling it; the live log has no CARGO DROP line (none in ANY run on file -
+      only PICK-UPs, which arrived direct and were answered).
+    * Cause: the time-wrapper (prefixed, cmd != 0) copy of a message is only re-framed for subs on
+      PREFIXED_REFRAME_SUBS; 0x6a (cargo 106), 0x69 (air-drop 105) and 0x71 (paratroop 113) were not
+      on it, so the sub was normalised to 0, cmd stayed set, and the compound fallback echoed the
+      'unknown inner' back to the sender (DEBUG-only logging on every step, hence invisible).
+    * Fix: the three join PREFIXED_INGAME_SUBS -> re-framed and dispatched exactly like the direct
+      form (the v869 route that fixed the prefixed msg-51 hits). Verify: a landed unload or an
+      air-drop prints the CARGO 'DROP at scene ...' line, the stores rise on the next msg-71 push, and
+      the client never logs 'Unknown Type 106'.
+    * NOT a bug - the 'not linked by trains' half: forward airfields are not rail stations, so the
+      supply model's virtual train serves them: the live log shows 'train arrived at scene 43 (camp 0)
+      from scene(s) [2, 19, 27]: +ammo 1500kg +fuel 900kg +metal 600kg' every 300 s (55 arrivals in
+      the run), and the two screenshots show fuel/ammo rising between them. The physical NetTrains
+      only run station to station.
+
 v947f5 [BOMB vs TANK, THIRD PASS: THE CRATER IS THE PROOF] (10-20)
     * User 10-20 on v946 live (run_115030 11:59:37): '910 lb didn't do anything, only hits, no kills,
       worse'. Four bombs (crater record: 4 craters at 11:59:39.5), tank hits on THREE Panthers with raws
@@ -11,6 +83,31 @@ v947f5 [BOMB vs TANK, THIRD PASS: THE CRATER IS THE PROOF] (10-20)
       67 a Panther, 84 a Tiger. The 11:59 drop replayed: 74 -> 222 (Panther dead), 35 -> 105, 17 -> 51.
       The 11:39 blast: 6 of 7. Top-ups are applied once per hit (marked 'bomb'); the log line says
       which proof fired ('BOMB blast (N tanks in 0.3s)' or 'BOMB confirmed by the crater record').
+    * [PRF ARCHIVES OPENED - 'TANK' WORD SETTLED] _scratch/prf_pack.py reads the 'PRF\x03' Data0N.all
+      archives (FileR.cpp RE: 16-byte header = magic, dirs_len, files_len, time; directory = the last
+      dirs_len+files_len bytes; everything scrambled per dword: xor 0x499602d2, swap the low two bytes,
+      ror 13; each file body scrambled on its own grid). TXT\Texts.str read directly: 0x27 plane,
+      0x28 anti-aircraft, 0x29 tank, 0x2a Train AA, 0x44 ship, 0x112 soldier, 0x119 car, 0x11d submarine.
+      So PPT class 7 = tank and 15 = soldier: PPT_CLASS_TANK 9 -> 7 (9 would have read 'Train AA'),
+      PPT_CLASS_SOLDIER 7 -> 15 (7 read 'tank' for a soldier kill). No in-game `tc ppt` hunt needed.
+    * [LOCOMOTIVE ICON - FOUND, AND A CLIENT PATCH BUILT] The map glyphs are JPG\MapIcons.bmp in
+      data.q6: a 64x64 DXT1 atlas of 16-px cells (MapIconsAlpha = the same picture, zlib-packed).
+      Cells 0-7 = scene types (Fighter Airfield, Bomber Airfield, Village, Factory, RAILWAYSTATION =
+      a steam locomotive, Port, wreck, no-entry), cells 8-14 = msg-26 group kinds 1..7 (tank, fighter,
+      bomber, destroyer, soldier, sub, lorry), cell 15 empty. The big-map (msg 70) drawer uses none of
+      them: aircraft = two lines, anything else = a square, in the camp colour (FUN_0048d770).
+      The server cannot point a MOVING unit at cell 4 (only scene objects draw cells 0-7), so the
+      locomotive goes in by a client DATA patch: _scratch/mapicons_loco.q6t = the atlas with cell 4
+      copied into the lorry cell 14 (nothing but trains is sent as kind 7), written in place into both
+      members by q6_pack repack -> _scratch/data.q6.loco (same size, verified) and reduced to a 3-region
+      byte patch _scratch/data.q6.loco.patch.json (3,860 bytes: MFT length 2 B @0x2bb4, the two texture
+      clusters @0x696530, FAT slack 2 B @0x26f745ec) + apply_q6_patch.py (--revert) for the launcher.
+      Not installed on the user's client - his call.
+    * [q6_pack.py BUG FIXED] a GSP FILE entry's record number is in the GAME's numbering; our MFT
+      walk counts the 0x80 header as three slots, so the record is f0 + 3 (NAME_REC_OFF). Every name
+      was paired with the record three slots earlier (jpg\mapicons.bmp extracted as the 128x128 hand
+      cursor disc, which is why 10-20 11:51 'found a grey disc'). Verified: data.q6 1003 vs 712
+      name/content matches, data_0006 83/83, selftest updated and passing. Backup _scratch/q6_pack.py.bak_v1.
     * Verify: a 910 lb that lands beside a Panther kills it and the log shows the crater-confirmed line
       ~2 s after the hits; cannon strafing still goes through the bands (no crater follows).
 
