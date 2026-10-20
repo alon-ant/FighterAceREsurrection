@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v944f5'
+VERSION = 'v946f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10707,6 +10707,7 @@ def _load_tank_consts():
                     _hp = None
                 if _hp is not None:
                     TANK_CLASS_HP[int(_c['class_id'])] = _hp
+        TANK_CLASS_HP.update(TANK_CLASS_HP_OVERRIDE)             # v946f5
         if TANK_CLASS_HP:
             log('TANK', 'class hit points: ' + ', '.join(f'{k}={int(v)}' for k, v in sorted(TANK_CLASS_HP.items())))
         if TANK_CLASS_MAX_MPS:
@@ -11690,7 +11691,12 @@ def _tank_note_client_delete(s, pl):
 # tank dies: score + ai_tanks counter to the killer, chat line, TANK_WRECK_S of flags bit0
 # (the 'hold fire' state - a dead tank stops shooting) and then a bare msg-3 delete.
 TANK_CLASS_HP     = {}             # class_id -> hit points (from tank_tables.json phys f38)
-TANK_FALLBACK_HP  = 1000.0
+TANK_FALLBACK_HP  = 200.0          # v946f5: was 1000 - the Panther (class 134) carries 10 in its record's hit-point
+                                   # field, the 100..5000 sanity filter rejected it and every GE Panther got the
+                                   # 1000 HP fallback: 4-7x any other tank (Sherman/Cromwell/T-34-85 150, T-34 200,
+                                   # Tiger 250, JP 100). Alon 10-20 11:39, 910 lb near-misses on a Panther column:
+                                   # raw 335 -> 502 of 1000, 127 -> 190, 'too many tanks survive'. Between T-34 and Tiger.
+TANK_CLASS_HP_OVERRIDE = {134: 200.0}   # v946f5: Panther - the table value (10) is not a hit-point figure
 TANK_KILL_SCORE   = 250            # fallback; v779f5: per CLASS from the wiki's TC table (below)
 # v779f5 (ACWIKI 'Fighter Ace - Scoring Information', TC values): Sherman 250, Cromwell 250,
 # T-34 400, Panther 400, Tiger 500. Class ids from the client's table: US 133, GB 131, SU 132/135,
@@ -11722,7 +11728,8 @@ TANK_DAMAGE       = True
 TANK_HIT_CLUSTER_S  = 0.30
 TANK_BOMB_MIN_TANKS = 4            # a cannon pass can rake 3 tanks of a column inside 0.3 s; a blast reaches 4-7
 TANK_BOMB_MIN_RAW   = 400          # a 2-3 tank cluster counts as a bomb only with a heavy hit in it (20 mm is 210-320)
-TANK_BOMB_SCALE     = 1.5          # splash raw 100 kills a 150 HP Sherman; a 2000 lb near-direct (1457) kills a Tiger (1100)
+TANK_BOMB_SCALE     = 2.0          # v946f5: 1.5 -> 2.0 (user 10-20: '910 lb with good hits, too many tanks survive').
+                                   # splash raw 75 kills a 150 HP Sherman, 100 a Panther (200), 125 a Tiger (250)
 
 def tank_hp_max(t):
     return TANK_CLASS_HP.get(t.get('class'), TANK_FALLBACK_HP)
@@ -12662,7 +12669,17 @@ TC_MAX_TANKS_PER_CAMP = 24      # v860f5: NO LONGER ENFORCED
 # v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
 # proven; the others are knobs (`tc ppt <tank> <soldier> <aa>`) - the client's kill line names the
 # hunter from this ('GBR tank destroyed GER tank', 'GBR anti-aircraft destroyed GER soldier').
-PPT_CLASS_TANK    = 3
+# v945f5 [THE HUNTER WORD, RE'd]: the kill tail's last byte is (camp << 5) | PPT class (FUN_0045cb90 packs
+# it, FUN_004f8d10 unpacks it); the receiver indexes a 16-entry PPT type table (PPTWork.cpp, 0xc7ed48)
+# and prints that type's name (vtable slot 1 -> localized string id):
+#     class 0,1,2,11,12,13 -> player types (string 0x27 'unknown plane' when no pilot resolves)
+#     class 3,4,5          -> string 0x28 = 'anti-aircraft'   <- why tank kills read 'Anti-aircraft'
+#     class 7 -> 0x29   class 9 -> 0x2a   class 10,14 -> 0x44   class 6 -> 0x119   class 8 -> 0x11d   class 15 -> 0x112
+# The words themselves live in TXT\*.str inside the PRF-packed Data0N.all, which no tool here opens, so
+# which of the six is 'tank' is settled in game: `tc ppt <tank> <soldier> <aa>` switches the class live,
+# a tank-vs-tank kill prints the word. 9 (0x2a, the next classic id after plane/anti-aircraft) is the
+# first candidate; then 15, 6, 8 (TC-era ids 0x112/0x119/0x11d), 7, 10.
+PPT_CLASS_TANK    = 9
 PPT_CLASS_SOLDIER = 7
 PPT_CLASS_AA      = 4
 TC_DEFEND_RING_M     = 220.0    # v594f5: perimeter radius floor; v596f5: the real ring is the scene's own
@@ -17646,6 +17663,8 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
+COLLISION_DEATH_S   = 20.0   # v945f5: a MEC 2 exit this soon after a msg-125 collision on the plane is a collision death
+SELF_DEATH_S        = 30.0   # v945f5: ... or after a msg-28 that names the plane's OWN object as the hunter (own bomb)
 BAIL_CREW_BACK_S    = 3.0    # v943f5: human-bit-clear chutes released this long BEFORE the pilot's own chute are
                              #   the bail's aircrew (0.26 s cadence, pilot inside the burst: up to ~11 seats)
 BAIL_CREW_AFTER_S   = 60.0   # v943f5: ... and anything the husk sheds this long after the bail
@@ -18769,6 +18788,14 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         except Exception:
             logx('DEATH', 'ground-death check failed')
 
+    # v945f5 [TEAM KILL = NO CREDIT]: a collision with (or fire from) a plane of the victim's OWN
+    # side kills the victim all the same, but nobody earns the kill for it (user 10-20: teammate
+    # collisions count as a death; the 2004 page gives no points for killing your own side).
+    if (killer is not None and getattr(killer, 'nation', None) is not None
+            and getattr(killer, 'nation', None) == getattr(victim, 'nation', None)):
+        log('KILL', f'attribution: {killer.current_pilot} is on {victim.current_pilot}\'s own side -> '
+                    f'TEAM KILL, death booked, no credit [v945f5]')
+        killer = None
     # ---- VICTIM: always dies. Count it and break the ace streak. ----
     victim.k_deaths = getattr(victim, 'k_deaths', 0) + 1
     victim.kills_since_death = 0
@@ -23357,6 +23384,8 @@ def _fire_server_confirm(s, via='', ident=None):
     # inside the SEND_ACE_RANK_88 block, so turning that flag off would silently leave took_damage
     # latched and make every clean exit count as a death again.)
     s.took_damage = False
+    s.__dict__.pop('_collision_at', None); s.__dict__.pop('_collision_with', None)   # v945f5: per life
+    s.__dict__.pop('_self_damaged_at', None)
     # v532f5: and nobody has killed this life's pilot yet (cockpit-kill record, see
     # _ingame_msg_instrument / the crash classifier).
     s.__dict__.pop('_cockpit_kill_t', None)
@@ -23889,12 +23918,27 @@ def _ingame_own_object_removed(s, tb, stored):
                              + ' [PILOT_FATE/v532f5]')
             elif mec_nib in (5, 2):
                 _cap = (se == 12)
+                # v945f5 [COLLISIONS AND SELF-INFLICTED DEATHS ARE DEATHS] (user 10-20): MEC 2 is the
+                # client's collision/crash-land exit and was booked 'pilot safe (crash-land)' - so a
+                # mid-air with a teammate, or your own bomb blast (msg-28 names your own plane as the
+                # hunter), cost the plane but kept the pilot and the ace streak. With a msg-125
+                # collision on this plane inside COLLISION_DEATH_S, or a self-damage report inside
+                # SELF_DEATH_S, the pilot is lost too. A plain belly landing (neither) stays as it was.
+                _now_d = time.time()
+                _coll = (mec_nib == 2 and _now_d - float(s.__dict__.get('_collision_at') or 0.0) < COLLISION_DEATH_S)
+                _selfd = (mec_nib == 2 and _now_d - float(s.__dict__.get('_self_damaged_at') or 0.0) < SELF_DEATH_S)
+                _coll_with = s.__dict__.get('_collision_with') if _coll else None
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
-                                                   victim_obj=_onum, pilot_lost=_cap)
-                log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) -> plane '
-                             f'counted + shooter credited; pilot '
-                             f'{"CAPTURED" if _cap else "pending (bail) / safe (crash-land)"} '
-                             f'[PILOT_FATE]')
+                                                   victim_obj=_onum, pilot_lost=(_cap or _coll or _selfd))
+                if _coll or _selfd:
+                    log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) by '
+                                 f'{("COLLISION with " + getattr(_coll_with, "current_pilot", "?")) if _coll else "HIS OWN ORDNANCE / BLAST"}'
+                                 f' -> plane AND pilot lost [v945f5]')
+                else:
+                    log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) -> plane '
+                                 f'counted + shooter credited; pilot '
+                                 f'{"CAPTURED" if _cap else "pending (bail) / safe (crash-land)"} '
+                                 f'[PILOT_FATE]')
             else:
                 log('DEATH', f'{s.current_pilot} clean exit (MEC&0xf={mec_nib} SE={se}) -> no loss '
                              f'[PILOT_FATE]')
@@ -27982,6 +28026,8 @@ def handle_post_auth(s, cmd, pl):
                     if getattr(_p, 'my_obj_number', None) == _victim_num:
                         _p.took_damage = True
                         _p.last_damaged_at = time.time()
+                        if _hunter_num == _victim_num:
+                            _p.__dict__['_self_damaged_at'] = time.time()     # v945f5: own bomb / own blast
                         # v506f5: a NEW hit re-opens repair even if this plane was already serviced
                         # at this exact parked spot (else the poll's one-shot skips it). A victim
                         # already parked engine-off when hit never fires a fresh 119 (no engine-off
@@ -28296,7 +28342,11 @@ def handle_post_auth(s, cmd, pl):
             _to  = int.from_bytes(pl[7:9], 'little')
             _frm = int.from_bytes(pl[9:11], 'little')
             _peer, _by_current = _peer_owning_object(s, _to)
+            # v945f5: remember the collision on BOTH planes - a MEC 2 exit that follows within
+            # COLLISION_DEATH_S is a collision death (pilot lost), not a crash-landing
+            s.__dict__['_collision_at'] = time.time(); s.__dict__['_collision_with'] = _peer
             if _peer is not None:
+                _peer.__dict__['_collision_at'] = time.time(); _peer.__dict__['_collision_with'] = s
                 threading.Thread(
                     target=lambda _p=_peer: send_rel(
                         _p, stored,

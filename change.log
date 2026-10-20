@@ -1,3 +1,40 @@
+v946f5 [PANTHERS HAD 1000 HP; BOMB SCALE 2.0] (10-20)
+    * User 10-20 (run_053656 11:39 / 11:43, v944 live): '910 lb with good hits, too many tanks survive'.
+      The BOMB blast lines show the rule working - 7 tanks hit, raws 959/335/127/102/32/7 (+5554 direct)
+      - but every tank was 'class 134 ... /1000': the GE Panther had 1000 hit points against 150 for a
+      Sherman / Cromwell / T-34-85, 200 for a T-34, 250 for a Tiger, 100 for the JP tank. Cause: the
+      Panther's class record carries 10 in the hit-point field, the loader's 100..5000 sanity filter
+      threw it out, and the class fell to TANK_FALLBACK_HP = 1000 - so a near-miss worth 502 took half
+      a Panther while the same bomb would have killed three Shermans.
+    * Fix: TANK_CLASS_HP_OVERRIDE {134: 200} (between T-34 and Tiger) and TANK_FALLBACK_HP 1000 -> 200.
+      TANK_BOMB_SCALE 1.5 -> 2.0: splash raw 75 kills a Sherman, 100 a Panther, 125 a Tiger. Replayed
+      on the two Panther blasts: 11:39 -> 5 of 7 (was 2), 11:43 -> 1 of 5 + one at 84% (was 0).
+    * Verify: the startup line 'class hit points' now lists 134=200; a 910 lb near a Panther column
+      drops most of it.
+
+v945f5 [COLLISIONS / SELF-KILLS ARE DEATHS; TEAM KILLS EARN NOTHING; TANK KILL WORD] (10-20)
+    * User 10-20: 'self-inflicted deaths / teammate collisions should count as a death/plane loss'.
+      What the code did: an enemy collision (exit 0x44, MEC 4) was already a full death both ways; a
+      self-kill with exit 0x2d (MEC 2 EEC 13) or MEC 1 (v909) already cost plane AND pilot. The gap was
+      exit 0x22 (MEC 2 SE 2) - the client's collision / crash-land exit - booked 'plane counted, pilot
+      safe (crash-land)': deaths +1 but no pilot penalty and the ace streak kept (148 cases in the last
+      three runs, e.g. JOLLY/AirShark 23:48:35 mid-air -> both 0x22 -> 'solo crash/crashland').
+    * Fix: a msg-125 collision on the plane within COLLISION_DEATH_S (20 s) before a MEC 2 exit, or a
+      msg-28 that named the plane's OWN object as the hunter within SELF_DEATH_S (30 s), makes the pilot
+      lost too ('by COLLISION with X / HIS OWN ORDNANCE -> plane AND pilot lost'). Both marks are per
+      life (cleared at the spawn). A plain belly landing (neither) is unchanged.
+    * TEAM KILL: a hunter on the victim's own side (collision or fire) never earns the kill - the death
+      is booked, the credit is dropped ('TEAM KILL, death booked, no credit').
+    * TANK KILL WORD ('Anti-aircraft has destroyed' for tank-vs-tank): RE'd the mechanism - the kill
+      tail's class byte indexes the client's 16-entry PPT type table and classes 3, 4 and 5 all print
+      'anti-aircraft' (string 0x28), which is what PPT_CLASS_TANK = 3 produced. The candidate classes
+      with their own word are 9 (0x2a), 15 (0x112), 6 (0x119), 8 (0x11d), 7 (0x29), 10 (0x44); the words
+      sit in TXT\*.str inside the PRF-packed Data0N.all, which no tool here reads. Default moved to 9;
+      settle it in game with `tc ppt <tank> <soldier> <aa>` (live) - the next tank-vs-tank kill prints
+      the word; try 9, then 15, 6, 8, 7, 10 - and tell me which one says 'tank'.
+    * Verify: collide with a teammate -> both lose plane + pilot, nobody gets a kill; bomb yourself ->
+      pilot lost; crash-land clean -> as before.
+
 v944f5 [BOMBS vs TANKS: A BLAST IS NOT A GUN BURST] (10-20)
     * User 10-20 (Killer in chat 04:09: '550 and higher bombs do nothing on them ... i dropped 16 on one
       group and nothing ... tiny bombs do more'; user: 'small bombs kill tanks, anything above 250 lb
