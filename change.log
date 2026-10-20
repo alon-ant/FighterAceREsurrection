@@ -1,3 +1,70 @@
+v943f5 [AI AIRCREW FROM A BAIL-OUT ARE NOT PARATROOPS] (10-20)
+    * User 10-20: 'whenever a loaded troop carrier bails out, the troops also bail with the crew and
+      ... AI crew spawn soldiers'. run_033558: Killer asked 14 troopers at 04:40:01 and bailed his C-47
+      at 04:44:02 - the client ejected crew, crew, PILOT, crew, crew (four human-bit-clear chutes at
+      0.26 s, the pilot's inside the burst; the 14 troopers stayed in the wreck) and the server spawned
+      four soldiers from them (stick 6 'US paratroops (4) landed ... dropped by AA_Killer_X'). Same at
+      04:54:55 (GB plane 83: 8 crew, PILOT, 1 crew -> stick 9 = 9 'GB soldiers'). The troops did not
+      jump - the crew did, and became infantry; that is what looked like 'the troops bail with the crew'.
+    * Cause: a crew chute and a trooper chute are the same Type-2 record. tc_para_landed told them apart
+      only by 'troops aboard > 0' (v609), so with a loaded transport every bail-out crewman landed as a
+      soldier and debited a trooper.
+    * Fix: the bail classifies the burst. At the pilot's own chute (tag 0x82) every human-bit-clear chute
+      of his released within BAIL_CREW_BACK_S (3.0 s) before it is marked crew, and every one the husk
+      sheds afterwards (pilot on his canopy, or bailed_plane_obj set and < BAIL_CREW_AFTER_S) is marked
+      at registration. A crew chute is still confirmed, created on peers, relayed and deleted as before -
+      it just never becomes a soldier and never debits the troop count ('aircrew from the bail-out, not a
+      paratrooper -> no soldier' in the log). A deliberate drop whose last troopers left within 3 s of the
+      pilot bailing loses those few to the crew rule - accepted.
+    * Verify: load 14, bail - peers see the crew canopies and the pilot's, no 'paratroops (N) landed ...
+      dropped by' line, no soldiers, troop stock unchanged; a normal 14-drop still makes 14 soldiers.
+
+v942f5 ['p HAS BAILED OUT' SURVIVED v940 = THE FIRST FRAME RACING THE CREATE; 13-CHUTE FRAMES DROPPED] (10-20)
+    * User 10-20 (messages61 04:24/04:28, online run_033558): v940 removed the plane tag ('US p has
+      bailed out' now, chute name 'p') but 3 of 26 remote troopers still printed the line.
+    * The printer (FA.exe): the chute's NET sub-object frame handler FUN_004a3ba0 (vtable 0xa2d868 slot
+      1, called by the msg-7 record loop FUN_007e3a70 for every frame) prints '<nation> <GetName()> has
+      bailed out' (string id 0x7f, name = score name if bound else chute+0x154) whenever it applies a
+      frame while chute+0x318 is non-zero. Both ctors set that flag to 1 (0x4a8e11 / 0x4a87fd); nothing
+      in the frame path clears it - the client's own first update tick does. So the line is printed by
+      a frame that lands in the tens of ms between 'Create NetParachuter' and that tick. Measured:
+      the three printing chutes had their first owner frame applied 40-60 ms after construction;
+      every silent chute got its first frame later (or before construction, when it is dropped).
+      A pilot's bail prints the same way - there it is the real game's announcement (Creed 10-09:
+      7 lines = 7 owner frames in 1.6 s before his client went quiet).
+    * Fix: CHUTE_FRAME_HOLD_S = 0.75 - for CREW/troop chutes only, no frame (owner relay, server drive,
+      or the v804 behind-create frame, now sent after the hold instead of immediately) goes to a peer
+      until 0.75 s after that peer acked the create; construction lagged the create by up to 0.38 s,
+      so the peer has ticked at least once. _para_created_at[onum][peer] records the ack time and is
+      dropped with the created-set. A pilot's canopy is not held.
+    * ALSO (same log): the transport's multi-record frame grew to plane + 13 canopies = 523 B at
+      04:24:37.978 and _telem_split_records refused it (fit() depth cap 12) -> TELEM-GUARD 'unknown
+      shape -> NOT relayed' for the rest of the drop: the Dakota's OWN position stopped reaching the
+      peers until the last chute landed (the 'troopship not padlockable after drop' feel). Cap is now
+      TELEM_SPLIT_MAX_RECORDS = 48.
+    * Verify: a 14-trooper drop watched from a second plane - no 'p has bailed out' line at all, the
+      canopies appear and descend as before (first frame 0.75 s after the create), and no TELEM-GUARD
+      'unknown shape' line for the transport while 13+ canopies are up.
+
+v941f5 [MAP: FOUR TANK COLUMNS, ONE BOX WITH FOUR MISSION LINES - w6 IS THE GROUP ID] (10-20)
+    * User 10-20 04:14 (run_033558: columns 1-4, gids 1..4, scenes 40/42/41/23): 'only 1 box/icon on
+      map displayed with 4 target lines to it; all real tank positions plotted correctly'. Same shape as
+      Starfighter 10-19 ('1 tank column assigned 2 targets') and Skyyr/Gibson 09-27 (line drawn from the
+      earlier column) - the v858 mission-code fix addressed the lines' END, not their START.
+    * Cause (FA.exe): the msg-26 record's last word (our 'w6') lands at rec+0x34 and is the GROUP ID.
+      The map renderer FUN_0048cb30 calls FUN_004f0e50 for every record; that walks the live objects of
+      the record's kind and BINDS each one whose class (vtbl+0x50) == uc, camp (+0x11c) == camp and
+      group id == rec+0x34 - for a tank the id is tank+0x2f4, which the tank factory (0x61d13f) fills
+      from the tank record's i16 at [6] = our column gid. The box is drawn around the bound tanks (+0x3c..
+      +0x50, flag +0x54); a record that binds nothing falls back to an icon at pair 2. We sent w6 = 1 for
+      every moving column ('moving flag' guess, v715), so all N records bound column 1's eight tanks:
+      N identical boxes on column 1, each with its own mission line = one box, N lines.
+    * Fix: tank records carry w6 = the column's gid. Each column now gets its own box and its own line.
+      Sticks (w6=1) and trains (0/1) untouched: the soldier/train object types take different branches of
+      the same matcher (soldier id is probably not compared at all - one box per garrison still comes
+      from the v817 merge); revisit if a stick or train box misbehaves.
+    * Verify: trigger two scenes from the same factory; the map should show two boxes, each with one line.
+
 v940f5 [REMOTE TROOP DROPS PRINTED '<TRANSPORT>(p) HAS BAILED OUT' ON THE PEERS] (10-20)
     * User 10-20: 'when remote players drop paratroopers the game chat logs a bailout ... this isn't a
       bailout'. Gibson's log 10-19 20:04:36: 'Create NetParachuter St=6 ONumber=367' then 5 ms later

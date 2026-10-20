@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v940f5'
+VERSION = 'v943f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14971,7 +14971,15 @@ def room_group_records(room_id, viewer_camp=None):
                     'uc': int(lead.get('class', 131)), 'count': len(live),
                     'x': txy[0] if txy else tx, 'y': txy[1] if txy else ty,
                     'tx': tx, 'ty': ty,
-                    'w6': 1 if lead.get('goal') is not None else 0})
+                    # v941f5: w6 is the GROUP ID the client binds the box to, not a 'moving' flag. The map
+                    # renderer (FUN_0048cb30) calls FUN_004f0e50 per record, which walks the live objects of
+                    # the record's kind and binds every one whose class == uc, camp == camp and group id
+                    # (tank+0x2f4 = the tank record's i16 at [6], our column gid) == rec+0x34 = w6; the box
+                    # is then drawn around the BOUND tanks. Sending 1 for every moving column bound all the
+                    # records to column 1's tanks: one box, N mission lines out of it (Alon 10-20 04:14, four
+                    # columns -> 'only 1 box/icon with 4 target lines'; Starfighter 10-19; Gibson 09-27).
+                    # A record whose id matches nothing falls back to an icon at pair 2 (no box).
+                    'w6': int(gid) & 0x7fff})
     # v817f5 [ONE BOX PER GARRISON]: sticks of the same camp with the same purpose and objective whose
     # centres are within GROUP_STICK_MERGE_M share ONE box carrying their combined count. Each stick used
     # to get its own box at its centre; several sticks defending one field put their boxes on the same
@@ -15519,6 +15527,12 @@ def tc_para_landed(s, onum, ent):
     if not PARATROOPS or not tank_consts_ok() or ent is None:
         return
     if not is_transport_plane(getattr(s, 'plane_type', None)):
+        return
+    if ent.get('crew'):
+        # v943f5: an aircrew canopy from a bail - no soldier, no trooper debit (user 10-20: 'no
+        # spawning of soldiers for AI aircrew')
+        log('PARA', f'{s.current_pilot}: chute 0x{onum:04x} landed - aircrew from the bail-out, not a paratrooper '
+                    f'(troops still booked aboard: {int(s.__dict__.get("_troops_aboard", 0) or 0)}) -> no soldier')
         return
     # v609f5: troop chutes and CARGO chutes are the same Type-2 objects - what tells them apart is
     # whether the plane has troops aboard (msg 113/114). No troops -> it's cargo (msg 105 follows).
@@ -16612,6 +16626,10 @@ CHUTE_MIN_Z        = 20.0         # v814f5: never drive a canopy below this (no 
 CHUTE_OPEN_FRAMES  = 6            # v815f5: a chute with fewer real frames than this has no reliable opened state
 CHUTE_ORPHAN_S     = 15.0         # v820f5: a silent chute this long past its predicted landing is deleted by the server
 CHUTE_SILENT_AFTER_S = 1.0        # owner silent for this long -> the server drives the canopy
+CHUTE_FRAME_HOLD_S   = 0.75       # v942f5: no frames for a CREW/troop chute to a peer this long after its create was
+                                  # acked - the peer's first frame inside its announce window prints 'p has bailed out'
+                                  # (see send_crew_parachuter_create_for). Construction lagged the create by up to
+                                  # 0.38 s on 10-20, the printing frames came 40-60 ms after it; 0.75 covers both.
 CHUTE_NEAR_HZ      = 2.0          # v887f5 [CHUTE STEPPING]: the client holds a driven canopy still between frames
                                   # v889f5: HELD (user 09-28) - 2.0 = the v886 cadence for everyone, i.e. the fix is
                                   # inert until tested; `chute near 6` on the console turns it on live.
@@ -16666,6 +16684,7 @@ def _chute_keepalive_loop():
                     if now - t0 > max(CHUTE_ORPHAN_S, (pos[2] - CHUTE_MIN_Z) / max(1.0, CHUTE_DESCENT_MPS) + CHUTE_ORPHAN_S):
                         crew.pop(onum, None)
                         (s.__dict__.get('_para_created_peers') or {}).pop(onum, None)
+                        (s.__dict__.get('_para_created_at') or {}).pop(onum, None)       # v942f5
                         _pdo = build_delete_object_3(onumber=onum, client_number=None)
                         for p in get_sessions_in_room(s.current_room):
                             if p is not s:
@@ -16712,8 +16731,11 @@ def _chute_keepalive_loop():
                     _peers = (s.__dict__.get('_para_created_peers') or {}).get(onum, set())
                     _kap = ent.setdefault('_ka_peer', {})             # v887f5: per-observer cadence
                     n = 0
+                    _ca942 = (s.__dict__.get('_para_created_at') or {}).get(onum) or {}
                     for p in get_sessions_in_room(s.current_room):
                         if p is s or getattr(p, 'addr', None) not in _peers:
+                            continue
+                        if now - _ca942.get(p.addr, 0.0) < CHUTE_FRAME_HOLD_S:     # v942f5 (see the create)
                             continue
                         _ppos = p.__dict__.get('_pos_xy')
                         _near = (_ppos is not None and math.hypot(_ppos[0] - _x, _ppos[1] - _y) <= CHUTE_NEAR_M)
@@ -16757,6 +16779,7 @@ def send_crew_parachuter_create_for(src, dst, onum):
     if _age > CREW_CHUTE_STALE_S:
         _crew.pop(onum, None)
         src.__dict__.get('_para_created_peers', {}).pop(onum, None)
+        (src.__dict__.get('_para_created_at') or {}).pop(onum, None)                    # v942f5
         # v820f5: tell the peers too - they still hold it (see the orphan note in _chute_keepalive_loop)
         try:
             _pdo = build_delete_object_3(onumber=onum, client_number=None)
@@ -16781,6 +16804,16 @@ def send_crew_parachuter_create_for(src, dst, onum):
     send_rel(dst, pkt, f'<- ATOMIC predel+create CREW PARACHUTER: {src.current_pilot} '
                        f'ONumber=0x{onum:04x} -> {dst.current_pilot})', to=3.0)
     src.__dict__.setdefault('_para_created_peers', {}).setdefault(onum, set()).add(dst.addr)
+    # v942f5 [THE 'p HAS BAILED OUT' LINE IS THE FIRST FRAME RACING THE CREATE]: the peer's chute
+    # frame handler (FUN_004a3ba0, NET sub-object vtable slot 1) prints '<nation> <chute name> has
+    # bailed out' whenever it applies a frame while the ctor's announce flag (chute+0x318 = 1 at
+    # construction) is still set; the client's own first update tick clears it. A frame that lands
+    # in the few tens of ms between construction and that tick prints the line (10-20 04:24, three
+    # of 26 troopers: first frame applied 40-60 ms after 'Create NetParachuter'; every other chute
+    # got its first frame later and stayed silent). Hold this peer's frames for the chute for
+    # CHUTE_FRAME_HOLD_S after the create was acknowledged; a PILOT's canopy is not held - there
+    # the line is the real game's bail announcement.
+    src.__dict__.setdefault('_para_created_at', {}).setdefault(onum, {})[dst.addr] = time.time()
     log('PARA', f'create-crew-parachuter {src.current_pilot} St={src.client_number} '
                 f'ONumber=0x{onum:04x} rec={len(rec)}B body={hx(_ent["body"])} -> {dst.current_pilot}')
     # v804f5 [CHUTES THAT NEVER OPEN]: the owner sends a chute's frames - the ones that carry its
@@ -16790,17 +16823,24 @@ def send_crew_parachuter_create_for(src, dst, onum):
     # initial unopened state for the whole descent (Taurus 09-22: 2 then 3 of a stick 'did not
     # deploy' while the owner saw them all open). Send the chute's latest real frame right behind
     # the create so the state is never missed.
-    _lf = _ent.get('last_frame')
-    if _lf and len(_lf) > 8 + 9 and CHUTE_DRIVE_ENABLED:
-        try:
-            b2 = bytearray(_lf[8:])
-            rt = dst.last_telem_tick
-            if rt is not None and len(b2) >= 9:
-                struct.pack_into('<H', b2, 5, _ai_stamp(dst, int.from_bytes(b2[7:9], 'little')))   # v884f5
-            seq = dst.nundgram()                                                    # v813f5
-            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2), dst.addr)
-        except OSError:
-            pass
+    # v942f5: sent after CHUTE_FRAME_HOLD_S (was immediately behind the create - the surest way to
+    # land a frame inside the announce window), with whatever frame is the latest by then.
+    if CHUTE_DRIVE_ENABLED:
+        def _late_frame(_src=src, _dst=dst, _onum=onum):
+            _e = (_src.__dict__.get('crew_para_objs') or {}).get(_onum)
+            _lf = _e.get('last_frame') if _e else None
+            if not _lf or len(_lf) <= 8 + 9 or _dst.addr not in (_src.__dict__.get('_para_created_peers') or {}).get(_onum, set()):
+                return
+            try:
+                b2 = bytearray(_lf[8:])
+                rt = _dst.last_telem_tick
+                if rt is not None and len(b2) >= 9:
+                    struct.pack_into('<H', b2, 5, _ai_stamp(_dst, int.from_bytes(b2[7:9], 'little')))   # v884f5
+                seq = _dst.nundgram()                                                    # v813f5
+                sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2), _dst.addr)
+            except (OSError, AttributeError):
+                pass
+        threading.Timer(CHUTE_FRAME_HOLD_S + 0.05, _late_frame).start()
     return True
 
 def _forget_canopies_on(owner, viewer):
@@ -17563,6 +17603,9 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
+BAIL_CREW_BACK_S    = 3.0    # v943f5: human-bit-clear chutes released this long BEFORE the pilot's own chute are
+                             #   the bail's aircrew (0.26 s cadence, pilot inside the burst: up to ~11 seats)
+BAIL_CREW_AFTER_S   = 60.0   # v943f5: ... and anything the husk sheds this long after the bail
 BAIL_DEDUP_WINDOW_S = 5.0    # v511f5: a repeat bail out-4 carrying the SAME ident within this
                              #   window is a reliable-retransmit the RX dedup missed, not a
                              #   second bail - swallow it so one bail makes exactly one canopy.
@@ -19406,6 +19449,7 @@ TELEM_MAX_BC = 5
 TELEM_SPLIT_MULTI    = True
 TELEM_RECORD_SIZES   = (34, 81, 83, 85)   # candidate record sizes when an ONumber's size is unknown
 TELEM_PARA_RECORD    = 34
+TELEM_SPLIT_MAX_RECORDS = 48            # v942f5: records per multi-record frame the tiler will walk (was 12; see fit())
 
 def _telem_split_records(src, pl):
     """v547f5: split a multi-record msg-7 appspace into [(onum, single-record appspace), ...].
@@ -19431,7 +19475,10 @@ def _telem_split_records(src, pl):
     def fit(i, acc, depth):
         if i == len(rest):
             return acc
-        if i + 2 > len(rest) or depth > 12:
+        if i + 2 > len(rest) or depth > TELEM_SPLIT_MAX_RECORDS:
+            # v942f5: was 12 - a transport with 13+ canopies in the air (plane + 13 x 34 = 523 B,
+            # VENOM 10-20 04:24:37.978) failed the tiling and the WHOLE frame, plane included, was
+            # dropped for the rest of the drop: the Dakota froze on every peer until the stick landed
             return None
         onum = int.from_bytes(rest[i:i+2], 'little')
         if owned and onum not in owned:
@@ -20075,6 +20122,10 @@ def relay_telemetry(src, data, _split_obj=None):
         if _chute_frame:
             _pc553 = (getattr(src, '_para_created_peers', {}) or {}).get(_gate_obj, set())
             if p.addr not in _pc553:
+                continue
+            # v942f5: crew/troop chute - hold the frames until the peer has had its first update tick
+            _ca942 = (src.__dict__.get('_para_created_at') or {}).get(_gate_obj)
+            if _ca942 is not None and _now_relay - _ca942.get(p.addr, 0.0) < CHUTE_FRAME_HOLD_S:
                 continue
         # Re-stamp the object tick to the RECIPIENT's own latest tick so their move loop
         # sees a small +delta (object slightly behind -> interpolate) instead of the
@@ -23384,6 +23435,7 @@ def _ingame_own_object_removed(s, tb, stored):
             _pdc = build_delete_object_3(onumber=_ponum, client_number=None)
             _crew_ent_l = s.crew_para_objs.pop(_ponum, None)
             (s.__dict__.get('_para_created_peers') or {}).pop(_ponum, None)
+            (s.__dict__.get('_para_created_at') or {}).pop(_ponum, None)                 # v942f5
             _age_c = time.time() - float((_crew_ent_l or {}).get('at') or 0.0)
             _delay_c = (max(0.0, CREW_CHUTE_DELETE_SETTLE_S - _age_c) if (_crew_ent_l and CHUTE_DRIVE_ENABLED) else 0.0)
 
@@ -28876,6 +28928,13 @@ def handle_post_auth(s, cmd, pl):
                 _crew = s.__dict__.setdefault('crew_para_objs', {})
                 _crew[_pn] = {'ident': _pi, 'at': time.time(),
                               'body': bytes(pl[7:7 + PARACHUTER_HEADER_SIZE]), 'frames': 0}
+                # v943f5: released while the pilot is already on his own canopy (the husk) -> aircrew,
+                # not a trooper (see the BAILED OUT site); the ones released just BEFORE the pilot's
+                # chute are re-marked there.
+                if getattr(s, 'para_obj_number', None) is not None \
+                        or (getattr(s, 'bailed_plane_obj', None) is not None       # cleared at the respawn
+                            and (time.time() - float(getattr(s, 'bailed_plane_at', 0.0) or 0.0)) < BAIL_CREW_AFTER_S):
+                    _crew[_pn]['crew'] = True
                 # v815f5: seed the chute's position with the transport's own at release, so a chute
                 # whose owner never sends a frame for it can still be driven (see keep-alive loop)
                 if s.__dict__.get('_pos_xy') is not None:
@@ -28937,6 +28996,18 @@ def handle_post_auth(s, cmd, pl):
                 s.bailed_plane_obj = s.my_obj_number
                 s.bailed_plane_at  = time.time()
                 s.para_body = bytes(pl[7:7 + PARACHUTER_HEADER_SIZE])
+                # v943f5 [AI AIRCREW ARE NOT PARATROOPS] (user 10-20): on a bail the client ejects the
+                # plane's CREW as human-bit-clear chutes at a 0.26 s cadence, the pilot's own chute
+                # somewhere inside the burst (Killer 04:44: crew, crew, PILOT, crew, crew with 14
+                # troopers aboard - the troopers stay in the wreck). tc_para_landed could not tell a
+                # crewman's canopy from a trooper's (same record) and, with troops aboard, turned every
+                # crew chute into a soldier (stick 6 = 4 'US soldiers' from Killer's crew). Mark the
+                # burst: every chute released within BAIL_CREW_BACK_S before the pilot's, and every one
+                # after it (the husk), is CREW - shown on peers, never a soldier, never a trooper debit.
+                _bt943 = time.time()
+                for _ce943 in (s.__dict__.get('crew_para_objs') or {}).values():
+                    if _bt943 - float(_ce943.get('at') or 0.0) <= BAIL_CREW_BACK_S:
+                        _ce943['crew'] = True
                 log('PARA', f'{s.current_pilot} BAILED OUT -> parachuter is object 0x{_pn:04x} '
                             f'(plane 0x{s.my_obj_number:04x} keeps flying). '
                             f'client body={hx(s.para_body)} ({len(s.para_body)}B) '
