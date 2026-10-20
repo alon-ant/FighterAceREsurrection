@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v946f5'
+VERSION = 'v947f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11726,10 +11726,13 @@ TANK_DAMAGE       = True
 # the ones already applied through the bands, is topped up to raw x TANK_BOMB_SCALE. A gun burst is a
 # stream of similar raws on ONE tank and keeps the bands.
 TANK_HIT_CLUSTER_S  = 0.30
-TANK_BOMB_MIN_TANKS = 4            # a cannon pass can rake 3 tanks of a column inside 0.3 s; a blast reaches 4-7
+TANK_BOMB_CRATER_LINK_S = 6.0      # v947f5: a crater record from the pilot this long after his tank hits proves they were a bomb
+TANK_BOMB_MIN_TANKS = 3            # v947f5: 4 -> 3 (Alon 11:59: a 4-bomb drop touched 3 tanks and went through the gun bands); a
+                                   # cannon pass that rakes 3 tanks inside 0.3 s is the price, and the crater link now catches the rest
 TANK_BOMB_MIN_RAW   = 400          # a 2-3 tank cluster counts as a bomb only with a heavy hit in it (20 mm is 210-320)
-TANK_BOMB_SCALE     = 2.0          # v946f5: 1.5 -> 2.0 (user 10-20: '910 lb with good hits, too many tanks survive').
-                                   # splash raw 75 kills a 150 HP Sherman, 100 a Panther (200), 125 a Tiger (250)
+TANK_BOMB_SCALE     = 3.0          # v947f5: 2.0 -> 3.0 (user 10-20: '910 lb didn't do anything, only hits, no kills' - raws
+                                   # 74/35/17 at 11:59: the client's own splash figure falls off hard with distance).
+                                   # splash raw 50 kills a 150 HP Sherman, 67 a Panther (200), 84 a Tiger (250)
 
 def tank_hp_max(t):
     return TANK_CLASS_HP.get(t.get('class'), TANK_FALLBACK_HP)
@@ -11796,12 +11799,13 @@ def _handle_tank_hit_51(s, pl):
             # blast are topped up to raw x TANK_BOMB_SCALE below.
             _nowh = time.time()
             _hb = s.__dict__.setdefault('_tank_hit_recent', [])
-            _hb[:] = [h for h in _hb if _nowh - h['t'] <= TANK_HIT_CLUSTER_S]
+            _hb[:] = [h for h in _hb if _nowh - h['t'] <= TANK_BOMB_CRATER_LINK_S]      # v947f5: kept for the crater link
             _rec = {'t': _nowh, 'victim': victim, 'raw': float(dmg), 'applied': eff, 'bomb': False}
             _hb.append(_rec)
-            _tanks_in = {h['victim'] for h in _hb}
+            _cl = [h for h in _hb if _nowh - h['t'] <= TANK_HIT_CLUSTER_S]
+            _tanks_in = {h['victim'] for h in _cl}
             _is_bomb = (len(_tanks_in) >= TANK_BOMB_MIN_TANKS
-                        or (len(_tanks_in) >= 2 and max(h['raw'] for h in _hb) >= TANK_BOMB_MIN_RAW))
+                        or (len(_tanks_in) >= 2 and max(h['raw'] for h in _cl) >= TANK_BOMB_MIN_RAW))
             t['hp'] = t.get('hp', hp_max) - eff
             t['last_hit_by'] = s
             log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit tank 0x{victim:04x} class {t["class"]} '
@@ -11809,24 +11813,44 @@ def _handle_tank_hit_51(s, pl):
             if t['hp'] <= 0:
                 tank_killed(victim, s, reason='(msg-51 damage)')
             if _is_bomb:
-                for h in _hb:
-                    _want = h['raw'] * TANK_BOMB_SCALE
-                    _extra = _want - h['applied']
-                    if _extra <= 0.5:
-                        continue
-                    h['applied'] = _want; h['bomb'] = True
-                    _tv = TANKS.get(h['victim'])
-                    if _tv is None or _tv.get('dead'):
-                        continue
-                    _tv['hp'] = _tv.get('hp', tank_hp_max(_tv)) - _extra
-                    _tv['last_hit_by'] = s
-                    log('TANKHIT', f'{s.current_pilot}: BOMB blast ({len(_tanks_in)} tanks in {TANK_HIT_CLUSTER_S:.1f}s) - '
-                                   f'tank 0x{h["victim"]:04x} raw {h["raw"]:.0f} x {TANK_BOMB_SCALE} = {_want:.0f} '
-                                   f'(+{_extra:.0f} over the gun bands) -> hp {_tv["hp"]:.0f}/{tank_hp_max(_tv):.0f}')
-                    if _tv['hp'] <= 0:
-                        tank_killed(h['victim'], s, reason='(bomb blast)')
+                _tank_bomb_topup(s, _cl, f'blast ({len(_tanks_in)} tanks in {TANK_HIT_CLUSTER_S:.1f}s)')
     except Exception:
         logx('TANKHIT', 'msg-51 handling failed')
+
+def _tank_bomb_topup(s, hits, why):
+    """v944f5/v947f5: the hits in `hits` are a bomb's - raise each one from the gun-band figure already
+    applied to raw x TANK_BOMB_SCALE (once; a hit is marked 'bomb' after its top-up)."""
+    for h in hits:
+        if h.get('bomb'):
+            continue
+        _want = h['raw'] * TANK_BOMB_SCALE
+        _extra = _want - h['applied']
+        h['applied'] = max(h['applied'], _want); h['bomb'] = True
+        if _extra <= 0.5:
+            continue
+        _tv = TANKS.get(h['victim'])
+        if _tv is None or _tv.get('dead'):
+            continue
+        _tv['hp'] = _tv.get('hp', tank_hp_max(_tv)) - _extra
+        _tv['last_hit_by'] = s
+        log('TANKHIT', f'{s.current_pilot}: BOMB {why} - tank 0x{h["victim"]:04x} raw {h["raw"]:.0f} x {TANK_BOMB_SCALE} '
+                       f'= {_want:.0f} (+{_extra:.0f} over the gun bands) -> hp {_tv["hp"]:.0f}/{tank_hp_max(_tv):.0f}')
+        if _tv['hp'] <= 0:
+            tank_killed(h['victim'], s, reason='(bomb blast)')
+
+def _tank_bomb_crater_link(s):
+    """v947f5 [THE CRATER IS THE PROOF]: only a bomb digs a crater, and the client sends the crater record
+    ~2 s after the blast's msg-51 hits (Alon 10-20 11:59:37.2 hits, 11:59:39.5 'crater record (4 crater(s))').
+    Every tank hit of this pilot inside TANK_BOMB_CRATER_LINK_S before the record is a bomb hit, whatever
+    the cluster test said - that is how a blast that touched only 1-3 tanks is told from a gun burst."""
+    try:
+        _hb = s.__dict__.get('_tank_hit_recent') or []
+        _now = time.time()
+        _hits = [h for h in _hb if _now - h['t'] <= TANK_BOMB_CRATER_LINK_S and not h.get('bomb')]
+        if _hits:
+            _tank_bomb_topup(s, _hits, f'confirmed by the crater record {_now - _hits[0]["t"]:.1f}s later')
+    except Exception:
+        logx('TANKHIT', 'crater link failed')
 
 # --- v597f5 SOLDIER LIFE ------------------------------------------------------------------
 # A soldier hit arrives on the same msg-51 path as a tank hit (the client's 'Hit To %s Soldier'
@@ -14970,6 +14994,8 @@ GROUP_STRATEGY    = {'none': 0, 'goto': 1, 'attack': 2, 'defend': 3, 'defence': 
 GROUP_KIND        = {'ship': 0, 'tank': 1, 'fighter': 2, 'bomber': 3, 'soldier': 5, 'sub': 6, 'lorry': 7, 'train': 7}
 GROUP_MISSION_NONE = 0xf
 TRAIN_GROUP_RECORDS = True     # v722f5: ON - the lorry box is the train's marker on both map scales (user)
+BIGMAP_TRAINS       = True     # v946f5: live trains on the big map (msg 70) under their locomotive class - see the
+                               #   msg-70 reply; set False if the client draws them wrong
 GROUP_STICK_MERGE_M = 1500.0   # v817f5: sticks with the same camp/purpose/objective closer than this share one map box
 
 def _g16(v):
@@ -16289,6 +16315,7 @@ def crater_record_in(s, body, echo=False):
     kept for later spawners and relayed to every other pilot in the world. echo=True also returns
     it to the sender, as the plain-form generic echo always did. v831f5: tagged with the scene it
     fell nearest to (the bomber's own position), so metal delivered there can repair it."""
+    _tank_bomb_crater_link(s)                 # v947f5: the tank hits of the last few seconds were a bomb's
     try:
         _crpkt = build_appspace_pkt(body)
         _hist = ROOM_CRATERS.setdefault(s.current_room, [])
@@ -27405,6 +27432,24 @@ def handle_post_auth(s, cmd, pl):
                 if _camp is not None and _t.get('camp') != _camp:
                     continue
                 _recs.append(_rec(_t['pos'][0], _t['pos'][1], _t['pos'][2] if len(_t['pos']) > 2 else 0.0, _t.get('camp', 0), _t.get('class', 131)))
+            # v946f5 [LOCOMOTIVE ON THE BIG MAP] (user 10-20: 'there has to be a locomotive icon'): the
+            # big-map record carries the unit CLASS and the client picks the icon from its class table,
+            # so the live trains go out under their locomotive class (141..145) - the glyph the client
+            # has for that class, if any, is the one we are after. The msg-26 group box cannot do it:
+            # its kind field is 3 bits (tank/fighter/bomber/destroyer/soldier/sub/lorry), no train.
+            if BIGMAP_TRAINS:
+                try:
+                    _rails = rails_for(_probe_terrain_for_room(s.current_room))
+                    for _on, _tr in list(TRAINS.items()):
+                        if _tr.get('room') != s.current_room or _tr.get('dead') or not _rails:
+                            continue
+                        if _camp is not None and _tr.get('camp') != _camp:
+                            continue
+                        (_tx, _ty, _tz), _seg = rail_point(_rails['roads'][_tr['road']], _tr['node'], _tr['dist'])
+                        _recs.append(_rec(_tx, _ty, _tz, _tr.get('camp', 0),
+                                          int(_tr.get('loco_class') or TRAIN_LOCO_BY_CAMP.get(_tr.get('camp', 0), 141))))
+                except Exception:
+                    logx('BIGMAP70', 'train records failed')
             _body = bytes([0x46]) + b''.join(_recs)
             # v847f5: the client asserts (Length-1) % 6 == 0 (FUN_004fb2c0) - the appspace framing pads
             # to 16n+1 and CTD'd the client on the first reply (local 09-25 10:17: 'in 70'17', one

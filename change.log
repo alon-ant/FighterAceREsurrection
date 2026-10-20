@@ -1,3 +1,19 @@
+v947f5 [BOMB vs TANK, THIRD PASS: THE CRATER IS THE PROOF] (10-20)
+    * User 10-20 on v946 live (run_115030 11:59:37): '910 lb didn't do anything, only hits, no kills,
+      worse'. Four bombs (crater record: 4 craters at 11:59:39.5), tank hits on THREE Panthers with raws
+      74 / 35 / 17 - below the 4-tank cluster bar and below the 400 raw bar, so the v944 rule never
+      fired and the gun bands applied 2 / 1 / 1 of 200. The client's splash figure falls off hard with
+      distance: the same bomb at 11:39 gave 959 / 335 / 127 when it fell among the column.
+    * Fix, three parts: (1) a crater record from the pilot within TANK_BOMB_CRATER_LINK_S (6 s) of his
+      tank hits marks them as bomb hits regardless of the cluster test - only a bomb digs a crater, and
+      the record follows the blast by ~2 s (new _tank_bomb_crater_link, called from crater_record_in);
+      (2) TANK_BOMB_MIN_TANKS 4 -> 3; (3) TANK_BOMB_SCALE 2.0 -> 3.0: splash raw 50 kills a Sherman,
+      67 a Panther, 84 a Tiger. The 11:59 drop replayed: 74 -> 222 (Panther dead), 35 -> 105, 17 -> 51.
+      The 11:39 blast: 6 of 7. Top-ups are applied once per hit (marked 'bomb'); the log line says
+      which proof fired ('BOMB blast (N tanks in 0.3s)' or 'BOMB confirmed by the crater record').
+    * Verify: a 910 lb that lands beside a Panther kills it and the log shows the crater-confirmed line
+      ~2 s after the hits; cannon strafing still goes through the bands (no crater follows).
+
 v946f5 [PANTHERS HAD 1000 HP; BOMB SCALE 2.0] (10-20)
     * User 10-20 (run_053656 11:39 / 11:43, v944 live): '910 lb with good hits, too many tanks survive'.
       The BOMB blast lines show the rule working - 7 tanks hit, raws 959/335/127/102/32/7 (+5554 direct)
@@ -11,6 +27,13 @@ v946f5 [PANTHERS HAD 1000 HP; BOMB SCALE 2.0] (10-20)
       on the two Panther blasts: 11:39 -> 5 of 7 (was 2), 11:43 -> 1 of 5 + one at 84% (was 0).
     * Verify: the startup line 'class hit points' now lists 134=200; a 910 lb near a Panther column
       drops most of it.
+    * LOCOMOTIVE ICON (user 10-20): the msg-26 group box cannot show one - its kind field is 3 bits and
+      the probe-verified glyphs are tank / fighter / bomber / destroyer / soldier / sub / lorry; the
+      3.x JPG\MapIcons.bmp in data.q6 is a plain disc + blob (the 4.2 icon art sits in the PRF-packed
+      Data00.all we cannot open yet). The big map (msg 70) is different: its records carry the unit
+      CLASS and the client picks the icon from its own class table, so the live trains now go out in the
+      big-map reply under their locomotive class (141..145), own camp only, like the tanks
+      (BIGMAP_TRAINS). If the client has a locomotive glyph for that class, that is where it shows.
 
 v945f5 [COLLISIONS / SELF-KILLS ARE DEATHS; TEAM KILLS EARN NOTHING; TANK KILL WORD] (10-20)
     * User 10-20: 'self-inflicted deaths / teammate collisions should count as a death/plane loss'.
