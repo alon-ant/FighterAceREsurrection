@@ -62,6 +62,44 @@ they explain why a specific line is the way it is and must stay with it.
     tank + defences dead'); metal repair by train/cargo stays; the panel's production % stays
     the scene HP fraction.
 
+v938f5 [INVISIBLE PEERS AFTER A RESPAWN: MIRROR THE CLIENT'S 15 km INSERT CULL] (10-20)
+    * Bama 10-19 22:02-22:16 'no one could see me, my bullets didn't register': 162 hits on Gibson
+      (5 cockpit) reached the server, were decoded (victim 0x0292, hunter 0x028f) and relayed to
+      Gibson - who took nothing. Gibson's own log (messages994) closes it: at his same-field respawn
+      22:04:24 ('InsertPlayer') his client deleted every net object farther than 15 km from the spawn
+      point - 'Check discon. and del 655 (Bama), (Dist=41088.598)', 656 (Jolly), 642 (Scraps), plus
+      'VIRTUAL delete Client 1/2/3' - and sent NO del packet (the silence cull '(dif=...)' does; the
+      distance cull does not). FA.exe FUN_004fdb40: pos != NULL -> delete when dist > [game+0x1b2c],
+      which is INI [Range] Information, default 15000 (0x583423..). We kept relaying Bama at 1 Hz
+      (planes are never silent), so Gibson's client never silence-culled him either: 'Get coord for
+      missing object 655' every second for 12 minutes; Bama only reappeared when his own death
+      re-armed the create. This happens at EVERY respawn, to EVERY peer plane beyond 15 km, and only
+      heals when that far peer dies. The 'Client 1 already exist' theory was wrong: Gibson's log shows
+      'Server require delete client 1' at Bama's leave and 'Create client 1 (Bama)' at his rejoin.
+    * Fix: at the first own frame of a new life (the exact spawn point the client culled against)
+      _mirror_insert_cull drops this session from the created-set of every peer plane farther than
+      15 km + 1 km whose create predates the ServerConfirm (creates for the new life were not culled;
+      re-arming one would raise a duplicate -> !Objects CTD). The re-create is object-only - the
+      VIRTUAL client delete keeps the station (Gibson 21:51:01/02: VIRTUAL delete Client 2 then
+      'Create NetPlane St=2', no 'Create client', no error). Planes in the 15-16 km band are left
+      alone on purpose. Log: INSERT-CULL '<pilot>: his client dropped every peer plane beyond 15 km
+      at his spawn -> re-arming create for N: ...'. AI objects already notify (del packets); chutes
+      beyond 15 km are not handled yet (rare, short-lived).
+    * Also from Bama's report: his three chat lines after the restart WERE reflected and answered;
+      sid-17 'Prowler very laggy' coincides with Prowler's link dying (reliable backlog unacked from
+      22:03:16, closed 22:03:36) and RGP_JOLLY's uplink jitter (9 TICK-JITTER lines, 22.6/s window),
+      not with anything on Bama's link.
+
+v938f5 [RELAY-GAP: RECEIVER RESPAWNS ARE NOT STALLS; HONEST SENDER AGE] (10-20)
+    * Of the 31 RELAY-GAP lines in run_182942 nearly all sat on the RECEIVER's death->respawn at the
+      same field (Bama 21:36:27 '2.6 s' = his death at :25): the relay skips a non-flying peer, so his
+      first frame after the new ServerConfirm printed one gap per sender. v929 handled the sender's
+      pauses and the receiver's HQ visit, not the receiver's same-field respawn. Now a gap is skipped
+      when the receiver's plane (_obj_confirmed_at) is younger than the gap. 'sender frames 0.0s old'
+      was computed after _harvest_tick had just stamped the frame (always 0.0); the line now reports
+      the sender's real previous-frame age and says what it is: a server-side delivery gap between two
+      flying pilots. What survives is worth reading.
+
 v937f5 [A LOST STATUS COST THE CLIENT 2 s OF CLOCK - RESEND UNTIL ACKED] (10-19)
     * First live reading of v936 `clocks` (18:03-18:16, 5 pilots): everyone 50.00 with 0 jitter
       windows - except Bama, whose long-baseline rate went 50.00 -> 49.88 at 18:12:18 (last-second

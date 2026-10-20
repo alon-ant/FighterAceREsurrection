@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v937f5'
+VERSION = 'v938f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11525,6 +11525,57 @@ def send_tank_update(onum, tick_for, payload26):
     except OSError:
         return False
 
+# v938f5 [THE CLIENT CULLS EVERY PEER PLANE BEYOND 15 km AT EVERY SPAWN - SILENTLY]. Gibson's log
+# (messages994, 10-19 22:04:24): on his same-field respawn ('InsertPlayer') his client ran
+# FUN_004fdb40(spawn_pos): every net object farther than [Range] Information (INI key, default
+# 0x3a98 = 15000 m, FA.exe 0x583423) from the spawn point is deleted - 'Check discon. and del 655
+# (Bama), (Dist=41088.598)' + 'VIRTUAL delete Client 1' - and NO del packet is sent (the silence
+# cull '(dif=...)' does send one; the distance cull does not). The server kept relaying Bama's and
+# Jolly's frames at 1 Hz (planes are never silent, PLANE_RELAY_FAR_HZ), so the client never
+# silence-culled them either: 'Get coord for missing object 655' once a second for 12 minutes, Bama
+# invisible to Gibson, 162 hits (5 cockpit) on Gibson applied by nobody, until Bama's own death
+# finally re-armed the create. Same for Jolly (656). This is every respawn, every pilot, for every
+# peer plane beyond 15 km - it only ever healed when the far peer died.
+# Mirror it: at the first own frame of a new life (exact spawn position; the client culled against
+# the same point) drop this session from the created-set of every peer plane farther than
+# INSERT_CULL_RANGE_M + INSERT_CULL_MARGIN_M whose create predates this ServerConfirm (a create sent
+# for the NEW life was not culled - re-arming it would raise a duplicate -> !Objects CTD). The
+# re-create is object-only: the client's VIRTUAL client delete keeps the station (Gibson 21:51:01
+# 'VIRTUAL delete Client 2' -> 21:51:02 'Create NetPlane St=2' with no 'Create client', no error).
+# The margin covers the two sides' position age at 1 Hz; planes in the 15-16 km band are left alone
+# (a missed re-create is the old benign failure, a duplicate create is a CTD).
+INSERT_CULL_RANGE_M  = 15000.0   # client [Range] Information default (FA.exe 0x583433: push 0x3a98)
+INSERT_CULL_MARGIN_M = 1000.0
+
+def _mirror_insert_cull(s, x, y):
+    """Re-arm the relay create of every peer plane the client of `s` has just distance-culled at
+    its InsertPlayer. Called once per life from relay_telemetry at the first own frame."""
+    try:
+        born = s.__dict__.get('_obj_confirmed_at', 0.0)
+        culled = []
+        for p in get_sessions_in_room(s.current_room):
+            if p is s:
+                continue
+            ppos = p.__dict__.get('_pos_xy')
+            if ppos is None:
+                continue
+            d = math.hypot(ppos[0] - x, ppos[1] - y)
+            if d <= INSERT_CULL_RANGE_M + INSERT_CULL_MARGIN_M:
+                continue
+            cp = p.__dict__.get('_created_peers')
+            if cp is None or s.addr not in cp:
+                continue
+            if p.__dict__.get('_created_at', {}).get(s.addr, 0.0) >= born:
+                continue                        # created for this life, after his cull - keep
+            cp.discard(s.addr)
+            culled.append(f'{p.current_pilot} {d / 1000.0:.0f}km')
+        if culled:
+            log('INSERT-CULL', f'{s.current_pilot}: his client dropped every peer plane beyond '
+                               f'{INSERT_CULL_RANGE_M / 1000.0:.0f} km at his spawn -> re-arming create for '
+                               f'{len(culled)}: {", ".join(culled)}')
+    except Exception:
+        logx('INSERT-CULL', 'mirror failed')
+
 def _ai_cull_list(s, ids):
     """v712f5: process a client cull list of 2-byte object ids: every id that is one of our AI
     objects loses this session from its peer set (re-created when back in range); unknown ids
@@ -19655,6 +19706,8 @@ def relay_telemetry(src, data, _split_obj=None):
     # across a respawn / HQ visit is the client's own silence and is reset without a line.
     try:
         _prev_ft = getattr(src, 'last_telem_time', 0.0)
+        if _split_obj is None:
+            src.__dict__['_prev_telem_time'] = _prev_ft or time.time()   # v938f5: for the RELAY-GAP line
         if _prev_ft and _split_obj is None:
             _pause = time.time() - _prev_ft
             if _pause >= RELAY_GAP_WARN_S:
@@ -19704,6 +19757,8 @@ def relay_telemetry(src, data, _split_obj=None):
                 except Exception:
                     pass
                 src._pos_xy = (_ox, _oy); src._pos_z = _oz; src._pos_at = time.time(); src._pos_obj = _co_onum
+                if src.__dict__.pop('_insert_cull_pending', False):          # v938f5
+                    _mirror_insert_cull(src, _ox, _oy)
                 # v863f5: ring of the pilot's own frames for the desync event file
                 _fr = src.__dict__.setdefault('_frame_ring', [])
                 _fr.append((time.time(), int.from_bytes(pl[5:7], 'little'), _ox, _oy, _oz))
@@ -19849,6 +19904,7 @@ def relay_telemetry(src, data, _split_obj=None):
             _cp = src.__dict__.setdefault('_created_peers', set())
             if p.addr not in _cp:
                 _cp.add(p.addr)
+                src.__dict__.setdefault('_created_at', {})[p.addr] = _now_relay   # v938f5: for _mirror_insert_cull
                 # The NET::CLIENT station is created ONCE per peer and PERSISTS across
                 # death/respawn/exit-to-HQ (type-3 deletes only the OBJECT, never the
                 # client). So only the FIRST create per peer carries the client record;
@@ -20020,7 +20076,13 @@ def relay_telemetry(src, data, _split_obj=None):
             _rg = src.__dict__.setdefault('_relay_last_to', {})
             _lt = _rg.get(p.addr)
             _rg[p.addr] = _now_relay
+            # v938f5: a RECEIVER who died and respawned at the same field was not flying for the
+            # whole gap (the relay skips non-flying peers), so the first frame after his new
+            # ServerConfirm printed one gap per sender (Bama 10-19 21:36:27 '2.6 s' = his death at
+            # :25). Those are his own death, not a stall: skip when his plane is younger than the gap.
+            _p_born = p.__dict__.get('_obj_confirmed_at', 0.0)
             if _lt is not None and (_now_relay - _lt) >= RELAY_GAP_WARN_S \
+                    and _p_born <= _lt \
                     and _dd is not None and _dd <= RELAY_GAP_MAX_DIST_M:
                 # v912f5: only pairs that SHOULD be getting frames - beyond the silent far tier (and
                 # with no position known) the gap is the tier design, not a delivery problem; those
@@ -20028,9 +20090,12 @@ def relay_telemetry(src, data, _split_obj=None):
                 _rgw = src.__dict__.setdefault('_relay_gap_warned', {})
                 if _now_relay - _rgw.get(p.addr, 0.0) >= 30.0:
                     _rgw[p.addr] = _now_relay
+                    # v938f5: 'sender frames N s old' was measured AFTER _harvest_tick had just stamped
+                    # this very frame, so it always read 0.0; report the sender's real pause instead.
                     log('RELAY-GAP', f'{src.current_pilot} -> {p.current_pilot}: no frame relayed for '
                                      f'{_now_relay - _lt:.1f}s (distance {_dd / 1000.0 if _dd is not None else -1:.1f} km, '
-                                     f'sender frames {time.time() - getattr(src, "last_telem_time", 0.0):.1f}s old)')
+                                     f'sender\'s previous frame {_now_relay - src.__dict__.get("_prev_telem_time", _now_relay):.1f}s before this one) '
+                                     f'- a server-side delivery gap between two flying pilots')
         except Exception:
             pass
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
@@ -22964,6 +23029,7 @@ def _fire_server_confirm(s, via='', ident=None):
     number = next_obj_number()       # GLOBALLY-unique u16 so each player's telemetry id differs
     s.my_obj_number = number; s.obj_confirmed = True; s.flying = True
     s.__dict__['_obj_confirmed_at'] = time.time()   # v701f5: fresh-plane guard for stale exit records
+    s.__dict__['_insert_cull_pending'] = True       # v938f5: mirror his client's InsertPlayer distance cull at his first frame
     s.__dict__['_silence_expected'] = True          # v929f5: the pause before this spawn is not an uplink stall
     s.__dict__.pop('_relay_last_to', None)          # v929f5: fresh per-pair relay clocks for the new plane
     try:
