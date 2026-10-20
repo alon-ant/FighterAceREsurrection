@@ -1,3 +1,25 @@
+v940f5 [REMOTE TROOP DROPS PRINTED '<TRANSPORT>(p) HAS BAILED OUT' ON THE PEERS] (10-20)
+    * User 10-20: 'when remote players drop paratroopers the game chat logs a bailout ... this isn't a
+      bailout'. Gibson's log 10-19 20:04:36: 'Create NetParachuter St=6 ONumber=367' then 5 ms later
+      'EVENT GB Dakota Mk.II(4)(p) has bailed out' - the peer's CLIENT prints it, from the create.
+    * Cause (FA.exe, the parachuter ctor FUN_004a8c20 and its factory call FUN_004f26b0 case 2): record
+      body[9] is kept at chute+0x2dc. With a parent plane bound (body[2:4]) and body[9]==0 the ctor
+      names the chute '<parent name>(p)' and sets parent+0x1afc=1 - the plane's 'pilot has bailed'
+      flag - which is what the event printer reacts to. body[9]==1 goes down the SAME parent-position
+      path (0x4a9084: position/heading from the parent, FUN_004a6780) without touching the flag; the
+      chute is just named 'p'. The transport's client sends every trooper with body[9]=1 (all 10-19/
+      10-20 crew bodies: ..5301/..5201/..5501/..5601) and a bailing pilot's own body has 0
+      (82804302030000005200) - but build_parachuter_record has forced body[9] = PARA_DEPLOY_BYTE9 = 0
+      on EVERY chute since v259, turning each trooper into 'the parent's bailed pilot' on the peers.
+      The v816 'throttle' note (byte-identical records, only some printed) is the flag being set by
+      each create and cleared once per plane by the printer.
+    * Fix: PARA_DEPLOY_BYTE9 = None - the client's own byte goes out verbatim (the real server relayed
+      the record as sent). Pilot chutes are unchanged (they carry 0); troopers keep their 1. No change
+      to CHUTE_NO_PARENT (still off - v919: without a parent the canopy has no position); the parent
+      stays bound, so placement is as before.
+    * Verify on the next online drop: no 'has bailed out' EVENT on the observers' messages logs for
+      a troop stick; canopies still appear at the transport and descend as before.
+
 Fighter Ace LAN Server - CHANGE LOG
 ==============================================================================
 Split out of server.py's docstring on 2026-07-25, current build v429f5.
@@ -61,6 +83,51 @@ they explain why a specific line is the way it is and must stay with it.
     positioning wins); the capture rule stays capture% + a tank inside (not the wiki's 'one
     tank + defences dead'); metal repair by train/cargo stays; the panel's production % stays
     the scene HP fraction.
+
+v939f5 [NOT ALL SOLDIERS FIRE AT A DEFENDED SCENE = A NameError UNWINDING THE WHOLE TICK] (10-20)
+    * User 10-20: 'not all soldiers fire on targets when on an enemy scene'. _tc_para_capture_tick's
+      v746 defended-scene branch (enemy soldiers / tanks holding the scene) wrote sd['state'] =
+      SOLDIER_STATE_FIRE / SOLDIER_STATE_WALK - names that never existed - and read `now`, which the
+      function never set. The first soldier OUTSIDE gun range of a defender raised NameError and
+      unwound the whole 1 Hz tick: every stick in the room, and _recreate_near_pilots behind it.
+      run_20261013_055312 has 'engagement tick failed ... SOLDIER_STATE_WALK is not defined' 1,259
+      times. Net effect at a defended scene: the men before him in the list fired, everyone after him
+      froze. The out-of-range men would not have closed in either - sd['goal'] was never read by the
+      walk (_soldier_goal walks on _tgt_obj).
+    * Fix: `now` set; in range -> flags 0x04 / firing / aim / fwd (the client's firing animation,
+      held still by _sticks_tick); out of range -> the defender becomes the man's _tgt_obj so the
+      walk closes to SOLDIER_STAND_OFF of it, inside gun range. The soft-target branch re-targets when
+      the defenders are gone (its own validity test rejects the ('unit', id) key).
+    * SECOND CAUSE, the common one (user 10-20 'still not all troops attacking when dropped on scene',
+      tested on the live v938): the infantry cap (SOLDIER_DAMAGE_CAP 30%) gated the WHOLE firing block -
+      defenders and the scene's AA/Flak included. A scene triggers at 60% damage and pilots drop after
+      bombing, so a stick landing on a triggered scene never fired at anything: run_182942 00:16, scene
+      40 at ~35%, 13 men killed by the AA/Flak in 60 s, zero objects destroyed. The cap now limits only
+      SOFT (non-defence) targets - what keeps infantry from taking a scene alone - while enemy units
+      and the defences are engaged at any damage level; when the cap is crossed mid-fight the soft
+      targets drop off the list and the men re-target the guns.
+    * THIRD CAUSE, from the local v939 test (run_044700 04:53-04:57, 11 men on GB Tank Factory 51 at
+      5-17%): the men in range killed the AA in 2 s and a Flak 30 s later - then 10 of 11 logged 'no
+      progress for 12s (190-211 m from its slot) - standing here' and never fired again. The stuck
+      detector (_soldier_step) never ran while a man stood firing (moving=False), so _stuck_since
+      stayed at his landing time; the moment his gun died he got a target 200 m away, took one step,
+      was declared stuck (12 s had long passed) and the test returned False forever. Now: a target
+      switch resets the detector, standing to fire refreshes it, and 'stuck' is a 20 s rest followed
+      by a fresh path plan, not a life sentence. Also the dead gun was still in the defence
+      candidate list after its destroy, so the next men in the same tick re-picked it and fired at a
+      corpse ('SKIPPED re-destroy ... still dead' x8 per tick); it is now removed with the soft list.
+    * PINK LINE FOR THE TROOPS' KILLS (user 10-20, local test: 'missing ground object destruction line
+      for each object my troops destroy'): tc_ai_destroy_object sent every AI kill with the AI
+      sentinel - the 30 destroy-form to all, the 'You have destroyed <owner> <Scene>' msg 36 to nobody
+      ('msg 36 ... -> 0 session(s)'). When the kill is credited to a pilot in the room (his stick,
+      TC_CREDIT_PARA_GROUND_KILLS) the points are now booked first and the 36 goes to him carrying his
+      category's new total (the v783 contract - the client stores that float), peers get the 30, then
+      the STAT25 push. Tank-column kills are unchanged (no credited pilot -> wreck only).
+    * pyflakes over the whole file found one more undefined-name trap of the same family: an orphaned
+      fragment of build_parachuter_record (def line lost in an old edit) sitting INSIDE
+      _send_parachuter_create_after after its log line, raising NameError 'nation' on every canopy
+      re-create (pool worker, after the create had gone out). Removed. pyflakes undefined-name scan
+      is now clean; worth running before every deploy.
 
 v938f5 [INVISIBLE PEERS AFTER A RESPAWN: MIRROR THE CLIENT'S 15 km INSERT CULL] (10-20)
     * Bama 10-19 22:02-22:16 'no one could see me, my bullets didn't register': 162 hits on Gibson

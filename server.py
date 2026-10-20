@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v938f5'
+VERSION = 'v940f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12680,8 +12680,46 @@ def tc_ai_destroy_object(room_id, obj, oi, by='', credit_pilot=None):
     like a ground kill of his own."""
     sc = oi.get('scene')
     camp = scene_camp(_probe_terrain_for_room(room_id), sc) if sc is not None and sc >= 0 else 0
-    broadcast_scene_36(room_id, [(obj, camp if camp != SCENE_CAMP_NEUTRAL else 0, 0.0)],
-                       reason=f'(AI tank fire {by})', killer=_TC_AI_KILLER)
+    # v939f5 [PINK LINE FOR THE TROOPS' KILLS] (user 10-20, local test): the 36 went out with the AI
+    # sentinel, i.e. the 30 destroy-form to everyone and the 'You have destroyed <owner> <Scene>' 36
+    # to nobody ('msg 36 ... -> 0 session(s)'), so the pilot whose stick killed a building saw the
+    # wreck but never the line he gets for his own bombs. Now, when the kill is credited to a pilot
+    # in the room, the points are booked FIRST and the 36 goes to him with the f32 = his category's
+    # new total (v783 contract: the client STORES that float as its local score), peers get the 30.
+    _ksess = None
+    if credit_pilot:
+        _ksess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == credit_pilot), None)
+    _booked = False
+    if _ksess is not None and GROUND_KILL_SCORE and oi.get('value', 0) > 0:
+        try:
+            _mode = scoring_mode_for_room(room_id)
+            _pts = int(round(oi['value'] * SCENE36_SCORE_PCT / 100.0))
+            if _mode is not None and _pts > 0:
+                _bomber = is_bomber_plane(getattr(_ksess, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(credit_pilot, _pts, bomber=_bomber, mode=_mode)
+                _bld = db_bump_pilot_counter(credit_pilot, 'ai_buildings', 1)
+                log('SCORE', f'{credit_pilot} +{_pts} = his paratroops destroyed {oi["name"]} (obj {obj}) | total {_sc} '
+                             f'rank {_old}->{_rk} buildings={_bld}')
+                _booked = True
+        except Exception:
+            logx('TC', 'paratroop kill credit failed')
+    if _ksess is not None:
+        _tot = 0.0
+        try:
+            _st = db_get_pilot_stat25(credit_pilot)
+            _tot = float(_st.get('bomber_score' if is_bomber_plane(getattr(_ksess, 'plane_type', None)) else 'score', 0) or 0)
+        except Exception:
+            _tot = 0.0
+        broadcast_scene_36(room_id, [(obj, camp if camp != SCENE_CAMP_NEUTRAL else 0, _tot)],
+                           reason=f'(AI tank fire {by}, credited to {credit_pilot})', killer=_ksess)
+        if _booked:
+            try:
+                send_stat_block_25(_ksess, reason='(paratroop kill)')
+            except Exception:
+                logx('SCORE', 'stat25 push after paratroop kill failed')
+    else:
+        broadcast_scene_36(room_id, [(obj, camp if camp != SCENE_CAMP_NEUTRAL else 0, 0.0)],
+                           reason=f'(AI tank fire {by})', killer=_TC_AI_KILLER)
     if sc is not None and sc >= 0:
         frac = trn_scene_damage_frac(room_id, sc)
         SCENE_HP[(room_id, sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - frac)))
@@ -12693,20 +12731,7 @@ def tc_ai_destroy_object(room_id, obj, oi, by='', credit_pilot=None):
         if trn_scene_complete(room_id, sc):
             supply_on_scene_destroyed(room_id, sc)
         tc_check_defend(room_id, sc, reason='(tank fire)')          # v587f5
-    if credit_pilot and GROUND_KILL_SCORE and oi.get('value', 0) > 0:
-        try:
-            sess = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == credit_pilot), None)
-            _mode = scoring_mode_for_room(room_id)
-            _pts = int(round(oi['value'] * SCENE36_SCORE_PCT / 100.0))
-            if sess is not None and _mode is not None and _pts > 0:
-                _bomber = is_bomber_plane(getattr(sess, 'plane_type', None))
-                _sc, _rk, _old = db_apply_score_delta(credit_pilot, _pts, bomber=_bomber, mode=_mode)
-                _bld = db_bump_pilot_counter(credit_pilot, 'ai_buildings', 1)
-                log('SCORE', f'{credit_pilot} +{_pts} = his paratroops destroyed {oi["name"]} (obj {obj}) | total {_sc} '
-                             f'rank {_old}->{_rk} buildings={_bld}')
-                send_stat_block_25(sess, reason='(paratroop kill)')
-        except Exception:
-            logx('TC', 'paratroop kill credit failed')
+    # (v939f5: the paratroop credit moved above the 36 so the line carries the new total)
 
 def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
     """assist_pilot (v607f5): the pilot whose paratroops made the capture, when he is not the
@@ -15376,6 +15401,7 @@ def soldier_broadcast_state(onum):
 SOLDIER_IDLE_S = 8.0     # v790f5: keep-alive cadence for a standing soldier (client cull is ~28 s of silence)
 SOLDIER_ARRIVE_M = 4.0   # v792f5: close enough to the slot (was 2 m)
 SOLDIER_STUCK_S  = 12.0  # v792f5: no progress this long -> stand where he is
+SOLDIER_STUCK_REST_S = 20.0  # v939f5: ... for this long, then try again with a fresh path (was: forever)
 SOLDIER_STUCK_M  = 1.5   #         'progress' = closing at least this much
 SOLDIER_AIM_CHANGE_DEG = 15.0   # v791f5: an aim swing smaller than this is not worth an update
 
@@ -15735,11 +15761,23 @@ def _soldier_step(sd, o, terrain, gx, gy, dt, now):
     if _bd is None or dist < _bd - SOLDIER_STUCK_M:
         sd['_best_dist'] = dist; sd['_stuck_since'] = now
     elif now - (sd.get('_stuck_since') or now) > SOLDIER_STUCK_S:
-        if not sd.get('_stuck_logged'):
-            sd['_stuck_logged'] = True
-            log('PARA', f'soldier 0x{o:04x}: no progress for {SOLDIER_STUCK_S:.0f}s ({dist:.0f} m from its slot) - standing here')
-        sd['moving'] = False
-        return False
+        # v939f5 [STUCK WAS A LIFE SENTENCE]: local run_044700 04:54 - 10 of 11 men 'no progress for
+        # 12s (190-211 m from its slot) - standing here' seconds after their first AA died: they
+        # had stood FIRING (moving=False, this function never ran, _stuck_since frozen at landing),
+        # then got a target 200 m away and were declared stuck on the first step - and the test
+        # above returned False forever after. Now: a stuck man rests SOLDIER_STUCK_REST_S, then the
+        # detector forgets and he tries again (a fresh path plan: _wps dropped). The target
+        # switch in _tc_para_capture_tick also resets the detector.
+        if now - (sd.get('_stuck_since') or now) > SOLDIER_STUCK_S + SOLDIER_STUCK_REST_S:
+            sd['_best_dist'] = None; sd['_stuck_since'] = None; sd['_wps'] = None; sd['_planned_at'] = 0.0
+            sd['_stuck_logged'] = False
+        else:
+            if not sd.get('_stuck_logged'):
+                sd['_stuck_logged'] = True
+                log('PARA', f'soldier 0x{o:04x}: no progress for {SOLDIER_STUCK_S:.0f}s ({dist:.0f} m from its slot) '
+                            f'- resting {SOLDIER_STUCK_REST_S:.0f}s, then trying again')
+            sd['moving'] = False
+            return False
     wps = sd.get('_wps')
     pg = sd.get('_wp_goal')
     drift = math.hypot(gx - pg[0], gy - pg[1]) if pg else 1e9
@@ -15790,6 +15828,7 @@ def _sticks_tick(dt=1.0):
             gx, gy = _soldier_goal(st, sd, o, terrain, txy)
             if sd.get('firing'):
                 sd['moving'] = False                      # v594f5: stand while shooting
+                sd['_stuck_since'] = now                  # v939f5: standing to shoot is not being stuck
                 if now - sd.get('last_sent', 0.0) >= TANK_IDLE_S:
                     soldier_broadcast_state(o)
                 arrived += 1
@@ -15850,7 +15889,16 @@ def tc_sticks_at_scene(rid, sidx, camp):
 def _tc_para_capture_tick():
     """v588f5/v591f5: attacking sticks at a hostile scene shoot its SOFT objects (never past
     SOLDIER_DAMAGE_CAP); the scene flips when damage >= capture% with >= PARA_CAPTURE_MIN
-    soldiers present."""
+    soldiers present.
+    v939f5 [NOT ALL SOLDIERS FIRE]: the v746 defended-scene branch wrote sd['state'] =
+    SOLDIER_STATE_FIRE / SOLDIER_STATE_WALK - names that were never defined - and read `now`,
+    which this function never set. The first soldier outside gun range of a defender raised
+    NameError, which unwound the WHOLE tick (every stick, and _recreate_near_pilots behind it):
+    run_20261013 logged 'engagement tick failed ... SOLDIER_STATE_WALK is not defined' 1,259
+    times. So at a defended scene the men processed before him kept firing and everyone after
+    him froze - 'not all soldiers fire' (user 10-20). Also sd['goal'] was never read by the walk
+    (_soldier_goal walks on _tgt_obj), so out-of-range men would not have closed in anyway."""
+    now = time.time()
     for sid, st in list(STICKS.items()):
         if st['target'] < 0 or st.get('purpose') != 'attack':
             continue
@@ -15864,8 +15912,14 @@ def _tc_para_capture_tick():
             continue
         objs = [o for o in (st.get('objs') or []) if o in SOLDIERS]
         frac = trn_scene_damage_frac(rid, sidx)
-        # --- soft-target fire under the infantry cap ---
-        if objs and frac < SOLDIER_DAMAGE_CAP:
+        # --- v939f5 [TROOPS IDLE AT A TRIGGERED SCENE]: the infantry cap used to gate THIS WHOLE
+        # block, defenders and defences included. A scene is triggered at 60% damage and pilots
+        # drop after bombing, so a stick landing on a triggered scene (always >= 30%) never fired a
+        # shot at anything and was simply killed by the AA/Flak (run_182942 00:16: scene 40 at
+        # ~35%, 13 men dead in 60 s, zero objects destroyed, user 10-20 'troops are not attacking').
+        # The cap now limits only SOFT (non-defence) targets - what stops infantry taking a scene
+        # alone - while enemy units and the scene's defences are engaged at any damage level. ---
+        if objs:
             # v746f5 (user): the stick kills the scene's DEFENDERS - enemy soldiers first, then enemy
             # tanks - before it touches anything else; a defended scene cannot be captured either
             # (tc_capture_scene refuses while any live enemy ground unit holds it).
@@ -15882,9 +15936,12 @@ def _tc_para_capture_tick():
                     _tg = min(_cd, key=lambda e: math.hypot(e[1][0] - sd['pos'][0], e[1][1] - sd['pos'][1]))
                     _dd = math.hypot(_tg[1][0] - sd['pos'][0], _tg[1][1] - sd['pos'][1])
                     if _dd <= SOLDIER_GUN_RANGE:
-                        sd['goal'] = None
+                        # v939f5: in range -> stand and fire (flags 0x04 is the client's firing
+                        # animation; 'firing' holds him still in _sticks_tick)
                         sd['_aim'] = (_tg[1][0] - sd['pos'][0], _tg[1][1] - sd['pos'][1])
-                        sd['state'] = SOLDIER_STATE_FIRE
+                        sd['fwd'] = (sd['_aim'][0], sd['_aim'][1], 0.0)
+                        sd['flags'] |= 0x04; sd['firing'] = True; sd['moving'] = False
+                        sd['_tgt_obj'] = (('unit', _tg[0]), None, _tg[1][0], _tg[1][1], True)
                         if _tg[0] in SOLDIERS:
                             v2 = SOLDIERS[_tg[0]]
                             v2['hp'] = v2.get('hp', SOLDIER_HP) - SOLDIER_VS_SOLDIER_DPS
@@ -15897,7 +15954,10 @@ def _tc_para_capture_tick():
                             if v3['hp'] <= 0 and not v3.get('dead'):
                                 tank_killed(_tg[0], None, reason='(infantry fire)')
                     else:
-                        sd['goal'] = (_tg[1][0], _tg[1][1]); sd['state'] = SOLDIER_STATE_WALK
+                        # v939f5: out of range -> hand the defender to the walk as this man's
+                        # target; _soldier_goal closes to SOLDIER_STAND_OFF of it, inside gun range
+                        sd['flags'] &= ~0x04; sd['firing'] = False; sd['_aim'] = None
+                        sd['_tgt_obj'] = (('unit', _tg[0]), None, _tg[1][0], _tg[1][1], True)
                 if now - st.get('_def_logged', 0.0) > 30.0:
                     st['_def_logged'] = now
                     log('PARA', f'stick {sid}: scene {sidx} defended by {len(_dt2)} tank(s) / {len(_ds2)} soldier(s) '
@@ -15909,10 +15969,14 @@ def _tc_para_capture_tick():
             # cut - the troops had no chance with the AA up (user 09-17). They are now valid targets
             # whatever their value, and are taken FIRST; the soft targets follow once they are down.
             _defs_t = [e for e in _all if e[4] and is_defence_name(e[1].get('name'))]
-            soft = _defs_t + [e for e in _all if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE
-                              and not is_defence_name(e[1].get('name'))]
+            _soft_plain = [e for e in _all if e[4] and e[1]['value'] < SOLDIER_HARD_VALUE
+                           and not is_defence_name(e[1].get('name'))]
+            soft = _defs_t + (_soft_plain if frac < SOLDIER_DAMAGE_CAP else [])    # v939f5: cap = soft only
+            if not soft:
+                for o in objs:
+                    SOLDIERS[o]['flags'] &= ~0x04; SOLDIERS[o]['firing'] = False; SOLDIERS[o]['_tgt_obj'] = None; SOLDIERS[o]['_aim'] = None
             per_soldier = st['n'] / max(1, len(objs))
-            for o in objs:
+            for o in (objs if soft else []):
                 sd = SOLDIERS[o]
                 # v594f5: each soldier keeps an assigned soft target and closes on it (the walk
                 # goal); it fires once within gun range
@@ -15923,6 +15987,10 @@ def _tc_para_capture_tick():
                              if math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1]) <= SOLDIER_GUN_RANGE * 2.0] or soft
                     tgt = min(_cand, key=lambda e: math.hypot(e[2] - sd['pos'][0], e[3] - sd['pos'][1])) if _cand else None
                     sd['_tgt_obj'] = tgt
+                    # v939f5: a NEW target = a new walk; forget the stuck detector's memory of the
+                    # old one (see _soldier_step) or a man who stood firing for 20 s is declared
+                    # stuck the instant his gun dies and never moves again
+                    sd['_best_dist'] = None; sd['_stuck_since'] = None
                 if tgt is None or math.hypot(tgt[2] - sd['pos'][0], tgt[3] - sd['pos'][1]) > SOLDIER_GUN_RANGE:
                     sd['flags'] &= ~0x04; sd['firing'] = False; sd['_aim'] = None
                     continue
@@ -15937,13 +16005,13 @@ def _tc_para_capture_tick():
                     tc_ai_destroy_object(rid, best[0], best[1], by=f'stick {sid}',
                                          credit_pilot=(st.get('by') if TC_CREDIT_PARA_GROUND_KILLS else None))   # v607f5/v738f5
                     soft = [e for e in soft if e[0] != best[0]]
+                    _defs_t = [e for e in _defs_t if e[0] != best[0]]     # v939f5: the dead gun must not be re-picked
                     sd['_tgt_obj'] = None
                     frac = trn_scene_damage_frac(rid, sidx)
                     if frac >= SOLDIER_DAMAGE_CAP:
-                        break
-        elif objs:
-            for o in objs:
-                SOLDIERS[o]['flags'] &= ~0x04; SOLDIERS[o]['firing'] = False; SOLDIERS[o]['_tgt_obj'] = None; SOLDIERS[o]['_aim'] = None
+                        # v939f5: the cap is reached -> soft targets come off the list, the defences
+                        # stay on it (men on a soft target re-target next tick)
+                        soft = [e for e in soft if is_defence_name(e[1].get('name'))]
         # --- v599f5: the scene's own defences shoot back (client-side AI guns report nothing for
         # our objects, so it is modelled here): each live defence object within DEFENCE_RANGE of
         # an enemy soldier deals DEFENCE_DPS to the nearest one per second ---
@@ -16759,6 +16827,11 @@ def _send_parachuter_create_after(src, dst, delay, with_client=False):
     if send_parachuter_create_for(src, dst, predel=(not with_client), with_client=with_client):
         log('PARA', f'{src.current_pilot} canopy 0x{src.para_obj_number:04x} re-created onto '
                     f'{dst.current_pilot} (peer rebuilt its world mid-descent) [v550f5]')
+    return
+    # v939f5: the text below is an ORPHANED fragment of build_parachuter_record (its def line was
+    # lost in an old edit); it sat inside this function after the log and raised NameError 'nation'
+    # on every canopy re-create (found by pyflakes while fixing the soldier NameError). Kept as a
+    # comment-free dead string for the record; the live builder is build_parachuter_record above.
     """23-byte PARACHUTER object record (Type 2). *** SIZE PROVEN FROM THE BINARY. ***
 
     v248 sent a 41-byte PLANE-shaped record here and it CTD'd the peer. The msg-2 record loop
@@ -16795,13 +16868,7 @@ def _send_parachuter_create_after(src, dst, delay, with_client=False):
         [14:23]  rest of the trailer, zero
     [1], [4:8] and [8] are passed to the ctor but not yet identified; left 0.
     """
-    rec = bytearray(PARACHUTER_HEADER_SIZE + 13)              # 10 + 13 = 23
-    rec[0] = 0x80 | (PARACHUTER_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
-    struct.pack_into('<h', rec, 2, owner_obj & 0x7fff)        # must be >= 0 or the score is skipped
-    rec[9] = model & 0xff
-    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 0, st & 0xffff)        # St      @ [10]
-    struct.pack_into('<H', rec, PARACHUTER_HEADER_SIZE + 2, onumber & 0xffff)   # ONumber @ [12]
-    return bytes(rec)
+    # (orphaned body of build_parachuter_record removed in v939f5 - see the note above)
 
 def _dead_v250_send_parachuter_create_for(src, dst):
     # *** DEAD CODE - superseded by send_parachuter_create_for above (v251). ***
@@ -17529,7 +17596,17 @@ MSG20_INSTRUMENT    = False  # v258: log the FULL bytes of every in-game msg-20 
                              #   learn the state format that must drive the pilotless plane + the
                              #   parachuter descent/deploy after a bail. Pure logging, no behaviour
                              #   change. Set False once the format is understood.
-PARA_DEPLOY_BYTE9   = 0      # v259: record body byte[9] = ctor param_6 = the parachuter DEPLOY/model
+PARA_DEPLOY_BYTE9   = None   # v940f5: None = relay the client's OWN byte[9] (was 0 since v259 - see below).
+                             #   The transport's client sends its troopers with byte[9]=1 (body
+                             #   12804f01000000005301); forcing 0 made every trooper a 'bailed pilot of
+                             #   the parent' on the peers: FUN_004a8c20 keeps byte[9] at chute+0x2dc and
+                             #   when it is 0 AND a parent is bound it names the chute '<parent>(p)' and
+                             #   sets parent+0x1afc=1 (the plane's 'pilot has bailed' flag) -> the peer's
+                             #   client printed 'GB Dakota Mk.II(4)(p) has bailed out' at every drop
+                             #   (Gibson 10-19 20:04:36, 5 ms after 'Create NetParachuter'). byte[9]=1
+                             #   takes the same parent-position path (0x4a9084) without the flag; name 'p'.
+                             #   A bailing PILOT's own body carries 0, so his chute is unchanged.
+                             # v259: record body byte[9] = ctor param_6 = the parachuter DEPLOY/model
                              #   selector. RE'd from the master object factory FUN_004f26b0 case 2:
                              #     FUN_004a8c20(body[8], owner, *(body+4), (body[0]&0x70)>>4, body[9])
                              #   ctor param_6 = body[9] drives model + canopy:
