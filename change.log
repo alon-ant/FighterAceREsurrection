@@ -1,3 +1,26 @@
+v944f5 [BOMBS vs TANKS: A BLAST IS NOT A GUN BURST] (10-20)
+    * User 10-20 (Killer in chat 04:09: '550 and higher bombs do nothing on them ... i dropped 16 on one
+      group and nothing ... tiny bombs do more'; user: 'small bombs kill tanks, anything above 250 lb
+      doesn't kill any, a 2000 lb should kill quite a few, 550 should be very effective').
+    * What the logs show: a bomb's blast reaches the server as one msg-51 hit per tank within a few tens
+      of ms, the raw already falling off with distance - 500 lb-class: [299, 71, 130, 20, 38, 9, 1] over 7
+      tanks (VENOM 00:16:41), [36, 131, 229, 17, 2] (Sean 23:50:56); heavy: [379, 11475, 761, 212, 753,
+      1457, 107] (Killer 00:26:50). The v608 armour bands (<100 x0.03, <400 x0.20, <700 x0.60) exist so
+      MG rounds (raw 1-81) bounce - and they crushed bomb splash the same way: 299 -> 60, 130 -> 26,
+      71 -> 2 on a 150 HP Sherman. Only a hull hit (raw >= 700) killed: VENOM's 7-tank blast killed 0,
+      Killer's heavy pass 4 of 7. Small bombs 'do more' because a stick of many lands more hull hits.
+    * Fix: the blast is recognised by its shape. Hits by the same attacker are kept for TANK_HIT_CLUSTER_S
+      (0.3 s); once they cover TANK_BOMB_MIN_TANKS (4) different tanks, or 2+ tanks with a raw >=
+      TANK_BOMB_MIN_RAW (400), the cluster is a bomb and every hit in it - the ones already applied
+      through the bands included - is topped up to raw x TANK_BOMB_SCALE (1.5), logged as 'BOMB blast'.
+      A gun burst (one tank, similar raws) and a cannon pass raking up to 3 tanks keep the bands.
+      Replayed on the logged clusters: VENOM 00:16:41 0 -> 2 kills (+1 at 106/150), VENOM 00:21:43
+      1 -> 4, Sean 00:03:49 3 -> 5, Sean 23:50:56 0 -> 2, Meno 22:19:03 1 -> 2, Killer's heavy pass
+      4 -> 7 of 7; JOLLY's MG rake [2, 10, 85, 4, 15] still kills nothing. Tune TANK_BOMB_SCALE if 550s
+      still feel weak (2.0 makes the 71 a near-kill too).
+    * Verify: drop one 550 on a column - 'BOMB blast (N tanks in 0.3s)' lines and 1-3 kills; a 2000 lb
+      near the column takes most of it; strafing with cannon still needs the old number of hits.
+
 v943f5 [AI AIRCREW FROM A BAIL-OUT ARE NOT PARATROOPS] (10-20)
     * User 10-20: 'whenever a loaded troop carrier bails out, the troops also bail with the crew and
       ... AI crew spawn soldiers'. run_033558: Killer asked 14 troopers at 04:40:01 and bailed his C-47

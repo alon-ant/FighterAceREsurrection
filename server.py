@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v943f5'
+VERSION = 'v944f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -11708,6 +11708,21 @@ def tank_effective_damage(raw):
     return raw
 TANK_WRECK_S      = 20.0           # seconds the dead tank stays as a wreck before the delete
 TANK_DAMAGE       = True
+# v944f5 [BOMBS vs TANKS] (user 10-20; Killer: '550 and higher bombs do nothing on them, tiny bombs do
+# more'). A bomb's blast arrives as one msg-51 hit per tank it reached, all within a few tens of ms,
+# with the raw already falling off with distance: 500 lb-class clusters online were e.g. [299, 71, 130,
+# 20, 38, 9, 1] over 7 tanks (VENOM 00:16:41) and [1875, 20, 106, 70] (Meno 22:19:03); Killer's heavy
+# pass at 00:26:50 [379, 11475, 761, 212, 753, 1457, 107]. The v608 bands were built for GUN rounds (MG
+# 1-81 should bounce), and they crushed the splash of a heavy bomb the same way: 299 -> 60, 130 -> 26,
+# 71 -> 2 on a 150 HP Sherman - nothing died unless a bomb landed on the hull (raw >= 700). A bomb is
+# recognised by its shape - the same attacker hitting TANK_BOMB_MIN_TANKS different tanks inside
+# TANK_HIT_CLUSTER_S (or 2 with a raw >= TANK_BOMB_MIN_RAW) - and every hit of the cluster, including
+# the ones already applied through the bands, is topped up to raw x TANK_BOMB_SCALE. A gun burst is a
+# stream of similar raws on ONE tank and keeps the bands.
+TANK_HIT_CLUSTER_S  = 0.30
+TANK_BOMB_MIN_TANKS = 4            # a cannon pass can rake 3 tanks of a column inside 0.3 s; a blast reaches 4-7
+TANK_BOMB_MIN_RAW   = 400          # a 2-3 tank cluster counts as a bomb only with a heavy hit in it (20 mm is 210-320)
+TANK_BOMB_SCALE     = 1.5          # splash raw 100 kills a 150 HP Sherman; a 2000 lb near-direct (1457) kills a Tiger (1100)
 
 def tank_hp_max(t):
     return TANK_CLASS_HP.get(t.get('class'), TANK_FALLBACK_HP)
@@ -11769,12 +11784,40 @@ def _handle_tank_hit_51(s, pl):
                 continue
             hp_max = tank_hp_max(t)
             eff = tank_effective_damage(float(dmg))                    # v608f5 armour bands
+            # v944f5: cluster bookkeeping (see TANK_HIT_CLUSTER_S) - the hit is first applied through
+            # the gun bands; if it turns out to belong to a bomb blast, it and the earlier hits of the
+            # blast are topped up to raw x TANK_BOMB_SCALE below.
+            _nowh = time.time()
+            _hb = s.__dict__.setdefault('_tank_hit_recent', [])
+            _hb[:] = [h for h in _hb if _nowh - h['t'] <= TANK_HIT_CLUSTER_S]
+            _rec = {'t': _nowh, 'victim': victim, 'raw': float(dmg), 'applied': eff, 'bomb': False}
+            _hb.append(_rec)
+            _tanks_in = {h['victim'] for h in _hb}
+            _is_bomb = (len(_tanks_in) >= TANK_BOMB_MIN_TANKS
+                        or (len(_tanks_in) >= 2 and max(h['raw'] for h in _hb) >= TANK_BOMB_MIN_RAW))
             t['hp'] = t.get('hp', hp_max) - eff
             t['last_hit_by'] = s
             log('TANKHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit tank 0x{victim:04x} class {t["class"]} '
                            f'camp {t["camp"]} for {dmg} (eff {eff:.0f}) -> hp {t["hp"]:.0f}/{hp_max:.0f}')
             if t['hp'] <= 0:
                 tank_killed(victim, s, reason='(msg-51 damage)')
+            if _is_bomb:
+                for h in _hb:
+                    _want = h['raw'] * TANK_BOMB_SCALE
+                    _extra = _want - h['applied']
+                    if _extra <= 0.5:
+                        continue
+                    h['applied'] = _want; h['bomb'] = True
+                    _tv = TANKS.get(h['victim'])
+                    if _tv is None or _tv.get('dead'):
+                        continue
+                    _tv['hp'] = _tv.get('hp', tank_hp_max(_tv)) - _extra
+                    _tv['last_hit_by'] = s
+                    log('TANKHIT', f'{s.current_pilot}: BOMB blast ({len(_tanks_in)} tanks in {TANK_HIT_CLUSTER_S:.1f}s) - '
+                                   f'tank 0x{h["victim"]:04x} raw {h["raw"]:.0f} x {TANK_BOMB_SCALE} = {_want:.0f} '
+                                   f'(+{_extra:.0f} over the gun bands) -> hp {_tv["hp"]:.0f}/{tank_hp_max(_tv):.0f}')
+                    if _tv['hp'] <= 0:
+                        tank_killed(h['victim'], s, reason='(bomb blast)')
     except Exception:
         logx('TANKHIT', 'msg-51 handling failed')
 
