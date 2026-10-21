@@ -3812,6 +3812,30 @@ def apply_world_clock(d, room_id, settings=None):
             f'(x{ts:g} day / x{ts * ns:g} night) -> {nd:02d}/{nm:02d}/{ny} {nh:02d}:{nmin:02d} '
             f'(+{rem:.1f} s into the minute)')
 
+def apply_radar_gate_defaults(d, room_id, settings):
+    """v949f5: with the radar gate on for this arena and no explicit [Radar] override, serve the
+    client the matching [Radar] block: ApplyToLocalObjects=yes, AlwaysVisibleRange = the gate's
+    visual range, AboveTerrainLevel = the arena's under-the-radar height. Returns change strings,
+    '' when not applicable, None when the fields were not located."""
+    if not RADAR_GD_ENABLED or room_id is None:
+        return ''
+    if isinstance(settings, dict) and settings.get('rd_enabled'):
+        return ''                                  # the explicit override already ran
+    cfg = radar_cfg_for_room(room_id)
+    if cfg is None:
+        return ''
+    o = _gamedef_radar_offsets(d)
+    if o is None:
+        return None
+    changes = []
+    if not (d[o['flags']] & 0x40):
+        d[o['flags']] |= 0x40; changes.append('ApplyToLocalObjects 0->1')
+    for k, v in (('always_vis', float(cfg['visual_m'])), ('above_terrain', float(cfg.get('agl_m', RADAR_UNDER_AGL_M)))):
+        old = struct.unpack_from('<f', d, o[k])[0]
+        if abs(old - v) > 1e-6:
+            struct.pack_into('<f', d, o[k], v); changes.append(f'{k} {old:g}->{v:g}')
+    return changes
+
 def war_date_from_settings(arena_settings):
     """(enabled, day, month, year) from a per-arena settings dict, or (False, ...) if the arena
     hasn't opted in. Defaults day/month to 1/1 when only a year is set."""
@@ -4254,6 +4278,9 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             log('GAMEDEF212', 'radar: fields not located in this GAME_DEF - left as-is')
         elif _rd:
             log('GAMEDEF212', 'radar: ' + '; '.join(_rd))
+        _rg = apply_radar_gate_defaults(d, room_id, arena_settings)     # v949f5 under-the-radar defaults
+        if _rg:
+            log('GAMEDEF212', f'radar gate defaults room {room_id}: ' + '; '.join(_rg))
     except Exception:
         logx('GAMEDEF212', 'radar patch failed')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
@@ -11680,6 +11707,17 @@ RADAR_OBSERVER_CAMPS   = (5, 6, 7)  # neutral / HQ-observer viewers own no radar
 RADAR_GATE_FRIENDS     = True      # the client's Covers() hides friendly icons too; web radar_friends=0 -> enemies only
 RADAR_HIDE_DELETE      = True      # object-only DELETE3 the moment a plane drops off radar (else the ~28 s silence cull)
 RADAR_HYST_M           = 1500.0    # a hidden plane must come this far INSIDE a ring / the visual range to re-appear (no flapping at the edge)
+RADAR_UNDER_AGL_M      = 150.0     # v949f5 'fly under the radar' (user 10-21: 'below 500 ft AGL you wouldn't be picked up by
+                                   # long range radars, only once in visual range'): with the gate on, the arena's [Radar] block
+                                   # is served with ApplyToLocalObjects=yes, AlwaysVisibleRange = the gate's visual range and
+                                   # AboveTerrainLevel = this, so the CLIENT (which knows the ground under every plane) drops
+                                   # a relayed plane from the map beyond the visual bubble while it flies lower than this above
+                                   # the terrain (Map.cpp @0x491549: terrain + AboveTerrainLevel vs altitude). The templates
+                                   # ship 50 m / ApplyToLocalObjects off; the ACWIKI (manual, 'The Menu System') has no figure.
+                                   # Web 'Under the radar below' (radar_agl_m) per arena; an explicit [Radar] override wins.
+RADAR_SCENE_VISUAL     = True      # ACWIKI manual: outside coverage 'you will only see the planes that are within visual range
+                                   # of your plane OR FRIENDLY INSTALLATIONS' - a plane within the visual range of a scene the
+                                   # viewer's camp owns is detectable too (the garrison reports it)
 RADAR_CFG_TTL_S        = 10.0      # settings_json / template re-read
 RADAR_SET_TTL_S        = 2.0       # destroyed-set / ownership re-scan
 _RADAR_CFG  = {}                   # room -> (t, cfg | None)
@@ -11717,8 +11755,13 @@ def radar_cfg_for_room(room_id):
             except (TypeError, ValueError):
                 vis = RADAR_VISUAL_RANGE_M
             fr = str(st.get('radar_friends', '') or '').strip()
+            try:
+                agl = float(st.get('radar_agl_m') if st.get('radar_agl_m') not in (None, '') else RADAR_UNDER_AGL_M)
+            except (TypeError, ValueError):
+                agl = RADAR_UNDER_AGL_M
             cfg = {'visual_m': max(1000.0, min(100000.0, vis)), 'mult': mult,
-                   'friends': (fr == '1') if fr in ('0', '1') else RADAR_GATE_FRIENDS}
+                   'friends': (fr == '1') if fr in ('0', '1') else RADAR_GATE_FRIENDS,
+                   'agl_m': max(0.0, min(5000.0, agl))}
     except Exception:
         logx('RADAR', f'room {room_id}: config read failed - gate off')
         cfg = None
@@ -11755,7 +11798,29 @@ def room_radars(room_id, cfg):
     _RADAR_SETS[room_id] = (now, out)
     return out
 
-def plane_detectable_by(src_pos, src_camp, viewer, dist, cfg, radars, hidden=False):
+_RADAR_SCENES = {}                 # room -> (t, [(x, y, camp), ...]) owned scenes (the 'friendly installations' lookouts)
+
+def room_scene_lookouts(room_id):
+    """[(x, y, camp)] of every owned scene of the room (current camp), cached RADAR_SET_TTL_S."""
+    now = time.time()
+    ent = _RADAR_SCENES.get(room_id)
+    if ent and now - ent[0] < RADAR_SET_TTL_S:
+        return ent[1]
+    out = []
+    try:
+        trn = _probe_terrain_for_room(room_id)
+        t = trn_tables(trn) or {}
+        for sk, si in (t.get('scene_info') or {}).items():
+            camp = scene_camp(trn, int(sk))
+            if camp is None or camp > 4:
+                continue
+            out.append((float(si['x']), float(si['y']), camp))
+    except Exception:
+        logx('RADAR', f'room {room_id}: scene scan failed')
+    _RADAR_SCENES[room_id] = (now, out)
+    return out
+
+def plane_detectable_by(src_pos, src_camp, viewer, dist, cfg, radars, hidden=False, lookouts=()):
     """Covers() for the server: may `viewer` know about a plane at src_pos? True inside the visual
     range, for friendlies when the arena does not gate them, and wherever a standing radar of the
     viewer's camp reaches. A plane that is currently hidden needs RADAR_HYST_M of margin to come back."""
@@ -11774,13 +11839,24 @@ def plane_detectable_by(src_pos, src_camp, viewer, dist, cfg, radars, hidden=Fal
             lim = rr - m
             if lim > 0.0 and dx * dx + dy * dy <= lim * lim:
                 return True
+    if lookouts:                                   # within visual range of a friendly installation
+        lim = cfg['visual_m'] - m
+        if lim > 0.0:
+            l2 = lim * lim
+            for sx, sy, camp in lookouts:
+                if camp == vc:
+                    dx = x - sx; dy = y - sy
+                    if dx * dx + dy * dy <= l2:
+                        return True
     return False
 
 def radar_coverage_text(room_id):
     """Console `radar <room>`: the room's radars and their state."""
     cfg = radar_cfg_for_room(room_id)
     lines = [f'room {room_id}: radar gate {"ON" if cfg else "OFF"}'
-             + (f' visual {cfg["visual_m"]/1000:.0f} km, range x{cfg["mult"]:g}, friends {"gated" if cfg["friends"] else "always shown"}' if cfg else '')]
+             + (f' visual {cfg["visual_m"]/1000:.0f} km, range x{cfg["mult"]:g}, friends {"gated" if cfg["friends"] else "always shown"}, '
+                f'under the radar below {cfg.get("agl_m", RADAR_UNDER_AGL_M):.0f} m AGL (client-side), '
+                f'friendly scenes as lookouts {"on" if RADAR_SCENE_VISUAL else "off"}' if cfg else '')]
     try:
         trn = _probe_terrain_for_room(room_id)
         t = trn_tables(trn) or {}
@@ -20918,12 +20994,13 @@ def relay_telemetry(src, data, _split_obj=None):
     _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
     _src_pos = (_co_pos if (_co_pos is not None and CHUTE_DRIVE_ENABLED) else src.__dict__.get('_pos_xy'))   # v794f5/v809f5
     # v949f5 RADAR FAILURE: once per frame, the room's gate config + standing radars (both cached)
-    _rg_cfg = None; _rg_radars = ()
+    _rg_cfg = None; _rg_radars = (); _rg_look = ()
     if RADAR_GATE_ENABLED and not _chute_frame and _src_pos is not None and getattr(src, 'flying', False):
         try:
             _rg_cfg = radar_cfg_for_room(src.current_room)
             if _rg_cfg is not None:
                 _rg_radars = room_radars(src.current_room, _rg_cfg)
+                _rg_look = room_scene_lookouts(src.current_room) if RADAR_SCENE_VISUAL else ()
         except Exception:
             logx('RADAR', 'gate setup failed'); _rg_cfg = None
     for p in peers:
@@ -20941,7 +21018,7 @@ def relay_telemetry(src, data, _split_obj=None):
             if _rg_cfg is not None:
                 _rh = src.__dict__.setdefault('_radar_hidden', set())
                 if not plane_detectable_by(_src_pos, getattr(src, 'nation', None), p, _dd, _rg_cfg, _rg_radars,
-                                           hidden=(p.addr in _rh)):
+                                           hidden=(p.addr in _rh), lookouts=_rg_look):
                     _cp9 = src.__dict__.get('_created_peers')
                     if _cp9 is not None and p.addr in _cp9:
                         _cp9.discard(p.addr)

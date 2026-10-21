@@ -2394,6 +2394,10 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + hesc('' if _rg_vis in (None, '') else str(_rg_vis), quote=True)
                 + '" placeholder="15000" style="width:100px; padding:6px;"> <span style="color:#999;">m of the pilot</span></label>'
                 + _rdsel('radar_friends', 'Outside coverage, hide', [('', 'All aircraft (the game\'s rule)'), ('1', 'All aircraft'), ('0', 'Enemy aircraft only')], _rg_fr)
+                + '<label style="font-size:0.85em; color:#333;">Under the radar below<br>'
+                  '<input type="number" min="0" max="5000" step="10" name="s_radar_agl_m" value="'
+                + hesc('' if overrides.get('radar_agl_m', '') in (None, '') else str(overrides.get('radar_agl_m')), quote=True)
+                + '" placeholder="150" style="width:90px; padding:6px;"> <span style="color:#999;">m above terrain (500 ft = 152 m)</span></label>'
                 + '</div>'
                 + '<label style="font-size:0.9em;">'
                 '<input type="checkbox" name="s_rd_enabled" value="1"' + (' checked' if rd_on else '') +
@@ -2613,8 +2617,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Radar</h3>
                     <p style="color:#888; font-size:0.85em; max-width:640px;">Radar failure: with the gate on, a plane
                     farther than the always-visible range is shown to a pilot only while a standing radar antenna of
-                    his own side covers it &mdash; destroy the antenna and its ring goes grey and the contacts in it
-                    vanish from the map unless another ring still reaches them. The lower row edits the arena&#39;s own
+                    his own side covers it (or it is within visual range of one of his side&#39;s installations) &mdash;
+                    destroy the antenna and its ring goes grey and the contacts in it vanish from the map unless another
+                    ring still reaches them. &quot;Under the radar&quot;: a plane lower than the given height above the
+                    terrain is dropped from the map beyond the always-visible range even inside coverage (the client
+                    tests the ground under it). The lower row edits the arena&#39;s own
                     [Radar] block: ring display, range multiplier (also used by the gate) and the altitude under which a
                     plane slips below the radar. Takes effect the next time the arena is entered.</p>
                     {radar_html}
@@ -4038,13 +4045,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     settings[_gk] = _gv
                 else:
                     settings.pop(_gk, None)
-            _gv = qs.get('s_radar_visual_m', [''])[0].strip()
-            try:
-                settings['radar_visual_m'] = int(max(1000, min(100000, float(_gv)))) if _gv else None
-            except ValueError:
-                settings['radar_visual_m'] = None
-            if settings.get('radar_visual_m') is None:
-                settings.pop('radar_visual_m', None)
+            for _gk, _glo, _ghi in (('radar_visual_m', 1000, 100000), ('radar_agl_m', 0, 5000)):
+                _gv = qs.get('s_' + _gk, [''])[0].strip()
+                try:
+                    settings[_gk] = int(max(_glo, min(_ghi, float(_gv)))) if _gv else None
+                except ValueError:
+                    settings[_gk] = None
+                if settings.get(_gk) is None:
+                    settings.pop(_gk, None)
             settings['rd_enabled'] = 1 if qs.get('s_rd_enabled', [''])[0].strip() else 0
             for _rk, _lo, _hi, _isf in (('rd_always_vis', 0, 100000, 1), ('rd_range_mult', 0.1, 10, 1),
                                         ('rd_above_terrain', 0, 5000, 1), ('rd_show_range', 0, 3, 0)):

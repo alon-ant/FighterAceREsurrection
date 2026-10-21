@@ -1,3 +1,28 @@
+v949f5 [UNDER THE RADAR + FRIENDLY-INSTALLATION LOOKOUTS] (10-21)
+    * User 10-21: 'we used to be able to fly under the radar - below 500 ft AGL you wouldn't be picked up by
+      long range radars, only once in visual range. check the wiki first.'
+    * ACWIKI (C:\games\ACWIKI, 995 pages scanned): no page mentions altitude or flying under the radar. The
+      only functional text is the manual, 'The Menu System' (map section): 'the various dashed circles on the
+      map show the areas covered by radar ... Keep in mind that if your radar unit has been destroyed or if you
+      are outside friendly radar coverage you will only see the planes that are within visual range of your
+      plane or friendly installations. If a radar installation is destroyed, its coverage circle is changed
+      to a dark almost invisible circle.' The map pages' building tables give Radar: life 1000, Rad 50000 m,
+      Rep 50/min (20 min to full) - our Antenna class exactly.
+    * The EXE has the mechanic: [Radar] AboveTerrainLevel (templates 50 m) - the map loop drops a contact
+      below terrain + that height (Map.cpp @0x491549 / @0x4916e7), for the server icons always and for the
+      planes the client holds only beyond AlwaysVisibleRange with ApplyToLocalObjects on (templates: off).
+      So no server terrain model is needed: with the radar gate on and no explicit [Radar] override the
+      arena is now served ApplyToLocalObjects=yes, AlwaysVisibleRange = the gate's visual range (8 km) and
+      AboveTerrainLevel = RADAR_UNDER_AGL_M (150 m ~ 500 ft; web 'Under the radar below', radar_agl_m) -
+      apply_radar_gate_defaults in build_lz_gamedef. Inside coverage the plane is still relayed (3D dot
+      within 13 km as before) but leaves the MAP while it hugs the ground beyond the visual bubble; outside
+      coverage the server gate hides it as before.
+    * Per the manual's 'or friendly installations': a plane within the visual range of a scene the viewer's
+      camp owns is detectable too (room_scene_lookouts; RADAR_SCENE_VISUAL) - the garrison sees it.
+    * Verify: fly below 150 m AGL 10 km from an enemy inside his coverage -> you leave his map, climb -> you
+      are back; `radar <room>` prints the AGL figure; GAMEDEF212 (DEBUG) logs 'radar gate defaults ...
+      ApplyToLocalObjects 0->1; always_vis 3000->8000; above_terrain 50->150' on the next arena entry.
+
 v949f5 [TRIGGER RE-ARM: NO RE-TRIGGER UNTIL REPAIRED BELOW 25%] (10-21)
     * Player report (via Alon 10-21): 'you can achieve multiple triggers on the same target, over and over
       again, even when the damage is over 60%. You can also instantly trigger a captured scene from an enemy
