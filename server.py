@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v948f5'
+VERSION = 'v949f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3548,6 +3548,270 @@ def extract_reality_from_gamedef_struct(d, o):
             'rw_wind_rot_time': w['rot_time'], 'rw_wind_min': w['min'], 'rw_wind_max': w['max'],
             'rw_wind_osc_time': w['osc_time']}
 
+# --- v949f5 RADAR (web arena editor -> GAME_DEF [Radar]; the server-side RADAR FAILURE gate is
+# further down, next to the plane relay tiers) --------------------------------------------------
+# The client's [Radar] block (printed by the GAME_DEF text writer @0x57b74b .. 0x57b877):
+#   Works | ApplyToLocalObjects | AlwaysVisibleRange=%fm | RangeMultiplier=%f | FriendsColored |
+#   EnemiesColored | ShowGroundObjects | ShowRange=%s (none/friends/enemies/all) | AboveTerrainLevel=%fm
+# Binary layout (deserialiser FUN_0057bee0 @0x57d792..0x57d8d3, fixed distance from the END of the
+# struct - verified identical on every local room blob, TC 1196 B and the 5-terrain arenas):
+#   len-106 AlwaysVisibleRange f32 (m) | len-102 RangeMultiplier f32 | len-98 ShowRange u8
+#   (0 none, 1 friends, 2 enemies, 3 all - jump table 0x57bec8) | len-97 AboveTerrainLevel f32 (m)
+#   the bools are bits of the flag byte at len-52 (FUN_0057bee0 @0x57ef87..): 0x80 Works,
+#   0x40 ApplyToLocalObjects, 0x20 FriendsColored, 0x10 EnemiesColored, 0x08 ShowGroundObjects
+#   (apply_show_ground_objects), 0x04 Rain (apply_reality_settings).
+# Templates: Works=yes, ApplyToLocalObjects=no, AlwaysVisibleRange 3000 m, RangeMultiplier 1.0,
+# ShowRange 3 (all), AboveTerrainLevel 50 m.
+# What the client does with them (Map.cpp FUN_00491400 draw loop, RE 10-21):
+#   * every TRN object whose class has RadarRadius>0 (TRN02: the 'Antenna', 50 km, one per airfield)
+#     owns a RADAR (FA3Radar.hpp, radius x RangeMultiplier, camp = its scene's camp) registered in the
+#     8 km map squares it reaches; the ring is drawn in the camp colour while the object stands and in
+#     colour 7 (GREY) once TRN_OBJECT::SetDestroyed clears RADAR+0x18 (FUN_00567fd0 @0x568055; the
+#     repair/restore FUN_00567370 @0x56746a sets it back). ShowRange picks whose rings are drawn.
+#   * the server-pushed map icons (msg 57 OBJECT_MAP_INFO array) are drawn ONLY where
+#     RADAR_MGR::Covers(pos, own camp) (FUN_0048df40) finds an ACTIVE radar of a friendly camp whose
+#     radius reaches the icon - that is the original 'radar failure': lose the antenna, lose the icons.
+#   * the planes the client HOLDS as objects (our relayed peers) are drawn regardless of coverage;
+#     with ApplyToLocalObjects they are hidden beyond AlwaysVisibleRange when below terrain +
+#     AboveTerrainLevel ('under the radar'). Hence the server-side gate below: our server relays every
+#     plane in the arena to everyone, so a client always held every plane and no antenna loss could
+#     ever matter - the gate withholds planes outside visual range that no working friendly radar
+#     covers, exactly the client's own Covers() rule, and deletes them from the peer's world.
+RADAR_GD_ENABLED = True
+RADAR_SHOW_RANGE_NAMES = ('none', 'friends', 'enemies', 'all')
+
+def _gamedef_radar_offsets(d):
+    """Offsets of the [Radar] fields in a DECOMPRESSED GAME_DEF (see above), or None when the bytes
+    there do not look like them (unknown template: refuse rather than write into the wrong place)."""
+    try:
+        n = len(d)
+        if n < 120 or not _gamedef_tail_ok(d):
+            return None
+        o = {'always_vis': n - 106, 'range_mult': n - 102, 'show_range': n - 98, 'above_terrain': n - 97,
+             'flags': n - 52}
+        av, rm = struct.unpack_from('<ff', d, o['always_vis'])
+        at = struct.unpack_from('<f', d, o['above_terrain'])[0]
+        if not (0.0 <= av <= 200000.0 and 0.05 <= rm <= 20.0 and d[o['show_range']] <= 3
+                and 0.0 <= at <= 10000.0):
+            return None
+        return o
+    except Exception:
+        return None
+
+def extract_radar_from_gamedef_struct(d, o):
+    return {'rd_works': 1 if (d[o['flags']] & 0x80) else 0,
+            'rd_apply_local': 1 if (d[o['flags']] & 0x40) else 0,
+            'rd_always_vis': round(struct.unpack_from('<f', d, o['always_vis'])[0], 1),
+            'rd_range_mult': round(struct.unpack_from('<f', d, o['range_mult'])[0], 3),
+            'rd_show_range': d[o['show_range']],
+            'rd_above_terrain': round(struct.unpack_from('<f', d, o['above_terrain'])[0], 1)}
+
+def extract_radar_from_gamedef(game_def_raw):
+    """Current [Radar] values of a stored (compressed) GAME_DEF as a {rd_*} dict, or None."""
+    d = decompress_gamedef(game_def_raw)
+    if not d:
+        return None
+    o = _gamedef_radar_offsets(d)
+    if o is None:
+        return None
+    try:
+        return extract_radar_from_gamedef_struct(d, o)
+    except Exception:
+        return None
+
+def apply_radar_settings(d, settings):
+    """In-place patch of the [Radar] fields from the per-arena settings dict (web rd_* keys; only
+    keys present are written; length-preserving). Returns the list of 'field old->new' strings,
+    or None when the fields were not located."""
+    if not RADAR_GD_ENABLED or not isinstance(settings, dict) or not settings.get('rd_enabled'):
+        return []
+    o = _gamedef_radar_offsets(d)
+    if o is None:
+        return None
+    changes = []
+    def _num(k, lo, hi):
+        v = settings.get(k)
+        if v in (None, ''):
+            return None
+        try:
+            return max(lo, min(hi, float(v)))
+        except (TypeError, ValueError):
+            return None
+    def _set_f32(k, key, lo, hi):
+        v = _num(key, lo, hi)
+        if v is None:
+            return
+        old = struct.unpack_from('<f', d, o[k])[0]
+        if abs(old - v) > 1e-6:
+            changes.append(f'{k} {old:g}->{v:g}'); struct.pack_into('<f', d, o[k], v)
+    def _set_bit(key, bit, name):
+        v = _num(key, 0, 1)
+        if v is None:
+            return
+        v = 1 if v >= 0.5 else 0
+        old = 1 if (d[o['flags']] & bit) else 0
+        if old != v:
+            changes.append(f'{name} {old}->{v}')
+            d[o['flags']] = (d[o['flags']] | bit) if v else (d[o['flags']] & ~bit & 0xff)
+    _set_f32('always_vis', 'rd_always_vis', 0.0, 100000.0)
+    _set_f32('range_mult', 'rd_range_mult', 0.1, 10.0)
+    _set_f32('above_terrain', 'rd_above_terrain', 0.0, 5000.0)
+    sr = _num('rd_show_range', 0, 3)
+    if sr is not None and d[o['show_range']] != int(round(sr)):
+        changes.append(f'ShowRange {RADAR_SHOW_RANGE_NAMES[d[o["show_range"]]]}->{RADAR_SHOW_RANGE_NAMES[int(round(sr))]}')
+        d[o['show_range']] = int(round(sr))
+    _set_bit('rd_works', 0x80, 'Works')
+    _set_bit('rd_apply_local', 0x40, 'ApplyToLocalObjects')
+    return changes
+
+# --- v949f5 ARENA WORLD CLOCK (the time of day runs on, server-side) -----------------------------
+# User 10-21: 'time of day doesn't roll - it resets each time you enter the arena ... the server
+# should tick on by itself'. Cause: the client's clock is WORLD_TIME (WorldTime.cpp, FUN_00591470
+# Init / FUN_00591210 Update): game time = the GAME_DEF [Reality] start (day/month/year hh:mm) advanced
+# by the REAL seconds since the arena's CreationTime (Seconds = CreationTimeSeconds + (StartTime -
+# CreationTime)/1000), at TimeSpeed game-minutes per real minute from 06:00 to 18:00 and at
+# TimeSpeed x NightSpeed from 18:00 to 06:00 (hour < 6 / > 17 at Init; 720-minute phases after).
+# v210 stamps CreationTime = 'now' on EVERY 212 serve (needed: a days-old creation time froze the
+# client), so every joiner's clock restarted at the start time while the pilots already flying had
+# ticked on - one at dusk, the next one at 08:00. Fix: the server keeps one epoch per arena (when
+# its clock started; persisted in arena_clocks.json, reset on an arena reset or `clock <room> reset`),
+# replays the client's own phase rule from the start time for the real seconds since that epoch,
+# and writes the RESULTING date and hh:mm into the [Reality] block at serve time - and backs the
+# CreationTime stamp up by the real seconds already spent in the current game minute, so the joiner
+# lands on the same second as everyone else, not on the minute. TimeSpeed 0 = frozen clock (the
+# client's own rule) -> nothing to advance. Per arena: settings_json clock_static=1 keeps the old
+# reset-on-entry behaviour (web 'Date, time & weather' section).
+WORLD_CLOCK_ENABLED = True
+WORLD_CLOCK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'arena_clocks.json')
+_WORLD_CLOCK_EPOCH = {}      # room_id -> epoch (time.time() when the arena's clock started)
+_WORLD_CLOCK_LOADED = [False]
+_WORLD_CLOCK_LOCK = threading.Lock()
+
+def _world_clock_load():
+    if _WORLD_CLOCK_LOADED[0]:
+        return
+    _WORLD_CLOCK_LOADED[0] = True
+    try:
+        with open(WORLD_CLOCK_FILE, 'r', encoding='utf-8') as f:
+            for k, v in (json.load(f) or {}).items():
+                _WORLD_CLOCK_EPOCH[int(k)] = float(v)
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logx('CLOCK', 'arena_clocks.json unreadable - clocks start now')
+
+def _world_clock_save():
+    try:
+        tmp = WORLD_CLOCK_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({str(k): v for k, v in _WORLD_CLOCK_EPOCH.items()}, f)
+        os.replace(tmp, WORLD_CLOCK_FILE)
+    except Exception:
+        logx('CLOCK', 'arena_clocks.json not written')
+
+def world_clock_epoch(room_id, reset=False):
+    """When this arena's clock started (time.time()); created on first use, re-based on reset."""
+    with _WORLD_CLOCK_LOCK:
+        _world_clock_load()
+        ep = _WORLD_CLOCK_EPOCH.get(room_id)
+        if ep is None or reset:
+            ep = time.time()
+            _WORLD_CLOCK_EPOCH[room_id] = ep
+            _world_clock_save()
+            log('CLOCK', f'room {room_id}: arena clock {"re-based" if reset else "started"} at {time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ep))} UTC')
+        return ep
+
+def _days_in_month(y, m):
+    if m == 2:
+        return 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28
+    return 30 if m in (4, 6, 9, 11) else 31
+
+def world_clock_advance(day, month, year, hour, minute, time_speed, night_speed, elapsed_s):
+    """WORLD_TIME replayed: (day, month, year, hour, minute, rem_real_s) after elapsed_s real seconds.
+    rem_real_s = real seconds already spent inside the returned game minute (for the CreationTime
+    back-dating). Day 06:00-18:00 at time_speed, night at time_speed x night_speed (game minutes per
+    real minute); time_speed <= 0 freezes the clock (the client does the same)."""
+    ts = float(time_speed or 0.0); ns = float(night_speed or 0.0)
+    if ts <= 0.0 or elapsed_s <= 0.0:
+        return int(day), int(month), int(year), int(hour), int(minute), 0.0
+    if ns <= 0.0:
+        ns = 1.0
+    tod = float(hour) * 60.0 + float(minute)          # game minute of day
+    d, m, y = int(day), int(month), int(year)
+    R = float(elapsed_s)
+    def _rate(t):
+        return ts if 360.0 <= t < 1080.0 else ts * ns
+    # whole game days first (bounded loop afterwards)
+    day_real = (720.0 / ts + 720.0 / (ts * ns)) * 60.0
+    if R >= day_real:
+        nd = int(R // day_real); R -= nd * day_real
+        for _ in range(nd):
+            d += 1
+            if d > _days_in_month(y, m):
+                d = 1; m += 1
+                if m > 12:
+                    m = 1; y += 1
+    for _ in range(6):
+        if R <= 0.0:
+            break
+        rate = _rate(tod)
+        end = 1080.0 if tod < 1080.0 and tod >= 360.0 else (360.0 if tod < 360.0 else 1440.0)
+        need = (end - tod) * 60.0 / rate
+        if R >= need:
+            R -= need; tod = end
+            if tod >= 1440.0:
+                tod -= 1440.0
+                d += 1
+                if d > _days_in_month(y, m):
+                    d = 1; m += 1
+                    if m > 12:
+                        m = 1; y += 1
+        else:
+            tod += R * rate / 60.0; R = 0.0
+    tod = tod % 1440.0
+    whole = int(tod)
+    rem_real = (tod - whole) * 60.0 / _rate(tod)
+    return d, m, y, whole // 60, whole % 60, rem_real
+
+def _stamp_creation_time(d, t):
+    """CreationTime (ms @5) / CreationTimeSeconds (s @9) for wall time t on the fa_s timeline (v210)."""
+    if len(d) < 13:
+        return
+    s = ctypes.c_uint32(int(t) - FA_EPOCH).value
+    frac = int((t % 1) * 1000 * 0x10000 // 1000) + 0x800
+    ms = (s * 1000 + int((frac - 0x800) / 0x10000 * 1000)) & 0xFFFFFFFF
+    struct.pack_into('<I', d, 5, ms)
+    struct.pack_into('<I', d, 9, s)
+
+def apply_world_clock(d, room_id, settings=None):
+    """Advance the [Reality] date/time of a DECOMPRESSED GAME_DEF to the arena's current world time
+    and back-date the creation stamp by the sub-minute remainder. Returns a description string, ''
+    when static/disabled, None when the fields were not located."""
+    if not WORLD_CLOCK_ENABLED or room_id is None:
+        return ''
+    if isinstance(settings, dict) and str(settings.get('clock_static', '') or '') in ('1', 'True'):
+        return ''
+    o = _gamedef_reality_offsets(d)
+    if o is None:
+        return None
+    day, month = d[o['day']], d[o['month']]
+    year = d[o['year']] | (d[o['year'] + 1] << 8)
+    hour, minute = d[o['hour']], d[o['minute']]
+    ts = struct.unpack_from('<f', d, o['time_speed'])[0]
+    ns = struct.unpack_from('<f', d, o['night_speed'])[0]
+    now = time.time()
+    elapsed = max(0.0, now - world_clock_epoch(room_id))
+    nd, nm, ny, nh, nmin, rem = world_clock_advance(day, month, year, hour, minute, ts, ns, elapsed)
+    if ts <= 0.0:
+        return f'TimeSpeed 0 - clock frozen at {hour:02d}:{minute:02d}'
+    d[o['day']] = max(1, min(31, nd)); d[o['month']] = max(1, min(12, nm))
+    ny = max(1900, min(2100, ny)); d[o['year']] = ny & 0xff; d[o['year'] + 1] = (ny >> 8) & 0xff
+    d[o['hour']] = nh; d[o['minute']] = nmin
+    _stamp_creation_time(d, now - rem)
+    return (f'{day:02d}/{month:02d}/{year} {hour:02d}:{minute:02d} + {elapsed / 3600.0:.2f} h real '
+            f'(x{ts:g} day / x{ts * ns:g} night) -> {nd:02d}/{nm:02d}/{ny} {nh:02d}:{nmin:02d} '
+            f'(+{rem:.1f} s into the minute)')
+
 def war_date_from_settings(arena_settings):
     """(enabled, day, month, year) from a per-arena settings dict, or (False, ...) if the arena
     hasn't opted in. Defaults day/month to 1/1 when only a year is set."""
@@ -3688,7 +3952,8 @@ def _tc_room_flag(room_id):
         return None
 
 def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_settings=None,
-                     hide_planes=None, is_ffa=False, stamp_mission=False, room_name=None, tc_room=None):
+                     hide_planes=None, is_ffa=False, stamp_mission=False, room_name=None, tc_room=None,
+                     room_id=None):
     """Decompress the stored (LZ) GAME_DEF, pad a string field so the re-encoded
     all-literals stream lands EXACTLY on bc*16+1 (payload = 5 + comp_size(N') == 1 mod16),
     then re-encode. Returns (compressed_bytes, decompressed_size, pad) or (None,0,0)."""
@@ -3981,6 +4246,16 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             log('GAMEDEF212', 'reality/weather: ' + '; '.join(_rw))
     except Exception:
         logx('GAMEDEF212', 'reality/weather patch failed')
+    # v949f5 RADAR (web editor): [Radar] AlwaysVisibleRange / RangeMultiplier / ShowRange /
+    # AboveTerrainLevel / Works / ApplyToLocalObjects - length-preserving, tail-anchored.
+    try:
+        _rd = apply_radar_settings(d, arena_settings)
+        if _rd is None:
+            log('GAMEDEF212', 'radar: fields not located in this GAME_DEF - left as-is')
+        elif _rd:
+            log('GAMEDEF212', 'radar: ' + '; '.join(_rd))
+    except Exception:
+        logx('GAMEDEF212', 'radar patch failed')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -3995,6 +4270,17 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                                   f'-> {_wd:02d}/{_wm:02d}/{_wy} (pushed to client)')
             else:
                 log('GAMEDEF212', 'war-date: date bytes not located/verified; left as-is')
+    # v949f5 ARENA WORLD CLOCK: advance the [Reality] date/time to the arena's running clock (after
+    # the war date, so the day that rolls is the one the arena really shows) and back-date the
+    # creation stamp by the part of the current game minute already spent.
+    try:
+        _wc = apply_world_clock(d, room_id, arena_settings)
+        if _wc is None:
+            log('GAMEDEF212', 'world clock: reality fields not located - clock left at the start time')
+        elif _wc:
+            log('GAMEDEF212', f'world clock room {room_id}: {_wc}')
+    except Exception:
+        logx('GAMEDEF212', 'world clock patch failed')
     # --- [TC] economy block: InitialStorage + the limited-field load fractions -----------------
     # Without this the scenes ship empty (HQ shows "0 supplies"), so the client has no economy to
     # negotiate: it never sends msg 59 and can never apply GetFuelWhenLimFuel/GetAmmoWhenLimAmmo.
@@ -4806,6 +5092,65 @@ def console_handler():
                         log('CONSOLE', f'  +{_o:04x}: {_d[_o:_o + 32].hex()}   (tail)')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: gamedef dump <room>')
+            elif cmd == 'clock':
+                # v949f5: clock <room> [reset] - the arena's running world clock (and re-base it to the start time)
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    _rid = int(_a[0])
+                    if len(_a) > 1 and _a[1] == 'reset':
+                        world_clock_epoch(_rid, reset=True)
+                    _ep = world_clock_epoch(_rid)
+                    _row = None
+                    try:
+                        _cn = sqlite3.connect(DB_PATH)
+                        _row = _cn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (_rid,)).fetchone()
+                        _cn.close()
+                    except Exception:
+                        _row = None
+                    _dd = bytearray(decompress_gamedef(bytes(_row[0]))) if (_row and _row[0]) else None
+                    if _dd:
+                        apply_reality_settings(_dd, db_get_room_settings(_rid))
+                        _o = _gamedef_reality_offsets(_dd)
+                        if _o:
+                            _ts = struct.unpack_from('<f', _dd, _o['time_speed'])[0]; _ns = struct.unpack_from('<f', _dd, _o['night_speed'])[0]
+                            _r = world_clock_advance(_dd[_o['day']], _dd[_o['month']], _dd[_o['year']] | (_dd[_o['year'] + 1] << 8),
+                                                     _dd[_o['hour']], _dd[_o['minute']], _ts, _ns, max(0.0, time.time() - _ep))
+                            log('CONSOLE', f'room {_rid}: clock started {time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(_ep))} UTC '
+                                           f'({(time.time() - _ep) / 3600.0:.2f} h ago); start {_dd[_o["day"]]:02d}/{_dd[_o["month"]]:02d} '
+                                           f'{_dd[_o["hour"]]:02d}:{_dd[_o["minute"]]:02d} x{_ts:g}/x{_ts * _ns:g} -> NOW {_r[0]:02d}/{_r[1]:02d}/{_r[2]} {_r[3]:02d}:{_r[4]:02d}'
+                                           + (' (static per arena setting)' if str((db_get_room_settings(_rid) or {}).get('clock_static', '')) in ('1', 'True') else ''))
+                        else:
+                            log('CONSOLE', f'room {_rid}: reality fields not located')
+                    else:
+                        log('CONSOLE', f'room {_rid}: no GAME_DEF')
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: clock <room> [reset]')
+            elif cmd == 'radar':
+                # v949f5: radar <room> - the room's radar gate config and every antenna's state;
+                #         radar who <pilot> - which peers currently hold / hide his plane
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    if _a and _a[0] == 'who':
+                        _t = next((x for x in get_all_sessions() if x.current_pilot == _a[1]), None)
+                        if _t is None:
+                            log('CONSOLE', f'radar who: pilot {_a[1]!r} not online'); raise IndexError
+                        _hid = _t.__dict__.get('_radar_hidden') or set()
+                        _cp = _t.__dict__.get('_created_peers') or set()
+                        for _q in get_sessions_in_room(_t.current_room):
+                            if _q is _t:
+                                continue
+                            _qp = _q.__dict__.get('_pos_xy'); _tp = _t.__dict__.get('_pos_xy')
+                            _dk = (math.hypot(_qp[0] - _tp[0], _qp[1] - _tp[1]) / 1000.0) if (_qp and _tp) else None
+                            log('CONSOLE', f'  {_q.current_pilot} (camp {getattr(_q, "nation", None)}): '
+                                           f'{"HIDDEN" if _q.addr in _hid else ("holds" if _q.addr in _cp else "no create yet")}'
+                                           + (f' at {_dk:.1f} km' if _dk is not None else ''))
+                    else:
+                        _rid = int(_a[0]) if _a else int(getattr(next((x for x in get_all_sessions() if x.current_room is not None), None), 'current_room', 0) or 0)
+                        _RADAR_SETS.pop(_rid, None); _RADAR_CFG.pop(_rid, None)
+                        for _ln in radar_coverage_text(_rid).split('\n'):
+                            log('CONSOLE', _ln)
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: radar <room> | radar who <pilot>')
             elif cmd == 'mapobj':
                 # v718f5: mapobj probe <pilot> <camp> <kind 0|1> [alt_m]  - one map icon 2 km NE of him
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -6204,6 +6549,8 @@ def console_handler():
                 log('CONSOLE', 'list        - show all accounts and their pilots')
                 log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
                 log('CONSOLE', 'repair <obj|all|status> [room] [force] - v556f5 restore dead ground objects (msg 30) / list clocks')
+                log('CONSOLE', 'radar <room> | radar who <pilot> - v949f5 radar-failure gate: antennas + state / who holds or hides his plane')
+                log('CONSOLE', 'clock <room> [reset] - v949f5 the arena world clock (start -> now) / re-base it to the start time')
                 log('CONSOLE', 'tank column <class> <n> (<x> <y>|scene <idx>) [camp] | tank cgoto <grp> ... [m/s] | cstop|cdel <grp> - v570f5 columns')
                 log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
                 log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
@@ -7710,7 +8057,8 @@ def build_gamedef_212(room, hide_planes=None):
                                     is_ffa=is_ffa_room(room),
                                     stamp_mission=_room_official,  # v438f5b: official -> Type 1
                                     room_name=(room[1] or None),   # v473f5: DB name -> in-arena
-                                    tc_room=_tc_room_flag(room[0]))  # v824f5: TC-only patches
+                                    tc_room=_tc_room_flag(room[0]),  # v824f5: TC-only patches
+                                    room_id=room[0])                 # v949f5: arena world clock
     if comp is None:
         log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
         return None
@@ -11286,6 +11634,151 @@ PLANE_RELAY_NEAR_M   = 12000.0  # inside: every frame (the visual / combat range
 PLANE_RELAY_FAR_M    = 40000.0
 PLANE_RELAY_MID_HZ   = 1.0      # 12-40 km: map position rate
 PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client, never re-created
+# --- v949f5 RADAR FAILURE (server-side gate on the peer-plane relay) -----------------------------
+# The original mechanic (user 10-21): a radar antenna destroyed -> its ring greys out, and where no
+# other radar covers, the map keeps only what the pilot can see himself. The CLIENT does the ring
+# (TRN_OBJECT::SetDestroyed clears RADAR+0x18, the ring drawer paints colour 7) and filters the
+# server-pushed map icons through RADAR_MGR::Covers() (FUN_0048df40: an ACTIVE radar of a friendly
+# camp whose radius reaches the icon) - but a plane the client HOLDS as an object is drawn on the map
+# whatever the radars say, and this server relays every plane in the arena to every client. So the
+# radar never mattered. This gate replicates Covers() on the server for each (plane, viewer) pair:
+#   * inside RADAR_VISUAL_RANGE_M of the viewer the plane is always relayed (he could see it);
+#   * beyond, it is relayed only while at least one standing ('Antenna' not in _SCENE36_DESTROYED)
+#     radar of the viewer's own camp reaches it (class RadarRadius x RangeMultiplier - the same
+#     figure the client draws the ring with);
+#   * otherwise nothing goes out, the viewer gets an object-only DELETE3 (silent, no death effect)
+#     and the create is re-armed, so the plane re-appears with a fresh create the moment a radar
+#     covers it again or it closes to visual range.
+# The viewer's own plane, parachutes (chute frames pass untouched) and damage/kill traffic are not
+# gated; combat happens well inside visual range. Scene capture moves a radar with its scene
+# (scene_camp), repair brings it back. Config per arena from settings_json (web 'Radar' section):
+#   radar_enabled '' / 1 / 0 (blank = on for TC-economy arenas), radar_visual_m, radar_friends.
+RADAR_GATE_ENABLED     = True      # master switch - False relays every plane as before
+RADAR_GATE_TC_DEFAULT  = True      # arenas with the TC economy gate by default (web radar_enabled overrides)
+RADAR_VISUAL_RANGE_M   = 15000.0   # always relayed this close to the viewer (client visual range: 13 km fighters)
+RADAR_GATE_FRIENDS     = True      # the client's Covers() hides friendly icons too; web radar_friends=0 -> enemies only
+RADAR_HIDE_DELETE      = True      # object-only DELETE3 the moment a plane drops off radar (else the ~28 s silence cull)
+RADAR_HYST_M           = 1500.0    # a hidden plane must come this far INSIDE a ring / the visual range to re-appear (no flapping at the edge)
+RADAR_CFG_TTL_S        = 10.0      # settings_json / template re-read
+RADAR_SET_TTL_S        = 2.0       # destroyed-set / ownership re-scan
+_RADAR_CFG  = {}                   # room -> (t, cfg | None)
+_RADAR_SETS = {}                   # room -> (t, [(x, y, radius_m, camp, obj, name), ...] standing radars)
+
+def radar_cfg_for_room(room_id):
+    """{'visual_m', 'mult', 'friends'} when the gate is on for this room, else None. Cached."""
+    now = time.time()
+    ent = _RADAR_CFG.get(room_id)
+    if ent and now - ent[0] < RADAR_CFG_TTL_S:
+        return ent[1]
+    cfg = None
+    try:
+        st = db_get_room_settings(room_id) or {}
+        en = str(st.get('radar_enabled', '') or '').strip()
+        on = (en == '1') if en in ('0', '1') else (RADAR_GATE_TC_DEFAULT and bool(room_has_economy(room_id)))
+        if on:
+            mult = None
+            if st.get('rd_enabled') and st.get('rd_range_mult') not in (None, ''):
+                try:
+                    mult = max(0.1, min(10.0, float(st.get('rd_range_mult'))))
+                except (TypeError, ValueError):
+                    mult = None
+            if mult is None:
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+                    conn.close()
+                    _rdv = extract_radar_from_gamedef(bytes(row[0])) if (row and row[0]) else None
+                    mult = float(_rdv['rd_range_mult']) if _rdv else 1.0
+                except Exception:
+                    mult = 1.0
+            try:
+                vis = float(st.get('radar_visual_m') or RADAR_VISUAL_RANGE_M)
+            except (TypeError, ValueError):
+                vis = RADAR_VISUAL_RANGE_M
+            fr = str(st.get('radar_friends', '') or '').strip()
+            cfg = {'visual_m': max(1000.0, min(100000.0, vis)), 'mult': mult,
+                   'friends': (fr == '1') if fr in ('0', '1') else RADAR_GATE_FRIENDS}
+    except Exception:
+        logx('RADAR', f'room {room_id}: config read failed - gate off')
+        cfg = None
+    _RADAR_CFG[room_id] = (now, cfg)
+    return cfg
+
+def room_radars(room_id, cfg):
+    """The room's STANDING radars: [(x, y, radius_m, camp, obj, name)] from the terrain tables (class
+    RadarRadius > 0 - TRN02: 'Antenna' 50 km, one per airfield), the scene's CURRENT camp and the
+    destroyed set. Cached RADAR_SET_TTL_S."""
+    now = time.time()
+    ent = _RADAR_SETS.get(room_id)
+    if ent and now - ent[0] < RADAR_SET_TTL_S:
+        return ent[1]
+    out = []
+    try:
+        trn = _probe_terrain_for_room(room_id)
+        t = trn_tables(trn) or {}
+        got = t.get('got') or []
+        for o in t.get('goi') or []:
+            try:
+                cls = got[o['type']]
+            except (IndexError, KeyError, TypeError):
+                continue
+            r = float(cls.get('radius') or 0.0)
+            if r <= 0.0 or (room_id, o['i']) in _SCENE36_DESTROYED:
+                continue
+            sc = o.get('scene')
+            camp = scene_camp(trn, sc) if (sc is not None and sc >= 0) else SCENE_CAMP_NEUTRAL
+            rr = r * float(cfg.get('mult') or 1.0)
+            out.append((float(o['x']), float(o['y']), rr, camp, o['i'], cls.get('name', '')))
+    except Exception:
+        logx('RADAR', f'room {room_id}: radar scan failed')
+    _RADAR_SETS[room_id] = (now, out)
+    return out
+
+def plane_detectable_by(src_pos, src_camp, viewer, dist, cfg, radars, hidden=False):
+    """Covers() for the server: may `viewer` know about a plane at src_pos? True inside the visual
+    range, for friendlies when the arena does not gate them, and wherever a standing radar of the
+    viewer's camp reaches. A plane that is currently hidden needs RADAR_HYST_M of margin to come back."""
+    m = RADAR_HYST_M if hidden else 0.0
+    if dist is None or dist <= cfg['visual_m'] - m:
+        return True
+    vc = getattr(viewer, 'nation', None)
+    if vc is None:
+        return True
+    if not cfg['friends'] and src_camp == vc:
+        return True
+    x, y = src_pos[0], src_pos[1]
+    for rx, ry, rr, camp, _obj, _nm in radars:
+        if camp == vc:
+            dx = x - rx; dy = y - ry
+            lim = rr - m
+            if lim > 0.0 and dx * dx + dy * dy <= lim * lim:
+                return True
+    return False
+
+def radar_coverage_text(room_id):
+    """Console `radar <room>`: the room's radars and their state."""
+    cfg = radar_cfg_for_room(room_id)
+    lines = [f'room {room_id}: radar gate {"ON" if cfg else "OFF"}'
+             + (f' visual {cfg["visual_m"]/1000:.0f} km, range x{cfg["mult"]:g}, friends {"gated" if cfg["friends"] else "always shown"}' if cfg else '')]
+    try:
+        trn = _probe_terrain_for_room(room_id)
+        t = trn_tables(trn) or {}
+        got = t.get('got') or []
+        for o in t.get('goi') or []:
+            cls = got[o['type']] if 0 <= o['type'] < len(got) else {}
+            r = float(cls.get('radius') or 0.0)
+            if r <= 0.0:
+                continue
+            sc = o.get('scene')
+            camp = scene_camp(trn, sc) if (sc is not None and sc >= 0) else SCENE_CAMP_NEUTRAL
+            dead = (room_id, o['i']) in _SCENE36_DESTROYED
+            scn = (t.get('scene_info') or {}).get(str(sc), {}).get('name', '?')
+            lines.append(f'  obj {o["i"]:4d} {cls.get("name","?")} r={r/1000:.0f} km camp {camp} scene {sc} {scn}: '
+                         f'{"DESTROYED (ring grey)" if dead else "standing"}')
+    except Exception as e:
+        lines.append(f'  (scan failed: {e})')
+    return '\n'.join(lines)
+
 # v672f5: near-tier cadence per kind (the client integrates the motion itself from our throttle /
 # steer / speed seed; these are corrections). Column followers correct at the follower rate.
 AI_TELEMETRY_NEAR_HZ = {'tank': 2.0, 'follower': 1.0, 'soldier': 1.0, 'train': 4.0}   # v793f5: soldiers 1 Hz - the
@@ -14891,6 +15384,10 @@ def arena_boot_session(s, reason=''):
 def arena_reset_state(room_id):
     """Rebuild the room's world state from the GAME_DEF (ownership, stores, units, AI objects)."""
     tkey = _probe_terrain_for_room(room_id)
+    try:
+        world_clock_epoch(room_id, reset=True)      # v949f5: a new war starts at the arena's start time
+    except Exception:
+        logx('CLOCK', 'clock re-base on reset failed')
     for onum in [o for o, t in list(TANKS.items()) if t['room'] == room_id]:
         delete_tank(onum, reason='(arena reset)')
     for gid in [g for g, c in list(COLUMNS.items()) if c['room'] == room_id]:
@@ -20351,6 +20848,15 @@ def relay_telemetry(src, data, _split_obj=None):
     _relay_batch = [] if RELAY_SEND_ASYNC else None   # v389f5: collect per-peer sends off the RX thread
     _now_relay = time.time()                          # v485f5: shared clock for the create-settle gate
     _src_pos = (_co_pos if (_co_pos is not None and CHUTE_DRIVE_ENABLED) else src.__dict__.get('_pos_xy'))   # v794f5/v809f5
+    # v949f5 RADAR FAILURE: once per frame, the room's gate config + standing radars (both cached)
+    _rg_cfg = None; _rg_radars = ()
+    if RADAR_GATE_ENABLED and not _chute_frame and _src_pos is not None and getattr(src, 'flying', False):
+        try:
+            _rg_cfg = radar_cfg_for_room(src.current_room)
+            if _rg_cfg is not None:
+                _rg_radars = room_radars(src.current_room, _rg_cfg)
+        except Exception:
+            logx('RADAR', 'gate setup failed'); _rg_cfg = None
     for p in peers:
         # v674f5 [PLANE RELAY TIERS] (user 09-13: live telemetry only near the player, tactical
         # positions beyond): a peer farther than PLANE_RELAY_NEAR_M from the sender gets this
@@ -20360,6 +20866,27 @@ def relay_telemetry(src, data, _split_obj=None):
         _dd = None                                        # v837f5: known to the gap log below
         if _src_pos is not None and _ppos is not None:
             _dd = math.hypot(_src_pos[0] - _ppos[0], _src_pos[1] - _ppos[1])
+            # v949f5 RADAR FAILURE gate: beyond visual range only a standing radar of the viewer's camp
+            # lets this plane through; dropping off radar deletes it from his world (object only) and
+            # re-arms the create, so it comes back with a fresh create when covered again.
+            if _rg_cfg is not None:
+                _rh = src.__dict__.setdefault('_radar_hidden', set())
+                if not plane_detectable_by(_src_pos, getattr(src, 'nation', None), p, _dd, _rg_cfg, _rg_radars,
+                                           hidden=(p.addr in _rh)):
+                    _cp9 = src.__dict__.get('_created_peers')
+                    if _cp9 is not None and p.addr in _cp9:
+                        _cp9.discard(p.addr)
+                        if RADAR_HIDE_DELETE and src.my_obj_number is not None:
+                            _submit_send(send_rel, p, build_delete_object_3(onumber=src.my_obj_number),
+                                         f'<- DELETE3 off-radar {src.current_pilot} 0x{src.my_obj_number:04x}', 3.0)
+                    if p.addr not in _rh:
+                        _rh.add(p.addr)
+                        log('RADAR', f'{src.current_pilot} off {p.current_pilot}\'s radar at {_dd / 1000.0:.1f} km '
+                                     f'(camp {getattr(p, "nation", None)}, {sum(1 for r in _rg_radars if r[3] == getattr(p, "nation", None))} radar(s) standing) -> hidden')
+                    continue
+                elif p.addr in _rh:
+                    _rh.discard(p.addr)
+                    log('RADAR', f'{src.current_pilot} back on {p.current_pilot}\'s radar at {_dd / 1000.0:.1f} km -> re-created')
             if _dd > PLANE_RELAY_NEAR_M:
                 _friend = getattr(p, 'nation', None) == getattr(src, 'nation', None)
                 _hz = PLANE_RELAY_MID_HZ if (_dd <= PLANE_RELAY_FAR_M or _friend) else PLANE_RELAY_FAR_HZ   # v683f5: never silent
@@ -30345,6 +30872,7 @@ threading.Thread(
             'push_lobby_news_fn': push_lobby_news_all,      # v870f5: web save -> push to lobby clients
             'plane_roster_fn': plane_roster_for_web,        # v932f5: aircraft-per-team editor
             'reality_read_fn': extract_reality_from_gamedef,   # v948f5: date/time/weather editor defaults
+            'radar_read_fn': extract_radar_from_gamedef,       # v949f5: radar editor defaults
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()

@@ -208,6 +208,7 @@ SRV = {
     'scoring_ref': None,
     'password_read': None,
     'reality_read': None,     # v948f5: extract_reality_from_gamedef(blob) -> {rw_*}
+    'radar_read': None,       # v949f5: extract_radar_from_gamedef(blob) -> {rd_*}
     'log': print
 }
 
@@ -2336,6 +2337,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + '<label style="font-size:0.85em; color:#333;"><input type="checkbox" name="s_rw_rain" value="1"'
                 + (' checked' if str(_rwv.get('rw_rain', 0)) in ('1', 'True') else '') + '> Rain'
                 + ' <span style="color:#999;">(the game only allows rain with Stratus clouds)</span></label></div>'
+                # v949f5 ARENA WORLD CLOCK: the server keeps the arena's time of day running from the start
+                # time above (day at Time speed, 18:00-06:00 at Time speed x Night speed) and serves every
+                # joiner the CURRENT time, so a fresh pilot gets the same dusk as the ones already flying.
+                + '<div style="margin:6px 0;"><label style="font-size:0.85em; color:#333;"><input type="checkbox" name="s_clock_static" value="1"'
+                + (' checked' if str(overrides.get('clock_static', '')) in ('1', 'True') else '')
+                + '> Reset the clock to the start time on every arena entry'
+                + ' <span style="color:#999;">(unticked = the arena clock runs on by itself; a joiner gets the current time of day. '
+                  'The clock re-starts at an arena reset or the console\'s <code>clock &lt;room&gt; reset</code>.)</span></label></div>'
                 # per-type field enabling, mirroring the client's own dialog: Constant = speed + direction;
                 # Const. rotating = speed + rotation time; Oscill. rotating = min/max + oscillation + rotation
                 '<script>(function(){var f=document.forms[0];function u(){var t=f.s_rw_wind_type.value;'
@@ -2344,6 +2353,59 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 'for(var k in on){var e=f[k];if(e){e.disabled=!on[k];e.style.opacity=on[k]?"1":"0.45";}}}'
                 'f.s_rw_wind_type.addEventListener("change",u);f.s_rw_clouds_type.addEventListener("change",u);'
                 'f.addEventListener("submit",function(){for(var i=0;i<f.elements.length;i++)f.elements[i].disabled=false;});u();})();</script>')
+            # RADAR (v949f5): the server-side radar-failure gate (peer planes beyond visual range are
+            # relayed only inside a standing radar of the viewer's camp) + the GAME_DEF [Radar] block
+            # the client draws the rings and tests its map icons with. Defaults from radar_read.
+            _rdb = {}
+            try:
+                if SRV.get('radar_read') and gdef:
+                    _rdb = SRV['radar_read'](bytes(gdef)) or {}
+            except Exception:
+                _rdb = {}
+            _rdv = dict(_rdb); _rdv.update({k: v for k, v in overrides.items() if k.startswith('rd_')})
+            rd_on = bool(overrides.get('rd_enabled'))
+            rd_edited = ' &bull; <span style="color:#c60;">edited</span>' if ('rd_enabled' in overrides or 'radar_enabled' in overrides) else ''
+            def _rdi(key, dflt=''):
+                v = _rdv.get(key, dflt)
+                return hesc('' if v is None else str(v), quote=True)
+            def _rdnum(key, label, lo, hi, step=1, width=90, unit=''):
+                return ('<label style="font-size:0.85em; color:#333;">' + label + '<br>'
+                        '<input type="number" min="' + str(lo) + '" max="' + str(hi) + '" step="' + str(step) + '" '
+                        'name="s_' + key + '" value="' + _rdi(key) + '" style="width:' + str(width) + 'px; padding:6px;">'
+                        + (' <span style="color:#999;">' + unit + '</span>' if unit else '') + '</label>')
+            def _rdsel(key, label, opts, cur):
+                h = '<label style="font-size:0.85em; color:#333;">' + label + '<br><select name="s_' + key + '" style="padding:6px;">'
+                for val, text in opts:
+                    h += '<option value="' + str(val) + '"' + (' selected' if str(cur) == str(val) else '') + '>' + hesc(text) + '</option>'
+                return h + '</select></label>'
+            def _rdchk(key, label, note=''):
+                return ('<label style="font-size:0.85em; color:#333;"><input type="checkbox" name="s_' + key + '" value="1"'
+                        + (' checked' if str(_rdv.get(key, 0)) in ('1', 'True') else '') + '> ' + label
+                        + (' <span style="color:#999;">' + note + '</span>' if note else '') + '</label>')
+            _rg_en = str(overrides.get('radar_enabled', '') if overrides.get('radar_enabled', '') is not None else '')
+            _rg_fr = str(overrides.get('radar_friends', '') if overrides.get('radar_friends', '') is not None else '')
+            _rg_vis = overrides.get('radar_visual_m', '')
+            radar_html = (
+                '<div style="margin:8px 0 14px 0;">'
+                + _row + _rdsel('radar_enabled', 'Radar failure (server gate)',
+                                [('', 'Arena default (on in Territorial Combat)'), ('1', 'On'), ('0', 'Off')], _rg_en)
+                + '<label style="font-size:0.85em; color:#333;">Always visible within<br>'
+                  '<input type="number" min="1000" max="100000" step="500" name="s_radar_visual_m" value="'
+                + hesc('' if _rg_vis in (None, '') else str(_rg_vis), quote=True)
+                + '" placeholder="15000" style="width:100px; padding:6px;"> <span style="color:#999;">m of the pilot</span></label>'
+                + _rdsel('radar_friends', 'Outside coverage, hide', [('', 'All aircraft (the game\'s rule)'), ('1', 'All aircraft'), ('0', 'Enemy aircraft only')], _rg_fr)
+                + '</div>'
+                + '<label style="font-size:0.9em;">'
+                '<input type="checkbox" name="s_rd_enabled" value="1"' + (' checked' if rd_on else '') +
+                '> Override the arena\'s [Radar] block (rings and map icons on the client)' + rd_edited + '</label>'
+                + _row + _rdnum('rd_always_vis', 'Always visible range', 0, 100000, 100, 100, 'm')
+                + _rdnum('rd_range_mult', 'Radar range multiplier', 0.1, 10, 0.1, 80, 'x (Antenna 50 km)')
+                + _rdnum('rd_above_terrain', 'Under the radar below', 0, 5000, 10, 90, 'm above terrain')
+                + _rdsel('rd_show_range', 'Draw rings for', [(0, 'none'), (1, 'friends'), (2, 'enemies'), (3, 'all')], _rdv.get('rd_show_range', 3))
+                + '</div>' + _row
+                + _rdchk('rd_works', 'Radar works', '(off = no radar layer at all)')
+                + _rdchk('rd_apply_local', 'Low flyers under the radar', '(hides planes beyond the always-visible range that fly below the level above)')
+                + '</div></div>')
             # FIGHTERS ONLY (v391): opt-in checkbox. The game server hides every non-fighter
             # (bombers, attackers, transports - the BOMBER_PLANE_IDS scoring classification)
             # via the same camp-7/byte0 mechanism as the war-date filter.
@@ -2548,6 +2610,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     globe, wind, clouds and rain. Untick to keep the arena template's own values. Takes effect the
                     next time the arena is entered (a client that stays in the arena keeps the old sky).</p>
                     {reality_html}
+                    <h3>Radar</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">Radar failure: with the gate on, a plane
+                    farther than the always-visible range is shown to a pilot only while a standing radar antenna of
+                    his own side covers it &mdash; destroy the antenna and its ring goes grey and the contacts in it
+                    vanish from the map unless another ring still reaches them. The lower row edits the arena&#39;s own
+                    [Radar] block: ring display, range multiplier (also used by the gate) and the altitude under which a
+                    plane slips below the radar. Takes effect the next time the arena is entered.</p>
+                    {radar_html}
                     <h3>Fighters only</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
                     {fighters_html}
@@ -3959,6 +4029,35 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 except ValueError:
                     pass
             settings['rw_rain'] = 1 if qs.get('s_rw_rain', [''])[0].strip() else 0
+            settings['clock_static'] = 1 if qs.get('s_clock_static', [''])[0].strip() else 0   # v949f5 arena world clock
+            # RADAR (v949f5): the server gate (radar_enabled ''/1/0, radar_visual_m, radar_friends ''/1/0) and the
+            # GAME_DEF [Radar] override (rd_enabled + rd_* fields; the two checkboxes are stored as 1/0).
+            for _gk in ('radar_enabled', 'radar_friends'):
+                _gv = qs.get('s_' + _gk, [''])[0].strip()
+                if _gv in ('0', '1'):
+                    settings[_gk] = _gv
+                else:
+                    settings.pop(_gk, None)
+            _gv = qs.get('s_radar_visual_m', [''])[0].strip()
+            try:
+                settings['radar_visual_m'] = int(max(1000, min(100000, float(_gv)))) if _gv else None
+            except ValueError:
+                settings['radar_visual_m'] = None
+            if settings.get('radar_visual_m') is None:
+                settings.pop('radar_visual_m', None)
+            settings['rd_enabled'] = 1 if qs.get('s_rd_enabled', [''])[0].strip() else 0
+            for _rk, _lo, _hi, _isf in (('rd_always_vis', 0, 100000, 1), ('rd_range_mult', 0.1, 10, 1),
+                                        ('rd_above_terrain', 0, 5000, 1), ('rd_show_range', 0, 3, 0)):
+                _rv = qs.get('s_' + _rk, [''])[0].strip()
+                if _rv == '':
+                    continue
+                try:
+                    _rf = float(_rv)
+                    settings[_rk] = round(max(_lo, min(_hi, _rf)), 3) if _isf else int(round(max(_lo, min(_hi, _rf))))
+                except ValueError:
+                    pass
+            settings['rd_works'] = 1 if qs.get('s_rd_works', [''])[0].strip() else 0
+            settings['rd_apply_local'] = 1 if qs.get('s_rd_apply_local', [''])[0].strip() else 0
             # AIRCRAFT PER TEAM (v932f5): the grid posts pt_<slot>_<camp>=1 for every tick. Store only
             # the planes whose tick set differs from the server's default nation table; [] = hidden.
             # The grid is always on the page (pt_present), so a save without it keeps nothing stale.
@@ -4333,8 +4432,9 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
                      server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None,
-                     reality_read_fn=None):
+                     reality_read_fn=None, radar_read_fn=None):
     SRV['reality_read'] = reality_read_fn   # v948f5: date/time/weather editor defaults
+    SRV['radar_read'] = radar_read_fn       # v949f5: radar editor defaults
     SRV['plane_roster'] = plane_roster_fn   # v932f5: () -> [(slot, name, default_camp, is_bomber, year)]
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console

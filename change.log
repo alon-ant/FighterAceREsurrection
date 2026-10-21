@@ -1,3 +1,76 @@
+v949f5 [ARENA WORLD CLOCK - THE TIME OF DAY RUNS ON] (10-21)
+    * User 10-21: 'time of day doesn't roll, it resets each time you enter the arena ... a player can fly
+      and reach night time while a fresh player joins and it's day time. the server should tick on by
+      itself.'
+    * Cause (RE WorldTime.cpp, FUN_00591470 Init / FUN_00591210 Update): the client's clock is the
+      GAME_DEF [Reality] start (day/month/year hh:mm) advanced by the REAL seconds since the arena's
+      CreationTime (Seconds = CreationTimeSeconds + (StartTime - CreationTime)/1000) - at TimeSpeed
+      game-minutes per real minute from 06:00 to 18:00 and at TimeSpeed x NightSpeed from 18:00 to 06:00
+      (Init: hour < 6 -> night to 06:00, > 17 -> night to 30:00, else day to 18:00; then alternating
+      720-minute phases; TimeSpeed <= 0 freezes the clock). v210 stamps CreationTime = 'now' on EVERY
+      212 serve (a days-old stamp froze the client), so each joiner's clock restarted at the start
+      time while the pilots already in the arena had ticked on.
+    * Fix: one clock epoch per arena (world_clock_epoch; arena_clocks.json next to the DB, so a server
+      restart does not reset the day; re-based at an arena reset and by `clock <room> reset`).
+      apply_world_clock replays the client's phase rule from the start time for the real seconds since
+      the epoch and writes the RESULTING date + hh:mm into the [Reality] block at serve (after the war
+      date, so the rolling day is the one the arena shows), then backs the CreationTime stamp up by the
+      real seconds already spent in the current game minute - the joiner lands on the same second as
+      everyone else. TC template (1.0 day / 4.0 night): a game day is 15 real hours (10 h of day, 3 h of
+      night at x4). Verified offline: 08:00 +10 h -> 18:00, +11 h -> 22:00, +13 h -> 06:00 next day,
+      +100 h -> 6 days later 18:00; 29 Feb 1944 rolls; TimeSpeed 0 untouched.
+    * Per arena: 'Reset the clock to the start time on every arena entry' checkbox in the web 'Date,
+      time & weather' section (settings_json clock_static) restores the old behaviour. Console
+      `clock <room>` prints epoch, start and the current world time. Kill switch WORLD_CLOCK_ENABLED.
+    * Verify: fly 30 min, exit to the lobby, re-enter: the clock is ~30 game-minutes on, not back at
+      the start; a second pilot joining sees the same time of day; the log has 'GAMEDEF212 world clock
+      room N: 22/06/1941 08:00 + 0.50 h real ... -> 22/06/1941 08:30 (+12.3 s into the minute)'.
+
+v949f5 [RADAR FAILURE - ANTENNA DOWN, RING GREY, CONTACTS GONE] (10-21)
+    * User 10-21: 'one game mechanic that TC misses is radar failure. when a radar antenna is destroyed the
+      radar ring goes grey on the map, and if there is no other radar to cover that area then all the
+      aircraft that are seen on the map in that specific coverage range are dropped and the map only
+      displays what is in visual range for the pilot.'
+    * RE of the client's radar (Map.cpp draw loop FUN_00491400, FA3Radar.hpp manager @0xc85054):
+      - every TRN object whose class has RadarRadius > 0 owns a RADAR object (radius x [Radar]
+        RangeMultiplier, camp = its scene's camp, +0x18 active) registered in the 8 km map squares it
+        reaches. TRN02 has 15 of them: the 'Antenna' (50 km) on every airfield, one per field (goi 377,
+        449, 512, 576, 649, 721, 784, 848, 921, 993, 1056, 1140, 1231, 1322, 1420).
+      - TRN_OBJECT::SetDestroyed (FUN_00567fd0 @0x568055) clears RADAR+0x18, the restore
+        (FUN_00567370 @0x56746a) sets it; the ring drawer (@0x492866) paints the ring in the camp colour
+        while active and colour 7 = GREY when not. Scene capture re-camps the radar (@0x567013).
+        So the grey ring already works from our msg-30 destroy / repair forms.
+      - the map draws the SERVER-PUSHED icons (msg 57 OBJECT_MAP_INFO array @0xc7f6fc) only where
+        RADAR_MGR::Covers(pos, own camp) (FUN_0048df40: an ACTIVE radar of a friendly camp whose radius
+        reaches the point) says yes - that is the original contact drop. BUT the planes the client HOLDS
+        as objects (every peer we relay) are drawn whatever the radars say (ApplyToLocalObjects only adds
+        the 'under AboveTerrainLevel beyond AlwaysVisibleRange' test). Our server relays every plane in
+        the arena to every client at >= 1 Hz (v674/v683 tiers, 'never silent'), so every client always
+        held every plane and no antenna loss could matter. The 2009 host relayed near planes and pushed
+        the rest as msg-57 icons (which we turned off in v750 because of the ghost markers).
+    * Fix = the server replicates Covers() per (plane, viewer) pair in the relay loop (radar_cfg_for_room /
+      room_radars / plane_detectable_by, next to the relay tiers): inside RADAR_VISUAL_RANGE_M (15 km;
+      the client's own visual range is 13 km) a plane is always relayed; beyond, only while a STANDING
+      antenna (not in _SCENE36_DESTROYED) of the viewer's camp reaches it (class radius x the arena's
+      RangeMultiplier - the same figure the ring is drawn with). Otherwise nothing goes out, the viewer
+      gets an object-only DELETE3 (x=0: silent, no death effect) and the create is re-armed, so the plane
+      re-appears with a fresh create (+ loadout replay) the moment a radar covers it again or it closes
+      to visual range. Chute frames, damage/kill traffic and viewers without a position are untouched.
+      Radars re-scan every 2 s (destroyed set + scene_camp), config every 10 s.
+    * Per arena (web 'Radar' section on /admin/arena_settings): gate Arena default (on for TC-economy
+      arenas) / On / Off, 'always visible within' metres, and whether friendlies are hidden outside
+      coverage too (the game's rule; 'enemy aircraft only' is an option). Plus the GAME_DEF [Radar] block
+      itself (tail-anchored, FUN_0057bee0 @0x57d792..: AlwaysVisibleRange f32 @len-106, RangeMultiplier
+      f32 @len-102, ShowRange u8 @len-98 (0 none/1 friends/2 enemies/3 all), AboveTerrainLevel f32
+      @len-97; Works = bit 0x80 and ApplyToLocalObjects = bit 0x40 of the len-52 flag byte). Templates:
+      Works yes, ApplyToLocalObjects no, 3000 m, x1.0, all, 50 m - verified on every local blob.
+      Console: `radar <room>` (antennas + state), `radar who <pilot>` (who holds / hides his plane).
+      Kill switches RADAR_GATE_ENABLED (gate) and RADAR_GD_ENABLED (GAME_DEF patch).
+    * Verify in TC: fly 20+ km from an enemy whose side has lost all three antennas -> his plane leaves
+      your map (log 'RADAR <him> off <you>'s radar at N km -> hidden' + DELETE3), comes back when you
+      close to 15 km or his side repairs; your own side's rings go grey when your antennas die and the
+      enemies inside them vanish. `radar 49` lists the antennas; antennas are soft targets (life 1000 x2).
+
 v948f5 [WEB: DATE, TIME & WEATHER PER ARENA] (10-21)
     * User 10-21 (Options > Misc screenshot): the client shows the arena's date/clock/time zone/time &
       night speed/latitude/longitude/wind/clouds/rain READ-ONLY - they are GAME_DEF [Reality]/[Weather]
