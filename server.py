@@ -29087,6 +29087,13 @@ def handle_post_auth(s, cmd, pl):
         # log pl[:12] here and widen the marker rather than reverting this guard.
         elif len(pl) > 8 and pl[4] == 0x00 and pl[8] in MOD_INBOUND_OPCODES:
             _op, _mo = pl[8], 8                      # compound-wrapped
+        elif (cmd and len(pl) > 8 and pl[0] == 0x00 and not (pl[2] == 0 and pl[3] == 0) and pl[6] == 0 and pl[7] == 0
+              and pl[8] in MOD_INBOUND_OPCODES):
+            # v950f5g: the TIME-WRAPPED form (main lobby / HQ screen: [00][ctr][cmd BE][inner bc][T][00 00][sub]).
+            # pl[4] is the inner bc, non-zero for any record over 15 bytes, so the pl[4]==0 marker above never
+            # matched a lobby ##GSM / ##Ban: it fell to the compound echo, the sender's own client displayed
+            # it and answered with a receipt ('GSM receipt: Taurus@HQ -> Taurus@HQ', online 18:16-18:59).
+            _op, _mo = pl[8], 8
         if _op is not None and _op in GSM_OPCODES:
             handle_gsm(s, pl[_mo:])              # v950f5: ##GSM message (moderator) or its receipt (any client)
             return

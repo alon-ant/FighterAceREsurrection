@@ -46,8 +46,15 @@ v950f5 [##GSM - THE SYSOP'S PRIVATE FLASHING MESSAGE] (10-21)
       go out as class 5 = the 'AI' box, which is what the 2009 lines were; the roster 'AI' player stays -
       the client drops a msg 20 whose PlayerIndex is not a roster player, so there is no sender-less form.
       `tc aichan <0..11>` switches live.
+    * Fifth test (22:09): the 0x8e flash is RED, nothing magenta - good. But ##GSM from the MAIN LOBBY (and the
+      HQ chat) did nothing: there the client time-wraps the record ([00][ctr][cmd BE][inner bc][T][00 00][sub])
+      and the moderator detector only knew the direct (pl[4]) and the pl[4]==0 compound shapes - the inner bc
+      of a 100-byte GSM is 6, so it fell to the compound echo, the sender's own client displayed it and
+      answered with a receipt (log 18:16-18:59: 'GSM receipt: Taurus@HQ -> Taurus@HQ'). The detector now
+      takes the wrapped shape too (sub at pl[8]) - this also covers ##Ban/##Gag/##Chime typed from the lobby.
     * Verify: ##GSM X hello -> X (in an arena) gets the flashing 'You: hello' and a line in colour 12, nothing
       in the operator pane; X in the lobby -> chat line; you get 'Pilot "X" has received your message'.
+      Now also from the main lobby chat and the HQ chat.
       AI train/trigger lines show as 'AI: ...' and vanish when the Chat tab's AI box is unticked.
     * Fourth test (21:34): class 5 printed the AI lines GREEN (the normal msg-20 path colours by camp relation;
       only channels 3/4 carry the fixed magenta 13) and the client CTD'd when the Chat tab was opened right
