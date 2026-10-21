@@ -833,7 +833,8 @@ MOD_RIGHTS_DEFAULT = 1       # value written for 'mod <pilot>' (any non-zero = f
 #   0x8c        37B  chime      (FUN_0046d1b0)
 #   0x8d        33B  ghost      (FUN_0046d550)
 #   0x91        37B  smoke      (FUN_0046d430)
-MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x57, 0x5f, 0x62, 0x7f, 0x80, 0x85, 0x8b, 0x8c, 0x8d, 0x91})   # v950f5: +0x57 ResetGame, 0x85 EnableFlyButton, 0x8b ClearScores
+MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x57, 0x5f, 0x61, 0x62, 0x7f, 0x80, 0x85, 0x8b, 0x8c, 0x8d, 0x91, 0xe9})   # v950f5: +0x57 ResetGame, 0x85 EnableFlyButton, 0x8b ClearScores, 0x61/0xe9 GSM
+GSM_OPCODES = frozenset({0x61, 0xe9})   # ##GSM: 0x61 from / to an in-game client, 0xe9 from / to a lobby client
 
 MOD_OPCODE_NAMES = {
     0x55: 'BAN-family (Ban/BanAll/UnBan/UnBanAll)', 0x56: 'GAG-family (Gag/GagAll/UnGag/UnGagAll/GagRoom)',
@@ -1136,6 +1137,49 @@ def mod_ban(name, hours, by, room=None, scope_all=False, msg=None):
 
 def mod_unban(name, by):
     return clear_ban(name, by=by)
+
+def _gsm_pkt_for(target, body):
+    """Re-frame a GSM record for the receiver: op 0x61 + in-game frame when he is in an arena, op 0xe9 +
+    lobby frame otherwise (the client's two handlers FUN_004f5450 / FUN_004f7740 share the layout)."""
+    b = bytearray(body)
+    if getattr(target, 'entered_game', False):
+        b[0] = 0x61; return build_ingame_pkt(bytes(b))
+    b[0] = 0xe9; return build_appspace_pkt(bytes(b))
+
+def handle_gsm(s, body):
+    """v950f5 ##GSM <pilot> <text> - the sysop's private message to one pilot wherever he is on the
+    server (lobby or any arena). Record (client sender FUN_0046d650): [0x61|0xe9][flag][sender 32]
+    [target 32][text ... NUL]; flag 3 = message, flag 0x83 (sign bit) = the RECEIPT the target's client
+    sends back by itself ([0x61|0xe9][0x83][receiver 32][original sender 32]) -> 'Pilot "%s" has
+    received your message' on the sysop's screen (FUN_004f5450 / FUN_004f7740). The receiving client
+    prints '%s: %s' in its chat and, in flight, the flashing on-screen line (FUN_0046a420 colour 13)."""
+    body = bytes(body)
+    if len(body) < 0x42:
+        log('MODERATOR', f'GSM: short record {body[:8].hex()} from {getattr(s, "current_pilot", "?")}')
+        return
+    flag = body[1]
+    sender = body[2:34].split(b'\x00')[0].decode('latin1', 'replace')
+    target = body[34:66].split(b'\x00')[0].decode('latin1', 'replace')
+    me = getattr(s, 'current_pilot', None) or '?'
+    if flag & 0x80:                                   # receipt: target -> the original sender
+        dests = _sessions_named(target)
+        for d in dests:
+            send_rel(d, _gsm_pkt_for(d, body), f'<- GSM receipt from {sender} to {target}', to=3.0)
+        log('MODERATOR', f'GSM receipt: "{sender}" has read the message -> {target} ({len(dests)} session(s))')
+        return
+    if not sess_rights(s):
+        log('MODERATOR', f'REJECT GSM from non-moderator "{me}" - swallowed')
+        return
+    text = body[66:].split(b'\x00')[0].decode('latin1', 'replace')
+    dests = [d for d in _sessions_named(target) if d is not s]
+    if not dests:
+        send_system_msg(s, f'GSM: pilot "{target}" is not on the server.')
+        log('MODERATOR', f'GSM by {me} to "{target}": not online - {text!r}')
+        return
+    for d in dests:
+        send_rel(d, _gsm_pkt_for(d, body), f'<- GSM from {me}', to=3.0)
+    log('MODERATOR', f'GSM by {me} -> "{target}" ({len(dests)} session(s), '
+                     f'{"in-game" if getattr(dests[0], "entered_game", False) else "lobby"}): {text!r}')
 
 def mod_gag_room(room, hours, by, release=False):
     """##GagRoom / ##UnGagRoom: everyone in the room without moderator rights."""
@@ -5757,6 +5801,22 @@ def console_handler():
                     except ValueError: _hrs = 1
                     _ok = mod_gag(_pilot, _hrs if _hrs > 0 else 1, 'console', room=None, scope_all=True)
                     log('CONSOLE', f'GAGGED "{_pilot}" {_hrs}h everywhere; notice -> {len(_sessions_named(_pilot))} live session(s)' if _ok else f'gag "{_pilot}": no-op')
+            elif cmd == 'gsm':
+                # v950f5: gsm <pilot> <text> - the ##GSM private flashing message from the console (sender 'Server')
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                try:
+                    _name, _txt = _a[0], _a[1]
+                    _dests = _sessions_named(_name)
+                    if not _dests:
+                        log('CONSOLE', f'gsm: pilot {_name!r} not online')
+                    else:
+                        _rec = (bytes([0x61, 0x03]) + b'Server'.ljust(32, b'\x00') + _name.encode('latin1', 'replace')[:31].ljust(32, b'\x00')
+                                + _txt.encode('latin1', 'replace')[:1000] + b'\x00')
+                        for _d in _dests:
+                            send_rel(_d, _gsm_pkt_for(_d, _rec), '<- GSM from console', to=3.0)
+                        log('CONSOLE', f'gsm -> {_name} ({len(_dests)} session(s)): {_txt!r}')
+                except IndexError:
+                    log('CONSOLE', 'usage: gsm <pilot> <text>')
             elif cmd in ('ungag', 'ungagall'):
                 if len(parts) < 2: log('CONSOLE', f'Usage: {cmd} <pilot_name>')
                 else:
@@ -6819,6 +6879,7 @@ def console_handler():
                         'ungag|ungagall <pilot>            - unmute              gags - list active gags',
                         'mod <pilot> [rights] | unmod <pilot> | mods - moderator rights (##commands in game)',
                         'say <room|all> <text>             - yellow system line + 10 s on-screen banner',
+                        'gsm <pilot> <text>                - private flashing message to one pilot, wherever he is (##GSM)',
                         'broadcast <text>                  - server-wide banner (in-game) + Server chat (lobby)',
                         'boot <pilot> [text]               - EShutDown with text (client exits the game)',
                         'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
@@ -28947,6 +29008,9 @@ def handle_post_auth(s, cmd, pl):
         # log pl[:12] here and widen the marker rather than reverting this guard.
         elif len(pl) > 8 and pl[4] == 0x00 and pl[8] in MOD_INBOUND_OPCODES:
             _op, _mo = pl[8], 8                      # compound-wrapped
+        if _op is not None and _op in GSM_OPCODES:
+            handle_gsm(s, pl[_mo:])              # v950f5: ##GSM message (moderator) or its receipt (any client)
+            return
         if _op is not None:
             _who = getattr(s, 'current_pilot', None)
             if not sess_rights(s):

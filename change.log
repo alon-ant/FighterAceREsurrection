@@ -1,3 +1,19 @@
+v950f5 [##GSM - THE SYSOP'S PRIVATE FLASHING MESSAGE] (10-21)
+    * Alon 10-21 (after the ban/gag pass 'all work as expected'): '##gsm <pilot> [message] broadcasts
+      (flashing yellow) to a single pilot the message no matter where he is on the server' - it had only
+      ever been echoed back to the sender (the generic compound echo), so a lone tester saw it 'work'.
+    * Wire (client sender FUN_0046d650, receivers FUN_004f5450 in-game / FUN_004f7740 lobby): [0x61 in
+      game | 0xe9 lobby][flag 3][sender 32][target 32][text NUL]. The receiving client prints '%s: %s' in
+      chat and, in flight, the flashing on-screen line (FUN_0046a420 colour 13), then sends a RECEIPT by
+      itself: [op][0x83][receiver 32][original sender 32] -> 'Pilot "%s" has received your message' on the
+      sysop's screen. handle_gsm: a moderator's message is looked up by target name across the whole
+      server (lobby or any arena) and re-framed for the receiver's state (0x61 + in-game frame / 0xe9 +
+      lobby frame); the receipt is routed back to the named sender from any client (no rights needed);
+      'GSM: pilot "X" is not on the server.' when nobody matches. Console `gsm <pilot> <text>` (sender
+      'Server').
+    * Verify: ##GSM X hello from an arena while X sits in the lobby or another arena -> X sees
+      'You: hello' (flashing in flight), you see 'Pilot "X" has received your message'; panel gsm likewise.
+
 v950f5 [SYSOP COMMANDS: THE REAL BAN/GAG WIRE, NATIVE NOTICES, PANEL COMMANDS] (10-21)
     * Sysop report (Alon 10-21, in-game): ##gag 'not functioning', ##gagall 'target can type', ##banall
       'target not kicked, but muted', ##gagroom/##ungagroom/##joindisable/##resetgame/##nofuelp not working;
