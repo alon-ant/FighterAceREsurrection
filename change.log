@@ -1,3 +1,135 @@
+v953f5 [EVENT MODE = FIRING ENABLE / DISABLE] (10-22)
+    * Alon 00:26: 'can we try and find a firing enable/disable command? might be an ## command or server
+      console. very useful for events'. Found - it is the game's own [Event] system, next to [Tournament] in
+      the GAME_DEF: with DelaysActive on (flags len-62 bit 0x01) every client refuses, until the event start is
+      known, to start engines / open fire / launch rockets / drop bombs or torpedoes / deploy paratroopers /
+      drop or deliver supplies (Texts.str 0x13a..0x13f "You'll be able to open fire after Event starts"; fire
+      check FUN_004a2b70, siblings 0x4a7280/0x4a7550/0x4ad5c0/0x4ad790/0x4ada90/0x451dd0) and, after the
+      start, for Event.StartDelay (len-89, min) + per-plane EventParam minutes (EVENT_PLANE_CONFIG list, empty
+      in our templates) "You'll be able to open fire in MM:SS" (0x133..0x139). The start arrives as msg 0x83
+      [0x83][fly-button enable u8][start NET ms u32] (FUN_004f5e10 'GED: %u, now: %u'): start != 0 lifts the
+      lock, 0 locks again; the enable byte drives the HQ Fly button (FUN_00440b40 -> DAT_00c1cdbc; the
+      GAME_DEF FlyButtonEnabled, len-61 bit 0x80, is its initial state). The sysop commands behind it:
+      ##StartEvent sends 0x84 (1 B), ##EnableFlyButton 0x85 - the 2009 server answered both with 0x83 (the
+      0x85 we had as 'join enable' never reached a client handler; there is none).
+    * server.py: [Event] fields join the tournament GAME_DEF reader/writer (ev_enabled, ev_start_delay,
+      ev_fly_button; web 'Event mode (weapons lock)' rows in the Tournament section); runtime EVENTS per
+      room: event_start (0x83 start=now, 'EVENT STARTED' line + banner; `event start <room> [in <s>]`),
+      event_stop (0x83 start=0 -> 'HOLD FIRE'), event_fly_button (0x83 enable), event_on_spawn pushes the
+      state to joiners; ##StartEvent (0x84) and ##EnableFlyButton (0x85) enact them; arena reset clears.
+      Console `event start|stop <room> | fly <room> on|off | status [room]`. VERSION v953f5.
+    * v953f5b (Alon 00:41 'event stop just broadcasts a message. it doesn't hold the fire' - room 60 had
+      DelaysActive off, as the log note said): EVENT_LOCK_ALL_ARENAS - every served GAME_DEF now carries
+      [Event] DelaysActive=1 and every joiner gets the room's event state at ServerConfirm (0x83; default
+      'started at server time' = unlocked, so normal arenas play as before). `event stop <room>` therefore
+      locks ANY arena at any time, `event start` frees it; the web checkbox is now 'Start with weapons and
+      engines locked'. A client that was already in the arena keeps its old GAME_DEF (no lock) until it
+      re-enters.
+    * Verify: web -> tick 'Lock weapons and engines until the host starts the event' on a test arena, enter:
+      trigger -> "You'll be able to open fire after Event starts", engines will not start; ##StartEvent (or
+      console `event start 149`) -> 'EVENT STARTED' banner, engines/guns work (after the unlock delay if
+      set); `event stop 149` -> locked again. The lock needs the arena's GAME_DEF flag - an arena without it
+      ignores the commands (status says so).
+
+v952f5 [TOURNAMENT MODE] (10-21)
+    * Alon 23:43: 'Tournament mode! ... part of arena creation dialog ... expose it to the web server ... a join
+      wait timer that needs to be a dial ... lots of RE here'. RE results:
+      - Dialog New_Arena2_dlg: TOURNAMENT_ACTIVE_CHECK_BOX / TOURNAMENT_LIVES_COMBO_BOX ('Unlimited', N) /
+        TOURNAMENT_GHOSTING_CHECK_BOX -> GAME_DEF [Tournament] (INI loader FUN_0057f610): Active +0x1b78,
+        StartDelay +0x1b7c (min, the JOINING window), ShootDelay +0x1b80 (min after joining until the
+        competition), Lives +0x1b84 (0 unlimited), AllowTabbing +0x1b88, Ghosting +0x1b8c, LastIsWinner
+        +0x1b90; then [Event] DelaysActive / StartMethod / StartDelay / FlyButtonEnabled / TaxiLimit.
+      - Wire (GameDef.cpp unpack FUN_0057bee0, tail block; valid when the event-plane list byte len-84 is 0):
+        len-93 StartDelay, len-92 ShootDelay, len-91 Lives (u8 each), len-90/-89 Event.StartMethod/StartDelay,
+        len-88 f32 TaxiLimit, len-83/-79 Oxygen1/2, len-62 flags 0x10 Active 0x08 AllowTabbing 0x04 Ghosting
+        0x02 LastIsWinner 0x01 Event.DelaysActive, len-61 bit 0x80 Event.FlyButtonEnabled, len-52 [Radar] flags.
+        (_gamedef_tail_ok's docstring says Oxygen @len-80; its code reads len-83 - the code is right.)
+        Template defaults 5 / 2 / 0 / flags 0x46 (Ghosting + LastIsWinner on).
+      - No special arena TYPE: it is a flag inside any arena (the lobby Type byte stays official/private).
+      - Client mechanics, all keyed on Active && start DAT_00c7e5d0: msg 0x5c StartTournamentCB [u32 NET ms]
+        (FUN_004f4200) sets the clock, else each client seeds its OWN (GAME_DEF.StartTime dword @1 = 0 in our
+        blobs -> world-init time) - which is why the join wait timer must come from the server; HUD
+        FUN_00474e90 'Time until end of joining... M:SS' / 'Time until start of competition... M:SS'; before
+        the competition no collisions (FUN_00447b30 / FUN_00449b60) and no weapons (FUN_004bd880, plane
+        +0x3fc=1 FUN_004b2aa0); the client counts its own deaths (DAT_00c7e3ac, Msn_Exit.cpp FUN_0045d930:
+        ScoreEvent != 0 or AllowTabbing off, competition phase only, counter reset at arena re-entry); at
+        lives exhausted with Ghosting the dying plane goes ghost (FUN_004b1910, DAT_00c7e364: no fire, no
+        exit events), the HQ Fly button is disabled (0x6de8e5) unless moderator rights; msg 0x30
+        TournamentResult [s16 PlayerIndex] (FUN_004f6f50): PI -> '<name> has won', -1 -> 'Game ends in a
+        draw' (LastIsWinner) / 'Tournament is finished'. Side find: msg 0x83 [enable u8][u32] (FUN_004f5e10
+        'GED') = [Event] start-time + Fly-button enable; ##EnableFlyButton has no client handler at all.
+    * server.py: [Tournament] GAME_DEF reader/writer (_gamedef_tournament_offsets, extract_/apply_tournament_
+      settings, hooked after the radar patch in build_lz_gamedef; web tn_* keys: tn_enabled, tn_lives,
+      tn_ghosting, tn_allow_tabbing, tn_last_is_winner, tn_start_delay, tn_shoot_delay). Runtime TOURNAMENTS
+      per room: tournament_cfg_for_room (blob + web overrides), tournament_start (0x5c to the room,
+      system line; auto-started by the first spawn), tournament_on_spawn at ServerConfirm (0x5c to late
+      joiners = ONE common clock, participant list, 0x8d ghost + message for a pilot out of lives with
+      Ghosting), tournament_fly_allowed in handle_fly_start_place (joining closed -> non-participants
+      refused; out of lives without Ghosting refused; moderators exempt), tournament_on_plane_exit from the
+      msg-3 delete-notify (life spent on SE != 0, MEC 1/2/5, or any exit when AllowTabbing is off; competition
+      phase only; 'N lives left' / 'out of lives' lines), tournament_check_winner (LastIsWinner: one
+      participant left -> tournament_finish: 0x30 with his PlayerIndex, system line + cockpit banner),
+      arena reset clears the state. Console `tournament status [room] | start <room> [in <s>] | end <room>
+      [winner] | reset <room>`. VERSION v952f5.
+    * web_server.py: 'Tournament' section on /admin/arena_settings (enabled, lives, ghosting, joining window
+      min, shooting +min, allow tabbing, last one flying wins; defaults from the arena's blob via
+      SRV['tournament_read']).
+    * v952f5b (Alon 00:13 'how do i stop the count down timer and enable the game?'): console `tournament go
+      <room>` - the clock is re-based to now - (StartDelay+ShootDelay) min and re-sent with 0x5c, so every
+      client's two countdowns expire at once: joining closes, guns/collisions/lives are live ('FIGHT!'
+      banner). Participants and deaths kept; also starts a tournament that had not started.
+    * v952f5c (Alon 00:17 'a start command for skipping the join time and also the event itself'): two
+      separate skips - `tournament close <room>` re-bases the start so the JOINING window has just elapsed
+      (joining closes now, the ShootDelay countdown runs: 'shooting starts in N min'); `tournament go <room>`
+      skips both (competition now). Shared _tournament_rebase.
+    * Verify: web -> enable tournament on a test arena, lives 2, joining 2 min, shooting 1 min; enter: cockpit
+      shows 'Time until end of joining', then 'Time until start of competition', no guns until it ends; a
+      second pilot entering after the window is refused ('Joining has ended'); two deaths -> 'out of lives',
+      Fly button greyed, with Ghosting the next spawn is a ghost; last pilot flying -> 'X has won' + banner;
+      console `tournament status 149`; `tournament start 149` restarts the clock for everyone.
+
+v951f5 [PILOT RENAME HAD NO NAME RULES] (10-21)
+    * Alon 23:35: 'server allows users to rename a pilot to have a space in his name. this is not allowed.'
+      Cause: the lobby RENAME (type 0x42 sub 0xe7, direct and compound-wrapped) went straight to
+      db_rename_pilot - none of the create checks (staff tag, character set, length, vulgar list, name
+      taken) ran on it, and the client's rename dialog does not filter either; a rename could even take
+      another account's pilot name or a staff tag.
+    * pilot_rename_validate(): the pilot must belong to the account; then the create rules in the same
+      order (reserved -> length -> characters -> vulgar -> taken, case-insensitive, own name allowed). The
+      refusal is the client's own dialog: result codes read off Ch_Pl.cpp (create FUN_006b6ff0 / rename
+      FUN_006b7dc0 share them) 2 'already in use', 3 'Vulgar pilot name.', 4 'too many pilot names', 5 'Bad
+      characters in pilot name.', 6 'too long or too short', 8 'can not be changed during next %d hour(s)',
+      else "Can't create pilot with this name." - PILOT_ERR_INVALID corrected 1 -> 5 (the create refusal
+      for bad characters showed the generic text until now), new PILOT_ERR_LENGTH 6. lobby_reply_with_result
+      takes name= because the rename request keeps its names at +8/+40, not +6.
+    * Console `badnames` lists stored pilot names that already break the rule (staff-tagged names excepted)
+      so they can be fixed through the web admin rename, which deliberately still allows interior spaces
+      for staff names.
+    * Verify: lobby pilot edit -> rename to 'My Pilot' -> dialog 'Bad characters in pilot name.' + Server
+      chat line, DB unchanged; rename to an existing name -> 'already in use'; a legal rename still echoes
+      and sticks; create with a space now says 'Bad characters' instead of the generic line.
+
+v951f5 [SERVER POLLS - !!vote / !!poll] (10-21)
+    * Alon 23:14: 'implement poll'. The client's poll feature (found while chasing the chime: the engine's own
+      Chime20 play site is the poll handler) is now driven by the server. Client side pinned: msg 0x93
+      (dispatch 0xc82124 -> FUN_004f4940) opens a poll - fixed 0x245 B [0x93][id][3 x u32][0][duration s]
+      [44 x 00][text 0x200], text 'question|c0|c1|...'; the 2009 creator was script op 0x8d (FUN_0066bc30,
+      event scripts), reader op 0x8e (FUN_0066bd40). User commands are the '!!' table @0xc7ebc0 (Dlgs1.str
+      0x9c5..0x9c8: help, score, poll, vote): '!!poll' prints 'Current Poll Criteria' + choices (FUN_0046e320),
+      '!!vote N' (FUN_0046e1e0) checks 0..9 / still active / not voted and sends 0x94 [id u32][N u32] on the
+      same reliable path as the ## commands; inbound 0x94 (FUN_004f3a50) bumps the per-poll counters that
+      nothing displays. Options toggles 0xbf5b7c (chime on poll) / 0xbf5b80 (print on arrival).
+    * server.py: build_poll_93 / build_poll_vote_94, POLLS per room, poll_start (system lines with the
+      '!!vote N = choice' list + the 0x93 to every in-game pilot, threading.Timer closes it), handle_poll_vote
+      (0x94 added to the ## detection shapes, no rights needed; one vote per pilot name, ack 'Vote counted',
+      relay to the room), poll_finish (counts per choice as system lines, winner as the cockpit banner, tie
+      line), poll_late_join at ServerConfirm, console `poll start|status|end|cancel`, help entry. VERSION
+      v951f5.
+    * Verify: `poll start 149 120 Next map? | Pacific | Europe` -> pilots see the yellow lines (+ Chime20 /
+      auto print if their options allow); '!!poll' shows it; '!!vote 1' -> 'Vote counted: 1 - Europe', a
+      second '!!vote' is refused by the client ('You have already voted on the current poll'); after 120 s
+      the result lines + the 'POLL: Europe (n of m)' banner in the cockpit; `poll status` on the console.
+
 v950f5 [CHIMES FIXED - THE SOUND INDEX WAS OFF BY 121] (10-21)
     * Alon 22:40: 'chimes don't work at all. ghost commands work. smoke commands work.' Log: chime by
       Taurus@HQ (arg 2 / 16 / 380 / 388) - the client sends the typed number raw (atoi -> record [0x21]) and
@@ -15,6 +147,13 @@ v950f5 [CHIMES FIXED - THE SOUND INDEX WAS OFF BY 121] (10-21)
       confirms the block. So only 500..521 are usable chimes.
     * Server: ##ChimeP/##ChimeAll with 1..22 is mapped to the chime block (CHIME_BASE 499 + n) and logged as
       'chime #n -> idx 50x'; any other value is passed through raw. MODERATION.md table corrected.
+    * Alon 22:56: 'all chimes work. nothing with banners though' - the :B / say / broadcast banner is the
+      yellow blinking centre line of the COCKPIT view only (Msn_Serv.cpp FUN_00474e90, colour 14, 10 s from
+      the ch-4 handler's FUN_0046a8a0), cleared on any screen switch and pre-empted by the higher-priority
+      centre messages (shutdown/exit countdowns, bailing, pilot killed, 'Fueling and Arming Plane', cargo,
+      view-return, start-place/take-off queue, competition timers). Log 19:55: Taurus sent :B from the HQ
+      screen, Alon was parked right after a repair request -> chat line only, no banner. No server change;
+      documented in MODERATION.md. Side find: msg 0x93/0x94 = server POLL + 'vote N' / 'poll' user commands.
     * Verify: ##ChimeP X 7 -> X hears Chime07 (two high pings); ##ChimeAll 500 -> everyone hears Chime01;
       ##ChimeP X 90 -> plain beep.
 

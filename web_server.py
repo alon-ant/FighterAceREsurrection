@@ -209,6 +209,7 @@ SRV = {
     'password_read': None,
     'reality_read': None,     # v948f5: extract_reality_from_gamedef(blob) -> {rw_*}
     'radar_read': None,       # v949f5: extract_radar_from_gamedef(blob) -> {rd_*}
+    'tournament_read': None,  # v952f5: extract_tournament_from_gamedef(blob) -> {tn_*}
     'log': print
 }
 
@@ -2410,6 +2411,44 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _rdchk('rd_works', 'Radar works', '(off = no radar layer at all)')
                 + _rdchk('rd_apply_local', 'Low flyers under the radar', '(hides planes beyond the always-visible range that fly below the level above)')
                 + '</div></div>')
+            # TOURNAMENT (v952f5): the arena-creation dialog's Tournament group, served into the GAME_DEF
+            # [Tournament] block (tn_* keys; '' = template value). Defaults from tournament_read.
+            _tnb = {}
+            try:
+                if SRV.get('tournament_read') and gdef:
+                    _tnb = SRV['tournament_read'](bytes(gdef)) or {}
+            except Exception:
+                _tnb = {}
+            _tnv = dict(_tnb); _tnv.update({k: v for k, v in overrides.items() if (k.startswith('tn_') or k.startswith('ev_')) and v not in (None, '')})
+            tn_edited = ' &bull; <span style="color:#c60;">edited</span>' if any(k.startswith('tn_') for k in overrides) else ''
+            ev_edited = ' &bull; <span style="color:#c60;">edited</span>' if any(k.startswith('ev_') for k in overrides) else ''
+            def _tnchk(key, label, note=''):
+                return ('<label style="font-size:0.85em; color:#333;"><input type="checkbox" name="s_' + key + '" value="1"'
+                        + (' checked' if str(_tnv.get(key, 0)) in ('1', 'True') else '') + '> ' + label
+                        + (' <span style="color:#999;">' + note + '</span>' if note else '') + '</label>')
+            def _tnnum(key, label, lo, hi, unit=''):
+                v = _tnv.get(key, '')
+                return ('<label style="font-size:0.85em; color:#333;">' + label + '<br>'
+                        '<input type="number" min="' + str(lo) + '" max="' + str(hi) + '" step="1" name="s_' + key
+                        + '" value="' + hesc('' if v is None else str(v), quote=True) + '" style="width:80px; padding:6px;">'
+                        + (' <span style="color:#999;">' + unit + '</span>' if unit else '') + '</label>')
+            tournament_html = (
+                '<div style="margin:8px 0 14px 0;">' + _row
+                + _tnchk('tn_enabled', '<b>Tournament mode enabled</b>', tn_edited)
+                + _tnnum('tn_lives', 'Number of lives', 0, 99, '(0 = unlimited)')
+                + _tnchk('tn_ghosting', 'Ghosting', '(out of lives = fly on as a ghost)')
+                + '</div>' + _row
+                + _tnnum('tn_start_delay', 'Joining window', 0, 240, 'min from the start')
+                + _tnnum('tn_shoot_delay', 'Shooting starts', 0, 240, 'min after joining closes')
+                + _tnchk('tn_allow_tabbing', 'Allow tabbing out', '(exiting to HQ does not cost a life)')
+                + _tnchk('tn_last_is_winner', 'Last one flying wins', '(the server announces the winner)')
+                + '</div>'
+                + '<div style="margin:14px 0 6px 0; font-weight:bold;">Event mode (weapons lock)' + ev_edited + '</div>' + _row
+                + _tnchk('ev_enabled', '<b>Start with weapons and engines locked</b>',
+                         '(until ##StartEvent / <code>event start &lt;room&gt;</code>; <code>event stop &lt;room&gt;</code> locks any arena at any time)')
+                + _tnnum('ev_start_delay', 'Unlock', 0, 240, 'min after the event start')
+                + _tnchk('ev_fly_button', 'Fly button enabled from the start', '(untick = greyed until ##EnableFlyButton / <code>event fly on</code>)')
+                + '</div></div>')
             # FIGHTERS ONLY (v391): opt-in checkbox. The game server hides every non-fighter
             # (bombers, attackers, transports - the BOMBER_PLANE_IDS scoring classification)
             # via the same camp-7/byte0 mechanism as the war-date filter.
@@ -2614,6 +2653,18 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     globe, wind, clouds and rain. Untick to keep the arena template's own values. Takes effect the
                     next time the arena is entered (a client that stays in the arena keeps the old sky).</p>
                     {reality_html}
+                    <h3>Tournament</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">The Tournament group of the game&#39;s
+                    arena-creation dialog. The clock starts when the first pilot spawns (or with the console
+                    <code>tournament start &lt;room&gt;</code>): pilots may join during the joining window, then
+                    everybody flies unarmed until shooting starts (the cockpit shows both countdowns). Each pilot has
+                    the given number of lives; out of lives he is either grounded or, with ghosting, flies on as a
+                    ghost. With &quot;last one flying wins&quot; the server declares the winner when one pilot is left.
+                    The weapons lock is the game&#39;s own event mode: while locked nobody can start engines, fire,
+                    launch rockets, drop bombs or troops. Every arena can be locked and freed from the console
+                    (<code>event stop</code> / <code>event start</code>, or ##StartEvent in game); tick the box to
+                    have the arena start locked. Values take effect the next time the arena is entered.</p>
+                    {tournament_html}
                     <h3>Radar</h3>
                     <p style="color:#888; font-size:0.85em; max-width:640px;">Radar failure: with the gate on, a plane
                     farther than the always-visible range is shown to a pilot only while a standing radar antenna of
@@ -4066,6 +4117,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     pass
             settings['rd_works'] = 1 if qs.get('s_rd_works', [''])[0].strip() else 0
             settings['rd_apply_local'] = 1 if qs.get('s_rd_apply_local', [''])[0].strip() else 0
+            # TOURNAMENT (v952f5): checkboxes stored 1/0, numbers only when given (blank = template value)
+            for _tk in ('tn_enabled', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner', 'ev_enabled', 'ev_fly_button'):
+                settings[_tk] = 1 if qs.get('s_' + _tk, [''])[0].strip() else 0
+            for _tk, _lo, _hi in (('tn_lives', 0, 99), ('tn_start_delay', 0, 240), ('tn_shoot_delay', 0, 240), ('ev_start_delay', 0, 240)):
+                _tv = qs.get('s_' + _tk, [''])[0].strip()
+                try:
+                    settings[_tk] = int(max(_lo, min(_hi, float(_tv)))) if _tv else None
+                except ValueError:
+                    settings[_tk] = None
+                if settings.get(_tk) is None:
+                    settings.pop(_tk, None)
             # AIRCRAFT PER TEAM (v932f5): the grid posts pt_<slot>_<camp>=1 for every tick. Store only
             # the planes whose tick set differs from the server's default nation table; [] = hidden.
             # The grid is always on the page (pt_present), so a save without it keeps nothing stale.
@@ -4440,9 +4502,10 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
                      server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None,
-                     reality_read_fn=None, radar_read_fn=None):
+                     reality_read_fn=None, radar_read_fn=None, tournament_read_fn=None):
     SRV['reality_read'] = reality_read_fn   # v948f5: date/time/weather editor defaults
     SRV['radar_read'] = radar_read_fn       # v949f5: radar editor defaults
+    SRV['tournament_read'] = tournament_read_fn   # v952f5: tournament editor defaults
     SRV['plane_roster'] = plane_roster_fn   # v932f5: () -> [(slot, name, default_camp, is_bomber, year)]
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console

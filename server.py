@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v950f5'
+VERSION = 'v953f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -835,12 +835,16 @@ MOD_RIGHTS_DEFAULT = 1       # value written for 'mod <pilot>' (any non-zero = f
 #   0x91        37B  smoke      (FUN_0046d430)
 MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x57, 0x5f, 0x61, 0x62, 0x7f, 0x80, 0x85, 0x8b, 0x8c, 0x8d, 0x91, 0xe9})   # v950f5: +0x57 ResetGame, 0x85 EnableFlyButton, 0x8b ClearScores, 0x61/0xe9 GSM
 GSM_OPCODES = frozenset({0x61, 0xe9})   # ##GSM: 0x61 from / to an in-game client, 0xe9 from / to a lobby client
+POLL_VOTE_OPCODE = 0x94                   # v951f5: '!!vote N' answer [0x94][poll id u32][choice u32] (any pilot)
+MOD_INBOUND_OPCODES = MOD_INBOUND_OPCODES | {POLL_VOTE_OPCODE}
+EVENT_START_OPCODE = 0x84                 # v953f5: ##StartEvent (1 byte) -> msg 0x83 to the room
+MOD_INBOUND_OPCODES = MOD_INBOUND_OPCODES | {EVENT_START_OPCODE}
 
 MOD_OPCODE_NAMES = {
     0x55: 'BAN-family (Ban/BanAll/UnBan/UnBanAll)', 0x56: 'GAG-family (Gag/GagAll/UnGag/UnGagAll/GagRoom)',
     0x57: 'ResetGame', 0x5f: 'Join enable/disable', 0x62: 'AllChat', 0x7f: 'plane action by index',
     0x80: 'killp/ejectp/crumblep/nofuelp by name', 0x85: 'EnableFlyButton', 0x8b: 'ClearScores',
-    0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke',
+    0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke', 0x84: 'StartEvent',
 }
 # Real command names come from the official "FA 3.6 Sysop Commands" reference (rev 2004-08-06).
 # The 'p' suffix = player-targeted. Mapping of sub-byte -> command is inferred by pairing each
@@ -1221,6 +1225,604 @@ def mod_gag_room(room, hours, by, release=False):
     log('MODERATOR', f'{"UNGAG" if release else "GAG"} ROOM {room} by {by}: {n} player(s)')
     return n
 
+# ----------------------------------------------------------------------------------------------------
+# v951f5 SERVER POLLS (Alon 10-21 'implement poll'). The client carries a complete poll UI that the 2009
+# event scripts drove (script ops 0x8d CreatePoll -> FUN_0066bc30, 0x8e GetPollVotes -> FUN_0066bd40):
+#   msg 0x93 (dispatch 0xc82124 -> FUN_004f4940) opens a poll on the client, 0x245 bytes fixed:
+#     [0x93][id u32][p2 u32][p3 u32][p4 u32][0 u32][duration s u32][44 x 00][text 0x200]
+#     text = 'question|choice0|choice1|...' (strtok on '|'); p2..p4 are stored (0xc6f2cc..d4) and never
+#     read by the player client; end time = now + duration*1000 (0xc6f2dc); 'voted' flag 0xc6f2e0 reset.
+#     On receipt the client plays Chime20 (0x207) when option 0xbf5b7c is on and prints the poll when
+#     option 0xbf5b80 is on (both Options toggles); '!!poll' prints it any time (FUN_0046e320: 'Current
+#     Poll Criteria' + question, 'Choice N - text' (0 carries '<<< Default'), 'Poll is active for %d
+#     seconds more'). User commands are the '!!' table @0xc7ebc0: help, score, poll, vote.
+#   '!!vote N' (FUN_0046e1e0): N in 0..9, poll still active, not voted yet -> sends 0x94 [id u32][N u32]
+#     (9 bytes, same reliable path as the ## commands) and sets the local voted flag; otherwise one of
+#     'Please use a choice between 0 and 9' / 'The current poll is not active anymore' / 'You have
+#     already voted on the current poll'.
+#   msg 0x94 inbound (dispatch 0xc82128 -> FUN_004f3a50): tally[id*0x244 + choice*4]++ (id < 100,
+#     choice < 10) - the per-poll counters @0xc6f52c the scripts read back; nothing displays them, so
+#     the server owns the count and announces the result itself.
+# The server keeps one poll per room (or the same poll in every room with 'all'), one vote per pilot,
+# relays each 0x94 to the room so the client counters stay in step, and closes with a result line.
+# ----------------------------------------------------------------------------------------------------
+POLLS_ENABLED = True
+POLL_MAX_CHOICES = 10
+POLL_MAX_S = 3600
+POLLS = {}              # room_id -> {'id','question','choices','end','votes':{pilot:choice},'by','timer'}
+_POLL_NEXT_ID = [1]
+_POLL_LOCK = threading.Lock()
+
+def build_poll_93(poll_id, question, choices, duration_s):
+    """The 0x93 CreatePoll record exactly as FUN_0066bc30 sends it (0x245 bytes)."""
+    text = '|'.join([question] + list(choices)).encode('latin1', 'replace')[:0x1ff]
+    rec = bytearray(0x245)
+    rec[0] = 0x93
+    struct.pack_into('<IIIIII', rec, 1, poll_id & 0xffffffff, 0, 0, 0, 0, int(duration_s) & 0xffffffff)
+    rec[0x45:0x45 + len(text)] = text
+    return bytes(rec)
+
+def build_poll_vote_94(poll_id, choice):
+    return bytes([0x94]) + struct.pack('<ii', int(poll_id), int(choice))
+
+def _poll_rooms(target):
+    """'all' -> every room with an in-game pilot; else the one room id."""
+    if str(target).lower() == 'all':
+        return sorted({getattr(x, 'current_room', None) for x in get_all_sessions()
+                       if getattr(x, 'entered_game', False) and getattr(x, 'current_room', None) is not None})
+    return [int(str(target), 0)]
+
+def poll_start(target, duration_s, question, choices, by='console'):
+    """Open a poll in the room(s). Returns (poll_id, rooms, recipients) or raises ValueError."""
+    if not POLLS_ENABLED:
+        raise ValueError('polls are disabled (POLLS_ENABLED)')
+    choices = [c.strip() for c in choices if c.strip()]
+    question = question.strip()
+    if not question or len(choices) < 2:
+        raise ValueError('need a question and at least 2 choices: poll start <room|all> <secs> <question> | <choice> | <choice> ...')
+    if len(choices) > POLL_MAX_CHOICES:
+        raise ValueError(f'at most {POLL_MAX_CHOICES} choices (the client votes 0..9)')
+    duration_s = max(10, min(int(duration_s), POLL_MAX_S))
+    rooms = _poll_rooms(target)
+    if not rooms:
+        raise ValueError('no room with in-game pilots')
+    with _POLL_LOCK:
+        pid = _POLL_NEXT_ID[0]; _POLL_NEXT_ID[0] = pid % 99 + 1          # client accepts id < 100
+    n = 0
+    rec = build_ingame_pkt(build_poll_93(pid, question, choices, duration_s))
+    for rid in rooms:
+        old = POLLS.get(rid)
+        if old and old.get('timer'):
+            try: old['timer'].cancel()
+            except Exception: pass
+            log('POLL', f'room {rid}: poll {old["id"]} replaced by {pid}')
+        entry = {'id': pid, 'question': question, 'choices': choices, 'end': time.time() + duration_s,
+                 'votes': {}, 'by': by, 'timer': None, 'start': time.time()}
+        for p in get_sessions_in_room(rid):
+            if not getattr(p, 'entered_game', False):
+                continue
+            _submit_send(send_rel, p, rec, f'<- POLL {pid} open', to=3.0); n += 1
+        room_system_msg(rid, f'POLL: {question}'[:74])
+        for i, c in enumerate(choices):
+            room_system_msg(rid, f'  !!vote {i} = {c}'[:74])
+        room_system_msg(rid, f'!!vote <0-{len(choices) - 1}> to answer, !!poll to see it again ({duration_s} s)'[:74])
+        t = threading.Timer(duration_s + 1.0, poll_finish, args=(rid, pid))
+        t.daemon = True; entry['timer'] = t; POLLS[rid] = entry; t.start()
+    log('POLL', f'poll {pid} by {by} in room(s) {rooms} ({n} pilot(s), {duration_s} s): {question!r} / {choices}')
+    return pid, rooms, n
+
+def poll_late_join(s):
+    """A pilot entering the arena while a poll runs gets the 0x93 so '!!vote' works for him too."""
+    try:
+        e = POLLS.get(getattr(s, 'current_room', None))
+        if not e or e['end'] <= time.time():
+            return
+        remain = int(e['end'] - time.time())
+        if remain < 5:
+            return
+        _submit_send(send_rel, s, build_ingame_pkt(build_poll_93(e['id'], e['question'], e['choices'], remain)),
+                     f'<- POLL {e["id"]} (late join, {remain} s)', to=3.0)
+    except Exception as ex:
+        log('POLL', f'late-join send failed: {ex}')
+
+def handle_poll_vote(s, body):
+    """0x94 [id u32][choice u32] from a pilot's '!!vote N'."""
+    body = bytes(body)
+    who = getattr(s, 'current_pilot', None) or '?'
+    rid = getattr(s, 'current_room', None)
+    if len(body) < 9:
+        log('POLL', f'short vote record {body.hex()} from {who}'); return
+    pid, choice = struct.unpack_from('<ii', body, 1)
+    e = POLLS.get(rid)
+    if not e or e['id'] != pid:
+        send_system_msg(s, 'There is no such poll in this arena.')
+        log('POLL', f'vote by {who} for poll {pid} choice {choice}: no such poll in room {rid}'); return
+    if e['end'] <= time.time():
+        send_system_msg(s, 'The poll is closed.'); return
+    if not (0 <= choice < len(e['choices'])):
+        send_system_msg(s, f'Choices are 0..{len(e["choices"]) - 1}.'); return
+    if who in e['votes']:
+        # the client blocks a second vote itself; a reconnect clears its flag, so the server decides
+        send_system_msg(s, 'You have already voted on the current poll.'); return
+    e['votes'][who] = choice
+    send_system_msg(s, f'Vote counted: {choice} - {e["choices"][choice]}'[:74])
+    # keep the clients' per-poll counters in step (FUN_004f3a50) - harmless if nothing reads them
+    pkt = build_ingame_pkt(build_poll_vote_94(pid, choice))
+    for p in get_sessions_in_room(rid):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- POLL {pid} vote relay', to=3.0)
+    log('POLL', f'poll {pid} room {rid}: {who} voted {choice} ({e["choices"][choice]!r}) - {len(e["votes"])} vote(s)')
+
+def poll_tally(e):
+    counts = [0] * len(e['choices'])
+    for c in e['votes'].values():
+        if 0 <= c < len(counts):
+            counts[c] += 1
+    return counts
+
+def poll_finish(rid, pid=None, cancelled=False):
+    e = POLLS.get(rid)
+    if not e or (pid is not None and e['id'] != pid):
+        return None
+    try:
+        if e.get('timer'): e['timer'].cancel()
+    except Exception:
+        pass
+    POLLS.pop(rid, None)
+    counts = poll_tally(e); total = sum(counts)
+    if cancelled:
+        room_system_msg(rid, f'POLL cancelled: {e["question"]}'[:74])
+        log('POLL', f'poll {e["id"]} room {rid} CANCELLED after {total} vote(s)')
+        return e
+    if total == 0:
+        room_system_msg(rid, f'POLL closed, no votes: {e["question"]}'[:74])
+    else:
+        best = max(counts); winners = [i for i, c in enumerate(counts) if c == best]
+        room_system_msg(rid, f'POLL result ({total} vote(s)): {e["question"]}'[:74])
+        for i, c in enumerate(e['choices']):
+            room_system_msg(rid, f'  {counts[i]:3d}  {i} = {c}'[:74])
+        if len(winners) == 1:
+            room_banner(rid, f'POLL: {e["choices"][winners[0]]} ({best} of {total})')
+        else:
+            room_system_msg(rid, '  tie: ' + ', '.join(e['choices'][i] for i in winners)[:66])
+    log('POLL', f'poll {e["id"]} room {rid} CLOSED: {total} vote(s) ' +
+        ', '.join(f'{i}={counts[i]}' for i in range(len(counts))) + f' votes={e["votes"]}')
+    return e
+
+def poll_status_text(rid=None):
+    out = []
+    for r, e in sorted(POLLS.items()):
+        if rid is not None and r != rid:
+            continue
+        counts = poll_tally(e); remain = int(e['end'] - time.time())
+        out.append(f'room {r}: poll {e["id"]} by {e["by"]}, {max(0, remain)} s left, {sum(counts)} vote(s): {e["question"]!r}')
+        for i, c in enumerate(e['choices']):
+            out.append(f'    {counts[i]:3d}  {i} = {c}')
+    return out or ['no active poll']
+
+# ----------------------------------------------------------------------------------------------------
+# v952f5 TOURNAMENT RUNTIME - the server side of the client mechanics described at the [Tournament]
+# GAME_DEF block: one common start clock (msg 0x5c), the joining window, the authoritative lives count,
+# ghost re-entry and the LastIsWinner result (msg 0x30).
+# ----------------------------------------------------------------------------------------------------
+TN_CFG_TTL_S = 20.0
+TN_MSG_START, TN_MSG_RESULT = 0x5c, 0x30
+TOURNAMENTS = {}      # room_id -> {'start': unix, 'participants': {pilot}, 'deaths': {pilot: n}, 'ghosts': {pilot},
+                      #             'finished': bool, 'winner': name|None, 'by': str, 'cfg': {...}}
+_TN_CFG = {}          # room_id -> (t, cfg|None)
+
+def tournament_cfg_for_room(room_id):
+    """Effective [Tournament] config of a room: the stored GAME_DEF values overlaid with the web tn_*
+    settings (the same values the clients are served). None when not enabled. Cached TN_CFG_TTL_S."""
+    now = time.time()
+    ent = _TN_CFG.get(room_id)
+    if ent and now - ent[0] < TN_CFG_TTL_S:
+        return ent[1]
+    cfg = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        base = extract_tournament_from_gamedef(bytes(row[0])) if (row and row[0]) else None
+        if base:
+            st = db_get_room_settings(room_id) or {}
+            for k in list(base):
+                v = st.get(k, '')
+                if v not in (None, ''):
+                    try:
+                        base[k] = int(float(v))
+                    except (TypeError, ValueError):
+                        pass
+            if base.get('tn_enabled'):
+                cfg = base
+    except Exception:
+        logx('TOURNAMENT', 'cfg read failed')
+    _TN_CFG[room_id] = (now, cfg)
+    return cfg
+
+def tournament_net_ms(t):
+    """The client's NET-clock millisecond value for wall time t (the fa_s timeline the SYNACK anchors
+    and _stamp_creation_time uses)."""
+    return ((int(t) - FA_EPOCH) * 1000 + int((t % 1) * 1000)) & 0xffffffff
+
+def build_tournament_start_5c(t):
+    return build_ingame_pkt(bytes([TN_MSG_START]) + struct.pack('<I', tournament_net_ms(t) or 1))
+
+def build_tournament_result_30(pi):
+    return build_ingame_pkt(bytes([TN_MSG_RESULT]) + struct.pack('<h', int(pi)))
+
+def tournament_state(room_id, create=True):
+    e = TOURNAMENTS.get(room_id)
+    if e is None and create:
+        e = {'start': None, 'participants': set(), 'deaths': {}, 'ghosts': set(), 'finished': False,
+             'winner': None, 'by': '', 'cfg': None}
+        TOURNAMENTS[room_id] = e
+    return e
+
+def tournament_phase(room_id, cfg=None):
+    """('off'|'idle'|'joining'|'countdown'|'competition'|'finished', seconds_to_next_phase)"""
+    cfg = cfg or tournament_cfg_for_room(room_id)
+    if not cfg:
+        return 'off', 0
+    e = tournament_state(room_id, create=False)
+    if not e or e['start'] is None:
+        return 'idle', 0
+    if e['finished']:
+        return 'finished', 0
+    now = time.time()
+    t_join = e['start'] + cfg['tn_start_delay'] * 60.0
+    t_comp = t_join + cfg['tn_shoot_delay'] * 60.0
+    if now < t_join:
+        return 'joining', int(t_join - now)
+    if now < t_comp:
+        return 'countdown', int(t_comp - now)
+    return 'competition', 0
+
+def tournament_start(room_id, by='console', at=None, announce=True):
+    """(Re)start the room's tournament clock at wall time `at` (default now) and push msg 0x5c to every
+    in-game pilot. Lives/participants are reset. Returns the entry or None when the room has no
+    tournament."""
+    _TN_CFG.pop(room_id, None)
+    cfg = tournament_cfg_for_room(room_id)
+    if not cfg:
+        return None
+    e = tournament_state(room_id)
+    e.update({'start': float(at or time.time()), 'participants': set(), 'deaths': {}, 'ghosts': set(),
+              'finished': False, 'winner': None, 'by': by, 'cfg': dict(cfg)})
+    pkt = build_tournament_start_5c(e['start'])
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, '<- TOURNAMENT start (0x5c)', to=3.0); n += 1
+            if getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
+                e['participants'].add(p.current_pilot)
+    if announce:
+        room_system_msg(room_id, (f'TOURNAMENT: joining open for {cfg["tn_start_delay"]} min, shooting '
+                                  f'{cfg["tn_shoot_delay"]} min later; lives: '
+                                  f'{cfg["tn_lives"] or "unlimited"}'
+                                  + (', ghosting' if cfg['tn_ghosting'] else '')
+                                  + (', last one flying wins' if cfg['tn_last_is_winner'] else ''))[:74])
+    log('TOURNAMENT', f'room {room_id}: START by {by} at {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC '
+                      f'(net_ms {tournament_net_ms(e["start"])}) -> {n} pilot(s); cfg {cfg}')
+    return e
+
+# ----------------------------------------------------------------------------------------------------
+# v953f5 EVENT MODE = THE FIRING ENABLE/DISABLE (Alon 10-22 'find a firing enable/disable command ... very
+# useful for events'). FA.exe has it as the [Event] section: with DelaysActive on (GAME_DEF flags len-62
+# bit 0x01) every client refuses, until the EVENT START is known, to start engines / open fire / launch
+# rockets / drop bombs or torpedoes / deploy paratroopers / drop or deliver supplies - Texts.str 0x13a..
+# 0x13f "You'll be able to open fire after Event starts" (fire check FUN_004a2b70 and siblings
+# FUN_004a7280/0x4a7550 rockets-bombs, 0x4ad5c0/0x4ad790/0x4ada90 troops-supplies, 0x451dd0 engines) -
+# and after the start, for Event.StartDelay (len-89, minutes) + the per-plane EventParam minutes (the
+# EVENT_PLANE_CONFIG list, empty in our templates), "You'll be able to open fire in MM:SS" (0x133..0x139).
+# The start is msg 0x83 [0x83][fly-button enable u8][start NET ms u32] (FUN_004f5e10 'GED: %u, now: %u'):
+# start != 0 -> DAT_00c7e580 = start (restrictions lift after the delays), start == 0 -> locked again;
+# the enable byte -> FUN_00440b40 -> HQ Fly button on (DAT_00c1cdbc; the GAME_DEF FlyButtonEnabled,
+# len-61 bit 0x80, is its initial state). The sysop side: ##StartEvent sends 0x84 (1 byte) to the server,
+# ##EnableFlyButton 0x85 - the 2009 server answered both with 0x83. Nothing is tournament-specific.
+# ----------------------------------------------------------------------------------------------------
+EVENTS = {}       # room_id -> {'start': unix|None, 'fly': bool, 'by': str}
+EV_MSG_START = 0x83
+
+def build_event_83(fly_enable, start_t):
+    return build_ingame_pkt(bytes([EV_MSG_START, 1 if fly_enable else 0])
+                            + struct.pack('<I', tournament_net_ms(start_t) if start_t else 0))
+
+def event_state(room_id):
+    e = EVENTS.get(room_id)
+    if e is None:
+        # initial state: locked when the arena says 'start locked' (ev_enabled), else started at server
+        # time 'now' (every joiner is told, so nothing is locked in a normal arena)
+        cfg = event_cfg_for_room(room_id) or {}
+        locked = bool(cfg.get('ev_enabled')) if cfg else False
+        e = EVENTS[room_id] = {'start': None if locked else time.time(), 'fly': True, 'by': 'arena default'}
+        log('EVENT', f'room {room_id}: initial state {"LOCKED (arena setting)" if locked else "unlocked"}')
+    return e
+
+def event_cfg_for_room(room_id):
+    """The served [Event] values (template + web ev_* overrides) or None."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        base = extract_tournament_from_gamedef(bytes(row[0])) if (row and row[0]) else None
+        if not base:
+            return None
+        st = db_get_room_settings(room_id) or {}
+        for k in ('ev_enabled', 'ev_start_delay', 'ev_fly_button'):
+            v = st.get(k, '')
+            if v not in (None, ''):
+                try:
+                    base[k] = int(float(v))
+                except (TypeError, ValueError):
+                    pass
+        return {k: base[k] for k in ('ev_enabled', 'ev_start_delay', 'ev_fly_button')}
+    except Exception:
+        logx('EVENT', 'cfg read failed'); return None
+
+def event_push(room_id, label):
+    e = event_state(room_id)
+    pkt = build_event_83(e['fly'], e['start'])
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- EVENT {label} (0x83 fly={int(e["fly"])} start={"set" if e["start"] else 0})', to=3.0); n += 1
+    return n
+
+def event_start(room_id, by='console', at=None):
+    """Weapons/engines ON: the event start is set (now or `at`) and pushed to the room (0x83)."""
+    e = event_state(room_id)
+    e['start'] = float(at or time.time()); e['fly'] = True; e['by'] = by
+    n = event_push(room_id, 'start')
+    cfg = event_cfg_for_room(room_id) or {}
+    _d = cfg.get('ev_start_delay', 0)
+    room_system_msg(room_id, ('EVENT STARTED' + (f' - weapons free in {_d} min' if _d else ' - weapons free!'))[:74])
+    try:
+        room_banner(room_id, 'EVENT STARTED')
+    except Exception:
+        pass
+    log('EVENT', f'room {room_id}: START by {by} at {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC -> {n} pilot(s)'
+                 + ('' if (EVENT_LOCK_ALL_ARENAS or cfg.get('ev_enabled')) else ' (NOTE: [Event] DelaysActive is OFF in this arena - the clients never lock, nothing changes)'))
+    return e
+
+def event_stop(room_id, by='console'):
+    """Weapons/engines OFF again: start 0 -> every client is back to 'after Event starts'."""
+    e = event_state(room_id)
+    e['start'] = None; e['by'] = by
+    n = event_push(room_id, 'stop')
+    room_system_msg(room_id, 'EVENT HOLD - weapons and engines are locked until the host starts the event.')
+    try:
+        room_banner(room_id, 'HOLD FIRE')
+    except Exception:
+        pass
+    log('EVENT', f'room {room_id}: STOP by {by} -> {n} pilot(s)')
+    return e
+
+def event_fly_button(room_id, on, by='console'):
+    e = event_state(room_id)
+    e['fly'] = bool(on)
+    n = event_push(room_id, 'fly-button')
+    log('EVENT', f'room {room_id}: Fly button {"ENABLED" if on else "DISABLED"} by {by} -> {n} pilot(s)')
+    return e
+
+def event_on_spawn(s):
+    """ServerConfirm: a joiner of a room whose event has started gets the start, else nothing (his
+    GAME_DEF already says locked)."""
+    rid = getattr(s, 'current_room', None)
+    if rid is None:
+        return
+    e = event_state(rid) if EVENT_LOCK_ALL_ARENAS else EVENTS.get(rid)
+    if e and (EVENT_LOCK_ALL_ARENAS or e['start'] or not e['fly']):
+        _submit_send(send_rel, s, build_event_83(e['fly'], e['start']), '<- EVENT state (0x83, late join)', to=3.0)
+
+def event_status_text(rid=None):
+    out = []
+    rooms = [rid] if rid is not None else sorted(EVENTS)
+    for r in rooms:
+        cfg = event_cfg_for_room(r) or {}
+        e = EVENTS.get(r) or {'start': None, 'fly': True, 'by': ''}
+        out.append(f'room {r}: [Event] start locked {cfg.get("ev_enabled", "?")}, unlock delay {cfg.get("ev_start_delay", "?")} min, '
+                   f'fly button initially {cfg.get("ev_fly_button", "?")} | '
+                   + (f'STARTED {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC by {e["by"]}' if e['start'] else 'not started (locked)')
+                   + f', fly button {"on" if e["fly"] else "off"}')
+    return out or ['no event rooms (use: event start <room>)']
+
+def _tournament_rebase(room_id, by, back_s, label):
+    """Move the room's tournament start `back_s` seconds into the past and re-send 0x5c to everyone, so
+    every client's countdowns jump together (they only compare their NET clock with the start we send).
+    Participants and lives are kept; a tournament that never started (or is finished) is started first."""
+    _TN_CFG.pop(room_id, None)
+    cfg = tournament_cfg_for_room(room_id)
+    if not cfg:
+        return None, None
+    e = tournament_state(room_id)
+    if e['start'] is None or e['finished']:
+        tournament_start(room_id, by=by, announce=False)
+        e = tournament_state(room_id)
+    e['start'] = time.time() - back_s - 1.0
+    e['cfg'] = dict(cfg)
+    pkt = build_tournament_start_5c(e['start'])
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- TOURNAMENT {label} (0x5c re-based)', to=3.0); n += 1
+            if getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
+                e['participants'].add(p.current_pilot)
+    log('TOURNAMENT', f'room {room_id}: {label.upper()} by {by} -> {n} pilot(s); participants {sorted(e["participants"])}')
+    return e, cfg
+
+def tournament_close_joining(room_id, by='console'):
+    """v952f5c: skip the JOINING window only - joining closes now, the shooting countdown (ShootDelay min)
+    starts; nobody else can enter the tournament."""
+    e, cfg = _tournament_rebase(room_id, by, 0.0, 'close-joining')
+    if e is None:
+        return None
+    # the start is 'now'; make the joining window already elapsed
+    e['start'] = time.time() - cfg['tn_start_delay'] * 60.0 - 1.0
+    pkt = build_tournament_start_5c(e['start'])
+    for p in get_sessions_in_room(room_id):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, '<- TOURNAMENT close-joining (0x5c)', to=3.0)
+    room_system_msg(room_id, (f'TOURNAMENT: joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.')[:74])
+    return e
+
+def tournament_go(room_id, by='console'):
+    """v952f5b: skip BOTH countdowns - joining closes and the competition (guns, collisions, lives)
+    begins at once on every client."""
+    cfg = tournament_cfg_for_room(room_id)
+    if not cfg:
+        return None
+    e, cfg = _tournament_rebase(room_id, by, (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, 'go')
+    if e is None:
+        return None
+    room_system_msg(room_id, 'TOURNAMENT: joining closed - the competition starts NOW. Good luck!')
+    try:
+        room_banner(room_id, 'FIGHT!')
+    except Exception:
+        pass
+    return e
+
+def tournament_on_spawn(s):
+    """ServerConfirm: sync the joiner's clock (0x5c), register him, ghost him if he is out of lives."""
+    rid = getattr(s, 'current_room', None)
+    cfg = tournament_cfg_for_room(rid) if rid is not None else None
+    if not cfg:
+        return
+    e = tournament_state(rid)
+    if e['start'] is None:
+        # first pilot in a tournament arena starts the clock (console `tournament start` restarts it)
+        tournament_start(rid, by=f'first spawn ({s.current_pilot})')
+        e = tournament_state(rid)
+    else:
+        _submit_send(send_rel, s, build_tournament_start_5c(e['start']), '<- TOURNAMENT clock (0x5c, late join)', to=3.0)
+    who = s.current_pilot
+    if who and not sess_rights(s):          # moderators/observers never count as participants
+        e['participants'].add(who)
+        if who in e['ghosts']:
+            # out of lives with Ghosting: his new plane is turned into a ghost (0x8d GhostP toggles the
+            # local plane's ghost mode - the client prints 'You are in Ghost Mode')
+            rec = bytearray(33); rec[0] = 0x8d; rec[1:1 + min(31, len(who))] = who.encode('ascii', 'replace')[:31]
+            def _ghost(_s=s, _rec=bytes(rec)):
+                time.sleep(2.0)
+                send_rel(_s, build_ingame_pkt(_rec), '<- TOURNAMENT ghost (0x8d)', to=3.0)
+                send_system_msg(_s, 'You are out of lives - flying as a ghost.')
+            threading.Thread(target=_ghost, daemon=True).start()
+            log('TOURNAMENT', f'room {rid}: {who} re-entered as GHOST')
+
+def tournament_fly_allowed(s):
+    """StartPlace gate: (True, '') or (False, reason). Moderators are never refused."""
+    rid = getattr(s, 'current_room', None)
+    cfg = tournament_cfg_for_room(rid) if rid is not None else None
+    if not cfg or sess_rights(s):
+        return True, ''
+    e = tournament_state(rid, create=False)
+    who = getattr(s, 'current_pilot', None) or ''
+    if not e or e['start'] is None:
+        return True, ''
+    if e['finished']:
+        return False, 'The tournament is finished - wait for the host to restart it.'
+    phase, _left = tournament_phase(rid, cfg)
+    if phase != 'joining' and who not in e['participants']:
+        return False, 'Joining has ended for this tournament.'
+    lives = cfg['tn_lives']
+    if lives and e['deaths'].get(who, 0) >= lives:
+        if cfg['tn_ghosting']:
+            return True, ''                  # ghosted at ServerConfirm
+        return False, 'You are out of lives in this tournament.'
+    return True, ''
+
+def tournament_on_plane_exit(s, mec_nib, se):
+    """A plane delete-notify from the pilot's own client: spend a life when it was a loss, then look
+    for a winner. Mirrors Msn_Exit.cpp: ScoreEvent != 0 costs a life, a clean exit (SE 0) only when
+    AllowTabbing is off; the server also counts MEC 1/2/5 (crash, crash-land/collision, bail) since
+    a bail reports SE 0. Only after the competition start, like the client."""
+    rid = getattr(s, 'current_room', None)
+    cfg = tournament_cfg_for_room(rid) if rid is not None else None
+    if not cfg or not cfg['tn_lives']:
+        return
+    e = tournament_state(rid, create=False)
+    who = getattr(s, 'current_pilot', None) or ''
+    if not e or e['start'] is None or e['finished'] or not who or who in e['ghosts'] or sess_rights(s):
+        return
+    phase, _ = tournament_phase(rid, cfg)
+    if phase != 'competition':
+        return
+    lost = (se != 0) or (mec_nib in (1, 2, 5)) or (not cfg['tn_allow_tabbing'])
+    if not lost:
+        return
+    e['participants'].add(who)
+    n = e['deaths'][who] = e['deaths'].get(who, 0) + 1
+    left = max(0, cfg['tn_lives'] - n)
+    log('TOURNAMENT', f'room {rid}: {who} lost a life (MEC {mec_nib} SE {se}) -> {n}/{cfg["tn_lives"]}, {left} left')
+    if left > 0:
+        send_system_msg(s, f'Tournament: {left} life{"s" if left != 1 else ""} left.')
+    else:
+        e['ghosts'].add(who) if cfg['tn_ghosting'] else None
+        send_system_msg(s, 'Tournament: you are out of lives.' + (' You may fly on as a ghost.' if cfg['tn_ghosting'] else ''))
+        room_system_msg(rid, f'{who} is out of the tournament.'[:74])
+    tournament_check_winner(rid)
+
+def tournament_alive(rid, e, cfg):
+    lives = cfg['tn_lives']
+    return [p for p in e['participants'] if (not lives or e['deaths'].get(p, 0) < lives) and p not in e['ghosts']]
+
+def tournament_check_winner(rid):
+    cfg = tournament_cfg_for_room(rid)
+    e = tournament_state(rid, create=False)
+    if not cfg or not e or e['start'] is None or e['finished'] or not cfg['tn_last_is_winner'] or not cfg['tn_lives']:
+        return
+    phase, _ = tournament_phase(rid, cfg)
+    if phase != 'competition' or len(e['participants']) < 2:
+        return
+    alive = tournament_alive(rid, e, cfg)
+    if len(alive) == 1:
+        tournament_finish(rid, winner=alive[0], by='last one flying')
+    elif not alive:
+        tournament_finish(rid, winner=None, by='nobody left')
+
+def tournament_finish(rid, winner=None, by='console'):
+    """Close the tournament: msg 0x30 to the room (winner PlayerIndex, -1 = draw/finished)."""
+    e = tournament_state(rid)
+    e['finished'] = True; e['winner'] = winner
+    pi = -1
+    if winner:
+        for p in get_sessions_in_room(rid):
+            if (getattr(p, 'current_pilot', '') or '') == winner:
+                pi = int(getattr(p, 'player_index', -1) if getattr(p, 'player_index', None) is not None else -1)
+                break
+    pkt = build_tournament_result_30(pi)
+    n = 0
+    for p in get_sessions_in_room(rid):
+        if getattr(p, 'entered_game', False):
+            _submit_send(send_rel, p, pkt, f'<- TOURNAMENT result (0x30, PI {pi})', to=3.0); n += 1
+    room_system_msg(rid, (f'TOURNAMENT: {winner} has won!' if winner else 'TOURNAMENT finished - no winner.')[:74])
+    try:
+        room_banner(rid, f'TOURNAMENT: {winner} HAS WON' if winner else 'TOURNAMENT FINISHED')
+    except Exception:
+        pass
+    log('TOURNAMENT', f'room {rid}: FINISHED ({by}) winner={winner!r} PI={pi} -> {n} pilot(s); deaths={e["deaths"]}')
+    return e
+
+def tournament_status_text(rid=None):
+    out = []
+    rooms = [rid] if rid is not None else sorted(set(TOURNAMENTS) | {r for r in _TN_CFG if _TN_CFG[r][1]})
+    for r in rooms:
+        cfg = tournament_cfg_for_room(r)
+        if not cfg:
+            out.append(f'room {r}: no tournament (Active off)'); continue
+        e = tournament_state(r, create=False)
+        phase, left = tournament_phase(r, cfg)
+        out.append(f'room {r}: {phase}' + (f' ({left} s to next phase)' if left else '')
+                   + f' | join {cfg["tn_start_delay"]} min, shoot +{cfg["tn_shoot_delay"]} min, lives '
+                   + f'{cfg["tn_lives"] or "unlimited"}, ghosting {cfg["tn_ghosting"]}, tabbing {cfg["tn_allow_tabbing"]}, '
+                   + f'last-wins {cfg["tn_last_is_winner"]}')
+        if e and e['start'] is not None:
+            out.append(f'    started {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC by {e["by"]}'
+                       + (f'; winner {e["winner"]}' if e['finished'] else ''))
+            for p in sorted(e['participants']):
+                out.append(f'    {p:<24} deaths {e["deaths"].get(p, 0)}' + ('  GHOST' if p in e['ghosts'] else ''))
+    return out or ['no tournament rooms']
+
 def enact_mod_action(s, op, body):
     """Apply the self-testable moderator actions server-side. `body` is opcode-first.
 
@@ -1251,10 +1853,14 @@ def enact_mod_action(s, op, body):
             if room is not None:
                 log('MODERATOR', f'RESETGAME room {room} by {by}')
                 arena_reset(room, winner_camp=None, reason='(##ResetGame)', by=by)
-        elif op == 0x85:                       # v950f5: ##EnableFlyButton = join enable
+        elif op == 0x85:                       # ##EnableFlyButton: v953f5 = msg 0x83 fly-button enable (+ join enable)
             _JOIN_DISABLED.pop(room, None)
-            log('MODERATOR', f'JOIN ENABLED (EnableFlyButton) in room {room} by {by}')
-            room_system_msg(room, 'Joining is enabled again.')
+            event_fly_button(room, True, by=by)
+            log('MODERATOR', f'FLY BUTTON ENABLED (EnableFlyButton) in room {room} by {by}')
+            room_system_msg(room, 'The Fly button is enabled.')
+        elif op == EVENT_START_OPCODE:         # v953f5: ##StartEvent -> event start (0x83) = weapons/engines free
+            event_start(room, by=by)
+            log('MODERATOR', f'EVENT STARTED in room {room} by {by} (##StartEvent)')
         elif op == 0x8b:                       # ClearScores: not modelled (scores are the ladder's) - logged
             log('MODERATOR', f'CLEARSCORES from {by} in room {room} - not implemented (arena scores live in the ladder)')
         elif op == 0x5f:                       # Join enable(0)/disable(1)
@@ -1561,10 +2167,16 @@ def db_get_pilot_slot(acct, name):
 # Client result strings seen 2026-09-11: 2 -> 'a pilot with this name already exists', 3 ->
 # 'vulgar pilot name'. 1 and 4+ still to be read off the dialog (1 = invalid name?, one of them
 # should be the too-many-pilots text).
+# v951f5: codes read off Ch_Pl.cpp - create callback FUN_006b6ff0 and RENAME callback FUN_006b7dc0 share
+# them: 2 'Pilot with this name is already in use.', 3 'Vulgar pilot name.', 4 'There are too many pilot
+# names.' (create only), 5 'Bad characters in pilot name.', 6 'The name is too long or too short.',
+# 8 'This name can not be changed during next %d hour(s)' (rename only, hours at +0xc), anything else
+# "Can't create pilot with this name." (so the old PILOT_ERR_INVALID = 1 showed the generic text).
 PILOT_ERR_NAME_TAKEN = 2
 PILOT_ERR_RESERVED   = 3
 PILOT_ERR_LIMIT      = 4
-PILOT_ERR_INVALID    = 1
+PILOT_ERR_INVALID    = 5
+PILOT_ERR_LENGTH     = 6
 PILOT_NAME_ALLOWED   = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-')   # v637f5: server-side name rule
 
 def pilot_name_invalid(name):
@@ -1599,6 +2211,38 @@ def pilot_name_vulgar(name):
     low = (name or '').lower()
     return any(w in low for w in badwords())
 
+def pilot_rename_validate(s, old_name, new_name, stored, label='rename-pilot refusal'):
+    """v951f5 (Alon 10-21: 'server allows users to rename a pilot to have a space in his name'): the
+    0xe7 rename had NO server-side checks at all - the create rules (reserved tag, character set,
+    length, vulgar list, name taken) never ran on a rename, and the client's own rename dialog does
+    not filter either. Same rules as pilot_create_validate, plus: the old pilot must belong to this
+    account. Returns True when the rename may proceed; otherwise the refusal (chat line + the
+    client's result dialog, codes shared with the create dialog) has been sent."""
+    acct = getattr(s, 'account', None)
+    if not acct or db_get_pilot_slot(acct, old_name) is None:
+        log('PILOT', f'REFUSED rename "{old_name}" -> "{new_name}": "{old_name}" is not a pilot of account {acct!r}')
+        lobby_reply_with_result(s, stored, 1, label + ' (not own pilot)', name=new_name); return False
+    if is_reserved_name(new_name):
+        log('MODERATOR', f'REFUSED rename "{old_name}" -> reserved name "{new_name}" (staff tag)')
+        send_rel(s, build_chat_broadcast('Server', f'The name "{new_name}" is reserved for staff and cannot be used.'),
+                 '<- reserved-name refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, label + ' (reserved)', name=new_name); return False
+    if len(new_name) > 24:
+        log('PILOT', f'REFUSED rename "{old_name}" -> "{new_name}": too long')
+        lobby_reply_with_result(s, stored, PILOT_ERR_LENGTH, label + ' (length)', name=new_name); return False
+    if pilot_name_invalid(new_name):
+        log('PILOT', f'REFUSED rename "{old_name}" -> "{new_name}": prohibited characters')
+        send_rel(s, build_chat_broadcast('Server', 'Pilot names may only use letters, digits, - and _ (no spaces).'),
+                 '<- invalid-name refusal', to=2.0)
+        lobby_reply_with_result(s, stored, PILOT_ERR_INVALID, label + ' (characters)', name=new_name); return False
+    if pilot_name_vulgar(new_name):
+        log('PILOT', f'REFUSED rename "{old_name}" -> "{new_name}": vulgar (server list)')
+        lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, label + ' (vulgar)', name=new_name); return False
+    if new_name.lower() != old_name.lower() and db_pilot_name_taken(new_name):
+        log('PILOT', f'REFUSED rename "{old_name}" -> "{new_name}": name already in use')
+        lobby_reply_with_result(s, stored, PILOT_ERR_NAME_TAKEN, label + ' (taken)', name=new_name); return False
+    return True
+
 _PILOT_CREATE_LOCK = threading.Lock()
 
 def pilot_create_validate(s, new_name, stored, label='create-pilot refusal'):
@@ -1612,6 +2256,9 @@ def pilot_create_validate(s, new_name, stored, label='create-pilot refusal'):
         send_rel(s, build_chat_broadcast('Server', f'The name "{new_name}" is reserved for staff and cannot be used.'),
                  '<- reserved-name refusal', to=2.0)
         lobby_reply_with_result(s, stored, PILOT_ERR_RESERVED, label); return False
+    if len(new_name) > 24:
+        log('PILOT', f'REFUSED pilot name "{new_name}" - too long')
+        lobby_reply_with_result(s, stored, PILOT_ERR_LENGTH, label + ' (length)'); return False
     if pilot_name_invalid(new_name):
         log('PILOT', f'REFUSED pilot name "{new_name}" - prohibited characters')
         send_rel(s, build_chat_broadcast('Server', 'Pilot names may only use letters, digits, - and _.'),
@@ -1648,7 +2295,7 @@ def pilot_create_commit(s, new_name):
         log('PILOT', f'created "{new_name}" for account {s.account} slot={slot}')
         return True
 
-def lobby_reply_with_result(s, stored, code, label):
+def lobby_reply_with_result(s, stored, code, label, name=None):
     """Answer a lobby request with the server->client RESPONSE form (type 0x42, bc=2, 33 B data:
     [sub][result][0][0][name...]) - the layout the delete-success reply uses - carrying the
     request's sub and a non-zero result. (v635f5 echoed the 0x22 request with the byte set; the
@@ -1656,7 +2303,10 @@ def lobby_reply_with_result(s, stored, code, label):
     try:
         pkt = bytes(stored)
         sub = pkt[4] if len(pkt) > 4 else 0xe2
-        name = pkt[6:].split(b'\x00')[0] if len(pkt) > 6 else b''
+        if name is not None:                      # v951f5: the rename request keeps its names at +8/+40
+            name = str(name).encode('ascii', 'replace')
+        else:
+            name = pkt[6:].split(b'\x00')[0] if len(pkt) > 6 else b''
         data = bytearray(33); data[0] = sub; data[1] = code & 0xff
         nb = name + b'\x00'
         data[4:4 + min(len(nb), 29)] = nb[:29]
@@ -4110,6 +4760,134 @@ def apply_world_clock(d, room_id, settings=None):
             f'(x{ts:g} day / x{ts * ns:g} night) -> {nd:02d}/{nm:02d}/{ny} {nh:02d}:{nmin:02d} '
             f'(+{rem:.1f} s into the minute)')
 
+# ----------------------------------------------------------------------------------------------------
+# v952f5 TOURNAMENT MODE (Alon 10-21 'Tournament mode!'). The arena-creation dialog's Tournament group
+# (New_Arena2_dlg: TOURNAMENT_ACTIVE_CHECK_BOX, TOURNAMENT_LIVES_COMBO_BOX 'Unlimited'/N,
+# TOURNAMENT_GHOSTING_CHECK_BOX) writes the GAME_DEF [Tournament] section, INI keys (FUN_0057f610,
+# live struct offsets): Active +0x1b78, StartDelay +0x1b7c (minutes: the JOINING window), ShootDelay
+# +0x1b80 (minutes after the joining window until the COMPETITION starts), Lives +0x1b84 (0 = unlimited),
+# AllowTabbing +0x1b88, Ghosting +0x1b8c, LastIsWinner +0x1b90; [Event] DelaysActive, StartMethod,
+# StartDelay, FlyButtonEnabled, TaxiLimit follow. On the wire (GameDef.cpp unpack FUN_0057bee0, same
+# tail block as [Radar]; valid when the event-plane list byte at len-84 is 0, which every template is):
+#   len-93 u8 StartDelay | len-92 u8 ShootDelay | len-91 u8 Lives | len-90 u8 Event.StartMethod |
+#   len-89 u8 Event.StartDelay | len-88 f32 TaxiLimit | len-83/-79 f32 Oxygen1/2 |
+#   len-62 flags: 0x10 Active, 0x08 AllowTabbing, 0x04 Ghosting, 0x02 LastIsWinner, 0x01 Event.DelaysActive
+#   len-61 flags: 0x80 Event.FlyButtonEnabled   (len-52 = the [Radar] flags byte)
+# Template defaults: StartDelay 5, ShootDelay 2, Lives 0, flags 0x46 (Ghosting + LastIsWinner on).
+# CLIENT MECHANICS (all keyed on Active && start time DAT_00c7e5d0 != 0):
+#   * start time = msg 0x5c StartTournamentCB [0x5c][u32 NET ms] (FUN_004f4200); without it each client
+#     seeds its own from GAME_DEF.StartTime (dword @1, 0 in our blobs) = its own world-init time ->
+#     every pilot on a private clock. The server therefore sends 0x5c to everyone at the start and to
+#     each late joiner at ServerConfirm.
+#   * HUD centre line (FUN_00474e90): 'Time until end of joining... M:SS' until start+StartDelay min,
+#     then 'Time until start of competition... M:SS' until start+(StartDelay+ShootDelay) min.
+#   * before the competition start: no plane collisions (FUN_00447b30/FUN_00449b60), no weapons fire
+#     (FUN_004bd880 path), plane flag +0x3fc=1 (FUN_004b2aa0).
+#   * lives: the client counts its own deaths in DAT_00c7e3ac at ExitEvent (Msn_Exit.cpp FUN_0045d930:
+#     ScoreEvent != 0 or AllowTabbing off), after the competition start only; at lives exhausted with
+#     Ghosting the dying plane turns ghost (FUN_004b1910, DAT_00c7e364) - no fire, no exit events; the HQ
+#     Fly button is disabled (FUN_006de570 @0x6de8e5) unless the pilot has moderator rights. The counter
+#     is per client session (reset at arena re-entry), so the server keeps the authoritative count.
+#   * result: msg 0x30 TournamentResult [0x30][s16 winner PlayerIndex] (FUN_004f6f50): -1 -> 'Game ends
+#     in a draw' when LastIsWinner else 'Tournament is finished'; PI -> '<name> has won'.
+#   * the 2003 event flow (FA 3.6 Sysop Commands.doc): ##JoinDisable / ##JoinEnable gate the Fly
+#     button, ##ResetGame restarts; msg 0x83 [enable u8][u32 start] (FUN_004f5e10 'GED') = the [Event]
+#     start-time / fly-button enable - not needed for tournaments.
+# ----------------------------------------------------------------------------------------------------
+TOURNAMENT_ENABLED = True
+TN_FLAG_ACTIVE, TN_FLAG_TABBING, TN_FLAG_GHOSTING, TN_FLAG_LASTWINS = 0x10, 0x08, 0x04, 0x02
+EV_FLAG_DELAYS, EV_FLAG2_FLYBUTTON = 0x01, 0x80      # v953f5 [Event] DelaysActive (len-62) / FlyButtonEnabled (len-61)
+# v953f5b (Alon 00:41 'event stop just broadcasts a message, it doesn't hold the fire' - the test arena had
+# DelaysActive off): the client only honours the lock when its GAME_DEF says DelaysActive. So EVERY served
+# arena now carries DelaysActive=1 and the server tells each joiner the event state at ServerConfirm (msg
+# 0x83): normally 'started long ago' = unlocked, nothing changes for anyone - but `event stop <room>` now
+# locks any arena at any time and `event start` frees it again. The web checkbox becomes 'start locked'.
+EVENT_LOCK_ALL_ARENAS = True
+
+def _gamedef_tournament_offsets(d):
+    """Offsets of the [Tournament] bytes in a DECOMPRESSED GAME_DEF, or None when the tail does not
+    have the known layout (unknown template: refuse rather than write into the wrong place)."""
+    try:
+        n = len(d)
+        if n < 120 or not _gamedef_tail_ok(d) or d[n - 84] != 0:
+            return None
+        o = {'start_delay': n - 93, 'shoot_delay': n - 92, 'lives': n - 91, 'flags': n - 62,
+             'ev_start_delay': n - 89, 'flags2': n - 61}          # v953f5 [Event] StartDelay / FlyButtonEnabled
+        if d[o['start_delay']] > 240 or d[o['shoot_delay']] > 240:
+            return None
+        return o
+    except Exception:
+        return None
+
+def extract_tournament_from_gamedef_struct(d, o):
+    f = d[o['flags']]
+    return {'tn_enabled': 1 if f & TN_FLAG_ACTIVE else 0, 'tn_lives': d[o['lives']],
+            'tn_ghosting': 1 if f & TN_FLAG_GHOSTING else 0, 'tn_allow_tabbing': 1 if f & TN_FLAG_TABBING else 0,
+            'tn_last_is_winner': 1 if f & TN_FLAG_LASTWINS else 0,
+            'tn_start_delay': d[o['start_delay']], 'tn_shoot_delay': d[o['shoot_delay']],
+            # v953f5 [Event]: DelaysActive (weapons/engines locked until the host starts the event),
+            # StartDelay (minutes after the event start until they unlock), FlyButtonEnabled
+            'ev_enabled': 1 if f & EV_FLAG_DELAYS else 0, 'ev_start_delay': d[o['ev_start_delay']],
+            'ev_fly_button': 1 if d[o['flags2']] & EV_FLAG2_FLYBUTTON else 0}
+
+def extract_tournament_from_gamedef(game_def_raw):
+    """Current [Tournament] values of a stored (compressed) GAME_DEF as a {tn_*} dict, or None."""
+    d = decompress_gamedef(game_def_raw)
+    if not d:
+        return None
+    o = _gamedef_tournament_offsets(d)
+    return extract_tournament_from_gamedef_struct(d, o) if o else None
+
+def apply_tournament_settings(d, settings):
+    """In-place patch of the [Tournament] bytes from the per-arena settings (web tn_* keys; only keys
+    present are written; length-preserving). Returns 'field old->new' strings, [] when nothing to do,
+    None when the fields were not located."""
+    if not TOURNAMENT_ENABLED:
+        return []
+    settings = settings if isinstance(settings, dict) else {}
+    if not EVENT_LOCK_ALL_ARENAS and not any(str(settings.get(k, '') or '') != '' for k in
+               ('tn_enabled', 'tn_lives', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner',
+                'tn_start_delay', 'tn_shoot_delay', 'ev_enabled', 'ev_start_delay', 'ev_fly_button')):
+        return []
+    o = _gamedef_tournament_offsets(d)
+    if o is None:
+        return None
+    changes = []
+    if EVENT_LOCK_ALL_ARENAS and not (d[o['flags']] & EV_FLAG_DELAYS):
+        d[o['flags']] |= EV_FLAG_DELAYS; changes.append('Event.DelaysActive 0->1 (server lock, see EVENT_LOCK_ALL_ARENAS)')
+    def _int(k, lo, hi):
+        v = settings.get(k)
+        if v in (None, ''):
+            return None
+        try:
+            return max(lo, min(hi, int(float(v))))
+        except (TypeError, ValueError):
+            return None
+    def _set_u8(k, key, lo, hi):
+        v = _int(key, lo, hi)
+        if v is not None and d[o[k]] != v:
+            changes.append(f'{k} {d[o[k]]}->{v}'); d[o[k]] = v
+    def _set_bit(key, bit, name, fk='flags'):
+        v = _int(key, 0, 1)
+        if v is None:
+            return
+        old = 1 if (d[o[fk]] & bit) else 0
+        if old != v:
+            changes.append(f'{name} {old}->{v}')
+            d[o[fk]] = (d[o[fk]] | bit) if v else (d[o[fk]] & ~bit & 0xff)
+    if not EVENT_LOCK_ALL_ARENAS:
+        _set_bit('ev_enabled', EV_FLAG_DELAYS, 'Event.DelaysActive')   # with the knob, ev_enabled = 'start locked' (runtime)
+    _set_u8('ev_start_delay', 'ev_start_delay', 0, 240)
+    _set_bit('ev_fly_button', EV_FLAG2_FLYBUTTON, 'Event.FlyButtonEnabled', 'flags2')
+    _set_bit('tn_enabled', TN_FLAG_ACTIVE, 'Active')
+    _set_u8('lives', 'tn_lives', 0, 99)
+    _set_bit('tn_ghosting', TN_FLAG_GHOSTING, 'Ghosting')
+    _set_bit('tn_allow_tabbing', TN_FLAG_TABBING, 'AllowTabbing')
+    _set_bit('tn_last_is_winner', TN_FLAG_LASTWINS, 'LastIsWinner')
+    _set_u8('start_delay', 'tn_start_delay', 0, 240)
+    _set_u8('shoot_delay', 'tn_shoot_delay', 0, 240)
+    return changes
+
 def apply_radar_gate_defaults(d, room_id, settings):
     """v949f5: with the radar gate on for this arena and no explicit [Radar] override, serve the
     client the matching [Radar] block: ApplyToLocalObjects=yes, AlwaysVisibleRange = the gate's
@@ -4581,6 +5359,16 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             log('GAMEDEF212', f'radar gate defaults room {room_id}: ' + '; '.join(_rg))
     except Exception:
         logx('GAMEDEF212', 'radar patch failed')
+    # v952f5 TOURNAMENT (web editor): [Tournament] Active / Lives / Ghosting / AllowTabbing /
+    # LastIsWinner / StartDelay (joining window, min) / ShootDelay - length-preserving, tail-anchored.
+    try:
+        _tn = apply_tournament_settings(d, arena_settings)
+        if _tn is None:
+            log('GAMEDEF212', 'tournament: fields not located in this GAME_DEF - left as-is')
+        elif _tn:
+            log('GAMEDEF212', 'tournament: ' + '; '.join(_tn))
+    except Exception:
+        logx('GAMEDEF212', 'tournament patch failed')
     # WAR DATE: push the arena's Reality date into the GAME_DEF so the CLIENT shows it too.
     # Opt-in per arena (settings_json war_enabled); length-preserving byte writes, so it cannot
     # disturb the plane block or the pad alignment. The plane FILTER itself is server-side (via
@@ -5855,6 +6643,96 @@ def console_handler():
                     except ValueError: _hrs = 1
                     _ok = mod_gag(_pilot, _hrs if _hrs > 0 else 1, 'console', room=None, scope_all=True)
                     log('CONSOLE', f'GAGGED "{_pilot}" {_hrs}h everywhere; notice -> {len(_sessions_named(_pilot))} live session(s)' if _ok else f'gag "{_pilot}": no-op')
+            elif cmd == 'badnames':
+                # v951f5: list pilots whose stored name breaks the create/rename rule (spaces, punctuation,
+                # staff tags excepted) - renamed-in with the unguarded 0xe7 before this build; fix via web admin
+                try:
+                    _c = sqlite3.connect(DB_PATH)
+                    _rows = _c.execute("SELECT pilot_name, account_name FROM pilots ORDER BY pilot_name").fetchall(); _c.close()
+                    _bad = [(n, a) for n, a in _rows if pilot_name_invalid(n.replace('@', '')) and not is_reserved_name(n)]
+                    _staff = [(n, a) for n, a in _rows if is_reserved_name(n) and pilot_name_invalid(n.replace('@', ''))]
+                    log('CONSOLE', f'badnames: {len(_bad)} of {len(_rows)} pilot names break the rule' +
+                        (f' (+{len(_staff)} staff-tagged names with spaces/punctuation, allowed)' if _staff else ''))
+                    for n, a in _bad:
+                        log('CONSOLE', f'  {n!r:32} account {a}')
+                except Exception as _ex:
+                    log('CONSOLE', f'badnames failed: {_ex}')
+            elif cmd == 'event':
+                # v953f5: event start <room> [in <s>] | stop <room> | fly <room> on|off | status [room]
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _sub = (_a[0].lower() if _a else 'status')
+                try:
+                    _by = 'console' if _src == 'terminal' else _src
+                    if _sub in ('start', 'go', 'fire'):
+                        _rid = int(_a[1], 0); _at = None
+                        if len(_a) > 3 and _a[2].lower() == 'in':
+                            _at = time.time() + float(_a[3])
+                        event_start(_rid, by=_by, at=_at); log('CONSOLE', f'event start room {_rid}: pushed')
+                    elif _sub in ('stop', 'hold', 'lock'):
+                        _rid = int(_a[1], 0); event_stop(_rid, by=_by); log('CONSOLE', f'event stop room {_rid}: pushed (weapons locked)')
+                    elif _sub == 'fly':
+                        _rid = int(_a[1], 0); _on = (_a[2].lower() in ('on', '1', 'yes', 'enable')) if len(_a) > 2 else True
+                        event_fly_button(_rid, _on, by=_by); log('CONSOLE', f'event fly room {_rid}: {"on" if _on else "off"}')
+                    else:
+                        _rid = int(_a[1], 0) if len(_a) > 1 else None
+                        for _l in event_status_text(_rid):
+                            log('CONSOLE', _l)
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: event start <room> [in <seconds>] | stop <room> | fly <room> on|off | status [room]')
+            elif cmd == 'tournament':
+                # v952f5: tournament status [room] | start <room> [in <seconds>] | end <room> [winner] | reset <room>
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _sub = (_a[0].lower() if _a else 'status')
+                try:
+                    if _sub == 'start':
+                        _rid = int(_a[1], 0); _at = None
+                        if len(_a) > 3 and _a[2].lower() == 'in':
+                            _at = time.time() + float(_a[3])
+                        _e = tournament_start(_rid, by=('console' if _src == 'terminal' else _src), at=_at)
+                        log('CONSOLE', f'tournament start room {_rid}: ' + ('ok' if _e else 'no tournament in this arena (Active off)'))
+                    elif _sub in ('close', 'closejoin', 'nojoin'):
+                        _rid = int(_a[1], 0)
+                        _e = tournament_close_joining(_rid, by=('console' if _src == 'terminal' else _src))
+                        log('CONSOLE', f'tournament close room {_rid}: ' + ('joining closed, shooting countdown running' if _e else 'no tournament in this arena (Active off)'))
+                    elif _sub in ('go', 'fight', 'begin'):
+                        _rid = int(_a[1], 0)
+                        _e = tournament_go(_rid, by=('console' if _src == 'terminal' else _src))
+                        log('CONSOLE', f'tournament go room {_rid}: ' + ('competition phase now' if _e else 'no tournament in this arena (Active off)'))
+                    elif _sub in ('end', 'finish'):
+                        _rid = int(_a[1], 0); _w = _a[2] if len(_a) > 2 else None
+                        _e = tournament_finish(_rid, winner=_w, by='console'); log('CONSOLE', f'tournament end room {_rid}: done')
+                    elif _sub == 'reset':
+                        _rid = int(_a[1], 0); TOURNAMENTS.pop(_rid, None); _TN_CFG.pop(_rid, None)
+                        log('CONSOLE', f'tournament reset room {_rid}: cleared (next spawn restarts the clock)')
+                    else:
+                        _rid = int(_a[1], 0) if len(_a) > 1 else None
+                        for _l in tournament_status_text(_rid):
+                            log('CONSOLE', _l)
+                except (IndexError, ValueError):
+                    log('CONSOLE', 'usage: tournament status [room] | start <room> [in <seconds>] | close <room> | go <room> | end <room> [winner] | reset <room>')
+            elif cmd == 'poll':
+                # v951f5: poll start <room|all> <secs> <question> | <choice> | <choice> ...
+                #         poll status [room] | poll end [room] | poll cancel [room]
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                _sub = (_a[0].lower() if _a else 'status')
+                try:
+                    if _sub == 'start':
+                        _r, _secs, _rest = _a[1].split(None, 2)
+                        _q, *_ch = [x.strip() for x in _rest.split('|')]
+                        _pid, _rooms, _n = poll_start(_r, int(_secs), _q, _ch, by=_src if _src != 'terminal' else 'console')
+                        log('CONSOLE', f'poll {_pid} opened in room(s) {_rooms} -> {_n} pilot(s)')
+                    elif _sub in ('end', 'close', 'cancel'):
+                        _rooms = (_poll_rooms(_a[1].strip()) if len(_a) > 1 and _a[1].strip() else list(POLLS))
+                        for _rid in _rooms:
+                            _e = poll_finish(_rid, cancelled=(_sub == 'cancel'))
+                            log('CONSOLE', f'poll {_sub}: room {_rid} -> ' + ('done' if _e else 'no poll'))
+                    else:
+                        _rid = int(_a[1].strip(), 0) if len(_a) > 1 and _a[1].strip() else None
+                        for _l in poll_status_text(_rid):
+                            log('CONSOLE', _l)
+                except (IndexError, ValueError) as _ex:
+                    log('CONSOLE', f'poll: {_ex}' if isinstance(_ex, ValueError) and str(_ex) else
+                        'usage: poll start <room|all> <secs> <question> | <choice> | <choice> ... ; poll status|end|cancel [room]')
             elif cmd == 'gsm':
                 # v950f5: gsm <pilot> <text> - the ##GSM private flashing message from the console (sender 'Server')
                 _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
@@ -6936,9 +7814,14 @@ def console_handler():
                         'gag|gagall <pilot> [hours]        - mute everywhere (default 1 h); his chat input locks',
                         'ungag|ungagall <pilot>            - unmute              gags - list active gags',
                         'mod <pilot> [rights] | unmod <pilot> | mods - moderator rights (##commands in game)',
+                        'badnames                          - list pilot names with spaces/punctuation (fix via web admin rename)',
                         'say <room|all> <text>             - yellow system line + 10 s on-screen banner',
                         'gsm <pilot> <text>                - private flashing message to one pilot, wherever he is (##GSM)',
                         'broadcast <text>                  - server-wide banner (in-game) + Server chat (lobby)',
+                        'poll start <room|all> <secs> <q> | <c0> | <c1> ... - open a poll (pilots: !!vote N, !!poll); poll status|end|cancel [room]',
+                        'tournament status|start <room> [in <s>]|close <room>|go <room>|end <room> [winner]|reset <room>',
+                        'event start|stop <room> | fly <room> on|off | status - weapons/engines lock (arena [Event] mode; ##StartEvent)',
+                        '                                  - clock / close joining now / fight now / lives / result',
                         'boot <pilot> [text]               - EShutDown with text (client exits the game)',
                         'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
                         'modact ...                        - moderator-action probes (dev)',
@@ -15917,6 +16800,8 @@ def arena_reset_state(room_id):
         world_clock_epoch(room_id, reset=True)      # v949f5: a new war starts at the arena's start time
     except Exception:
         logx('CLOCK', 'clock re-base on reset failed')
+    TOURNAMENTS.pop(room_id, None); _TN_CFG.pop(room_id, None)   # v952f5: the next spawn restarts the tournament clock
+    EVENTS.pop(room_id, None)                                    # v953f5: event back to 'not started'
     for onum in [o for o, t in list(TANKS.items()) if t['room'] == room_id]:
         delete_tank(onum, reason='(arena reset)')
     for gid in [g for g, c in list(COLUMNS.items()) if c['room'] == room_id]:
@@ -21976,6 +22861,17 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
             send_system_msg(s, 'Joining is disabled by the host - please wait.')
             log('MODERATOR', f'{s.current_pilot}: Fly ask refused - room {s.current_room} is join-disabled')
         return
+    # v952f5 TOURNAMENT: joining window closed / out of lives (ghosting re-entry is allowed)
+    try:
+        _tn_ok, _tn_why = tournament_fly_allowed(s)
+    except Exception:
+        logx('TOURNAMENT', 'fly gate failed'); _tn_ok, _tn_why = True, ''
+    if not _tn_ok:
+        if time.time() - s.__dict__.get('_tn_refused_at', 0.0) > 10.0:
+            s.__dict__['_tn_refused_at'] = time.time()
+            send_system_msg(s, _tn_why)
+            log('TOURNAMENT', f'{s.current_pilot}: Fly ask refused in room {s.current_room} - {_tn_why}')
+        return
     _ask_key = (af, mid, n, reply_sub)
     _now_ask = time.time()
     _last_ask = s.__dict__.get('_last_sp_ask')
@@ -22828,6 +23724,8 @@ def handle_compound(s, outer_cmd, pl):
         old_name = old_raw.split(b'\x00')[0].decode('ascii', 'replace')
         new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
         if old_name and new_name and s.account:
+            if not pilot_rename_validate(s, old_name, new_name, inner, 'rename-pilot refusal (compound)'):
+                return
             db_rename_pilot(old_name, new_name, s.account)
             log('COMPOUND', f'Renamed "{old_name}" -> "{new_name}"')
         threading.Thread(target=lambda: send_rel(s, inner, '<- compound rename echo', to=5.0), daemon=True).start()
@@ -24673,6 +25571,18 @@ def _fire_server_confirm(s, via='', ident=None):
         threading.Thread(target=_rc, daemon=True).start()
     except Exception:
         logx('TANK', 'tank re-create at ServerConfirm failed')
+    try:
+        poll_late_join(s)          # v951f5: a running poll is re-sent to a pilot entering the world
+    except Exception:
+        logx('POLL', 'late-join poll send failed')
+    try:
+        tournament_on_spawn(s)     # v952f5: common tournament clock, participant list, ghost re-entry
+    except Exception:
+        logx('TOURNAMENT', 'spawn hook failed')
+    try:
+        event_on_spawn(s)          # v953f5: event start / fly-button state to a joiner
+    except Exception:
+        logx('EVENT', 'spawn hook failed')
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -25260,6 +26170,10 @@ def _ingame_own_object_removed(s, tb, stored):
                          f'{", scored" if scored else ""}'
                          + (f', hunter=0x{_hunter:04x}' if _hunter is not None else '')
                          + ') -> drop plane, stay in arena, re-arm confirm')
+        try:
+            tournament_on_plane_exit(s, mec_nib, se)      # v952f5: lives / winner
+        except Exception:
+            logx('TOURNAMENT', 'exit hook failed')
 
         _killer = None; _kbailed = False
         if PILOT_FATE_SCORING:
@@ -29109,6 +30023,9 @@ def handle_post_auth(s, cmd, pl):
         if _op is not None and _op in GSM_OPCODES:
             handle_gsm(s, pl[_mo:])              # v950f5: ##GSM message (moderator) or its receipt (any client)
             return
+        if _op == POLL_VOTE_OPCODE:
+            handle_poll_vote(s, pl[_mo:])        # v951f5: '!!vote N' - any pilot, no rights needed
+            return
         if _op is not None:
             _who = getattr(s, 'current_pilot', None)
             if not sess_rights(s):
@@ -29850,7 +30767,11 @@ def handle_post_auth(s, cmd, pl):
                 new_raw = pl[40:72] if len(pl)>=72 else b''
                 old_name = old_raw.split(b'\x00')[0].decode('ascii', 'replace')
                 new_name = new_raw.split(b'\x00')[0].decode('ascii', 'replace')
-                if old_name and new_name and s.account: db_rename_pilot(old_name, new_name, s.account)
+                if old_name and new_name and s.account:
+                    if not pilot_rename_validate(s, old_name, new_name, stored, 'rename-pilot refusal'):
+                        return
+                    db_rename_pilot(old_name, new_name, s.account)
+                    log('PILOT', f'Renamed "{old_name}" -> "{new_name}" (account {s.account})')
                 threading.Thread(target=lambda: send_rel(s, stored, '<- echo rename', to=5.0), daemon=True).start(); return
             threading.Thread(target=lambda: send_rel(s, stored, 'echo type=0x42', to=5.0), daemon=True).start(); return
 
@@ -31479,6 +32400,7 @@ threading.Thread(
             'plane_roster_fn': plane_roster_for_web,        # v932f5: aircraft-per-team editor
             'reality_read_fn': extract_reality_from_gamedef,   # v948f5: date/time/weather editor defaults
             'radar_read_fn': extract_radar_from_gamedef,       # v949f5: radar editor defaults
+            'tournament_read_fn': extract_tournament_from_gamedef,   # v952f5: tournament editor defaults
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()

@@ -105,7 +105,7 @@ through as a raw index).
 
 | idx | # | file | length | character (auto-analysed) |
 | --- | --- | --- | --- | --- |
-| 500 | 1 | Chime01 | - | (not analysed - was skipped as "mis-listed" in the first pass) |
+| 500 | 1 | Chime01 | 1.0 s | very high bright tinkle (G#9-D#10), loud attack, fades |
 | 501 | 2 | Chime02 | 0.6 s | quick double hit, C5 / A#5 |
 | 502 | 3 | Chime03 | 0.6 s | low, soft (A2) |
 | 503 | 4 | Chime04 | 0.6 s | high D#6 ping over a low tone |
@@ -138,6 +138,80 @@ Gaps in the table (e.g. 382..499) are silent as well.
 A banned pilot who enters a barred arena is granted the entry (the join grant cannot be refused
 cleanly) and two seconds later his own ban dialog takes him out again. **Moderators are never
 gagged or booted.** Bans and gags persist in `moderation_state.json` across restarts.
+
+### Where the broadcast banner shows (`:B`, `say`, `broadcast`)
+
+The "blinking message across the screen" is the yellow centre-screen line of the **cockpit (3-D)
+view** - Msn_Serv.cpp FUN_00474e90 draws it blinking (200 ms) in colour 14 for the 10 s the msg-20
+channel-4 handler arms (FUN_0046a8a0(text, 10000)). It is not drawn on the HQ, map, plane-select or
+chat screens, and switching to any of those frees the text (0x44296d / 0x45f720). It also yields to
+every higher-priority centre message: server-shutdown / exit countdowns, "Bailing out!", "Your pilot
+has been killed!!!", "Fueling and Arming Plane... N" (the 15 s after a re-arm request), "Loading
+Cargo", "Your view is returning to cockpit mode", "Waiting Start Place On Airfield", take-off queue
+lines, competition timers. The magenta `NAME: TEXT` line in the chat pane is always printed. So to
+see the banner the receiver must be in the cockpit with none of those active - the 19:55 test had
+Taurus on the HQ screen and Alon parked right after a repair request.
+
+### Server polls (v951f5)
+
+The client ships a complete poll UI that the 2009 event scripts drove (script ops `CreatePoll` /
+`GetPollVotes`); the server now drives it from the console (terminal or web-admin console):
+
+```
+poll start <room|all> <seconds> <question> | <choice 0> | <choice 1> [| ...]
+poll status [room]        poll end [room]        poll cancel [room]
+```
+
+What the pilots see: yellow system lines with the question and `!!vote N = choice` list, the
+client's own poll record (msg 0x93 - Chime20 and an automatic print if the player has those two
+Options toggles on), and `!!poll` prints it any time ("Current Poll Criteria", "Choice N - ...",
+"Poll is active for N seconds more"). They answer with `!!vote N` (0-9); the client refuses a
+second vote, a closed poll or a bad number itself, and sends 0x94 `[id][choice]`. The server keeps
+one vote per pilot name (a reconnect does not reset it), acks with "Vote counted: N - choice",
+relays the 0x94 to the room so the clients' counters stay in step, re-sends the poll to pilots
+entering the arena while it runs, and when time is up prints the counts per choice and flashes
+the winner as a banner (`POLL: <choice> (n of m)`), or a tie line. Up to 10 choices, 10 s - 1 h,
+one poll per room; `all` opens the same poll in every room with in-game pilots. Poll ids run
+1..99 (the client's limit).
+
+Wire: 0x93 is a fixed 0x245-byte record `[0x93][id u32][3 x u32 unused][0 u32][duration s u32]
+[44 x 00][text 0x200]` with `question|choice|choice...`; 0x94 is `[0x94][id u32][choice u32]` both
+ways (client vote in, relay out; the client tallies per poll @0xc6f52c but never displays it).
+
+### Tournament mode (v952f5)
+
+The step-by-step event command chain (prepare, gather, clock, weapons lock, discipline, reset) is in
+**EVENTS.md** next to this file.
+
+
+The arena-creation dialog's Tournament group (enabled / number of lives / ghosting) plus the hidden
+template values (joining window 5 min, shooting 2 min later, allow tabbing off, last one flying wins
+on) are editable per arena on the web (Tournament section) and are served in the GAME_DEF. The server
+runs the clock: it starts at the first spawn or with `tournament start <room> [in <seconds>]`, every
+pilot receives the same start (msg 0x5c, late joiners at ServerConfirm), the cockpit counts down the
+joining window and then the shooting delay (no guns, no collisions until then). Pilots who ask to fly
+after the joining window closed are refused unless they were already in; a pilot out of lives is
+refused too, or, with ghosting, flies on as a ghost (the server ghosts his new plane). With "last one
+flying wins" the server declares the winner (msg 0x30: "<name> has won") and flashes the banner.
+`tournament close <room>` closes joining now (the shooting countdown then runs);
+`tournament go <room>` skips both countdowns (joining closes, the competition starts now - "FIGHT!");
+`tournament status [room]` shows phase, deaths and ghosts; `tournament end <room> [winner]` closes
+it by hand; `tournament reset <room>` (and an arena reset) clears it so the next spawn restarts.
+Moderators never count as participants and are never refused.
+
+### Event mode - the weapons lock (v953f5)
+
+The game's [Event] section. Every served arena carries its DelaysActive flag and each joiner is told
+the room's event state at spawn (normally "started" = free), so any arena can be locked at any time:
+while locked a pilot can take off but cannot start engines, fire guns, launch rockets, drop bombs or
+torpedoes, deploy paratroopers or drop supplies - the client says "You'll be able to open fire after
+Event starts". The web checkbox "Start with weapons and engines locked" makes an arena begin locked. `##StartEvent` in game (sysop) or `event start <room> [in <seconds>]` on the console
+starts the event: "EVENT STARTED" banner, everything unlocks (after the "unlock N min" delay if set,
+with an "in MM:SS" countdown on the client). `event stop <room>` locks at once ("HOLD FIRE") - in any arena. Pilots who were already in the arena
+before this build keep their old GAME_DEF and ignore the lock until they re-enter.
+`##EnableFlyButton` / `event fly <room> on|off` drive the HQ Fly button separately (the arena setting
+"Fly button enabled from the start" is its initial state). Joiners get the current state at spawn;
+an arena reset returns to the arena's initial state.
 
 ### Not modelled
 
