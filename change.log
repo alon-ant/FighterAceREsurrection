@@ -57,6 +57,11 @@ v949f5 [RADAR FAILURE - ANTENNA DOWN, RING GREY, CONTACTS GONE] (10-21)
       re-appears with a fresh create (+ loadout replay) the moment a radar covers it again or it closes
       to visual range. Chute frames, damage/kill traffic and viewers without a position are untouched.
       Radars re-scan every 2 s (destroyed set + scene_camp), config every 10 s.
+    * Online test 10-21 12:05-12:28 (Alon, Moira, Chuckdiver): the gate fired as designed - hidden at
+      exactly the visual range when outside the remaining ring (SU with two antennas down), back at
+      visual-1.5 km. 15 km was too wide for TC (front fields 10-15 km apart): default now 8 km (Alon set
+      8000 on the web; "disappears at around 4 miles just shy of 8000m"). A camp-7 (HQ observer) viewer
+      owns no radar and lost everything beyond the bubble - observer camps 5-7 are no longer gated.
     * Per arena (web 'Radar' section on /admin/arena_settings): gate Arena default (on for TC-economy
       arenas) / On / Off, 'always visible within' metres, and whether friendlies are hidden outside
       coverage too (the game's rule; 'enemy aircraft only' is an option). Plus the GAME_DEF [Radar] block

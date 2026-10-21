@@ -11655,7 +11655,13 @@ PLANE_RELAY_FAR_HZ   = 1.0      # beyond 40 km: same - stays alive on the client
 #   radar_enabled '' / 1 / 0 (blank = on for TC-economy arenas), radar_visual_m, radar_friends.
 RADAR_GATE_ENABLED     = True      # master switch - False relays every plane as before
 RADAR_GATE_TC_DEFAULT  = True      # arenas with the TC economy gate by default (web radar_enabled overrides)
-RADAR_VISUAL_RANGE_M   = 15000.0   # always relayed this close to the viewer (client visual range: 13 km fighters)
+RADAR_VISUAL_RANGE_M   = 8000.0    # always relayed this close to the viewer. Was 15 km (the client's own visual range is
+                                   # 13 km) - too wide for TC, where the front airfields are 10-15 km apart: Alon 10-21
+                                   # online with two SU antennas down still saw Chuckdiver 'move smoothly on the map'
+                                   # inside the bubble; at 8 km he vanished at 8.0 km and came back at 6.5 km (hysteresis).
+                                   # Web 'Always visible within' overrides per arena.
+RADAR_OBSERVER_CAMPS   = (5, 6, 7)  # neutral / HQ-observer viewers own no radar: never gated (12:11 Alon@HQ as camp 7
+                                   # lost every plane beyond 15 km, 0 radars standing)
 RADAR_GATE_FRIENDS     = True      # the client's Covers() hides friendly icons too; web radar_friends=0 -> enemies only
 RADAR_HIDE_DELETE      = True      # object-only DELETE3 the moment a plane drops off radar (else the ~28 s silence cull)
 RADAR_HYST_M           = 1500.0    # a hidden plane must come this far INSIDE a ring / the visual range to re-appear (no flapping at the edge)
@@ -11742,7 +11748,7 @@ def plane_detectable_by(src_pos, src_camp, viewer, dist, cfg, radars, hidden=Fal
     if dist is None or dist <= cfg['visual_m'] - m:
         return True
     vc = getattr(viewer, 'nation', None)
-    if vc is None:
+    if vc is None or vc in RADAR_OBSERVER_CAMPS:
         return True
     if not cfg['friends'] and src_camp == vc:
         return True
