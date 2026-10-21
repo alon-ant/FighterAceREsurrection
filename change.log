@@ -1,3 +1,16 @@
+v950f5 [##CHIME / ##SMOKE / ##GHOST RELAYED] (10-21)
+    * Alon 21:50: 'look into chime command and smoke command'. Senders (SecrCode 0x3ba ChimeP -> FUN_0046d1b0,
+      0x3b9 ChimeAll -> 0x46d320, 0x3c0 SmokeP -> 0x46d430, 0x3bc GhostP -> 0x46d550, 0x3bb GhostAll ->
+      0x46b3d0): 0x8c [name 32][SoundIdx i32] ('Sent chime %d to player'), 0x91 [name 32][SmokeBitField i32]
+      ('will get the new decorative smoke shortly'), 0x8d [name 32] ('will become ghosted shortly'); an empty
+      name = everyone. The client's inbound handlers act on the LOCAL client: 0x8c plays SoundIdx through the
+      sound manager (FUN_004f4a60), 0x91 writes the bitfield into the own plane's decorative-smoke byte
+      (+0x1b24, FUN_004f3a90), 0x8d toggles ghost mode (FUN_004f69a0, 'You are in Ghost Mode'). So the
+      server forwards the record to the named pilot(s) of the room; nothing else is needed. Sound indices
+      are TXT\Sounds.str: the chimes are 379..399 (Chime01..Chime21), 88 BadBeep, 89 Beep.
+    * Verify: ##ChimeP X 380 -> X hears Chime02; ##ChimeAll 380 -> everyone in the arena; ##SmokeP X 1 ->
+      X's plane trails decorative smoke (bits select the colour/kind); ##GhostP X -> X ghosted.
+
 v950f5 [##GSM - THE SYSOP'S PRIVATE FLASHING MESSAGE] (10-21)
     * Alon 10-21 (after the ban/gag pass 'all work as expected'): '##gsm <pilot> [message] broadcasts
       (flashing yellow) to a single pilot the message no matter where he is on the server' - it had only

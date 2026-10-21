@@ -1276,10 +1276,28 @@ def enact_mod_action(s, op, body):
             # the full roster, so we CAN resolve the name - which also makes crumblep/killp/eject
             # self-testable with a single client.
             enact_plane_destroy(s, body, by_index=False)
-        else:
-            # 0x8c/0x8d/0x91 are chime / ghost / smoke relay forms - not yet enacted;
-            # decode_mod_action already logged them.
-            pass
+        elif op in (0x8c, 0x8d, 0x91):
+            # v950f5f ##ChimeP/##ChimeAll (0x8c [name 32][SoundIdx i32]), ##GhostP/##GhostAll (0x8d [name 32]),
+            # ##SmokeP (0x91 [name 32][SmokeBitField i32]): the client's inbound handlers act on the LOCAL
+            # client - 0x8c plays sound SoundIdx (FUN_004f4a60 -> the sound manager @0xc84a54), 0x91 writes the
+            # bitfield into the local plane's decorative-smoke byte (+0x1b24, FUN_004f3a90), 0x8d toggles ghost
+            # mode on the local plane (FUN_004f69a0, 'You are in Ghost Mode'). So the server simply forwards the
+            # record to the named pilot (empty name = everyone in the room).
+            name = bytes(body[1:33]).split(b'\x00')[0].decode('ascii', 'replace') if len(body) >= 33 else ''
+            _what = {0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke'}[op]
+            if name:
+                dests = [x for x in get_sessions_in_room(room) if (getattr(x, 'current_pilot', '') or '').lower() == name.lower()]
+            else:
+                dests = [x for x in get_sessions_in_room(room) if getattr(x, 'entered_game', False)]
+            if not dests:
+                send_system_msg(s, f'{_what}: pilot "{name}" is not in this arena.')
+                log('MODERATOR', f'{_what} by {by}: no target ({name!r}) in room {room}')
+            else:
+                _arg = struct.unpack_from('<i', bytes(body), 33)[0] if len(body) >= 37 else None
+                for d in dests:
+                    send_rel(d, build_ingame_pkt(bytes(body)), f'<- MOD {_what} relay to {d.current_pilot}', to=3.0)
+                log('MODERATOR', f'{_what} by {by} -> {", ".join(d.current_pilot for d in dests)}'
+                                 + (f' (arg {_arg})' if _arg is not None else ''))
     except Exception as e:
         log('MODERATOR', f'enact op=0x{op:02x} failed: {e}')
 
