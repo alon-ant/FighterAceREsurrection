@@ -1,3 +1,23 @@
+v950f5 [CHIMES FIXED - THE SOUND INDEX WAS OFF BY 121] (10-21)
+    * Alon 22:40: 'chimes don't work at all. ghost commands work. smoke commands work.' Log: chime by
+      Taurus@HQ (arg 2 / 16 / 380 / 388) - the client sends the typed number raw (atoi -> record [0x21]) and
+      the receiver plays Sounds.str[idx] through FUN_00974420 (Sound.cpp), which is silent unless the DEF at
+      that index loaded (PARR<SOUND::DEF const*> @0x114083c, filled 1:1 from SOUNDS\Sounds.str at start-up).
+    * The bug was my table: a .str file is [First][Last] + NUL-terminated names, and a NUL at an entry start
+      followed by byte n SKIPS 1+n indices (Strings.cpp FUN_007d10d0). Sounds.str has '\0\x75' right before
+      Chime01 (that is the 'uSOUNDS\Chime01.snd' oddity), i.e. +118: the chimes are 500..521, not 379..400;
+      Beep is 90, BadBeep 89. 380 is a training-mission voice line, 388 is an empty slot -> nothing.
+    * Alon 22:43: Bigalon did not hear idx 2 / 16 either. Explained: the sound is a 3-D source on the chime
+      helper object (vtable 0xa31508, position (0,1,0) = world origin); the chime .snd DEFs (re-scrambled
+      from Data00.all) have MinDistance 10 / MaxDistance 1,000,000 m, while Beep/BadBeep are 25/200 m and
+      the explosions/siren likewise short - inaudible anywhere but over the map origin. The engine itself
+      plays 0x207 = 519 (Chime20) through the same object (FUN_004f4940, the timed server banner), which
+      confirms the block. So only 500..521 are usable chimes.
+    * Server: ##ChimeP/##ChimeAll with 1..22 is mapped to the chime block (CHIME_BASE 499 + n) and logged as
+      'chime #n -> idx 50x'; any other value is passed through raw. MODERATION.md table corrected.
+    * Verify: ##ChimeP X 7 -> X hears Chime07 (two high pings); ##ChimeAll 500 -> everyone hears Chime01;
+      ##ChimeP X 90 -> plain beep.
+
 v950f5 [##CHIME / ##SMOKE / ##GHOST RELAYED] (10-21)
     * Alon 21:50: 'look into chime command and smoke command'. Senders (SecrCode 0x3ba ChimeP -> FUN_0046d1b0,
       0x3b9 ChimeAll -> 0x46d320, 0x3c0 SmokeP -> 0x46d430, 0x3bc GhostP -> 0x46d550, 0x3bb GhostAll ->

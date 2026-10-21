@@ -1294,16 +1294,28 @@ def enact_mod_action(s, op, body):
                 log('MODERATOR', f'{_what} by {by}: no target ({name!r}) in room {room}')
             else:
                 _arg = struct.unpack_from('<i', bytes(body), 33)[0] if len(body) >= 37 else None
+                _note = ''
+                if op == 0x8c and _arg is not None and 1 <= _arg <= CHIME_COUNT:
+                    # v950f5g The client sends the typed number RAW as the Sounds.str index (atoi -> [0x21]),
+                    # and the chimes live at CHIME_BASE+1.. (the .str skip-encoding '\0<n>' jumps the index by
+                    # 1+n, so Chime01 is 500, not 379 as first listed). 1..22 therefore can only mean 'chime
+                    # number N' - nobody chimes a pilot with the torpedo explosion (idx 1) - so map it.
+                    body = bytearray(body); struct.pack_into('<i', body, 33, CHIME_BASE + _arg)
+                    _note = f' (chime #{_arg} -> idx {CHIME_BASE + _arg})'
                 for d in dests:
                     send_rel(d, build_ingame_pkt(bytes(body)), f'<- MOD {_what} relay to {d.current_pilot}', to=3.0)
                 log('MODERATOR', f'{_what} by {by} -> {", ".join(d.current_pilot for d in dests)}'
-                                 + (f' (arg {_arg})' if _arg is not None else ''))
+                                 + (f' (arg {_arg})' if _arg is not None else '') + _note)
     except Exception as e:
         log('MODERATOR', f'enact op=0x{op:02x} failed: {e}')
 
 # Moderator plane-destroy sub-actions (the 0x7f compact form: 7F <player_index:u16> <sub>).
 # Confirmed on the wire from run_20260722_223331 (2-client): 'out 127'4' = 7f 01 00 0X.
 MOD_DESTROY_SUBS = {0x01: 'crumblep', 0x02: 'nofuelp', 0x03: 'ejectp', 0x04: 'killp'}
+# v950f5g Sounds.str indices of the chime block (Chime01 = CHIME_BASE+1 .. Chime22 = CHIME_BASE+22). The .str
+# format is [FirstStringNumber][LastStringNumber] then NUL-terminated names, where a NUL at an entry start
+# followed by byte n skips 1+n indices (Strings.cpp FUN_007d10d0) - Sounds.str has '\0\x75' before Chime01.
+CHIME_BASE, CHIME_COUNT = 499, 22
 # Death-effect exit bytes (from the kill/exit RE). 0x53 = MEC5|EEC3 shot-down (explosion + names);
 # 0x50 = MEC5|EEC0 bailout short-form. Silent removal = plain build_delete_object_3 (X/Z=0).
 # Start CONSERVATIVE: crumblep/killp use the silent object delete (no exit-entry tail -> no desync

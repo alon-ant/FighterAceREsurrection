@@ -94,6 +94,47 @@ lobby. No session is killed — that is how the 2009 host did it.
 | `##killp` / `##ejectp` / `##crumblep` / `##nofuelp <player>` | Relayed natively to the target's client, which runs the death / bail-out / fuel loss itself. |
 | `##GSM <player> <text>` | Private global message (relayed). |
 
+### Chime sound indices (`##ChimeP <pilot> <idx>` / `##ChimeAll <idx>`)
+
+The index is the client's sound table (`SOUNDS\Sounds.str`), sent raw by the client (`atoi` of
+the typed number). The chimes are a block of 22 short 44.1 kHz samples at **500..521**. (A first
+listing had them at 379..400: the `.str` format skips indices with a `\0<n>` pair, and the pair in
+front of Chime01 jumps 118 entries - that is why nothing played.) The server also accepts the plain
+chime number: `##ChimeP X 7` plays Chime07 (1..22 are mapped to 500..521; anything else is passed
+through as a raw index).
+
+| idx | # | file | length | character (auto-analysed) |
+| --- | --- | --- | --- | --- |
+| 500 | 1 | Chime01 | - | (not analysed - was skipped as "mis-listed" in the first pass) |
+| 501 | 2 | Chime02 | 0.6 s | quick double hit, C5 / A#5 |
+| 502 | 3 | Chime03 | 0.6 s | low, soft (A2) |
+| 503 | 4 | Chime04 | 0.6 s | high D#6 ping over a low tone |
+| 504 | 5 | Chime05 | 0.5 s | mid F4, falling |
+| 505 | 6 | Chime06 | 0.9 s | very high C8 tick + low C3 |
+| 506 | 7 | Chime07 | 0.5 s | two high A6 pings |
+| 507 | 8 | Chime08 | 0.9 s | C#5 / E5 with a low tail |
+| 508 | 9 | Chime09 | 0.5 s | E6-C#6-E6 triple |
+| 509 | 10 | Chime10 | 1.0 s | four-note phrase D4 C#3 F3 A4 |
+| 510 | 11 | Chime11 | 1.0 s | six hits, C#6 E5 F#5 D4 |
+| 511 | 12 | Chime12 | 0.6 s | low buzz B2 / B4 |
+| 512 | 13 | Chime13 | 1.2 s | loud F4 with G#2 tail (loudest of the set) |
+| 513 | 14 | Chime14 | 1.0 s | D#4-F#4-F#4-D#4 phrase |
+| 514 | 15 | Chime15 | 1.0 s | D#4-F#4-D#4 phrase |
+| 515 | 16 | Chime16 | 1.0 s | very high F7/F8 sparkle, quiet |
+| 516 | 17 | Chime17 | 1.0 s | high G#7/F#7 sparkle, quiet |
+| 517 | 18 | Chime18 | 1.3 s | E6 / A6 bell, loud |
+| 518 | 19 | Chime19 | 1.5 s | D6 A#5 G5 descending, loud (longest) |
+| 519 | 20 | Chime20 | 1.0 s | A5 A6 D7 rising, loud |
+| 520 | 21 | Chime21 | 1.0 s | F6 G#6 D6 |
+| 521 | 22 | Chime22 | 0.5 s | single high E7 ping |
+
+Only the chime block is usable: the client plays the sound as a 3-D source parked at the world
+origin (the chime helper object @0xc84a54 reports position (0, 1, 0)), and the chime `.snd`
+definitions carry MaxDistance = 1,000,000 m so they are heard anywhere on the map. Every other
+sound (Beep/BadBeep 200 m, explosions, the Stuka siren, ...) has a normal range and is inaudible
+unless the pilot happens to be flying over the map origin - that is why `##ChimeP X 2` is silent.
+Gaps in the table (e.g. 382..499) are silent as well.
+
 A banned pilot who enters a barred arena is granted the entry (the join grant cannot be refused
 cleanly) and two seconds later his own ban dialog takes him out again. **Moderators are never
 gagged or booted.** Bans and gags persist in `moderation_state.json` across restarts.
