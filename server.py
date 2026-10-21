@@ -1189,13 +1189,17 @@ def gsm_deliver(dests, sender, text, by='?'):
     in-flight state), so the message goes out as the server's own forms instead: in an arena the msg-20
     channel-4 BANNER (the flashing on-screen line the `broadcast` command uses) plus the yellow system
     line, in the lobby the 'sender:' chat line."""
+    # v950f5c (Alon 21:20, screenshots): the channel-4 banner ALSO lands in the magenta operator pane,
+    # which only sysops should see. The client has a dedicated flash-to-player message: ##FlashP sends
+    # op 0x8e [name 32][text] and the receiver (dispatch 0xc82110 -> FUN_004f42c0) prints the text in
+    # colour 12 (FUN_00469cf0) and flashes it on screen for 7 s (FUN_0046a920(2, 12, 7, text)) - no
+    # chat-pane routing at all. GSM rides that in an arena; the lobby keeps the chat line.
     line = f'{sender}: {text}'[:ANNOUNCE_MAX_CHARS]
     for d in dests:
         try:
             if getattr(d, 'entered_game', False):
-                _pi = getattr(d, 'player_index', 0) or 0
-                send_rel(d, build_chat_display_20(4, line, player_index=_pi), f'<- GSM banner from {by} (ch4, PI={_pi})', to=3.0)
-                send_system_msg(d, line)
+                rec = bytes([0x8e]) + sender.encode('latin1', 'replace')[:31].ljust(32, b'\x00') + line.encode('latin1', 'replace') + b'\x00'
+                send_rel(d, build_ingame_pkt(rec), f'<- GSM flash (0x8e) from {by}', to=3.0)
             else:
                 send_rel(d, build_chat_broadcast(sender, text), f'<- GSM lobby line from {by}', to=3.0)
         except Exception:
@@ -6023,6 +6027,13 @@ def console_handler():
                                 log('CONSOLE', f'  room {_rid} camp {_camp}: units {camp_units_state(_rid, _camp)}')
                 elif _a[0] == 'reset':
                     TRIGGERS.clear(); _TC_DISARMED.clear(); log('CONSOLE', 'tc: trigger lockouts and disarmed scenes cleared')
+                elif _a[0] == 'aichan':
+                    # v950f5d: tc aichan <class> - the msg-20 class the AI lines use: 0 All 1 Team 2 Squad 3 Logins
+                    # 4 Hits 5 AI 6 Score 7 Help 8 News 9 Events 10 Weather 11 Hints (the Chat tab's filter boxes)
+                    try:
+                        globals()['TC_AI_CHANNEL'] = int(_a[1]); log('CONSOLE', f'tc: AI chat class = {TC_AI_CHANNEL}')
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc aichan <0..11>  (5 = the AI filter box)')
                 elif _a[0] == 'rearm':
                     # v949f5: tc rearm <scene> [room] - arm a disarmed scene by hand
                     try:
@@ -8635,6 +8646,26 @@ def reflect_chat_20(s, channel, text, player_index=0):
                        if db_pilot_squadron_id(getattr(x, 'current_pilot', None)) == _ssqn]
         else:
             targets = [s]
+    elif channel == 3:
+        # v950f5e [OPERATOR CHANNEL = SYSOPS ONLY] (Alon 10-21): channel letters are 'ATSOB' (Chat_accu.cpp,
+        # FUN_006b8f20: 0 All, 1 Team, 2 Squad, 3 Operator, 4 Broadcast; anything >= 5 asserts
+        # 'i<sizeof(Liters)/sizeof(*Liters)-1' and CTDs - messages84 21:34). The 2004 sheet: Operator
+        # 'sends message to ANY @FA's who are in the same arena'. So an O-channel line reaches only the
+        # moderators of the room (and its sender); a non-moderator typing :O talks to the sysops alone.
+        if not sess_rights(s):
+            # a plain pilot has no business on the O channel at all (Alon 21:46): nothing is reflected,
+            # not even to himself, and he is told why
+            send_system_msg(s, 'The operator channel is for sysops only.')
+            log('MODERATOR', f'O-CHANNEL DROP from non-moderator "{s.current_pilot}": {disp!r}')
+            return
+        targets = [x for x in room_players if sess_rights(x)]
+    elif channel == 4:
+        # Broadcast (':B', the 10 s banner): a moderator reaches the whole room; from anyone else it is dropped
+        if not sess_rights(s):
+            send_system_msg(s, 'Broadcast is for sysops only.')
+            log('MODERATOR', f'BROADCAST DROP from non-moderator "{s.current_pilot}": {disp!r}')
+            return
+        targets = list(room_players)
     else:
         targets = list(room_players)        # channel 0 = whole room
     if s not in targets:
@@ -13296,7 +13327,20 @@ TC_AI_CHAT           = True
 TC_AI_CHAT_PI        = None     # PlayerIndex the AI lines are stamped with (None = AI_ROSTER_PI)
 AI_ROSTER_PI         = 0x1fe    # v577f5: the 'AI' ROSTER player (msg 62) the chat lines come from
 AI_ROSTER_NATION     = 7        # neutral slot
-TC_AI_CHANNEL        = 3        # FUN_004f6030: channels 3/4 print '<name>: <text>' in a fixed colour
+TC_AI_CHANNEL        = 3        # v950f5e: 3 IS the answer. messages84 21:34: 'Assertion failed (i<sizeof(Liters)/
+                                #   sizeof(*Liters)-1) Chat_accu.cpp:38' - the channel letters are 'ATSOB' (0 All, 1 Team,
+                                #   2 Squad, 3 Operator, 4 Broadcast; FUN_006b8f20 @0xa5cab4), so a class >= 5 CTDs the
+                                #   Chat tab and the 'AI' filter box is for the client's OWN offline AI lines only. 3 =
+                                #   magenta 'AI: ...' = the 2009 look (v577). Players' own O-channel chat is relayed to
+                                #   moderators only (chat reflect, channel 3) - the AI's use of the colour is the server's.
+                                # v950f5d note: the msg-20 channel byte IS the client's message CLASS - the Chat tab's
+                                #   filter boxes (DLGS\Flight_Chat.txt ChatFilter1..12): 0 All, 1 Team, 2 Squad, 3 Logins,
+                                #   4 Hits, 5 AI, 6 Score, 7 Help, 8 News, 9 Events, 10 Weather, 11 Hints (the listener
+                                #   FUN_006b9190 stores it unchanged; FUN_004f6030 only special-cases 3/4 with the
+                                #   operator colour 13 and the 10 s banner on 4). Was 3 (-> the magenta operator pane,
+                                #   Alon 10-21), then 0/1 ('AI (T): ...' in the main pane). 5 = the 'AI' box, which is
+                                #   what the 2009 lines were. The sender must still be a roster player (the AI entry,
+                                #   PI 0x1fe) or the client drops the line. Console `tc aichan <n>`.
 # v717f5: camp -> tank class, read from the client's class table (tank_tables.json, class-info
 # +0x60 = nation): US 133, GB 131 (Cromwell), SU 132 / 135, GE 134 (Panther) / 136, JP 137.
 # Every column was Cromwell before (user 09-16). The second SU / GE class is the alternate

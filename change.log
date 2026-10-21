@@ -17,9 +17,40 @@ v950f5 [##GSM - THE SYSOP'S PRIVATE FLASHING MESSAGE] (10-21)
       server's own forms (gsm_deliver): in an arena the msg-20 channel-4 BANNER (the flashing on-screen
       line `broadcast` uses) + the yellow system line, in the lobby the 'sender:' chat line; the receipt
       ('Pilot "X" has received your message') is synthesised by the server to the sysop on delivery.
-    * Verify: ##GSM X hello from an arena while X is in another arena -> flashing 'You: hello' banner +
-      yellow line, not in the operator channel; X in the lobby -> 'You: hello' chat line; you get
-      'Pilot "X" has received your message'; panel `gsm` likewise ('Server: ...').
+    * Second test (21:20, screenshots): the channel-4 banner showed ('TAURUS@HQ: PREPARE TO FLY!') but
+      ALSO landed in the magenta OPERATOR pane - which only sysops should see - as did the AI lines
+      (TC_AI_CHANNEL 3) and `broadcast`. The client has a flash-to-player message of its own: ##FlashP
+      sends op 0x8e [name 32][text]; the receiver (0xc82110 -> FUN_004f42c0) prints the text in colour 12
+      and flashes it on screen 7 s (FUN_0046a920(2, 12, 7, text)) with NO chat-pane routing. GSM now rides
+      0x8e in an arena ('sender: text'), the lobby keeps the chat line. The AI lines move from channel 3
+      to 0 (main pane, 'AI: ...' in the camp colour; one-camp lines as team chat 1) - `tc aichan <n>`
+      switches live if a client refuses channel 0 from the AI roster player. `broadcast` / `say all` keep
+      channel 4 (the 10 s banner IS the 2004 ':B' Broadcast, which rode the operator pane by design).
+    * Third test (21:27, Chat tab screenshot): the AI lines came as 'AI (T): ...' - a channel of their own.
+      The Chat tab has twelve filter boxes (DLGS\Flight_Chat.txt ChatFilter1..12: All, Team, Squad, Logins,
+      Hits, AI, Score, Help, News, Events, Weather, Hints) and the msg-20 channel byte IS that class index
+      (the log listener FUN_006b9190 stores it as-is; FUN_004f6030 only special-cases 3/4). So the AI lines
+      go out as class 5 = the 'AI' box, which is what the 2009 lines were; the roster 'AI' player stays -
+      the client drops a msg 20 whose PlayerIndex is not a roster player, so there is no sender-less form.
+      `tc aichan <0..11>` switches live.
+    * Verify: ##GSM X hello -> X (in an arena) gets the flashing 'You: hello' and a line in colour 12, nothing
+      in the operator pane; X in the lobby -> chat line; you get 'Pilot "X" has received your message'.
+      AI train/trigger lines show as 'AI: ...' and vanish when the Chat tab's AI box is unticked.
+    * Fourth test (21:34): class 5 printed the AI lines GREEN (the normal msg-20 path colours by camp relation;
+      only channels 3/4 carry the fixed magenta 13) and the client CTD'd when the Chat tab was opened right
+      after. messages84: 'Assertion failed (i<sizeof(Liters)/sizeof(*Liters)-1) Chat_accu.cpp:38' - the chat
+      accumulator's channel letters are 'ATSOB' (FUN_006b8f20 @0xa5cab4): 0 All, 1 Team, 2 Squad, 3 Operator,
+      4 Broadcast, and anything >= 5 asserts. So the twelve filter boxes are NOT network channels (the 'AI'
+      box is for the client's own offline AI lines), a server line can only be A/T/S/O/B, and the magenta
+      'AI: ...' of 2009 was the O channel. TC_AI_CHANNEL stays 3. What IS reserved for sysops is players'
+      own O-channel chat: the chat reflect now sends a channel-3 line only to the room's moderators (+ the
+      sender) and a channel-4 broadcast to the room only when a moderator typed it (2004 sheet: Operator
+      'sends message to ANY @FA's who are in the same arena'). The GSM/0x8e change stands.
+    * Alon 21:46: 'plain pilot shouldn't be able to use this' - an O-channel or B line from a non-moderator is
+      now DROPPED outright (not even reflected to himself) with 'The operator channel is for sysops only.' /
+      'Broadcast is for sysops only.' and a MODERATOR log line; sysops' lines flow as before.
+    * Verify: AI lines magenta 'AI: ...' as before, Chat tab opens; a plain pilot's :O / :B line goes nowhere
+      and he gets the yellow refusal; a sysop's :O reaches the other sysops, his :B the whole room.
 
 v950f5 [SYSOP COMMANDS: THE REAL BAN/GAG WIRE, NATIVE NOTICES, PANEL COMMANDS] (10-21)
     * Sysop report (Alon 10-21, in-game): ##gag 'not functioning', ##gagall 'target can type', ##banall
