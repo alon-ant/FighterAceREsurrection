@@ -1176,10 +1176,30 @@ def handle_gsm(s, body):
         send_system_msg(s, f'GSM: pilot "{target}" is not on the server.')
         log('MODERATOR', f'GSM by {me} to "{target}": not online - {text!r}')
         return
-    for d in dests:
-        send_rel(d, _gsm_pkt_for(d, body), f'<- GSM from {me}', to=3.0)
+    gsm_deliver(dests, sender or me, text, by=me)
+    # the receipt the target's client would send: tell the sysop his message has landed
+    ack = bytes([0x61, 0x83]) + target.encode('latin1', 'replace')[:31].ljust(32, b'\x00') + (sender or me).encode('latin1', 'replace')[:31].ljust(32, b'\x00')
+    send_rel(s, _gsm_pkt_for(s, ack), f'<- GSM receipt ({target})', to=3.0)
     log('MODERATOR', f'GSM by {me} -> "{target}" ({len(dests)} session(s), '
                      f'{"in-game" if getattr(dests[0], "entered_game", False) else "lobby"}): {text!r}')
+
+def gsm_deliver(dests, sender, text, by='?'):
+    """v950f5b: what the pilot actually sees. The native 0x61 record landed in the OPERATOR chat channel
+    (reserved for sysops) and the flashing line only shows in flight (FUN_0046a420 is gated on the
+    in-flight state), so the message goes out as the server's own forms instead: in an arena the msg-20
+    channel-4 BANNER (the flashing on-screen line the `broadcast` command uses) plus the yellow system
+    line, in the lobby the 'sender:' chat line."""
+    line = f'{sender}: {text}'[:ANNOUNCE_MAX_CHARS]
+    for d in dests:
+        try:
+            if getattr(d, 'entered_game', False):
+                _pi = getattr(d, 'player_index', 0) or 0
+                send_rel(d, build_chat_display_20(4, line, player_index=_pi), f'<- GSM banner from {by} (ch4, PI={_pi})', to=3.0)
+                send_system_msg(d, line)
+            else:
+                send_rel(d, build_chat_broadcast(sender, text), f'<- GSM lobby line from {by}', to=3.0)
+        except Exception:
+            logx('MODERATOR', 'GSM deliver failed')
 
 def mod_gag_room(room, hours, by, release=False):
     """##GagRoom / ##UnGagRoom: everyone in the room without moderator rights."""
@@ -5810,10 +5830,7 @@ def console_handler():
                     if not _dests:
                         log('CONSOLE', f'gsm: pilot {_name!r} not online')
                     else:
-                        _rec = (bytes([0x61, 0x03]) + b'Server'.ljust(32, b'\x00') + _name.encode('latin1', 'replace')[:31].ljust(32, b'\x00')
-                                + _txt.encode('latin1', 'replace')[:1000] + b'\x00')
-                        for _d in _dests:
-                            send_rel(_d, _gsm_pkt_for(_d, _rec), '<- GSM from console', to=3.0)
+                        gsm_deliver(_dests, 'Server', _txt, by='console')
                         log('CONSOLE', f'gsm -> {_name} ({len(_dests)} session(s)): {_txt!r}')
                 except IndexError:
                     log('CONSOLE', 'usage: gsm <pilot> <text>')

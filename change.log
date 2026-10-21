@@ -11,8 +11,15 @@ v950f5 [##GSM - THE SYSOP'S PRIVATE FLASHING MESSAGE] (10-21)
       lobby frame); the receipt is routed back to the named sender from any client (no rights needed);
       'GSM: pilot "X" is not on the server.' when nobody matches. Console `gsm <pilot> <text>` (sender
       'Server').
-    * Verify: ##GSM X hello from an arena while X sits in the lobby or another arena -> X sees
-      'You: hello' (flashing in flight), you see 'Pilot "X" has received your message'; panel gsm likewise.
+    * First test (Alon 21:06): the relayed native record came in on the OPERATOR chat channel (reserved
+      for sysops) and no flashing line - the client's on-screen call (FUN_0046a420) is gated on the
+      in-flight state and its chat routing is the operator channel. So the message is now delivered in the
+      server's own forms (gsm_deliver): in an arena the msg-20 channel-4 BANNER (the flashing on-screen
+      line `broadcast` uses) + the yellow system line, in the lobby the 'sender:' chat line; the receipt
+      ('Pilot "X" has received your message') is synthesised by the server to the sysop on delivery.
+    * Verify: ##GSM X hello from an arena while X is in another arena -> flashing 'You: hello' banner +
+      yellow line, not in the operator channel; X in the lobby -> 'You: hello' chat line; you get
+      'Pilot "X" has received your message'; panel `gsm` likewise ('Server: ...').
 
 v950f5 [SYSOP COMMANDS: THE REAL BAN/GAG WIRE, NATIVE NOTICES, PANEL COMMANDS] (10-21)
     * Sysop report (Alon 10-21, in-game): ##gag 'not functioning', ##gagall 'target can type', ##banall
