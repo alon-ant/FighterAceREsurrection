@@ -213,10 +213,17 @@ before this build keep their old GAME_DEF and ignore the lock until they re-ente
 "Fly button enabled from the start" is its initial state). Joiners get the current state at spawn;
 an arena reset returns to the arena's initial state.
 
+### Relayed pilot effects (field-verified 2026-10-21)
+
+`##GhostP <pilot>` / `##GhostAll` (ghost mode, toggle), `##SmokeP <pilot> <0-7>` (decorative smoke -
+the bit field selects the colour; all three colours and their mixes work) and `##ChimeP` / `##ChimeAll`
+(see the chime table above) are relayed by the server to the named pilot's client, which applies them
+to its own plane. All verified in game.
+
 ### Not modelled
 
-`##ClearScores` (arena scores live in the ladder), `##Ghost`/`##Chime`/`##Smoke` relay forms (logged
-only), the long 0xDA form that would show *banned for all games* in the lobby dialogs.
+`##ClearScores` (arena scores live in the ladder; the command is logged only) and the long 0xDA form
+that would show *banned for all games* in the lobby dialogs.
 
 ---
 
