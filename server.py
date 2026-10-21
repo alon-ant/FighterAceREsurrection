@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v949f5'
+VERSION = 'v950f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -833,11 +833,13 @@ MOD_RIGHTS_DEFAULT = 1       # value written for 'mod <pilot>' (any non-zero = f
 #   0x8c        37B  chime      (FUN_0046d1b0)
 #   0x8d        33B  ghost      (FUN_0046d550)
 #   0x91        37B  smoke      (FUN_0046d430)
-MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x5f, 0x62, 0x7f, 0x80, 0x8c, 0x8d, 0x91})
+MOD_INBOUND_OPCODES = frozenset({0x55, 0x56, 0x57, 0x5f, 0x62, 0x7f, 0x80, 0x85, 0x8b, 0x8c, 0x8d, 0x91})   # v950f5: +0x57 ResetGame, 0x85 EnableFlyButton, 0x8b ClearScores
 
 MOD_OPCODE_NAMES = {
-    0x55: 'ban/gag-family', 0x56: 'unban/ungag-family', 0x7f: '0x80-companion',
-    0x80: 'killp/ejectp/crumblep/nofuelp-family', 0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke',
+    0x55: 'BAN-family (Ban/BanAll/UnBan/UnBanAll)', 0x56: 'GAG-family (Gag/GagAll/UnGag/UnGagAll/GagRoom)',
+    0x57: 'ResetGame', 0x5f: 'Join enable/disable', 0x62: 'AllChat', 0x7f: 'plane action by index',
+    0x80: 'killp/ejectp/crumblep/nofuelp by name', 0x85: 'EnableFlyButton', 0x8b: 'ClearScores',
+    0x8c: 'chime', 0x8d: 'ghost', 0x91: 'smoke',
 }
 # Real command names come from the official "FA 3.6 Sysop Commands" reference (rev 2004-08-06).
 # The 'p' suffix = player-targeted. Mapping of sub-byte -> command is inferred by pairing each
@@ -865,12 +867,11 @@ def decode_mod_action(tb, msg):
     out = [f'{name} len={len(body)}']
     if tb in (0x55, 0x56, 0x8d) and len(body) >= 33:
         target = body[1:33].split(b'\x00')[0].decode('ascii', 'replace')
-        out.append(f'target={target!r}' if target else 'target=<ALL/ROOM>')
+        out.append(f'target={target!r}' if target else 'target=<WHOLE ROOM>')
         if len(body) >= 41:
             a1, a2 = struct.unpack_from('<ii', body, 33)
-            out.append(f'arg1={a1}')
-            out.append((f'player_index={a2}' + (' (UNRESOLVED by client)' if a2 == -1 else ''))
-                       if target else f'mode={a2}')
+            out.append('scope=' + ('ALL rooms' if a1 == 0 else 'this room'))
+            out.append('RELEASE (Un*)' if a2 < 0 else f'hours={a2}' + (' (soft boot)' if a2 == 0 else ''))
     elif tb == 0x80 and len(body) > 1:
         out.append(f'sub={MOD_80_SUBS.get(body[1], hex(body[1]))}')
     out.append(f'raw={hx(body[:24])}')
@@ -930,73 +931,227 @@ def push_myrights(s, reason=''):
         log('MODERATOR', f'push_myrights failed: {e}')
     return r
 
-# --- Moderator ENACTMENT state (v304) -----------------------------------------
-# Self-testable actions only. Plane-destroy (crumblep/killp/ejectp/nofuelp) is intentionally
-# NOT here: it must relay to a *remote* client and cannot be validated on one machine (the
-# client's own name-resolver FUN_004696c0 walks the REMOTE roster, which excludes yourself).
-#
-# Wire opcodes (confirmed from FA.exe + live capture run_20260722_234344):
-#   0x55 41B  -> gag  (apply)   [1:33]=name [33:37]=i32 dur hours (0=softboot, -1=open)
-#   0x56 41B  -> ungag(release)
-#   0x5f  2B  -> Join enable(0x5f 00) / disable(0x5f 01)
-#   0x62  2B  -> AllChat on(0x62 01) / off(0x62 00)
-#   0x8d 33B  -> GhostAll (relay-only; logged, not enacted here)
-# NOTE: ##Ban and ##Gag are INDISTINGUISHABLE on the wire (both 0x55). Per design decision,
-# inbound 0x55 = GAG (reversible chat mute); real room-BAN is a server-console command only.
+# --- Moderator ENACTMENT state (v304, rewritten v950f5) ---------------------------------------
+# The v304 reading ('0x55 = gag apply, 0x56 = ungag; ##Ban and ##Gag indistinguishable') was wrong -
+# see the v950f5 block right below for the real record layout (0x55 = BAN family, 0x56 = GAG
+# family, [33:37] scope, [37:41] hours / -1 release) and the client's own notice handlers.
 
-GAGS = {}            # pilot_name(lower) -> expiry epoch (float); math.inf = open-ended
-_JOIN_DISABLED = {}  # room_id -> True   (Fly-Now button suppressed)
+GAGS = {}            # pilot_name(lower) -> {'until': epoch|inf, 'room': room_id|None (None = all rooms), 'by'}
+_JOIN_DISABLED = {}  # room_id -> True   (Fly-Now refused for non-moderators - see handle_fly_start_place)
 _ALLCHAT = {}        # room_id -> bool   (informational; client-side toggle)
-BANS = {}            # pilot_name(lower) -> {'until': epoch|inf, 'by': str, 'room': room_id|None}
+BANS = {}            # pilot_name(lower) -> {'until': epoch|inf, 'by': str, 'room': room_id|None (None = ALL arenas), 'msg'}
+MOD_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'moderation_state.json')
+MOD_MAX_HOURS = 12   # the 2004 sysop rules: no force action longer than twelve hours
+
+# v950f5 [SYSOP COMMANDS - THE REAL WIRE] (player report 10-21: '##gag not functioning', '##banall:
+# target not kicked, but muted', '##gagall: target can type', ban/gag from the panel do nothing).
+# The eight client handlers (registration FUN_0046f6c0.., names from TXT\SecrCode.str 800+):
+#   Ban      (0x330) -> FUN_0046c570: op 0x55, A=-1, B=hours      BanAll   (0x32b) -> 0x46c6f0: 0x55, A=0,  B=hours
+#   Gag      (0x381) -> FUN_0046c870: op 0x56, A=-1, B=hours      GagAll   (0x380) -> 0x46c9f0: 0x56, A=0,  B=hours
+#   UnBan    (0x383) -> FUN_0046cb70: op 0x55, A=-1, B=-1         UnBanAll (0x382) -> 0x46cc80: 0x55, A=0,  B=-1
+#   UnGag    (0x385) -> FUN_0046cd90: op 0x56, A=-1, B=-1         UnGagAll (0x384) -> 0x46cea0: 0x56, A=0,  B=-1
+#   GagRoom  (0x398) -> FUN_0046b430: op 0x56, name EMPTY, A=-1, B=1;  UnGagRoom (0x399) -> 0x46b4a0: 0x56, empty, -1, -1
+# 41-byte record: [0]=op [1:33]=target ASCIIZ [33:37]=A (-1 = this room, 0 = all rooms) [37:41]=B
+# (hours to apply, 0 = soft boot; -1 = release). So 0x55 is the BAN family and 0x56 the GAG family -
+# the v303 reading (0x55 = gag, 0x56 = ungag) had them crossed, which is exactly every symptom above.
+# Confirmation strings: 'Player (%s) will be banned for %i hour(s) (may be)' / 'gaged' / 'unbanned' /
+# 'ungaged' (0xa2a784/7cc/800/830). Other opcodes: 0x57 ResetGame (1 B), 0x5f Join enable/disable
+# (+byte), 0x62 AllChat (+byte), 0x85 EnableFlyButton (1 B), 0x8b ClearScores (1 B), 0x61/0xe9 GSM.
+# SERVER -> CLIENT: the client has native handlers for the SAME opcodes (dispatch 0xc8202c/30 ->
+# FUN_004ef040 / FUN_004eef80): [op][u32 MINUTES]. 0x56 stores the minutes in DAT_00caf27c (re-fired
+# to every chat dialog -> the input is locked), prints 'You are gagged for %i minutes' / 'You are
+# ungagged' (<= 0). 0x55 fires the ban listeners - the HQ/flight dialogs (Term_All.cpp @0x769880) put
+# up the 'You are banned for %d hour(s) %d minute(s).' box (0 -> 'You are banned. You can reenter
+# this game right after exiting.') and take the client back to the lobby. That is the 2009 kick.
 
 def _dur_to_expiry(hours):
-    """Map the packet's i32 duration field to an absolute expiry. 0 = soft (immediate expiry,
-    i.e. a boot with instant return per FA 3.5 semantics); -1 = open-ended; else N hours,
-    capped at the documented 12h maximum."""
-    if hours == 0:      return time.time()          # soft: expires now
-    if hours < 0:       return math.inf             # open-ended
-    return time.time() + min(int(hours), 12) * 3600
+    """i32 duration field -> absolute expiry. 0 = soft (expires now = boot with instant return);
+    -1 = open-ended; else N hours capped at MOD_MAX_HOURS."""
+    if hours == 0:      return time.time()
+    if hours < 0:       return math.inf
+    return time.time() + min(int(hours), MOD_MAX_HOURS) * 3600
 
-def is_gagged(pilot_name):
+def _mod_minutes_left(until):
+    if until == math.inf:
+        return MOD_MAX_HOURS * 60
+    return max(0, int((until - time.time()) / 60.0 + 0.999))
+
+def mod_state_save():
+    try:
+        now = time.time()
+        data = {'gags': {k: {'until': (None if v['until'] == math.inf else v['until']), 'room': v.get('room'), 'by': v.get('by')}
+                         for k, v in GAGS.items() if v['until'] > now},
+                'bans': {k: {'until': (None if v['until'] == math.inf else v['until']), 'room': v.get('room'), 'by': v.get('by'), 'msg': v.get('msg')}
+                         for k, v in BANS.items() if v['until'] > now}}
+        tmp = MOD_STATE_FILE + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+        os.replace(tmp, MOD_STATE_FILE)
+    except Exception:
+        logx('MODERATOR', 'moderation_state.json not written')
+
+def mod_state_load():
+    try:
+        with open(MOD_STATE_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f) or {}
+        now = time.time(); n = 0
+        for k, v in (data.get('gags') or {}).items():
+            u = math.inf if v.get('until') is None else float(v['until'])
+            if u > now:
+                GAGS[k] = {'until': u, 'room': v.get('room'), 'by': v.get('by') or 'restored'}; n += 1
+        for k, v in (data.get('bans') or {}).items():
+            u = math.inf if v.get('until') is None else float(v['until'])
+            if u > now:
+                BANS[k] = {'until': u, 'room': v.get('room'), 'by': v.get('by') or 'restored', 'msg': v.get('msg')}; n += 1
+        if n:
+            log('MODERATOR', f'restored {len(GAGS)} gag(s) and {len(BANS)} ban(s) from moderation_state.json')
+    except FileNotFoundError:
+        pass
+    except Exception:
+        logx('MODERATOR', 'moderation_state.json unreadable')
+
+def is_gagged(pilot_name, room=None):
+    """Active gag for this pilot that covers `room` (a room-scoped gag only bites in its room)."""
     if not pilot_name: return False
     k = pilot_name.lower()
-    exp = GAGS.get(k)
-    if exp is None: return False
-    if exp <= time.time():
-        GAGS.pop(k, None); return False
-    return True
+    rec = GAGS.get(k)
+    if rec is None: return False
+    if rec['until'] <= time.time():
+        GAGS.pop(k, None); mod_state_save(); return False
+    return rec.get('room') is None or room is None or rec.get('room') == room
 
-def set_gag(pilot_name, hours, by=''):
+def set_gag(pilot_name, hours, by='', room=None):
+    """Gag `pilot_name` for `hours` (room=None -> every room). Returns the record or None (soft/no-op)."""
     exp = _dur_to_expiry(hours)
     if exp <= time.time():
-        GAGS.pop(pilot_name.lower(), None)
+        GAGS.pop(pilot_name.lower(), None); mod_state_save()
         log('MODERATOR', f'gag on "{pilot_name}" is a soft/expired no-op (dur={hours})')
-        return False
-    GAGS[pilot_name.lower()] = exp
+        return None
+    rec = {'until': exp, 'room': room, 'by': by or '?'}
+    GAGS[pilot_name.lower()] = rec; mod_state_save()
     when = 'open-ended' if exp == math.inf else f'{int((exp-time.time())/60)}min'
-    log('MODERATOR', f'GAGGED "{pilot_name}" ({when}) by {by or "?"}')
-    return True
+    log('MODERATOR', f'GAGGED "{pilot_name}" ({when}, {"room " + str(room) if room is not None else "all rooms"}) by {by or "?"}')
+    return rec
 
 def clear_gag(pilot_name, by=''):
     if GAGS.pop(pilot_name.lower(), None) is not None:
+        mod_state_save()
         log('MODERATOR', f'UNGAGGED "{pilot_name}" by {by or "?"}')
         return True
     log('MODERATOR', f'ungag "{pilot_name}": was not gagged')
     return False
 
-def is_banned(pilot_name):
+def is_banned(pilot_name, room=None):
+    """Active ban record that bars `pilot_name` from `room` (None = from everything / the server)."""
     if not pilot_name: return None
     rec = BANS.get(pilot_name.lower())
     if not rec: return None
     if rec['until'] <= time.time():
-        BANS.pop(pilot_name.lower(), None); return None
+        BANS.pop(pilot_name.lower(), None); mod_state_save(); return None
+    if rec.get('room') is not None and room is not None and rec['room'] != room:
+        return None                       # banned from another arena only
+    if rec.get('room') is not None and room is None:
+        return None                       # a room ban does not bar the lobby / pilot select
     return rec
 
+def set_ban(pilot_name, hours, by='', room=None, msg=None):
+    """Record a ban (room=None -> every arena). hours 0 = soft boot: nothing recorded. Returns the record or None."""
+    exp = _dur_to_expiry(hours)
+    if exp <= time.time():
+        return None
+    rec = {'until': exp, 'by': by or '?', 'room': room, 'msg': msg}
+    BANS[pilot_name.lower()] = rec; mod_state_save()
+    when = 'open-ended' if exp == math.inf else f'{int((exp-time.time())/60)}min'
+    log('MODERATOR', f'BANNED "{pilot_name}" ({when}, {"room " + str(room) if room is not None else "ALL arenas"}) by {by or "?"}'
+                     f'{" reason=" + repr(msg) if msg else ""}')
+    return rec
+
+def clear_ban(pilot_name, by=''):
+    if BANS.pop(pilot_name.lower(), None) is not None:
+        mod_state_save()
+        log('MODERATOR', f'UNBANNED "{pilot_name}" by {by or "?"}')
+        return True
+    log('MODERATOR', f'unban "{pilot_name}": was not banned')
+    return False
+
 def _mod_name_and_dur(body):
-    """Parse the 41B gag/ungag payload: [0]=op [1:33]=ASCIIZ name [33:37]=i32 dur."""
+    """Parse the 41B ban/gag record: [0]=op [1:33]=ASCIIZ name [33:37]=A scope [37:41]=B hours.
+    Returns (name, hours, scope_all) with hours -1 = release."""
     name = body[1:33].split(b'\x00')[0].decode('ascii', 'replace') if len(body) >= 33 else ''
-    dur = struct.unpack_from('<i', body, 33)[0] if len(body) >= 37 else -1
-    return name, dur
+    a = struct.unpack_from('<i', body, 33)[0] if len(body) >= 37 else -1
+    b = struct.unpack_from('<i', body, 37)[0] if len(body) >= 41 else -1
+    return name, b, (a == 0)
+
+def send_mod_notice(target, op, minutes, label=''):
+    """The client's own ban / gag notice: [0x55|0x56][u32 minutes]. In-game clients take the appspace
+    frame (build_ingame_pkt, exact length), lobby clients the typed frame."""
+    try:
+        body = bytes([op & 0xff]) + struct.pack('<I', max(0, int(minutes)) & 0xffffffff)
+        pkt = build_ingame_pkt(body) if getattr(target, 'entered_game', False) else build_appspace_pkt(body)
+        return send_rel(target, pkt, f'<- MOD {"BAN" if op == 0x55 else "GAG"} notice {minutes} min {label}', to=3.0)
+    except Exception:
+        logx('MODERATOR', 'mod notice send failed'); return False
+
+def _sessions_named(name, room=None):
+    low = (name or '').lower()
+    out = []
+    for x in get_all_sessions():
+        if (getattr(x, 'current_pilot', None) or '').lower() != low:
+            continue
+        if room is not None and getattr(x, 'current_room', None) != room and getattr(x, 'entered_game', False):
+            continue
+        out.append(x)
+    return out
+
+def mod_gag(name, hours, by, room=None, scope_all=False):
+    """##Gag / ##GagAll (and the console): record + native notice to the live client."""
+    rec = set_gag(name, hours, by=by, room=(None if scope_all else room))
+    mins = _mod_minutes_left(rec['until']) if rec else 0
+    for t in _sessions_named(name):
+        send_mod_notice(t, 0x56, mins, f'({"all" if scope_all else "room"}, by {by})')
+    return rec is not None
+
+def mod_ungag(name, by):
+    ok = clear_gag(name, by=by)
+    for t in _sessions_named(name):
+        send_mod_notice(t, 0x56, 0, f'(ungag by {by})')
+    return ok
+
+def mod_ban(name, hours, by, room=None, scope_all=False, msg=None):
+    """##Ban (this arena) / ##BanAll (every arena) and the console ban: record (hours 0 = soft boot,
+    nothing recorded) + the native notice that makes the client's own dialog take him to the lobby."""
+    rec = set_ban(name, hours, by=by, room=(None if scope_all else room), msg=msg)
+    mins = _mod_minutes_left(rec['until']) if rec else 0
+    n = 0
+    for t in _sessions_named(name):
+        if db_get_admin_rights(getattr(t, 'current_pilot', None)):
+            log('MODERATOR', f'ban: "{name}" is a moderator - not booted'); continue
+        if getattr(t, 'entered_game', False) or scope_all:
+            if msg:
+                try: send_system_msg(t, f'Banned by {by}: {msg}')
+                except Exception: pass
+            send_mod_notice(t, 0x55, mins, f'({"all arenas" if scope_all else "this arena"}, by {by})'); n += 1
+    log('MODERATOR', f'ban "{name}" {hours}h {"ALL" if scope_all else f"room {room}"} by {by}: notice -> {n} live session(s)')
+    return rec is not None or hours == 0
+
+def mod_unban(name, by):
+    return clear_ban(name, by=by)
+
+def mod_gag_room(room, hours, by, release=False):
+    """##GagRoom / ##UnGagRoom: everyone in the room without moderator rights."""
+    n = 0
+    for t in get_sessions_in_room(room):
+        p = getattr(t, 'current_pilot', None)
+        if not p or db_get_admin_rights(p):
+            continue
+        if release:
+            clear_gag(p, by=by); send_mod_notice(t, 0x56, 0, f'(ungag room by {by})')
+        else:
+            rec = set_gag(p, hours, by=by, room=room)
+            send_mod_notice(t, 0x56, _mod_minutes_left(rec['until']) if rec else 0, f'(gag room by {by})')
+        n += 1
+    log('MODERATOR', f'{"UNGAG" if release else "GAG"} ROOM {room} by {by}: {n} player(s)')
+    return n
 
 def enact_mod_action(s, op, body):
     """Apply the self-testable moderator actions server-side. `body` is opcode-first.
@@ -1008,17 +1163,39 @@ def enact_mod_action(s, op, body):
     by = getattr(s, 'current_pilot', None) or '?'
     room = getattr(s, 'current_room', None)
     try:
-        if op == 0x55:                         # GAG (per design decision; NOT ban)
-            name, dur = _mod_name_and_dur(body)
-            if name: set_gag(name, dur, by=by)
-        elif op == 0x56:                       # UNGAG
-            name, _ = _mod_name_and_dur(body)
-            if name: clear_gag(name, by=by)
+        if op == 0x55:                         # v950f5: BAN family - Ban / BanAll (hours >= 0), UnBan / UnBanAll (-1)
+            name, hours, scope_all = _mod_name_and_dur(body)
+            if not name:
+                log('MODERATOR', f'ban-family record without a name from {by} - ignored')
+            elif hours < 0:
+                mod_unban(name, by)
+            else:
+                mod_ban(name, hours, by, room=room, scope_all=scope_all)
+        elif op == 0x56:                       # v950f5: GAG family - Gag / GagAll / UnGag / UnGagAll / GagRoom / UnGagRoom
+            name, hours, scope_all = _mod_name_and_dur(body)
+            if not name:
+                mod_gag_room(room, hours, by, release=(hours < 0))
+            elif hours < 0:
+                mod_ungag(name, by)
+            else:
+                mod_gag(name, hours, by, room=room, scope_all=scope_all)
+        elif op == 0x57:                       # v950f5: ##ResetGame -> the arena reset (announce, countdown, boot, rebuild)
+            if room is not None:
+                log('MODERATOR', f'RESETGAME room {room} by {by}')
+                arena_reset(room, winner_camp=None, reason='(##ResetGame)', by=by)
+        elif op == 0x85:                       # v950f5: ##EnableFlyButton = join enable
+            _JOIN_DISABLED.pop(room, None)
+            log('MODERATOR', f'JOIN ENABLED (EnableFlyButton) in room {room} by {by}')
+            room_system_msg(room, 'Joining is enabled again.')
+        elif op == 0x8b:                       # ClearScores: not modelled (scores are the ladder's) - logged
+            log('MODERATOR', f'CLEARSCORES from {by} in room {room} - not implemented (arena scores live in the ladder)')
         elif op == 0x5f:                       # Join enable(0)/disable(1)
             disabled = bool(body[1]) if len(body) > 1 else False
             if disabled: _JOIN_DISABLED[room] = True
             else:        _JOIN_DISABLED.pop(room, None)
             log('MODERATOR', f'JOIN {"DISABLED" if disabled else "ENABLED"} in room {room} by {by}')
+            if room is not None:                   # v950f5: tell the room (the Fly ask is refused while disabled)
+                room_system_msg(room, 'Joining is disabled by the host.' if disabled else 'Joining is enabled again.')
         elif op == 0x62:                       # AllChat on(1)/off(0)
             on = bool(body[1]) if len(body) > 1 else False
             _ALLCHAT[room] = on
@@ -1122,18 +1299,13 @@ def enact_plane_destroy(s, body, by_index=True):
     if not onum:
         log('MODERATOR', f'destroy {cmd}: target "{target.current_pilot}" has no live plane object')
         return
-    if sub == 0x02:
-        # nofuelp is NOT a destroy - it drains fuel, a different mechanism with no type-3 form.
-        # Not wired yet; log so it is visible rather than silently mis-handled as a delete.
-        log('MODERATOR', f'nofuelp on "{target.current_pilot}" not implemented (fuel-drain, not a delete)')
-        return
     exit_byte = MOD_DESTROY_EXIT.get(sub)
     _self = (target is s)
     # v527f5 [NATIVE RELAY]: see MOD_DESTROY_RELAY_NATIVE. Forward the action to the TARGET's own
     # client in the exact wire shape it emits itself ('out 127'4' = [7f][idx u16][sub], appspace
     # T=0x42 bc=0) and let FA.exe run the death natively. Nothing else is sent: if the client
     # honours it, its own death report drives the normal kill chain to every peer.
-    if MOD_DESTROY_RELAY_NATIVE and sub in (0x01, 0x03, 0x04):
+    if MOD_DESTROY_RELAY_NATIVE and sub in (0x01, 0x02, 0x03, 0x04):    # v950f5: nofuelp (0x02) rides the same native relay ('You are out of fuel')
         _tpi = getattr(target, 'player_index', None)
         if _tpi is None:
             log('MODERATOR', f'{cmd} native-relay: target "{target.current_pilot}" has no '
@@ -1148,6 +1320,9 @@ def enact_plane_destroy(s, body, by_index=True):
                              f'(idx={_tpi}) - client executes the death itself; no server delete '
                              f'sent [v527f5]')
             return
+    if sub == 0x02:                                   # v950f5: nothing but the native relay can drain fuel - never a delete
+        log('MODERATOR', f'nofuelp on "{target.current_pilot}": no player_index for the native relay - not applied')
+        return
     recipients = [x for x in get_sessions_in_room(room) if getattr(x, 'flying', False) or x is target]
     if target not in recipients:
         recipients.append(target)
@@ -1216,6 +1391,31 @@ def is_reserved_name(name):
         return False
     low = name.lower()
     return any(tag.lower() in low for tag in RESERVED_TAGS)
+
+def _ban_boot_if_barred(s, pilot_name):
+    """v950f5: arena entry by a pilot under a ban (room or all-arena). The 201 grant cannot be
+    refused cleanly (ClientNumber < 0 = 'keep polling'), so the entry is granted and, once the
+    client is in, the native 0x55 notice puts up its 'You are banned for N minutes' dialog and
+    takes it back to the lobby by itself - the 2009 experience."""
+    try:
+        rec = is_banned(pilot_name, getattr(s, 'current_room', None)) or is_banned(pilot_name)
+        if not rec or db_get_admin_rights(pilot_name):
+            return False
+        mins = _mod_minutes_left(rec['until'])
+        log('MODERATOR', f'BAN-BLOCK "{pilot_name}" entered room {s.current_room} while banned '
+                         f'({"this arena" if rec.get("room") is not None else "all arenas"}, {mins} min left) -> native boot')
+        def _boot(_s=s, _m=mins, _why=rec.get('msg')):
+            time.sleep(2.0)
+            if getattr(_s, 'closing', False) or not getattr(_s, 'entered_game', False):
+                return
+            if _why:
+                send_system_msg(_s, f'You are banned: {_why}')
+            send_mod_notice(_s, 0x55, max(1, _m), '(entry while banned)')
+        threading.Thread(target=_boot, daemon=True).start()
+        return True
+    except Exception:
+        logx('MODERATOR', 'ban boot on entry failed')
+        return False
 
 def _enforce_ban_on_select(s, pilot_name):
     """If the just-selected pilot is under an active ban, kick the session. Returns True if the
@@ -5391,7 +5591,22 @@ def console_handler():
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: groups <pilot> | groups probe <pilot> f0 f1 f2 f3 mission uc n')
             elif cmd == 'kick':
-                # v649f5/v650f5: kick <pilot> [87|74|47|48] [text]  - 87 (default) = graceful remove to the lobby
+                # v950f5: kick <pilot> [text] - the 2004 'soft boot' (##Ban 0): the client's own ban dialog
+                # ('You are banned. You can reenter this game right after exiting.') takes him to the lobby;
+                # nothing is recorded, he can come straight back. Probe forms moved to `kickprobe`.
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                try:
+                    _name = _a[0]; _txt = _a[1] if len(_a) > 1 else ''
+                    _live = _sessions_named(_name)
+                    if not _live:
+                        log('CONSOLE', f'kick: pilot {_name!r} not online')
+                    else:
+                        mod_ban(_name, 0, 'console', room=None, scope_all=True, msg=_txt or None)
+                        log('CONSOLE', f'kick: soft boot sent to {_name} ({len(_live)} session(s))')
+                except IndexError:
+                    log('CONSOLE', 'usage: kick <pilot> [text]')
+            elif cmd == 'kickprobe':
+                # v649f5/v650f5: kickprobe <pilot> [87|74|47|48] [text]  - 87 (default) = graceful remove to the lobby
                 # (FA MISSION::ShutDown 'game reset' path, session stays connected); 74 = 'AI client has
                 # finished the game, please choose another game' (events). 47/48 = custom-text variants,
                 # STILL UNSAFE (47 CTD 09-12) - handlers to be defined before use.
@@ -5414,7 +5629,7 @@ def console_handler():
                         send_rel(_t, _pkt, f'<- KICK probe msg {_m} to {_name}', to=3.0)
                         log('CONSOLE', f'kick: msg {_m} sent to {_name} ({_body[:8].hex()}...) - watch the client')
                 except (IndexError, ValueError) as e:
-                    log('CONSOLE', f'usage: kick <pilot> <74|87|47|48> [text]  ({e})')
+                    log('CONSOLE', f'usage: kickprobe <pilot> <74|87|47|48> [text]  ({e})')
             elif cmd == 'boot':
                 # v648f5: boot <pilot> [text]  - the 2009 soft boot: EShutDown with text (counter -> orderly exit)
                 _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
@@ -5437,14 +5652,20 @@ def console_handler():
                     log('CONSOLE', 'usage: broadcast <text>')
             elif cmd == 'say':
                 # v646f5: say <room|all> <text>  - yellow server system message (vcnc 0xc9)
+                # v950f5 (sysop report: 'say no longer broadcasts the flashing message'): say = the yellow
+                # system line AND the ~10 s on-screen banner (msg-20 channel 4) for the in-game clients.
                 _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
                 try:
                     _tgt, _txt = _a[0], _a[1]
                     if _tgt == 'all':
                         _n = sum(1 for p in get_all_sessions() if send_system_msg(p, _txt))
-                        log('CONSOLE', f'say: -> {_n} session(s)')
+                        _b = broadcast_everyone(_txt, src='console say')
+                        log('CONSOLE', f'say: system line -> {_n} session(s), banner -> {_b}')
                     else:
-                        room_system_msg(int(_tgt, 0), _txt)
+                        _rid = int(_tgt, 0)
+                        room_system_msg(_rid, _txt)
+                        _b = room_banner(_rid, _txt)
+                        log('CONSOLE', f'say: room {_rid} banner -> {_b}')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: say <room|all> <text>')
             elif cmd == 'vcnc':
@@ -5503,56 +5724,57 @@ def console_handler():
                 for _p, _acct, _r in _rows:
                     _on = any(getattr(x,'current_pilot',None) == _p for x in get_all_sessions())
                     log('CONSOLE', f'  {_p}  account={_acct}  rights={_r}  {"[ONLINE]" if _on else ""}')
-            elif cmd == 'ban':
-                # Console-only room/server BAN (##Ban is indistinguishable from ##Gag on the wire,
-                # so real removal lives here).
-                # Usage: ban <pilot> [hours] [message...]
-                #   hours is optional: omitted/0 = open-ended, else N (max 12). If the token after
-                #   the pilot name is NOT numeric it is treated as the first word of the message,
-                #   so `ban Bob spamming` works (open ban, reason 'spamming') as does
-                #   `ban Bob 2 team killing` (2h ban, reason 'team killing').
+            elif cmd in ('ban', 'banall'):
+                # v950f5: ban|banall <pilot> [hours] [message...] - the ##BanAll of the 2004 sysop sheet: the
+                # client's own ban dialog takes him to the lobby and every arena entry is refused for N hours
+                # (omitted = open-ended, 0 = soft boot, max 12). A non-numeric token after the name starts the
+                # message: `ban Bob spamming` / `ban Bob 2 team killing`.
                 _a = parts[1].split() if len(parts) > 1 else []
                 if not _a:
-                    log('CONSOLE', 'Usage: ban <pilot_name> [hours] [message...]  (omit/0 hours = open, max 12)')
+                    log('CONSOLE', f'Usage: {cmd} <pilot_name> [hours] [message...]  (omit = open-ended, 0 = soft boot, max {MOD_MAX_HOURS})')
                 else:
-                    _pilot = _a[0]
-                    _rest = _a[1:]
-                    _hrs = -1
+                    _pilot = _a[0]; _rest = _a[1:]; _hrs = -1
                     if _rest and _rest[0].lstrip('-').isdigit():
                         _hrs = int(_rest[0]); _rest = _rest[1:]
-                    _custom = ' '.join(_rest).strip()
-                    _until = _dur_to_expiry(_hrs if _hrs != 0 else -1)  # console ban never soft-boots
-                    BANS[_pilot.lower()] = {'until': _until, 'by': 'console',
-                                            'room': None, 'msg': _custom or None}
-                    _live = [x for x in get_all_sessions() if getattr(x,'current_pilot',None) == _pilot]
-                    _when = 'open-ended' if _until == math.inf else f'{int((_until-time.time())/3600)}h'
-                    if _custom:
-                        _msg = f'You have been banned by a sysop ({_when}): {_custom}'
-                    else:
-                        _msg = f'You have been banned by a sysop ({_when}).'
-                    for _s in _live: kick_session(_s, reason='banned by sysop', notice=_msg)
-                    log('CONSOLE', f'BANNED "{_pilot}" ({_when})'
-                                   f'{" reason=" + repr(_custom) if _custom else ""}; '
-                                   f'kicked {len(_live)} live session(s)')
-            elif cmd == 'unban':
-                if len(parts) < 2: log('CONSOLE', 'Usage: unban <pilot_name>')
+                    _custom = ' '.join(_rest).strip() or None
+                    mod_ban(_pilot, _hrs, 'console', room=None, scope_all=True, msg=_custom)
+                    _live = _sessions_named(_pilot)
+                    log('CONSOLE', f'BANNED "{_pilot}" ({"open-ended" if _hrs < 0 else (f"{_hrs}h" if _hrs else "soft boot")})'
+                                   f'{" reason=" + repr(_custom) if _custom else ""}; native boot -> {len(_live)} live session(s)')
+            elif cmd in ('unban', 'unbanall'):
+                if len(parts) < 2: log('CONSOLE', f'Usage: {cmd} <pilot_name>')
                 else:
                     _pilot = parts[1].strip()
-                    if BANS.pop(_pilot.lower(), None) is not None:
-                        log('CONSOLE', f'UNBANNED "{_pilot}"')
-                    else:
-                        log('CONSOLE', f'"{_pilot}" was not banned')
+                    log('CONSOLE', f'UNBANNED "{_pilot}"' if mod_unban(_pilot, 'console') else f'"{_pilot}" was not banned')
+            elif cmd in ('gag', 'gagall'):
+                # v950f5: gag|gagall <pilot> [hours] - mute everywhere (default 1 h, max 12); the client locks its input
+                _a = parts[1].split() if len(parts) > 1 else []
+                if not _a:
+                    log('CONSOLE', f'Usage: {cmd} <pilot_name> [hours]  (default 1, max {MOD_MAX_HOURS})')
+                else:
+                    _pilot = _a[0]
+                    try: _hrs = int(_a[1]) if len(_a) > 1 else 1
+                    except ValueError: _hrs = 1
+                    _ok = mod_gag(_pilot, _hrs if _hrs > 0 else 1, 'console', room=None, scope_all=True)
+                    log('CONSOLE', f'GAGGED "{_pilot}" {_hrs}h everywhere; notice -> {len(_sessions_named(_pilot))} live session(s)' if _ok else f'gag "{_pilot}": no-op')
+            elif cmd in ('ungag', 'ungagall'):
+                if len(parts) < 2: log('CONSOLE', f'Usage: {cmd} <pilot_name>')
+                else:
+                    _pilot = parts[1].strip()
+                    log('CONSOLE', f'UNGAGGED "{_pilot}"' if mod_ungag(_pilot, 'console') else f'"{_pilot}" was not gagged')
             elif cmd == 'bans':
                 if not BANS: log('CONSOLE', 'No active bans')
                 for _p, _rec in list(BANS.items()):
                     _rem = 'open' if _rec['until'] == math.inf else f'{int((_rec["until"]-time.time())/60)}min'
                     _r = f'  reason={_rec["msg"]!r}' if _rec.get('msg') else ''
-                    log('CONSOLE', f'  {_p}  until={_rem}  by={_rec["by"]}{_r}')
+                    _sc = 'ALL arenas' if _rec.get('room') is None else f'room {_rec["room"]}'
+                    log('CONSOLE', f'  {_p}  until={_rem}  {_sc}  by={_rec["by"]}{_r}')
             elif cmd == 'gags':
                 if not GAGS: log('CONSOLE', 'No active gags')
-                for _p, _exp in list(GAGS.items()):
-                    _rem = 'open' if _exp == math.inf else f'{int((_exp-time.time())/60)}min'
-                    log('CONSOLE', f'  {_p}  {_rem}')
+                for _p, _rec in list(GAGS.items()):
+                    _rem = 'open' if _rec['until'] == math.inf else f'{int((_rec["until"]-time.time())/60)}min'
+                    _sc = 'all rooms' if _rec.get('room') is None else f'room {_rec["room"]}'
+                    log('CONSOLE', f'  {_p}  {_rem}  {_sc}  by={_rec.get("by")}')
             elif cmd == 'list':
                 accounts = db_get_all_accounts()
                 if not accounts: log('CONSOLE', 'No accounts in DB')
@@ -6586,18 +6808,57 @@ def console_handler():
             elif cmd == 'logtags':
                 log('CONSOLE', f'muted tags: {_falog.list_muted() or "(none)"}')
             elif cmd == 'help':
-                log('CONSOLE', 'gen <name>  - generate ticket for new account')
-                log('CONSOLE', 'say <message> - announce to ALL players (every arena: chat + 10s banner; lobby: Server chat)')
-                log('CONSOLE', 'list        - show all accounts and their pilots')
-                log('CONSOLE', 'destroy <sceneIdx> [camp] [progress] - fire msg 36 SCENE DESTROY to in-game players')
-                log('CONSOLE', 'repair <obj|all|status> [room] [force] - v556f5 restore dead ground objects (msg 30) / list clocks')
-                log('CONSOLE', 'radar <room> | radar who <pilot> - v949f5 radar-failure gate: antennas + state / who holds or hides his plane')
-                log('CONSOLE', 'clock <room> [reset] - v949f5 the arena world clock (start -> now) / re-base it to the start time')
-                log('CONSOLE', 'tank column <class> <n> (<x> <y>|scene <idx>) [camp] | tank cgoto <grp> ... [m/s] | cstop|cdel <grp> - v570f5 columns')
-                log('CONSOLE', 'resupply [flags] [amount] [amt2] [b1] [b2] - send msg 60 supply grant (in-world rearm/refuel)')
-                log('CONSOLE', 'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control')
-                log('CONSOLE', 'update      - git pull the server dir + restart (only if there are new commits)')
-                log('CONSOLE', 'restart     - restart the CURRENT build now (no git pull); warns players first')
+                # v950f5: the complete list (sysop report: 'help not showing all available commands')
+                _h = (parts[1].strip().lower() if len(parts) > 1 else '')
+                _HELP = [
+                    ('MODERATION', [
+                        'kick <pilot> [text]               - soft boot: his own ban dialog takes him to the lobby, he can return at once',
+                        'ban|banall <pilot> [hours] [msg]  - boot + no arena entry for N hours (omit = open, 0 = soft, max 12)',
+                        'unban|unbanall <pilot>            - lift a ban          bans - list active bans',
+                        'gag|gagall <pilot> [hours]        - mute everywhere (default 1 h); his chat input locks',
+                        'ungag|ungagall <pilot>            - unmute              gags - list active gags',
+                        'mod <pilot> [rights] | unmod <pilot> | mods - moderator rights (##commands in game)',
+                        'say <room|all> <text>             - yellow system line + 10 s on-screen banner',
+                        'broadcast <text>                  - server-wide banner (in-game) + Server chat (lobby)',
+                        'boot <pilot> [text]               - EShutDown with text (client exits the game)',
+                        'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
+                        'modact ...                        - moderator-action probes (dev)',
+                    ]),
+                    ('ACCOUNTS / ROOMS', [
+                        'gen <name>                        - generate a ticket for a new account',
+                        'list                              - all accounts and their pilots',
+                        'reset <room> [winner_camp]        - arena reset (announce, countdown, boot, rebuild)',
+                        'clearrooms | reopen <room> | cleanup - room table housekeeping',
+                        'news <pilot> [form] | news probe ... | news reload - lobby news',
+                        'clock <room> [reset]              - the arena world clock (start -> now) / re-base it',
+                    ]),
+                    ('TERRITORIAL COMBAT', [
+                        'tc status | tc trigger <scene> [room] | tc reset | tc rearm <scene> [room] | tc assault ... | tc class <camp> <id>',
+                        'tank column <class> <n> (<x> <y>|scene <idx>) [camp] | tank cgoto <grp> ... | tank cstop|cdel <grp>',
+                        'train <road> <node> [wagons] [camp] | train speed|del|list|knobs ...',
+                        'repair <obj|all|status> [room] [force] - restore dead ground objects / list repair clocks',
+                        'destroy <sceneIdx> [camp] [progress]   - fire msg 36 scene destroy',
+                        'resupply [flags] [amount] [amt2] [b1] [b2] | supply ... | production ... | prodinfo | campscore',
+                        'cargo ... | chute ... | groups ... | panelprobe [on|off] | mapobj probe <pilot> <camp> <kind> [alt]',
+                        'radar <room> | radar who <pilot>  - radar-failure gate: antennas + state / who holds or hides his plane',
+                        'autopve on|off | evp ... | corr ...',
+                    ]),
+                    ('DIAGNOSTICS', [
+                        'gamedef dump <room> | snapshot ... | weaponmap ... | probe ... | idscan ... | desync ... | trace ... | rxtrace ... | tick ... | clocks | rec ... | vcnc <pilot> <cmd hex> [payload]',
+                        'loglevel console <LVL> | logmute <TAG> | logunmute <TAG> | logtags - logging control',
+                        'update                            - git pull + restart (only with new commits)',
+                        'restart                           - restart the current build now (warns players first)',
+                    ]),
+                ]
+                for _sec, _lines in _HELP:
+                    if _h and _h not in _sec.lower() and not any(_h in l.lower() for l in _lines):
+                        continue
+                    log('CONSOLE', f'--- {_sec} ---')
+                    for l in _lines:
+                        if not _h or _h in l.lower() or _h in _sec.lower():
+                            log('CONSOLE', '  ' + l)
+                if not _h:
+                    log('CONSOLE', 'help <word> filters the list. In-game (moderators): ##Ban/##BanAll/##Gag/##GagAll <pilot> <hours>, ##UnBan/##UnBanAll/##UnGag/##UnGagAll <pilot>, ##GagRoom/##UnGagRoom, ##JoinDisable/##JoinEnable, ##ResetGame, ##GSM <pilot> <text>, ##killp/##ejectp/##crumblep/##nofuelp <pilot>')
             else: log('CONSOLE', f'Unknown command "{cmd}". Type "help".')
         except Exception:
             logx('CONSOLE', f'command failed: {line!r}')
@@ -6636,6 +6897,10 @@ def identify_account_from_syn(syn_data):
 # --- Startup ------------------------------------------------------------------
 
 init_db(); init_rooms_db(); load_ticket_template()
+try:
+    mod_state_load()                      # v950f5: bans / gags survive a restart
+except Exception:
+    logx('MODERATOR', 'mod_state_load failed')
 migrate_stored_gamedefs_repair_rate()   # v453f5: bake BuildingsRepairRate=0 into stored arenas
 for _a, _p, *_ in db_get_all_accounts():
     log('DB', f'account="{_a}" pid={_p} pilots={[n for n,_ in db_get_pilots(_a)]}')
@@ -8276,7 +8541,7 @@ def reflect_chat_20(s, channel, text, player_index=0):
     # v304 GAG: a gagged sender's chat is dropped at the server (the authoritative reflect point).
     # We swallow silently rather than bouncing an error, matching how the retail server behaved -
     # the gagged player sees their own text vanish. Moderators (rights!=0) are never gagged.
-    if is_gagged(getattr(s, 'current_pilot', None)) and not sess_rights(s):
+    if is_gagged(getattr(s, 'current_pilot', None), room) and not sess_rights(s):
         log('MODERATOR', f'GAG-DROP chat from "{s.current_pilot}": {disp!r}')
         return
     room_players = get_sessions_in_room(room) if room is not None else []
@@ -15563,6 +15828,22 @@ def send_system_msg(s, text):
     except Exception:
         logx('SYSMSG', 'send failed'); return False
 
+def room_banner(room_id, text):
+    """v950f5: the ~10 s on-screen banner (msg-20 channel 4, the server announce form) to every in-game
+    client of one room. Returns the recipient count."""
+    n = 0
+    text = str(text).strip()[:ANNOUNCE_MAX_CHARS]
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        try:
+            _pi = getattr(p, 'player_index', 0) or 0
+            _submit_send(send_rel, p, build_chat_display_20(4, text, player_index=_pi), f'<- room banner (ch4, PI={_pi})', to=3.0)
+            n += 1
+        except Exception:
+            pass
+    return n
+
 def room_system_msg(room_id, text, camp=None):
     n = 0
     for p in get_sessions_in_room(room_id):
@@ -21535,6 +21816,14 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
     # drop the rest (the client only expects ONE StartPlaceList per ask; its own
     # RealSendAskStartPlace re-fires later if it truly got no usable reply). Keyed on
     # (af,mid,n,reply_sub) so a genuine airfield change or TAB to a new spot is NOT suppressed.
+    # v950f5 [##JoinDisable ENFORCED]: while the room is join-disabled a non-moderator's Fly ask is not
+    # granted (the client re-asks by itself, RealSendAskStartPlace); he is told once per 10 s.
+    if _JOIN_DISABLED.get(getattr(s, 'current_room', None)) and not sess_rights(s):
+        if time.time() - s.__dict__.get('_join_refused_at', 0.0) > 10.0:
+            s.__dict__['_join_refused_at'] = time.time()
+            send_system_msg(s, 'Joining is disabled by the host - please wait.')
+            log('MODERATOR', f'{s.current_pilot}: Fly ask refused - room {s.current_room} is join-disabled')
+        return
     _ask_key = (af, mid, n, reply_sub)
     _now_ask = time.time()
     _last_ask = s.__dict__.get('_last_sp_ask')
@@ -22345,6 +22634,11 @@ def _handle_chat_pl(s, pl):
         reconstructed = (chr(slot_char) + rest) if 0x20 <= slot_char <= 0x7e else rest
         sender = s.current_pilot or reconstructed
     msg, _nh = chat_filter(msg, who=sender)          # v780f5: word filter (lobby path)
+    # v950f5: a GagAll (all rooms) silences the lobby too; a room gag does not (the lobby is not a room)
+    _grec = GAGS.get((sender or '').lower())
+    if _grec and _grec.get('room') is None and _grec['until'] > time.time() and not sess_rights(s):
+        log('MODERATOR', f'GAG-DROP lobby chat from "{sender}": {msg!r}')
+        return
     log('CHAT', f'[{sender}]: {msg!r}')
     bcast = build_chat_broadcast(sender, msg)
     sessions = get_all_sessions()
@@ -22667,6 +22961,7 @@ def handle_compound(s, outer_cmd, pl):
         s.entering_gidx = game_idx
         s.nation = None                       # enters "In Menu" until a side is picked
         assign_player_slot(s, s.current_room)
+        _ban_boot_if_barred(s, pname)         # v950f5
         log('COMPOUND', f'SendEnterToGame (compound) pilot="{pname}" gidx=0x{game_idx:08x} '
                         f'room={s.current_room} -> GAME MODE, NOT echoed')
         # Same entry GRANT as the direct path: reply msg 201 (0xc9) JoinToGameAnswer.
@@ -29655,6 +29950,7 @@ def handle_post_auth(s, cmd, pl):
             s.nation = None                   # enters "In Menu" until a side is picked
             assign_player_slot(s, s.current_room)
             log('POST-AUTH', 'GAME MODE - will answer 0x43 game-connect poll (not echoing 200)')
+            _ban_boot_if_barred(s, pname)       # v950f5: a banned pilot is granted, then his own client's ban dialog takes him out
             # Send the real entry GRANT: msg 201 (0xc9) JoinToGameAnswer. ClientNumber and
             # PlayerIndex are the room-scoped slot (both >= 0 -> grant). This stops the
             # 0x43 poll and moves the client into the arena (handler FUN_004f88f0).
@@ -29708,6 +30004,7 @@ def handle_post_auth(s, cmd, pl):
             s.entered_game = True
             s.__dict__.pop('_motd_room', None)  # v893f5
             log('POST-AUTH', 'GAME MODE (wrapped VNET) - stopping 0x43, not echoing')
+            _ban_boot_if_barred(s, pname)        # v950f5
             return
 
         # -- SCAN-INNER PACKET DETECTION ------------------------------------------

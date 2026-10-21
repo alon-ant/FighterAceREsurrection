@@ -4,7 +4,7 @@ Documentation of the moderator/sysop system as currently enabled on the LAN serv
 (`fa with web server.py`). Covers how rights are granted, the in-game `##` commands, and
 the server-console commands.
 
-Last updated for server **v307**.
+Last updated for server **v950f5**.
 
 ---
 
@@ -56,95 +56,70 @@ all reverse-engineered from `FA.exe`, cooperate:
 
 ## 3. In-game `##` commands (issued by a moderator in chat)
 
-A moderator (a pilot with `admin_rights != 0`) types these in the game chat. The client
-sends a packet to the server, which re-validates rights and acts.
+A moderator (a pilot with `admin_rights != 0`) types these in the game chat. The client sends
+a packet to the server, which re-validates rights and acts. **v950f5 rewrote this layer** after
+the wire was re-read from the client's own command handlers (see change.log v950f5).
+
+### The wire (for the record)
+
+All ban/gag commands send one 41-byte record `[op][name 32 B][A i32][B i32]`:
+
+| | meaning |
+| --- | --- |
+| `op` | `0x55` = **BAN family**, `0x56` = **GAG family** |
+| `name` | the target; **empty = the whole room** (`##GagRoom` / `##UnGagRoom`) |
+| `A` | `-1` = this room only (`##Ban`, `##Gag`), `0` = all rooms (`##BanAll`, `##GagAll`) |
+| `B` | hours to apply (`0` = soft boot), `-1` = release (`##UnBan`, `##UnGag` …) |
+
+The server answers with the client's **native notices** on the same opcodes, `[op][u32 minutes]`:
+`0x56` locks the target's chat input and prints *You are gagged for N minutes* (0 = *You are
+ungagged*); `0x55` puts up the client's own *You are banned for N hour(s) M minute(s)* dialog
+(0 = *You are banned. You can reenter this game right after exiting.*) and takes it back to the
+lobby. No session is killed — that is how the 2009 host did it.
 
 ### Enabled and enforced
 
-| In-game command | Server effect | Notes |
-| --- | --- | --- |
-| `##Gag <player>` | Mutes the target's chat server-side. | See collision note below. |
-| `##Ungag <player>` | Clears the mute. | |
-| `##JoinDisable` | Marks the current room as join-disabled (Fly-Now suppressed). | Tracked server-side. |
-| `##JoinEnable` | Clears join-disable for the room. | |
-| `##AllChatOn` / `##AllChatOff` | Records the all-chat toggle for the room. | |
+| In-game command | Effect |
+| --- | --- |
+| `##Gag <player> <hours>` | Mute in **this arena** for N hours (max 12). Input locked on the client, lines dropped by the server. |
+| `##GagAll <player> <hours>` | Mute **everywhere** (every arena and the lobby). |
+| `##UnGag <player>` / `##UnGagAll <player>` | Lift the gag; the client is told *You are ungagged*. |
+| `##GagRoom` / `##UnGagRoom` | Gag (1 h) / ungag every non-moderator currently in the room. |
+| `##Ban <player> <hours>` | Native boot to the lobby + no re-entry to **this arena** for N hours. `0` = soft boot (can return at once). |
+| `##BanAll <player> <hours>` | Native boot + no entry to **any arena** for N hours (also kicked at pilot select). |
+| `##UnBan <player>` / `##UnBanAll <player>` | Lift the ban. |
+| `##JoinDisable` / `##JoinEnable` (also `##EnableFlyButton`) | While disabled a non-moderator's Fly ask is refused (*Joining is disabled by the host*); the room is told either way. |
+| `##ResetGame` | Runs the arena reset (announce, countdown, boot, rebuild). |
+| `##AllChatOn` / `##AllChatOff` | Recorded for the room. |
+| `##killp` / `##ejectp` / `##crumblep` / `##nofuelp <player>` | Relayed natively to the target's client, which runs the death / bail-out / fuel loss itself. |
+| `##GSM <player> <text>` | Private global message (relayed). |
 
-**Gag behavior:** a gagged player's chat is dropped at the server's authoritative reflect
-point, so it never reaches anyone (the player sees their own text vanish, matching retail
-behavior). **Moderators are never gaggable.** Duration from the command: `0` = soft/no-op,
-open-ended, or up to a documented **12-hour** maximum.
+A banned pilot who enters a barred arena is granted the entry (the join grant cannot be refused
+cleanly) and two seconds later his own ban dialog takes him out again. **Moderators are never
+gagged or booted.** Bans and gags persist in `moderation_state.json` across restarts.
 
-### The `##Ban` / `##Gag` wire collision (important)
+### Not modelled
 
-`##Ban` and `##Gag` send the **byte-identical** packet (opcode `0x55`, same layout). The
-server physically cannot tell them apart. By design decision, **inbound `0x55` is treated
-as GAG**. Therefore:
-
-- **In-game `##Ban` currently acts as a gag (chat mute), not a room ban.**
-- **Real bans come from the server console** (see §4).
-
-### Logged but not yet enacted (relay-only)
-
-These target a **remote** client and cannot be validated on a single machine (the client's
-own name-resolver walks the remote roster, which excludes the moderator themselves). They
-are decoded and logged, but do not yet produce an effect:
-
-| In-game command | Wire opcode | Status |
-| --- | --- | --- |
-| `##crumblep <player>` (explode plane) | `0x80` sub `0x01` | Logged only |
-| `##nofuelp <player>` (drain fuel) | `0x80` sub `0x02` | Logged only |
-| `##ejectp <player>` (force bail) | `0x80` sub `0x03` | Logged only |
-| `##killp <player>` (kill pilot) | `0x80` sub `0x04` | Logged only |
-| `##Ghost` / `##GhostAll` | `0x8d` | Logged only |
-| `##Chime`, `##Smoke` | `0x8c` / `0x91` | Logged only |
-
-Enacting these requires the outbound plane-destroy format, which needs a two-client capture
-to complete. See §6.
+`##ClearScores` (arena scores live in the ladder), `##Ghost`/`##Chime`/`##Smoke` relay forms (logged
+only), the long 0xDA form that would show *banned for all games* in the lobby dialogs.
 
 ---
 
-## 4. Server-console moderation commands
-
-Typed at the server's console (stdin). These are the authoritative, fully-enacted actions.
-
-### Bans
+## 4. Server-console / admin-panel moderation commands
 
 | Command | Effect |
 | --- | --- |
-| `ban <pilot> [hours] [message...]` | Ban a pilot. Kicks any live session and blocks re-entry until expiry. |
-| `unban <pilot>` | Lift a ban. |
-| `bans` | List active bans (remaining time, who set it, reason). |
-
-**`ban` argument rules**
-
-- `hours` is optional. Omitted or `0` = **open-ended**; otherwise N hours, capped at 12.
-- The token after the pilot name is treated as `hours` **only if it is numeric**; otherwise
-  it becomes the first word of the message. So both of these work:
-  - `ban Bob spamming` → open-ended ban, reason "spamming"
-  - `ban Bob 2 team killing` → 2-hour ban, reason "team killing"
-- `message` is optional and shown to the banned player.
-
-**What the banned player sees**
-
-- On kick: a private system chat line, e.g.
-  `You have been banned by a sysop (2h): team killing`
-- On any reconnect + pilot-select while still banned:
-  `You are banned (Nmin remaining): team killing`
-
-The notice is delivered reliably (server waits for the client's ACK) **before** the session
-is torn down, so it renders before the connection goes quiet. Moderators are exempt from the
-ban list.
-
-> Edit note: a purely numeric pilot name would be misread as `hours`. FA pilot names are
-> never purely numeric, so this does not occur in practice.
-
-### Gags (view)
-
-| Command | Effect |
-| --- | --- |
-| `gags` | List active gags and remaining time. |
-
-(Gags themselves are applied in-game via `##Gag`; see §3.)
+| `kick <pilot> [text]` | Soft boot through the native dialog; nothing recorded, he can return at once. |
+| `ban <pilot> [hours] [message...]` / `banall …` | Native boot + no arena entry for N hours (omit = open-ended, `0` = soft boot, max 12). A non-numeric token after the name starts the message. |
+| `unban <pilot>` / `unbanall <pilot>` | Lift a ban. |
+| `bans` | Active bans with scope and remaining time. |
+| `gag <pilot> [hours]` / `gagall …` | Mute everywhere (default 1 h); the client's input locks. |
+| `ungag <pilot>` / `ungagall <pilot>` | Lift a gag. |
+| `gags` | Active gags with scope. |
+| `say <room|all> <text>` | Yellow system line **and** the ~10 s on-screen banner. |
+| `broadcast <text>` | Server-wide banner (in-game) + *Server:* chat (lobby). |
+| `boot <pilot> [text]` | EShutDown with text (the client exits the game). |
+| `help [word]` | Every console command by section; `help ban` filters. |
 
 ---
 
@@ -166,47 +141,24 @@ no create-echo is sent (so the pilot is never registered), and the player is tol
 
 ## 5. Quick reference
 
-**Console — moderation:**
-
 ```
-mod <pilot> [rights]        grant moderator rights (non-zero = full mod)
-unmod <pilot>               revoke (effective on reconnect)
-mods                        list moderators (+ online status)
-ban <pilot> [hours] [msg]   ban: kick + block re-entry + notice
-unban <pilot>               lift a ban
-bans                        list active bans
-gags                        list active gags
-```
-
-**In-game (moderator, `MyRights != 0`):**
-
-```
-##Gag <player>              mute chat (also what ##Ban maps to)
-##Ungag <player>            unmute
-##JoinDisable / ##JoinEnable    toggle Fly-Now for the room
-##AllChatOn / ##AllChatOff      toggle all-chat for the room
+console:  kick <pilot> [text] | ban|banall <pilot> [hours] [msg] | unban|unbanall <pilot> | bans
+          gag|gagall <pilot> [hours] | ungag|ungagall <pilot> | gags
+          mod <pilot> [rights] | unmod <pilot> | mods | say <room|all> <text> | broadcast <text>
+in-game:  ##Ban/##BanAll <player> <hours>   ##UnBan/##UnBanAll <player>
+          ##Gag/##GagAll <player> <hours>   ##UnGag/##UnGagAll <player>   ##GagRoom / ##UnGagRoom
+          ##JoinDisable / ##JoinEnable      ##ResetGame      ##GSM <player> <text>
+          ##killp / ##ejectp / ##crumblep / ##nofuelp <player>
 ```
 
 ---
 
-## 6. Not yet implemented
+## 6. Still open
 
-- **Plane-destroy relay** (`##crumblep` / `##killp` / `##ejectp` / `##nofuelp`): needs the
-  outbound destroy packet format, which requires a two-client capture to finalize (msg 36
-  is scene-object only and cannot target a player plane).
-- **Ghost / Chime / Smoke** relay to remote clients.
-- **Native ban dialog:** FA has a built-in `EVENT_BANNED_PLAYER` event and
-  `CAN_BANNED_DIALOGS` UI, but its text is data-driven from the packed `*.str` resource and
-  its trigger is buried in the C++ event machinery. The current chat-line notice is the
-  practical substitute.
-- **JoinDisable / AllChat enforcement:** the toggles are recorded server-side but not yet
-  wired into the actual Fly-Now / chat gating.
-- **Sysop roster section:** moderators are not yet grouped under the client's dedicated
-  "sysop" section in the roster. The client files a player there when the server reports
-  their **camp = -2** (`C_SYSOPS`; normal nations are 0..7, "In Menu" is -1). Camp rides the
-  player-object layer (msg 63, `rp->Camp()` at player+0x2c), not the `0xcc` lobby update.
-  Wiring this means emitting camp -2 for `admin_rights != 0` pilots in the roster message,
-  carefully gated so -2 never reaches nation-indexed logic. Tracked in the code TODO block.
+- **Lobby "for all games" dialogs**: the client reads GagAll/BanAll minutes from a 25-byte 0xDA
+  lobby attach (offsets +0xd / +0x11); we send the 15-byte safe form, so a globally banned pilot
+  is kicked at pilot select instead of seeing that dialog.
+- **Sysop roster section** (camp -2 for moderators) — unchanged, see the code TODO.
 
 ---
 
@@ -219,5 +171,4 @@ At the top of the moderator section in `fa with web server.py`:
 | `MODERATORS_ENABLED` | `True` | Master kill-switch for the whole moderator layer. |
 | `MOD_RIGHTS_DEFAULT` | `1` | Value written by `mod <pilot>` when no rights value is given. |
 
-Ban and gag state is held in memory (`BANS`, `GAGS`) and does not currently persist across
-a server restart.
+Ban and gag state (`BANS`, `GAGS`, with their scope) persists in `moderation_state.json`.

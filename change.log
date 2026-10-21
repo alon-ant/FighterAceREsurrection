@@ -1,3 +1,47 @@
+v950f5 [SYSOP COMMANDS: THE REAL BAN/GAG WIRE, NATIVE NOTICES, PANEL COMMANDS] (10-21)
+    * Sysop report (Alon 10-21, in-game): ##gag 'not functioning', ##gagall 'target can type', ##banall
+      'target not kicked, but muted', ##gagroom/##ungagroom/##joindisable/##resetgame/##nofuelp not working;
+      panel: help incomplete, ban/banall neither kick nor block re-entry, gag/gagall missing, say lost its
+      flashing banner, kick behaved like an account ban.
+    * ROOT CAUSE (RE of the eight client handlers, registration FUN_0046f6c0.., names from TXT\SecrCode.str):
+      the 41-byte record is [op][name 32][A i32][B i32] with op 0x55 = BAN family and 0x56 = GAG family,
+      A = -1 this room / 0 all rooms, B = hours (0 = soft boot) or -1 = release; an EMPTY name is the whole
+      room (##GagRoom = 0x56 '' -1 1, ##UnGagRoom = 0x56 '' -1 -1). v303 had read 0x55 as 'gag' and 0x56 as
+      'ungag' ('##Ban and ##Gag indistinguishable' - they never were), so ##Ban/##BanAll gagged, ##Gag/
+      ##GagAll ungagged, ##UnBanAll 'worked' only because a -1 gag is a no-op. Confirmation strings
+      0xa2a784 'will be banned' / 0xa2a7cc 'will be gaged' / 0xa2a800 'unbanned' / 0xa2a830 'ungaged'.
+    * The client has NATIVE server->client notices on the same opcodes (0xc8202c -> FUN_004ef040 ban,
+      0xc82030 -> FUN_004eef80 gag): [op][u32 MINUTES]. 0x56 stores the minutes in DAT_00caf27c, which every
+      chat dialog re-reads (input locked), prints 'You are gagged for %i minutes' / 'You are ungagged'. 0x55
+      fires the ban listeners: the HQ / flight dialogs (Term_All.cpp @0x769880) show 'You are banned for %d
+      hour(s) %d minute(s).' (0 -> 'You are banned. You can reenter this game right after exiting.') and take
+      the client back to the lobby - the 2009 kick. The server now sends these (send_mod_notice).
+    * NEW MODEL: GAGS / BANS records carry a scope (room id or None = everywhere) and persist in
+      moderation_state.json across restarts. ##Gag/##GagAll -> gag (+ notice), ##UnGag/##UnGagAll -> clear
+      (+ 'ungagged' notice), ##GagRoom/##UnGagRoom -> every non-moderator in the room; the in-game chat drop
+      honours the room scope and a GagAll silences the lobby too. ##Ban -> room ban: notice (dialog -> lobby)
+      + no re-entry to THAT arena for N hours; ##BanAll -> every arena; 0 hours = soft boot (nothing
+      recorded). Re-entry while banned: the 201 grant cannot be refused cleanly ('keep polling'), so the
+      pilot is granted and 2 s later his own client's ban dialog takes him out again (_ban_boot_if_barred);
+      a global ban still kicks at pilot select as before. Moderators are never booted or gagged.
+    * ##ResetGame (op 0x57) -> arena_reset by the moderator. ##JoinDisable now ENFORCED: a non-moderator's Fly
+      ask is not granted while the room is join-disabled ('Joining is disabled by the host - please wait',
+      once per 10 s; the client re-asks by itself), ##JoinEnable / ##EnableFlyButton (0x85) release it, the
+      room is told. ##nofuelp rides the native 0x7f relay like killp/ejectp/crumblep (the client prints 'You
+      are out of fuel'); ClearScores (0x8b) is logged only. (SecrCode has no 'flyenable/flydisable' - the
+      names are JoinEnable/JoinDisable/EnableFlyButton.)
+    * CONSOLE / ADMIN PANEL: kick <pilot> [text] = soft boot through the native dialog (the old message probes
+      are `kickprobe`); ban|banall <pilot> [hours] [msg] = native boot + no arena entry (omit = open, 0 = soft,
+      max 12); unban|unbanall; gag|gagall <pilot> [hours]; ungag|ungagall; bans / gags show the scope; say
+      <room|all> <text> = yellow line + the 10 s banner again (broadcast stays server-wide); help lists every
+      command by section, `help <word>` filters.
+    * Verify (two clients, one moderator): ##Gag X 1 -> X sees 'You are gagged for 60 minutes', cannot type,
+      his lines vanish; ##UnGag X -> 'You are ungagged'. ##Ban X 0 -> X gets the ban box and lands in the
+      lobby, can re-enter; ##Ban X 1 -> re-entering that arena throws him out again after 2 s, other arenas
+      open; ##BanAll X 1 -> every arena. ##GagRoom / ##UnGagRoom. ##JoinDisable then Fly as a player ->
+      refused line; ##JoinEnable -> Fly works. ##ResetGame -> the reset sequence. ##nofuelp X -> 'You are out
+      of fuel'. Panel: kick/ban/gag/say as above. Log tag MODERATOR.
+
 v949f5 [UNDER THE RADAR + FRIENDLY-INSTALLATION LOOKOUTS] (10-21)
     * User 10-21: 'we used to be able to fly under the radar - below 500 ft AGL you wouldn't be picked up by
       long range radars, only once in visual range. check the wiki first.'
@@ -60,8 +104,8 @@ v949f5 [ARENA WORLD CLOCK - THE TIME OF DAY RUNS ON] (10-21)
       the epoch and writes the RESULTING date + hh:mm into the [Reality] block at serve (after the war
       date, so the rolling day is the one the arena shows), then backs the CreationTime stamp up by the
       real seconds already spent in the current game minute - the joiner lands on the same second as
-      everyone else. TC template (1.0 day / 4.0 night): a game day is 15 real hours (10 h of day, 3 h of
-      night at x4). Verified offline: 08:00 +10 h -> 18:00, +11 h -> 22:00, +13 h -> 06:00 next day,
+      everyone else. TC template (1.0 day / 4.0 night): a game day is 15 real hours (06:00-18:00 = 12 real h,
+      18:00-06:00 = 12 game h at x4 = 3 real h). Verified offline: 08:00 +10 h -> 18:00, +11 h -> 22:00, +13 h -> 06:00 next day,
       +100 h -> 6 days later 18:00; 29 Feb 1944 rolls; TimeSpeed 0 untouched.
     * Per arena: 'Reset the clock to the start time on every arena entry' checkbox in the web 'Date,
       time & weather' section (settings_json clock_static) restores the old behaviour. Console
