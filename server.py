@@ -5677,19 +5677,34 @@ def console_handler():
                 _rooms = sorted(_active_ingame_rooms())
                 if not _a or _a[0] == 'status':
                     log('CONSOLE', f'tc: triggers={"ON" if TC_TRIGGERS else "OFF"} attack%={TC_ATTACK_PERCENT} '
-                                   f'defend%={TC_DEFEND_PERCENT} toggle={TC_ATTACK_TOGGLE_S:.0f}s tanks={TC_TANKS_ATTACK}/{TC_TANKS_DEFEND} '
+                                   f'defend%={TC_DEFEND_PERCENT} rearm<{TC_REARM_PERCENT}% toggle={TC_ATTACK_TOGGLE_S:.0f}s tanks={TC_TANKS_ATTACK}/{TC_TANKS_DEFEND} '
                                    f'class_by_camp={TANK_CLASS_BY_CAMP}')
                     for (_r, _sidx), _tr in sorted(TRIGGERS.items()):
                         log('CONSOLE', f'  room {_r} scene {_sidx}: by {_tr["by"]} {time.time() - _tr["at"]:.0f}s ago '
                                        f'camp {_tr["camp"]} attacker {_tr["attacker"]} columns {_tr["columns"]} '
                                        f'defended={_tr.get("defended")}')
+                    for (_r, _sidx), _ds in sorted(_TC_DISARMED.items()):     # v949f5
+                        try:
+                            _pct = int(round(trn_scene_damage_frac(_r, _sidx) * 100))
+                        except Exception:
+                            _pct = -1
+                        log('CONSOLE', f'  room {_r} scene {_sidx}: DISARMED ({_ds["why"]} {(time.time() - _ds["at"]) / 60.0:.0f} min ago '
+                                       f'at {_ds["pct"]}%), damage now {_pct}% - re-arms below {TC_REARM_PERCENT}%')
                     for _rid in _rooms:
                         _trn = _probe_terrain_for_room(_rid)
                         for _camp in sorted(set((SCENE_CAMP_BY_TERRAIN.get(_trn) or {}).values())):
                             if _camp <= 7:
                                 log('CONSOLE', f'  room {_rid} camp {_camp}: units {camp_units_state(_rid, _camp)}')
                 elif _a[0] == 'reset':
-                    TRIGGERS.clear(); log('CONSOLE', 'tc: trigger lockouts cleared')
+                    TRIGGERS.clear(); _TC_DISARMED.clear(); log('CONSOLE', 'tc: trigger lockouts and disarmed scenes cleared')
+                elif _a[0] == 'rearm':
+                    # v949f5: tc rearm <scene> [room] - arm a disarmed scene by hand
+                    try:
+                        _sidx = int(_a[1], 0); _rid = int(_a[2], 0) if len(_a) > 2 else (_rooms[0] if _rooms else None)
+                        _was = _TC_DISARMED.pop((_rid, _sidx), None)
+                        log('CONSOLE', f'tc rearm: room {_rid} scene {_sidx} ' + ('re-armed' if _was else 'was not disarmed'))
+                    except (IndexError, ValueError):
+                        log('CONSOLE', 'usage: tc rearm <scene> [room]')
                 elif _a[0] == 'assault':
                     # v581f5 TEST SHORTCUT: tc assault <scene> [n] [camp]  - spawn an ATTACK column of
                     # <camp> (default: the first in-game pilot's side) right on the target scene
@@ -12842,6 +12857,15 @@ TC_DEFEND_PERCENT    = 80       # v587f5: the DEFENDING column is raised only on
                                 # reaches this (at the trigger, or later as the assault progresses -
                                 # plane or tank fire alike); a separate gate from the attack trigger
 TC_ATTACK_TOGGLE_S   = 300      # per-scene re-trigger lockout (AttackToggleDelay)
+# v949f5 [RE-ARM] (player report 10-21 via Alon: 'you can achieve multiple triggers on the same target over
+# and over again, even when the damage is over 60%. You can also instantly trigger a captured scene from an
+# enemy who has just taken it. The damage for a retrigger needs to be reduced to under 25%'): a scene that
+# has been TRIGGERED or CAPTURED is DISARMED - it cannot be triggered again (no bonus, no columns, no
+# 'about to be triggered' warning) until the repair model has brought its damage back under
+# TC_REARM_PERCENT. The 300 s toggle alone let a scene parked at 70% be re-triggered every 5 minutes for
+# another 500 points and another column. Console `tc status` lists the disarmed scenes, `tc rearm <scene>`.
+TC_REARM_PERCENT     = 25
+_TC_DISARMED = {}               # (room, scene) -> {'at', 'why', 'pct'}: waiting for repair below TC_REARM_PERCENT
 TC_TANKS_ATTACK      = 8
 TC_TANKS_DEFEND      = 8
 TC_TANK_FUEL_KG      = 300      # loadout drawn from the camp pool per tank
@@ -13349,6 +13373,7 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     pname = getattr(pilot_sess, 'current_pilot', None) or 'a pilot'
     txy = tc_scene_xy(terrain, sidx) or (0.0, 0.0, 'scene')
     TRIGGERS[key] = {'at': now, 'by': pname, 'camp': tcamp, 'attacker': pcamp, 'columns': []}
+    _TC_DISARMED[key] = {'at': now, 'why': f'triggered by {pname}', 'pct': int(round(trn_scene_damage_frac(room_id, sidx) * 100))}   # v949f5
     try:
         if pilot_sess is not None and getattr(pilot_sess, 'current_pilot', None):
             stats_add(pilot_sess.current_pilot, room_id=room_id, triggers=1)   # v891f5
@@ -13649,6 +13674,11 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
         logx('TC', 'capture helper lines failed')
     TRIGGERS.pop((room_id, int(sidx)), None)
     _TC_CAPTURED_AT[(room_id, int(sidx))] = time.time()      # v897f5: post-capture trigger grace
+    try:                                                     # v949f5: a taken scene must be repaired below
+        _TC_DISARMED[(room_id, int(sidx))] = {'at': time.time(), 'why': f'captured by camp {camp}',      # TC_REARM_PERCENT
+                                              'pct': int(round(trn_scene_damage_frac(room_id, sidx) * 100))}   # before it can be
+    except Exception:                                                                                     # triggered again
+        pass
     return True
 
 def _tc_engagement_tick():
@@ -15422,6 +15452,8 @@ def arena_reset_state(room_id):
                 d.pop(key, None)
     for key in [k for k in list(GROUND_HP) if k[0] == room_id]:
         GROUND_HP.pop(key, None)
+    for key in [k for k in list(_TC_DISARMED) if k[0] == room_id]:          # v949f5: every scene armed again
+        _TC_DISARMED.pop(key, None)
     for key in [k for k in list(_SCENE_CAP_LOSS) if k[0] == room_id]:       # v677f5
         _SCENE_CAP_LOSS.pop(key, None); _SCENE_CAP_LOSS_OBJ.pop(key, None)
     for key in [k for k in list(SCENE_HP) if k[0] == room_id]:
@@ -16982,7 +17014,16 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
         frac = trn_scene_damage_frac(room_id, sidx)
         # v702f5: compare the ROUNDED percent (what the map and the log show) - scene 43 read 60%
         # at 16:35:55 online (59.9x underneath) and did not trigger at attack%=60
-        if int(round(frac * 100.0)) >= TC_ATTACK_PERCENT:
+        _dis = _TC_DISARMED.get((room_id, int(sidx)))
+        if _dis is not None:
+            # v949f5 RE-ARM: triggered / captured and not yet repaired below TC_REARM_PERCENT - no trigger
+            _dl = globals().setdefault('_TC_DISARMED_LOGGED', {})
+            if time.time() - _dl.get((room_id, int(sidx)), 0.0) > 120.0:
+                _dl[(room_id, int(sidx))] = time.time()
+                log('TC', f'room {room_id}: scene {sidx} at {frac * 100:.0f}% hit by {getattr(pilot_sess, "current_pilot", "?")} - '
+                          f'DISARMED ({_dis["why"]} {(time.time() - _dis["at"]) / 60.0:.0f} min ago at {_dis["pct"]}%), no trigger '
+                          f'until repaired below {TC_REARM_PERCENT}%')
+        elif int(round(frac * 100.0)) >= TC_ATTACK_PERCENT:
             tc_trigger_scene(room_id, sidx, pilot_sess, reason=f'(damage {frac * 100:.0f}% >= {TC_ATTACK_PERCENT}%)')
         else:
             tc_pretrigger_warn(room_id, sidx, pilot_sess, frac)                 # v600f5
@@ -17001,8 +17042,30 @@ def tc_check_scene_trigger(room_id, sidx, pilot_sess):
 TC_WARN_PERCENT = 40   # v600f5: 'Your airbase at X is about to be triggered!' to the owners at this damage
 TC_HELP_LINE_S  = 120.0   # v677f5: 'Your hit helps capture' at most once per pilot per scene per this many seconds
 
+def tc_rearm_check(room_id, sidx, frac=None):
+    """v949f5: a disarmed scene (triggered / captured) is armed again once its damage is back under
+    TC_REARM_PERCENT. Called after every repair."""
+    key = (room_id, int(sidx))
+    dis = _TC_DISARMED.get(key)
+    if dis is None:
+        return False
+    try:
+        if frac is None:
+            frac = trn_scene_damage_frac(room_id, sidx)
+    except Exception:
+        return False
+    if int(round(frac * 100.0)) >= TC_REARM_PERCENT:
+        return False
+    _TC_DISARMED.pop(key, None)
+    si = trn_scene_info(room_id, sidx) or {}
+    log('TC', f'room {room_id}: scene {sidx} "{si.get("name")}" repaired to {frac * 100:.0f}% (< {TC_REARM_PERCENT}%) - '
+              f'trigger RE-ARMED ({dis["why"]} {(time.time() - dis["at"]) / 60.0:.0f} min ago)')
+    return True
+
 def tc_pretrigger_warn(room_id, sidx, pilot_sess, frac):
     key = (room_id, int(sidx))
+    if key in _TC_DISARMED:
+        return                       # v949f5: a disarmed scene cannot be triggered - no warning either
     _tr = TRIGGERS.get(key)
     if frac * 100.0 + 1e-6 < TC_WARN_PERCENT or (_tr and not (_tr.get('para') and not _tr.get('columns'))):
         return                       # v702f5: a paratroop-only entry does not silence the warning
@@ -23328,6 +23391,7 @@ def repair_objects(room_id, objs, reason='', force=False):
         si = trn_scene_info(room_id, sc) or {}
         log('REPAIR', f'room {room_id}: scene {sc} "{si.get("name")}" repaired {names} -> '
                       f'damage now {int(round(frac * 100))}% {reason}')
+        tc_rearm_check(room_id, sc, frac)                                      # v949f5
     log('REPAIR-TX', f'room {room_id}: msg 30 RESTORE x{len(done)} -> {len(sess)} session(s) {reason}')
     return done
 

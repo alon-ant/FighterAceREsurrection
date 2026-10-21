@@ -1,3 +1,22 @@
+v949f5 [TRIGGER RE-ARM: NO RE-TRIGGER UNTIL REPAIRED BELOW 25%] (10-21)
+    * Player report (via Alon 10-21): 'you can achieve multiple triggers on the same target, over and over
+      again, even when the damage is over 60%. You can also instantly trigger a captured scene from an enemy
+      who has just taken it. The damage for a retrigger of a scene needs to be reduced to under 25%.'
+    * Cause: the only re-trigger guard was the 300 s AttackToggleDelay lockout (+ the 120 s post-capture
+      grace of v897). A scene parked at 70% could be triggered again every 5 minutes - another 500-point
+      bonus and another attack column each time - and a scene just taken by tanks could be triggered by the
+      loser the moment the grace ran out, while its wrecks were still smoking.
+    * Fix: a scene is DISARMED when it is triggered or captured (_TC_DISARMED) and stays so until the repair
+      model brings its damage back under TC_REARM_PERCENT (25) - checked after every repair batch
+      (tc_rearm_check in repair_objects: 'trigger RE-ARMED'). While disarmed: no trigger, no bonus, no
+      columns, no 'about to be triggered' warning; hits still count as damage and still earn 'helps capture'
+      lines for a live trigger. Logged once per 2 min per scene ('DISARMED (triggered by X 7 min ago at
+      71%), no trigger until repaired below 25%'). Arena reset arms everything. Console: `tc status` lists
+      disarmed scenes with their current damage, `tc rearm <scene> [room]`, `tc reset` clears both.
+    * Verify: trigger a scene, bomb it again after 5+ min -> no second trigger line, log shows DISARMED;
+      wait for the repair ticks to take it under 25% -> 'trigger RE-ARMED', the next 60% triggers again.
+      Capture a scene with tanks -> the former owner cannot trigger it back until it is repaired below 25%.
+
 v949f5 [ARENA WORLD CLOCK - THE TIME OF DAY RUNS ON] (10-21)
     * User 10-21: 'time of day doesn't roll, it resets each time you enter the arena ... a player can fly
       and reach night time while a fresh player joins and it's day time. the server should tick on by
