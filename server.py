@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v958f5g'
+VERSION = 'v959f5'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -16545,6 +16545,36 @@ _RAILS = {}                  # terrain -> {'roads': [...]}
 # deliveries are switched off for camps that have visible trains.
 TRAIN_SUPPLY          = True
 TRAIN_STATION_RADIUS  = 900.0
+# v959f5: per-terrain station radius - English Channel's rails pass 1-2 km from most ports, tank
+# factories and bomber fields (trn06: 24 supply scenes in the 0.9-2.0 km band, 2 at 900 m). A
+# rails_trnNN.json 'station_radius' key (fa_make_rails.py --station-radius) overrides this table.
+TRAIN_STATION_RADIUS_BY_TERRAIN = {6: 2000.0}
+TRAIN_STATIONS_SUPPLY_ONLY = True   # v959f5: a station must have storage or production (no AA sites,
+                                    # villages, cities) - a stop there exchanges nothing; and the
+                                    # rear/front/mid starts then land on real depots
+
+def train_station_radius(terrain):
+    try:
+        r = (rails_for(terrain) or {}).get('station_radius')
+        if r:
+            return float(r)
+    except Exception:
+        pass
+    return float(TRAIN_STATION_RADIUS_BY_TERRAIN.get(_tbase(terrain), TRAIN_STATION_RADIUS))
+
+def scene_has_supply(terrain, sidx):
+    """True when the scene stores or produces anything (per-scene profiles); True for every scene
+    when the terrain has no profile file (old behaviour)."""
+    try:
+        data = scene_profiles_for(terrain)
+        if not data:
+            return True
+        sc = (data.get('scenes') or {}).get(str(int(sidx)))
+        if not sc:
+            return False
+        return any((sc.get('caps') or {}).values()) or any((sc.get('rates') or {}).values())
+    except Exception:
+        return True
 TRAIN_CRUISE_MPS      = 22.0
 TRAIN_STOP_S          = 30.0
 TRAIN_PICKUP_KEEP     = 0.50   # producers keep this fraction of capacity
@@ -16587,15 +16617,20 @@ def rail_stations(terrain):
         return cache[terrain]
     rails = rails_for(terrain)
     out = {}
+    skipped = 0
     if rails:
         tt = trn_tables(terrain) or {}
+        radius = train_station_radius(terrain)                          # v959f5
         for sidx, g in enumerate(tt.get('gsi') or []):
+            if TRAIN_STATIONS_SUPPLY_ONLY and not scene_has_supply(terrain, sidx):
+                skipped += 1
+                continue
             sx, sy = float(g['x']), float(g['y'])
             best = None
             for road in rails['roads']:
                 for ni, nd in enumerate(road['nodes'][:-1]):
                     d = math.hypot(nd[0] - sx, nd[1] - sy)
-                    if d <= TRAIN_STATION_RADIUS and (best is None or d < best[0]):
+                    if d <= radius and (best is None or d < best[0]):
                         best = (d, road['index'], ni)
             if best:
                 out.setdefault(best[1], []).append((best[2], sidx))
@@ -16610,7 +16645,8 @@ def rail_stations(terrain):
         cache.pop(terrain, None)
         log('TRAIN', f'terrain {terrain}: no rail stations yet (scene tables not loaded?) - will recompute')
         return out
-    log('TRAIN', f'terrain {terrain}: {n} rail station(s) on {len(out)} road(s): ' +
+    log('TRAIN', f'terrain {terrain}: {n} rail station(s) on {len(out)} road(s) (radius {train_station_radius(terrain):.0f} m, '
+                 f'{skipped} scene(s) without supplies skipped): ' +
                  ' '.join(f'r{r}:{[s for _n, s in v]}' for r, v in sorted(out.items())))
     return out
 
@@ -16881,6 +16917,17 @@ def spawn_supply_train(rid, camp, road_idx, reason='', start='rear'):
     else:
         depots = [st for st in stations if _is_depot(st[1])] or stations
         ni, sidx = min(depots, key=lambda st: _dist_to(st[1], rear))
+    # v959f5: never two trains on one node (the extra front/mid starts of several lines can resolve to
+    # the node another start already took) - move to the nearest free station on the line, or skip.
+    _busy = {int(tr['node']) for tr in TRAINS.values()
+             if tr['room'] == rid and tr['road'] == road_idx and tr.get('supply') and abs(float(tr.get('dist', 0.0))) < 400.0}
+    if int(ni) in _busy:
+        _free = [st for st in stations if int(st[0]) not in _busy]
+        if not _free:
+            log('TRAIN', f'room {rid}: {evs_tag(camp) if "evs_tag" in globals() else camp} road {road_idx} [{start}] - every station already has a train, skipped')
+            return None
+        _want = tc_scene_xy(terrain, sidx) or (0.0, 0.0)
+        ni, sidx = min(_free, key=lambda st: _dist_to(st[1], [_want]))
     onum = spawn_train(rid, camp, road_idx, ni, TRAIN_WAGONS_DEFAULT,
                        reason=f'{reason} from {(scene_type_for(terrain, sidx) or "scene").strip()} {sidx} [{start}]')
     if onum is None:
@@ -16928,6 +16975,13 @@ def ensure_camp_trains(rid):
     now = time.time()
     camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).values() if c is not None and c <= 7})
     starts = ('rear', 'front', 'mid')
+    try:                                                                # v959f5: web knob
+        per_camp = int((db_get_room_settings(rid) or {}).get('trains_per_camp') or TRAIN_PER_CAMP_MAX)
+    except (TypeError, ValueError):
+        per_camp = TRAIN_PER_CAMP_MAX
+    per_camp = max(0, min(12, per_camp))
+    if per_camp == 0:
+        return
     for camp in camps:
         have = [tr for tr in TRAINS.values() if tr['room'] == rid and tr['camp'] == camp and tr.get('supply')]
         cands = [(len(rails_stations_own(terrain, r, camp)), r) for r in stations]
@@ -16938,7 +16992,7 @@ def ensure_camp_trains(rid):
         # v834f5: ONE train per qualifying road is guaranteed whatever the per-camp cap says - the cap
         # only limits the extra front/mid trains. A captured line therefore gets its new owner's train
         # even when that side already runs three elsewhere.
-        _cap = max(TRAIN_PER_CAMP_MAX, len(cands))
+        _cap = max(per_camp, len(cands))
         if len(have) >= _cap:
             continue
         # slots (v698f5): ONE train per qualifying road first (the v617 rule - the US bomber base is
@@ -16946,8 +17000,9 @@ def ensure_camp_trains(rid):
         # three starts to the main line and US pilots at BBB stopped seeing trains), then the
         # extra starts (front, mid) on the best road up to TRAIN_PER_CAMP_MAX.
         slots = [(n, r, 'rear') for n, r in cands]
-        for st in ('front', 'mid'):
-            slots.append((cands[0][0], cands[0][1], st))
+        for st in ('front', 'mid'):                     # v959f5: extra starts on every line, best first
+            for n, r in cands:
+                slots.append((n, r, st))
         used = {(tr['road'], tr.get('start', 'rear')) for tr in have}
         for n, r, st in slots:
             if len(have) >= _cap:

@@ -13,10 +13,10 @@ the tables exist only once the terrain is loaded). NN below = the terrain number
 | 2 | `python fa_memdump.py --dump --out mapdata\fa_memdump_trnNN.json` | production defs + the client's own per-camp totals | step 3 |
 | 3 | `python fa_build_scene_profiles.py --trn NN --memdump mapdata\fa_memdump_trnNN.json` | `fa_scene_profiles_trnNN.json` | per-scene supply storage / production (without it the generic profiles from fa_scenes.json are used, or blind grants) |
 | 4 | `python fa_dump_tank_tables.py` | `roadmap.json` (+ `tank_tables.json`, global) | step 5 |
-| 5 | `python fa_make_rails.py --trn NN` | `rails_trnNN.json` | trains (no file = no trains on that terrain) |
+| 5 | `python fa_make_rails.py --trn NN [--station-radius 2000]` | `rails_trnNN.json` | trains (no file = no trains on that terrain); the radius is how far a scene may sit from the rails to be a station (default 900 m - check the `TRAIN terrain NN: ... station(s)` log line and raise it when depots are missed) |
 
-Step 1 writes next to the script by default - move the file into `mapdata\` (the server reads
-mapdata first and falls back to the server directory). Step 4's `roadmap.json` is overwritten per
+Steps 1 and 3 read and write `mapdata\` themselves (the server reads mapdata first and falls back to
+the server directory). Step 4's `roadmap.json` is overwritten per
 terrain, so run step 5 right after it. `tank_tables.json` and `weapon_map.json` are not per
 terrain.
 
@@ -26,4 +26,4 @@ Then:
   trn_tables_trnNN.json` and `SUPPLY terrain NN: per-scene profiles loaded` in the log.
 - Create the arena on the web with that terrain, enter it, `tc status` lists the scenes.
 
-Mediterrain (02) is the fully dumped reference; Circle (05) has only step 1.
+Mediterrain (02) is the fully dumped reference; English Channel (06) has steps 1-3; Circle (05) step 1.

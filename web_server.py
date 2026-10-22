@@ -2640,6 +2640,18 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 'oldest crater lasts about <b>n &times; 10 &divide; volume &times; minutes</b>. For 15 &times; 500 lb on one runway: '
                 '1 min / 5 &rarr; first gone at 2 min, last at 30; 1 min / 10 &rarr; one crater a minute; 2 min / 4 &rarr; last one at 75 min; '
                 '10 min / 40 &rarr; four craters at the first tick.</p>')
+            # SUPPLY TRAINS PER TEAM (v959f5): trains_per_camp - the floor of supply trains each
+            # team runs (one per rail line is always guaranteed on top of it).
+            _tpc = overrides.get('trains_per_camp', '')
+            craters_html += (
+                '<label style="display:block; margin:10px 0;">Supply trains per team<br>'
+                '<input type="number" name="s_trains_per_camp" min="0" max="12" value="' + hesc(str(_tpc), quote=True) + '" '
+                'placeholder="3" style="width:120px; padding:6px;"></label>'
+                '<p class="muted" style="margin:4px 0 12px; max-width:640px;">Every team gets at least this many supply trains '
+                '(default 3), and in any case one per rail line it holds. Trains start at the team\'s depots (factory, port, rail '
+                'yard nearest its bomber field), its front airfields and halfway between, on each line in turn. Stations are only '
+                'scenes that store or produce something - AA sites and villages are passed through. 0 = no supply trains in this arena. '
+                'Needs a rails file for the terrain (rails_trnNN.json).</p>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
@@ -4381,7 +4393,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
             if _wm in ('off', 'all', 'eliminated', 'wipeout'):
                 settings['tc_win_mode'] = 'eliminated' if _wm == 'wipeout' else _wm   # v933f5
-            for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000)):   # v686f5
+            for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000), ('trains_per_camp', 0, 12)):   # v686f5, v959f5
                 _cv = qs.get('s_' + _ck, [''])[0].strip()
                 if _cv == '':
                     settings.pop(_ck, None)
