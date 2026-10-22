@@ -198,6 +198,81 @@ DEFAULT_CLIENT_PATH = r"C:\games\FA\FA.exe"
 WEB_SESSIONS = {}
 
 # Bridge to hold references injected from the main game server
+# example event scripts shown under the Events tab (v958f5c)
+# ---- v958f5e: event-script library on the server (<server dir>/event_scripts/<name>.json) ----
+def _evs_lib_dir():
+    d = os.path.join(os.path.dirname(os.path.abspath(SRV.get('server_py') or __file__)), 'event_scripts')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
+
+def _evs_lib_safe(name):
+    """File-safe script name: letters, digits, space, _ - . ( ); 1..60 chars; '' if nothing is left."""
+    n = re.sub(r'[^A-Za-z0-9 _\-.()]+', '', str(name or '')).strip()
+    if n.lower().endswith('.json'):
+        n = n[:-5]
+    return n.strip().strip('.')[:60]
+
+def _evs_lib_list():
+    out = []
+    try:
+        for fn in sorted(os.listdir(_evs_lib_dir())):
+            if not fn.lower().endswith('.json'):
+                continue
+            p = os.path.join(_evs_lib_dir(), fn)
+            try:
+                st = os.stat(p)
+                title = ''
+                try:
+                    with open(p, encoding='utf-8') as f:
+                        j = json.load(f)
+                    title = f'{j.get("name", "")} ({j.get("mode", "team")}, {j.get("victory", "points")})'
+                except Exception:
+                    title = '(not valid JSON)'
+                out.append({'name': fn[:-5], 'size': st.st_size, 'mtime': int(st.st_mtime), 'title': title})
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return out
+
+def _evs_lib_json(handler, code, obj):
+    body = json.dumps(obj).encode('utf-8')
+    handler.send_response(code)
+    handler.send_header('Content-Type', 'application/json')
+    handler.send_header('Cache-Control', 'no-store')
+    handler.end_headers()
+    handler.wfile.write(body)
+
+EVS_EX_BOB = json.dumps({
+    'name': 'Battle of Britain', 'victory': 'points', 'report_min': 30, 'announce': True,
+    'points': {'kill_fighter': 1, 'kill_bomber': 2},
+    'teams': {
+        'GB': {'objective': 'Stop the raids - every bomber shot down counts double',
+               'points': {'kill_fighter': 1, 'kill_bomber': 4}},
+        'GE': {'objective': 'Bomb the radar chain and the sector airfields',
+               'points': {'kill_fighter': 1, 'scene_damage': 0.5, 'damage_specific': {'46': 2, '47': 2}}}},
+}, indent=2)
+EVS_EX_PPS = json.dumps({
+    'name': 'Pin Point Parachuting', 'mode': 'personal', 'victory': 'points', 'report_min': 15, 'announce': True,
+    'objectives': [{'type': 'chute_on_target', 'target': 'PPS@HQ', 'radius_m': 60, 'points': 10}],
+}, indent=2)
+EVS_EX_TC = json.dumps({
+    'name': 'Capture the front', 'victory': 'points', 'report_min': 30, 'announce': True,
+    'points': {'kill_fighter': 1, 'kill_bomber': 2, 'scene_capture': 5, 'capture_specific': {'46': 50},
+               'hold_specific': {'46': 1}, 'tank': 2, 'train': 3, 'bridge': 5, 'troops_drop': 1,
+               'supply_delivered': 2, 'supply_airdrop': 1},
+}, indent=2)
+EVS_EX_FOX = json.dumps({
+    'name': 'Fox hunt', 'mode': 'personal', 'victory': 'points', 'report_min': 15, 'announce': True,
+    'points': {'kill_fighter': 0.5, 'kill_bomber': 1},
+    'objectives': [{'type': 'kill_target', 'target': 'FOX@FA', 'points': 1}],
+}, indent=2)
+
+EVS_BUILDER_HTML = '<div id="evsb" style="border:1px solid #c9d6e2; border-radius:6px; padding:10px; margin:8px 0; background:#fafcfe; max-width:760px;">\n<div style="font-weight:bold; margin-bottom:6px;">Script builder <span style="font-weight:normal; color:#888; font-size:0.85em;">- fills the JSON box below as you edit; "Load from JSON" reads the box back into the form</span></div>\n<div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end;">\n <label style="font-size:0.85em;">Event name<br><input type="text" id="eb_name" style="width:200px; padding:5px;"></label>\n <label style="font-size:0.85em;">Scoring<br><select id="eb_mode" style="padding:5px;"><option value="team">team event - teams score</option><option value="personal">personal event - every pilot for themselves</option></select></label>\n <label style="font-size:0.85em;">Winner has<br><select id="eb_victory" style="padding:5px;"><option value="points">most points</option><option value="kills">most air kills</option><option value="none">no winner (scores only)</option></select></label>\n <label style="font-size:0.85em;">Progress update every<br><input type="number" id="eb_report" min="0" max="240" style="width:70px; padding:5px;"> min (0 = none)</label>\n <label style="font-size:0.85em;"><input type="checkbox" id="eb_announce" checked> announce every score</label>\n</div>\n<div style="margin-top:10px; font-size:0.85em;"><b>Points per action</b> - the <i>All teams</i> column is the shared table; a team column overrides it for that team (blank = inherit). In a personal event the points go to the pilot who did it (the <i>All teams</i> column is all you need). Kills: a bomber is any bomber / attacker / transport.</div>\n<div style="overflow:auto;"><table id="eb_tbl" style="border-collapse:collapse; font-size:0.85em; margin-top:4px;">\n<tr><th style="text-align:left; padding:3px 6px;">Action</th><th style="padding:3px 6px;">All teams</th>\n<th style="padding:3px 6px;">US</th><th style="padding:3px 6px;">GB</th><th style="padding:3px 6px;">SU</th><th style="padding:3px 6px;">GE</th><th style="padding:3px 6px;">JP</th></tr>\n</table></div>\n<div style="margin-top:8px; font-size:0.85em;"><b>Team objectives</b> (shown to each team when scoring starts; a team with an objective or any points of its own takes part)</div>\n<div id="eb_objs" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:4px;"></div>\n<div style="margin-top:10px; font-size:0.85em;"><b>Specific scenes</b> - scene number from <code>tc status</code> / the map; points for capturing it, per minute holding it, per 1 % damage on it, per tonne of supplies delivered to it</div>\n<table id="eb_sc" style="border-collapse:collapse; font-size:0.85em; margin-top:4px;">\n<tr><th style="padding:3px 6px;">Scene #</th><th style="padding:3px 6px;">Capture</th><th style="padding:3px 6px;">Hold /min</th><th style="padding:3px 6px;">Damage /%</th><th style="padding:3px 6px;">Supply /t</th><th></th></tr>\n</table>\n<a href="#" onclick="ebAddScene();return false;" style="font-size:0.85em;">+ add a scene</a>\n<div style="margin-top:10px; font-size:0.85em;"><b>Pin Point Parachuting</b> - bail out and land the canopy on the target pilot\'s parked plane</div>\n<div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:4px;">\n <label style="font-size:0.85em;">Target pilot<br><input type="text" id="eb_pps_target" placeholder="PPS@HQ" style="width:140px; padding:5px;"></label>\n <label style="font-size:0.85em;">Within<br><input type="number" id="eb_pps_radius" min="5" max="2000" placeholder="60" style="width:70px; padding:5px;"> m</label>\n <label style="font-size:0.85em;">Points<br><input type="number" id="eb_pps_points" min="0" step="0.5" placeholder="10" style="width:70px; padding:5px;"></label>\n <label style="font-size:0.85em;">Teams (optional, e.g. GB,GE)<br><input type="text" id="eb_pps_teams" style="width:120px; padding:5px;"></label>\n</div>\n<div style="margin-top:10px; font-size:0.85em;"><b>Fox hunt</b> - whoever shoots down the named pilot scores for their team (any camp), with an arena-wide announcement</div>\n<div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-top:4px;">\n <label style="font-size:0.85em;">Fox pilot<br><input type="text" id="eb_fox_target" placeholder="FOX@FA" style="width:140px; padding:5px;"></label>\n <label style="font-size:0.85em;">Points per fox kill<br><input type="number" id="eb_fox_points" min="0" step="0.5" placeholder="1" style="width:70px; padding:5px;"></label>\n <label style="font-size:0.85em;">Teams (optional)<br><input type="text" id="eb_fox_teams" style="width:120px; padding:5px;"></label>\n</div>\n<details style="margin-top:10px; font-size:0.85em;"><summary style="cursor:pointer; color:#2c5f8a;"><b>Message templates</b> - the arena broadcasts, editable (blank = default text, a single <code>-</code> silences that message)</summary>\n<div style="color:#666; margin:4px 0;">Placeholders in braces are filled in at run time; <code>{delta}</code> already carries its sign (+1). Messages are cut at 74 characters by the game.</div>\n<table id="eb_msgs" style="border-collapse:collapse; width:100%;"></table>\n</details>\n<div style="margin-top:10px;">\n <a href="#" onclick="ebBuild();return false;" class="btn-green" style="padding:6px 14px; font-size:0.85em; text-decoration:none; color:#fff;">Build JSON from the form</a>\n &nbsp; <a href="#" onclick="ebLoad();return false;" style="font-size:0.85em;">&uarr; Form from JSON box</a>\n &nbsp; <a href="#" onclick="ebClear();return false;" style="font-size:0.85em; color:#a00;">Clear</a>\n <span id="eb_msg" style="font-size:0.85em; color:#888; margin-left:10px;"></span>\n</div>\n<div style="margin-top:12px; padding-top:8px; border-top:1px dashed #c9d6e2; font-size:0.85em;">\n<b>Files</b> &nbsp;\n<a href="#" onclick="ebExport();return false;">Export to PC (.json)</a>\n&nbsp;|&nbsp; Load from PC: <input type="file" id="eb_file" accept=".json,application/json" style="font-size:0.85em;" onchange="ebImport(this)">\n</div>\n<div style="margin-top:8px; font-size:0.85em;">\n<b>Server library</b> <span style="color:#888;">(event_scripts/ next to server.py - shared by every arena)</span><br>\n<select id="eb_lib" style="padding:4px; min-width:260px; margin-top:4px;"><option value="">(loading...)</option></select>\n<a href="#" onclick="ebLibLoad();return false;" style="margin-left:6px;">Load</a>\n&nbsp;<a href="#" onclick="ebLibDownload();return false;">Download</a>\n&nbsp;<a href="#" onclick="ebLibDelete();return false;" style="color:#a00;">Delete</a>\n&nbsp;&nbsp; <input type="text" id="eb_lib_name" placeholder="name to save as" style="padding:4px; width:180px;">\n<a href="#" onclick="ebLibSave();return false;" class="btn-green" style="padding:4px 10px; text-decoration:none; color:#fff;">Save to server</a>\n<span id="eb_lib_msg" style="color:#888; margin-left:8px;"></span>\n</div>\n</div>\n<script>\nvar EB_MSGS=[[\'start\',\'EVENT "{name}" is ON - scoring started.\',\'name\'],[\'personal\',\'PERSONAL EVENT - every pilot scores for themselves.\',\'name\'],\n [\'objective\',\'{team} objective: {objective}\',\'team objective\'],[\'fox_start\',\'FOX HUNT: shoot down {fox} for {points} pts!\',\'fox points\'],\n [\'score_team\',\'{team} {delta}: {pilot} {what}\',\'team delta pilot what total\'],[\'score_personal\',\'{pilot} {delta} (total {total}): {what}\',\'pilot delta total what team\'],\n [\'fox_team\',\'FOX HUNT: {pilot} bagged {fox}! {team} {delta} (fox down x{count})\',\'pilot fox team delta total count\'],\n [\'fox_personal\',\'FOX HUNT: {pilot} bagged {fox}! {delta} (total {total}, fox down x{count})\',\'pilot fox team delta total count\'],\n [\'pps_hit\',\'landed {dist} m from {target}\',\'dist target radius pilot\'],[\'pps_miss\',\'Missed: {dist} m from {target} (target {radius} m).\',\'dist target radius pilot\'],\n [\'update\',\'EVENT UPDATE ({mins} min) - {name}: {scores}\',\'mins name scores\'],[\'final\',\'FINAL - {name}: {scores}\',\'mins name scores\'],\n [\'top\',\'Top: {list}\',\'list\'],[\'then\',\'Then: {list}\',\'list\'],[\'win\',\'{winner} WINS "{name}"!\',\'winner name\'],[\'win_banner\',\'{winner} WINS\',\'winner name\'],\n [\'draw\',\'"{name}" ends in a draw.\',\'name\'],[\'draw_banner\',\'DRAW\',\'name\']];\nfunction ebInitMsgs(){\n  var t=document.getElementById(\'eb_msgs\'); if(!t) return;\n  EB_MSGS.forEach(function(m){ var tr=document.createElement(\'tr\');\n    tr.innerHTML=\'<td style="padding:2px 6px; white-space:nowrap; vertical-align:top;"><code>\'+m[0]+\'</code><br><span style="color:#999; font-size:0.9em;">{\'+m[2].split(\' \').join(\'} {\')+\'}</span></td>\'\n      +\'<td style="padding:2px 4px; width:100%;"><input type="text" class="eb_msg" data-key="\'+m[0]+\'" placeholder="\'+m[1].replace(/"/g,\'&quot;\')+\'" style="width:100%; padding:3px; font-family:monospace; font-size:0.95em;"></td>\';\n    t.appendChild(tr); });\n}\nfunction ebMsgsBuild(sc){ var out={}; document.querySelectorAll(\'input.eb_msg\').forEach(function(e){ var v=e.value; if(v.trim()!==\'\') out[e.getAttribute(\'data-key\')]=v; });\n  if(Object.keys(out).length) sc.messages=out; }\nfunction ebMsgsLoad(sc){ var m=sc.messages||{}; document.querySelectorAll(\'input.eb_msg\').forEach(function(e){ var v=m[e.getAttribute(\'data-key\')]; e.value=(v==null)?\'\':v; }); }\nfunction ebExport(){ var txt=ebBox().value.trim(); if(!txt){ ebBuild(true); txt=ebBox().value.trim(); } if(!txt){ document.getElementById(\'eb_msg\').textContent=\'nothing to export\'; return; }\n  var nm=\'event\'; try{ nm=(JSON.parse(txt).name||\'event\'); }catch(e){} nm=nm.replace(/[^A-Za-z0-9 _\\-.()]+/g,\'\').trim()||\'event\';\n  var a=document.createElement(\'a\'); a.href=URL.createObjectURL(new Blob([txt],{type:\'application/json\'})); a.download=nm+\'.json\'; document.body.appendChild(a); a.click();\n  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); },500); }\nfunction ebImport(inp){ var f=inp.files&&inp.files[0]; if(!f) return; var r=new FileReader();\n  r.onload=function(){ try{ var j=JSON.parse(r.result); if(typeof j!==\'object\'||Array.isArray(j)) throw new Error(\'not a script object\'); ebBox().value=JSON.stringify(j,null,2); ebLoad(true);\n      document.getElementById(\'eb_msg\').textContent=\'loaded "\'+f.name+\'" from your PC - press Save to store it on this arena.\'; }\n    catch(e){ document.getElementById(\'eb_msg\').textContent=\'could not load \'+f.name+\': \'+e.message; } inp.value=\'\'; };\n  r.readAsText(f); }\nfunction ebLibFill(list){ var sel=document.getElementById(\'eb_lib\'); if(!sel) return; var cur=sel.value; sel.innerHTML=\'\';\n  var o0=document.createElement(\'option\'); o0.value=\'\'; o0.textContent=list.length?\'- pick a saved script -\':\'(library is empty)\'; sel.appendChild(o0);\n  list.forEach(function(s){ var o=document.createElement(\'option\'); o.value=s.name; o.textContent=s.name+\'  -  \'+s.title; sel.appendChild(o); }); sel.value=cur; }\nfunction ebLibRefresh(){ fetch(\'/admin/evs_library.json\',{credentials:\'same-origin\'}).then(function(r){return r.json();}).then(function(j){ ebLibFill(j.scripts||[]); })\n  .catch(function(e){ var m=document.getElementById(\'eb_lib_msg\'); if(m) m.textContent=\'library unavailable: \'+e; }); }\nfunction ebLibPost(data){ var body=Object.keys(data).map(function(k){return encodeURIComponent(k)+\'=\'+encodeURIComponent(data[k]);}).join(\'&\');\n  return fetch(\'/admin/evs_library\',{method:\'POST\',credentials:\'same-origin\',headers:{\'Content-Type\':\'application/x-www-form-urlencoded\'},body:body}).then(function(r){return r.json();}); }\nfunction ebLibLoad(){ var n=document.getElementById(\'eb_lib\').value; var m=document.getElementById(\'eb_lib_msg\'); if(!n){ m.textContent=\'pick a script first\'; return; }\n  fetch(\'/admin/evs_library_get?name=\'+encodeURIComponent(n),{credentials:\'same-origin\'}).then(function(r){return r.json();}).then(function(j){\n    if(!j.ok){ m.textContent=j.error||\'failed\'; return; } ebBox().value=j.script; ebLoad(true); document.getElementById(\'eb_lib_name\').value=n;\n    m.textContent=\'loaded "\'+n+\'" - press Save to store it on this arena.\'; }).catch(function(e){ m.textContent=\'failed: \'+e; }); }\nfunction ebLibDownload(){ var n=document.getElementById(\'eb_lib\').value; if(!n){ document.getElementById(\'eb_lib_msg\').textContent=\'pick a script first\'; return; }\n  window.location=\'/admin/evs_library_get?download=1&name=\'+encodeURIComponent(n); }\nfunction ebLibSave(){ var m=document.getElementById(\'eb_lib_msg\'); var n=document.getElementById(\'eb_lib_name\').value.trim(); var txt=ebBox().value.trim();\n  if(!txt){ ebBuild(true); txt=ebBox().value.trim(); } if(!n){ try{ n=JSON.parse(txt).name||\'\'; }catch(e){} } if(!n){ m.textContent=\'give it a name\'; return; } if(!txt){ m.textContent=\'nothing to save\'; return; }\n  ebLibPost({action:\'save\',name:n,script:txt}).then(function(j){ if(j.ok){ ebLibFill(j.scripts||[]); document.getElementById(\'eb_lib\').value=j.name; m.textContent=\'saved "\'+j.name+\'" on the server.\'; } else m.textContent=j.error||\'failed\'; })\n  .catch(function(e){ m.textContent=\'failed: \'+e; }); }\nfunction ebLibDelete(){ var n=document.getElementById(\'eb_lib\').value; var m=document.getElementById(\'eb_lib_msg\'); if(!n){ m.textContent=\'pick a script first\'; return; }\n  if(!window.confirm(\'Delete "\'+n+\'" from the server library?\')) return;\n  ebLibPost({action:\'delete\',name:n}).then(function(j){ if(j.ok){ ebLibFill(j.scripts||[]); m.textContent=\'deleted "\'+n+\'".\'; } else m.textContent=j.error||\'failed\'; }); }\n\nvar EB_KEYS=[[\'kill_fighter\',\'Shoot down a fighter\'],[\'kill_bomber\',\'Shoot down a bomber\'],[\'kill_any\',\'Any air kill (if the two above are blank)\'],\n [\'scene_trigger\',\'Trigger a scene\'],[\'scene_capture\',\'Capture a scene\'],[\'scene_damage\',\'Damage a scene (per 1 %)\'],\n [\'bridge\',\'Destroy a bridge\'],[\'tank\',\'Destroy a tank\'],[\'train\',\'Destroy a train\'],[\'troops_drop\',\'Land a troop chute\'],\n [\'supply_delivered\',\'Deliver supplies by landing (per tonne)\'],[\'supply_airdrop\',\'Air-drop supplies (per tonne)\'],[\'building_repaired\',\'Building rebuilt by a delivery\']];\nvar EB_TEAMS=[\'US\',\'GB\',\'SU\',\'GE\',\'JP\'];\nfunction ebBox(){return document.querySelector(\'textarea[name=s_ev_script]\');}\nfunction ebInit(){\n  var t=document.getElementById(\'eb_tbl\');\n  EB_KEYS.forEach(function(k){\n    var tr=document.createElement(\'tr\'); var h=\'<td style="padding:2px 6px; white-space:nowrap;">\'+k[1]+\'</td>\';\n    h+=\'<td style="padding:2px 4px;"><input type="number" step="0.5" class="eb_pt" data-key="\'+k[0]+\'" data-team="" style="width:64px; padding:3px;"></td>\';\n    EB_TEAMS.forEach(function(tm){h+=\'<td style="padding:2px 4px;"><input type="number" step="0.5" class="eb_pt" data-key="\'+k[0]+\'" data-team="\'+tm+\'" style="width:64px; padding:3px;"></td>\';});\n    tr.innerHTML=h; t.appendChild(tr);\n  });\n  var o=document.getElementById(\'eb_objs\');\n  EB_TEAMS.forEach(function(tm){\n    var d=document.createElement(\'label\'); d.style.fontSize=\'0.85em\';\n    d.innerHTML=tm+\'<br><input type="text" class="eb_obj" data-team="\'+tm+\'" placeholder="objective for \'+tm+\'" style="width:220px; padding:4px;">\';\n    o.appendChild(d);\n  });\n  ebInitMsgs();\n  document.getElementById(\'evsb\').addEventListener(\'input\', function(ev){ if(ev.target && (ev.target.id===\'eb_lib_name\'||ev.target.id===\'eb_file\')) return; ebBuild(true);});\n  ebLoad(true); ebLibRefresh();\n  var bx=ebBox(); if(bx){ var tmr=null; bx.addEventListener(\'input\', function(){ ebBox()._typing=true; clearTimeout(tmr); tmr=setTimeout(function(){ ebLoad(false, true); ebBox()._typing=false; }, 400); }); }\n}\nfunction ebAddScene(v){\n  v=v||{}; var t=document.getElementById(\'eb_sc\'); var tr=document.createElement(\'tr\');\n  function inp(n,val){return \'<td style="padding:2px 4px;"><input type="number" step="0.5" class="eb_sc_\'+n+\'" value="\'+(val==null?\'\':val)+\'" style="width:70px; padding:3px;"></td>\';}\n  tr.innerHTML=\'<td style="padding:2px 4px;"><input type="number" class="eb_sc_id" value="\'+(v.id==null?\'\':v.id)+\'" style="width:64px; padding:3px;"></td>\'\n    +inp(\'cap\',v.cap)+inp(\'hold\',v.hold)+inp(\'dmg\',v.dmg)+inp(\'sup\',v.sup)\n    +\'<td><a href="#" onclick="this.parentNode.parentNode.remove();ebBuild(true);return false;" style="color:#a00;">x</a></td>\';\n  t.appendChild(tr);\n}\nfunction ebNum(el){ if(!el) return null; var s=(el.value||\'\').trim(); if(s===\'\') return null; var n=parseFloat(s); return isNaN(n)?null:n; }\nvar EB_MANAGED={name:1,mode:1,victory:1,report_min:1,announce:1,points:1,teams:1,objectives:1,messages:1};\nfunction ebBuild(quiet){\n  if(ebBox() && ebBox()._typing) return;\n  var sc={};\n  try{ var prev=JSON.parse(ebBox().value); if(prev && typeof prev===\'object\') for(var pk in prev){ if(!EB_MANAGED[pk]) sc[pk]=prev[pk]; } }catch(e){} var name=document.getElementById(\'eb_name\').value.trim(); if(name) sc.name=name;\n  sc.mode=document.getElementById(\'eb_mode\').value; sc.victory=document.getElementById(\'eb_victory\').value;\n  var rep=ebNum(document.getElementById(\'eb_report\')); sc.report_min=(rep==null?30:rep);\n  sc.announce=document.getElementById(\'eb_announce\').checked;\n  var shared={}; var teams={};\n  document.querySelectorAll(\'input.eb_pt\').forEach(function(e){\n    var v=ebNum(e); if(v==null) return; var tm=e.getAttribute(\'data-team\'); var k=e.getAttribute(\'data-key\');\n    if(!tm){shared[k]=v;} else {teams[tm]=teams[tm]||{points:{}}; teams[tm].points[k]=v;}\n  });\n  document.querySelectorAll(\'input.eb_obj\').forEach(function(e){\n    var v=e.value.trim(); if(!v) return; var tm=e.getAttribute(\'data-team\'); teams[tm]=teams[tm]||{points:{}}; teams[tm].objective=v;\n  });\n  var rows=document.querySelectorAll(\'#eb_sc tr\'); var caps={},holds={},dmgs={},sups={};\n  rows.forEach(function(tr){\n    var id=tr.querySelector(\'.eb_sc_id\'); if(!id) return; var sid=(id.value||\'\').trim(); if(!sid) return;\n    var c=ebNum(tr.querySelector(\'.eb_sc_cap\')), h=ebNum(tr.querySelector(\'.eb_sc_hold\')), d=ebNum(tr.querySelector(\'.eb_sc_dmg\')), s2=ebNum(tr.querySelector(\'.eb_sc_sup\'));\n    if(c!=null) caps[sid]=c; if(h!=null) holds[sid]=h; if(d!=null) dmgs[sid]=d; if(s2!=null) sups[sid]=s2;\n  });\n  if(Object.keys(caps).length) shared.capture_specific=caps; if(Object.keys(holds).length) shared.hold_specific=holds;\n  if(Object.keys(dmgs).length) shared.damage_specific=dmgs; if(Object.keys(sups).length) shared.supply_specific=sups;\n  if(Object.keys(shared).length) sc.points=shared;\n  for(var tm in teams){ if(!Object.keys(teams[tm].points).length) delete teams[tm].points; }\n  if(Object.keys(teams).length) sc.teams=teams;\n  var tg=document.getElementById(\'eb_pps_target\').value.trim();\n  if(tg){ var o={type:\'chute_on_target\', target:tg, radius_m:(ebNum(document.getElementById(\'eb_pps_radius\'))||60), points:(ebNum(document.getElementById(\'eb_pps_points\'))||10)};\n    var tms=document.getElementById(\'eb_pps_teams\').value.split(\',\').map(function(x){return x.trim().toUpperCase();}).filter(function(x){return x;});\n    if(tms.length) o.teams=tms; sc.objectives=[o]; }\n  var fx=document.getElementById(\'eb_fox_target\').value.trim();\n  if(fx){ var f={type:\'kill_target\', target:fx, points:(ebNum(document.getElementById(\'eb_fox_points\'))||1)};\n    var ft=document.getElementById(\'eb_fox_teams\').value.split(\',\').map(function(x){return x.trim().toUpperCase();}).filter(function(x){return x;});\n    if(ft.length) f.teams=ft; sc.objectives=(sc.objectives||[]).concat([f]); }\n  ebMsgsBuild(sc);\n  var empty=!sc.name && !sc.points && !sc.teams && !sc.objectives && !sc.messages && Object.keys(sc).every(function(k){return EB_MANAGED[k];});\n  if(!ebBox()) return; ebBox().value=empty?\'\':JSON.stringify(sc,null,2);\n  if(!quiet) document.getElementById(\'eb_msg\').textContent=\'JSON built - press Save to store it.\';\n}\nfunction ebClear(keepBox){ document.querySelectorAll(\'#evsb input[type=text], #evsb input[type=number]\').forEach(function(e){ if(e.id!==\'eb_lib_name\') e.value=\'\'; });\n  document.getElementById(\'eb_victory\').value=\'points\'; document.getElementById(\'eb_mode\').value=\'team\'; document.getElementById(\'eb_announce\').checked=true;\n  document.querySelectorAll(\'#eb_sc tr\').forEach(function(tr,i){ if(i>0) tr.remove(); }); if(!keepBox){ ebBox().value=\'\'; document.getElementById(\'eb_msg\').textContent=\'cleared - press Save to remove the script.\'; } }\nfunction ebLoad(quiet, fromBox){\n  var bx=ebBox(); if(!bx) return; var txt=bx.value.trim(); if(!txt){ if(fromBox){ ebClear(true); document.getElementById(\'eb_msg\').textContent=\'JSON box is empty - form cleared.\'; } return; }\n  var sc; try{ sc=JSON.parse(txt); }catch(e){ document.getElementById(\'eb_msg\').textContent=(fromBox?\'form not updated - JSON box is not valid JSON yet: \':\'JSON box is not valid JSON: \')+e.message; return; }\n  if(typeof sc!==\'object\'||Array.isArray(sc)){ document.getElementById(\'eb_msg\').textContent=\'the script must be a JSON object {...}\'; return; }\n  document.getElementById(\'eb_name\').value=sc.name||\'\'; document.getElementById(\'eb_mode\').value=sc.mode||\'team\'; document.getElementById(\'eb_victory\').value=sc.victory||\'points\';\n  document.getElementById(\'eb_report\').value=(sc.report_min==null?\'\':sc.report_min); document.getElementById(\'eb_announce\').checked=(sc.announce!==false);\n  document.querySelectorAll(\'input.eb_pt\').forEach(function(e){ var tm=e.getAttribute(\'data-team\'), k=e.getAttribute(\'data-key\'); var tbl=tm?((sc.teams||{})[tm]||{}).points:(sc.points);\n    var v=tbl?tbl[k]:null; e.value=(v==null||typeof v===\'object\')?\'\':v; });\n  document.querySelectorAll(\'input.eb_obj\').forEach(function(e){ var tm=e.getAttribute(\'data-team\'); e.value=((sc.teams||{})[tm]||{}).objective||\'\'; });\n  document.querySelectorAll(\'#eb_sc tr\').forEach(function(tr,i){ if(i>0) tr.remove(); });\n  var p=sc.points||{}; var ids={}; [\'capture_specific\',\'hold_specific\',\'damage_specific\',\'supply_specific\'].forEach(function(k){ for(var sid in (p[k]||{})) ids[sid]=1; });\n  Object.keys(ids).forEach(function(sid){ ebAddScene({id:sid, cap:(p.capture_specific||{})[sid], hold:(p.hold_specific||{})[sid], dmg:(p.damage_specific||{})[sid], sup:(p.supply_specific||{})[sid]}); });\n  var o=(sc.objectives||[]).filter(function(x){return x.type===\'chute_on_target\';})[0];\n  document.getElementById(\'eb_pps_target\').value=o?o.target||\'\':\'\'; document.getElementById(\'eb_pps_radius\').value=o?(o.radius_m||\'\'):\'\';\n  document.getElementById(\'eb_pps_points\').value=o?(o.points||\'\'):\'\'; document.getElementById(\'eb_pps_teams\').value=o&&o.teams?o.teams.join(\',\'):\'\';\n  ebMsgsLoad(sc);\n  var f=(sc.objectives||[]).filter(function(x){return x.type===\'kill_target\';})[0];\n  document.getElementById(\'eb_fox_target\').value=f?f.target||\'\':\'\'; document.getElementById(\'eb_fox_points\').value=f?(f.points||\'\'):\'\';\n  document.getElementById(\'eb_fox_teams\').value=f&&f.teams?f.teams.join(\',\'):\'\';\n  if(!quiet) document.getElementById(\'eb_msg\').textContent=fromBox?\'form updated from the JSON box.\':\'form loaded from the JSON box.\';\n}\ndocument.addEventListener(\'DOMContentLoaded\', ebInit);\n</script>\n'
+
 SRV = {
     'db_path': None,
     'get_existing_ticket': None,
@@ -2444,11 +2519,37 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _tnchk('tn_last_is_winner', 'Last one flying wins', '(the server announces the winner)')
                 + '</div>'
                 + '<div style="margin:14px 0 6px 0; font-weight:bold;">Event mode (weapons lock)' + ev_edited + '</div>' + _row
-                + _tnchk('ev_enabled', '<b>Start with weapons and engines locked</b>',
-                         '(until ##StartEvent / <code>event start &lt;room&gt;</code>; <code>event stop &lt;room&gt;</code> locks any arena at any time)')
+                + _tnchk('ev_enabled', '<b>Event mode: weapons and engines locked until the host starts the event</b>',
+                         '(##StartEvent / <code>event start &lt;room&gt;</code> frees them, <code>event stop &lt;room&gt;</code> locks again; off = no event timers at all)')
                 + _tnnum('ev_start_delay', 'Unlock', 0, 240, 'min after the event start')
                 + _tnchk('ev_fly_button', 'Fly button enabled from the start', '(untick = greyed until ##EnableFlyButton / <code>event fly on</code>)')
-                + '</div></div>')
+                + '</div>' + _row
+                + _tnnum('ev_length', 'Event length', 0, 1440, 'min from the start of the fight (0 = until ended by hand); the server ends it: tournament finished, weapons locked')
+                + '</div>'
+                + '<div style="margin:14px 0 6px 0; font-weight:bold;">Event script (scoring rules, objectives, victory)</div>'
+                + '<p style="color:#888; font-size:0.85em; max-width:640px;">JSON. Scoring starts when the fight starts '
+                  '(<code>event fight</code>, or the tournament countdown) and ends with the event length or <code>event end</code>; '
+                  'every award is announced, a progress report goes out every <code>report_min</code> minutes, and the team with the '
+                  'most points (or kills) wins. Team keys: US GB SU GE JP. Point keys: kill_fighter, kill_bomber, kill_any, '
+                  'scene_trigger, scene_capture, capture_specific {\"scene\": pts}, hold_specific {\"scene\": pts per minute}, '
+                  'scene_damage (per 1 %), damage_specific {\"scene\": pts per 1 %}, bridge, tank, train, troops_drop, supply_delivered / supply_airdrop (per tonne), supply_specific {\"scene\": pts per tonne}, building_repaired; objectives: '
+                  'chute_on_target (target pilot, radius_m, points), kill_target = fox hunt (target pilot, points). mode: team (default) or personal - in a personal event every pilot scores for themselves and the top pilot wins. Leave empty for no script.</p>'
+                + EVS_BUILDER_HTML
+                + '<div style="font-size:0.85em; margin-top:6px;"><b>JSON</b> (what is saved - edit by hand or use the builder above; the form follows what you type here, '
+                + '<a href="#" onclick="ebLoad();return false;">&uarr; reload the form from this box</a>)</div>'
+                + '<textarea name="s_ev_script" rows="14" spellcheck="false" style="width:100%; max-width:720px; font-family:monospace; font-size:0.85em; padding:6px;">'
+                + hesc(str(overrides.get('ev_script', '') or '')) + '</textarea>'
+                + '<details style="margin:8px 0;"><summary style="cursor:pointer; color:#2c5f8a;">Example scripts (click to copy from)</summary>'
+                + '<p style="margin:6px 0 2px;"><b>Battle of Britain</b> - two teams, different objectives and point tables</p>'
+                + '<pre style="background:#f4f6f8; padding:8px; font-size:0.8em; overflow:auto;">' + hesc(EVS_EX_BOB) + '</pre>'
+                + '<p style="margin:6px 0 2px;"><b>Pin Point Parachuting</b> - personal event: bail out and land on the plane of PPS@HQ</p>'
+                + '<pre style="background:#f4f6f8; padding:8px; font-size:0.8em; overflow:auto;">' + hesc(EVS_EX_PPS) + '</pre>'
+                + '<p style="margin:6px 0 2px;"><b>Capture the front</b> - one shared table for every team, a key scene</p>'
+                + '<pre style="background:#f4f6f8; padding:8px; font-size:0.8em; overflow:auto;">' + hesc(EVS_EX_TC) + '</pre>'
+                + '<p style="margin:6px 0 2px;"><b>Fox hunt</b> - personal event: whoever shoots down FOX@FA scores a point; half a point per ordinary kill</p>'
+                + '<pre style="background:#f4f6f8; padding:8px; font-size:0.8em; overflow:auto;">' + hesc(EVS_EX_FOX) + '</pre>'
+                + '</details>'
+                + '</div>')
             # FIGHTERS ONLY (v391): opt-in checkbox. The game server hides every non-fighter
             # (bombers, attackers, transports - the BOMBER_PLANE_IDS scoring classification)
             # via the same camp-7/byte0 mechanism as the war-date filter.
@@ -2623,12 +2724,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             sel_open = 'selected' if status == 'open' else ''
             sel_closed = 'selected' if status != 'open' else ''
             content = f"""
+                <style>
+                  .tabbar{{display:flex; flex-wrap:wrap; gap:4px; border-bottom:2px solid #2c5f8a; margin:0 0 14px 0;}}
+                  .tabbar a.tabbtn{{padding:8px 16px; border:1px solid #c9d6e2; border-bottom:none; border-radius:6px 6px 0 0; background:#eef3f7; color:#2c5f8a; text-decoration:none; font-weight:bold;}}
+                  .tabbar a.tabbtn.active{{background:#2c5f8a; color:#fff; border-color:#2c5f8a;}}
+                  .tabpane{{display:none;}} .tabpane.active{{display:block;}}
+                  .tabpane h3{{margin-top:18px;}} .tabpane h3:first-child{{margin-top:4px;}}
+                  .tabsave{{position:sticky; bottom:0; background:#fff; padding:12px 0 4px 0; border-top:1px solid #ddd; margin-top:18px;}}
+                </style>
                 <div class="nav"><a href="/admin">&larr; Back to Admin</a></div>
                 <h1>Edit Arena &mdash; {hesc(str(rname))}</h1>
                 <div class="card">
                 <form method="POST" action="/admin/arena_settings">
                     <input type="hidden" name="room_id" value="{rid}">
-                    <h3 style="margin-top:0;">General</h3>
+                    <div class="tabbar"><a href="#general" class="tabbtn" data-tab="general" onclick="return arTab('general')">General</a><a href="#flight" class="tabbtn" data-tab="flight" onclick="return arTab('flight')">Flight & ground</a><a href="#aircraft" class="tabbtn" data-tab="aircraft" onclick="return arTab('aircraft')">Aircraft</a><a href="#world" class="tabbtn" data-tab="world" onclick="return arTab('world')">World & radar</a><a href="#events" class="tabbtn" data-tab="events" onclick="return arTab('events')">Events</a></div>
+                    <div class="tabpane" id="tab-general">
+                    <h3 >General</h3>
                     <label style="display:block; margin:10px 0;">Name<br>
                         <input type="text" name="room_name" value="{hesc(str(rname), quote=True)}" style="width:280px; padding:6px;"></label>
                     <label style="display:block; margin:10px 0;">Title (arena-list section header)<br>
@@ -2638,53 +2749,6 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <h3>Password protection</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to require a password to join this arena, and set it below (the client prompts for it &mdash; enforcement is client-side, exactly as when the arena was created). Untick, or clear the field, to remove protection. The password shown is the current one; change it and Save to change what players must type. Takes effect the next time the arena is entered.</p>
                     {password_html}
-                    <h3>Arena settings</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:560px;">All values in <strong>feet</strong>. Leave a field blank to keep the value the arena was created with. Changes are written into the arena's GAME_DEF and take effect the next time the arena is entered (they are served fresh on entry).</p>
-                    {fields_html}
-                    <h3>Enemy defences (EvP)</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:560px;">Strength of the terrain's automatic anti-aircraft defences that fire at players (0 = off, 6 = strongest). Applied the next time the arena is entered.</p>
-                    {evp_html}
-                    <h3>War date (plane era)</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to restrict this arena to aircraft that had entered service by the date below, and push that date into the arena so the client shows it too (e.g. a 1943 arena hides 1944+ planes). Leave unticked for no restriction (all planes &mdash; today's behaviour). A stopgap for standing arenas; takes effect the next time the arena is entered.</p>
-                    {wardate_html}
-                    <h3>Date, time &amp; weather</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:640px;">What the client shows read-only under
-                    Options &rarr; Misc: the arena's date and clock, time zone, time and night speed, position on the
-                    globe, wind, clouds and rain. Untick to keep the arena template's own values. Takes effect the
-                    next time the arena is entered (a client that stays in the arena keeps the old sky).</p>
-                    {reality_html}
-                    <h3>Tournament</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:640px;">The Tournament group of the game&#39;s
-                    arena-creation dialog. The clock starts when the first pilot spawns (or with the console
-                    <code>tournament start &lt;room&gt;</code>): pilots may join during the joining window, then
-                    everybody flies unarmed until shooting starts (the cockpit shows both countdowns). Each pilot has
-                    the given number of lives; out of lives he is either grounded or, with ghosting, flies on as a
-                    ghost. With &quot;last one flying wins&quot; the server declares the winner when one pilot is left.
-                    The weapons lock is the game&#39;s own event mode: while locked nobody can start engines, fire,
-                    launch rockets, drop bombs or troops. Every arena can be locked and freed from the console
-                    (<code>event stop</code> / <code>event start</code>, or ##StartEvent in game); tick the box to
-                    have the arena start locked. Values take effect the next time the arena is entered.</p>
-                    {tournament_html}
-                    <h3>Radar</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:640px;">Radar failure: with the gate on, a plane
-                    farther than the always-visible range is shown to a pilot only while a standing radar antenna of
-                    his own side covers it (or it is within visual range of one of his side&#39;s installations) &mdash;
-                    destroy the antenna and its ring goes grey and the contacts in it vanish from the map unless another
-                    ring still reaches them. &quot;Under the radar&quot;: a plane lower than the given height above the
-                    terrain is dropped from the map beyond the always-visible range even inside coverage (the client
-                    tests the ground under it). The lower row edits the arena&#39;s own
-                    [Radar] block: ring display, range multiplier (also used by the gate) and the altitude under which a
-                    plane slips below the radar. Takes effect the next time the arena is entered.</p>
-                    {radar_html}
-                    <h3>Fighters only</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
-                    {fighters_html}
-                    <h3>Aircraft per team</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:640px;">Tick which aircraft each nation may fly in this arena &mdash; a plane can be opened to several nations (coalition) or to none (hidden). The ticks start from the server's nation table; only planes you change are stored for this arena. The war date and Fighters-only filters above still apply on top (they can only hide). Takes effect the next time the arena is entered.</p>
-                    {planes_html}
-                    <h3>Exit = crash</h3>
-                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to make LEAVING THE PLANE WHILE AIRBORNE count as a crash (a death and a lost plane) &mdash; pilots must land, and be undamaged, to exit for free. Leave unticked (the default) and an undamaged in-flight exit is a clean bug-out that costs nothing. An exit while <em>damaged</em> is a death either way. Takes effect the next time the arena is entered.</p>
-                    {exitcrash_html}
                     <h3>Scoring</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">Which value table this
                     arena scores with. <em>Default</em> follows the Title/category (Dogfighting &rarr;
@@ -2700,6 +2764,17 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     arena from its GAME_DEF (ownership, stores, units, AI units). The button does the
                     same immediately, without a winner.</p>
                     {winmode_html}
+                    </div>
+                    <div class="tabpane" id="tab-flight">
+                    <h3>Arena settings</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">All values in <strong>feet</strong>. Leave a field blank to keep the value the arena was created with. Changes are written into the arena's GAME_DEF and take effect the next time the arena is entered (they are served fresh on entry).</p>
+                    {fields_html}
+                    <h3>Enemy defences (EvP)</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Strength of the terrain's automatic anti-aircraft defences that fire at players (0 = off, 6 = strongest). Applied the next time the arena is entered.</p>
+                    {evp_html}
+                    <h3>Exit = crash</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to make LEAVING THE PLANE WHILE AIRBORNE count as a crash (a death and a lost plane) &mdash; pilots must land, and be undamaged, to exit for free. Leave unticked (the default) and an undamaged in-flight exit is a clean bug-out that costs nothing. An exit while <em>damaged</em> is a death either way. Takes effect the next time the arena is entered.</p>
+                    {exitcrash_html}
                     <h3>Runway craters</h3>
                     <p style="color:#888; font-size:0.85em; max-width:560px;">How long bomb craters stay on the
                     ground before they are filled in, and how many the arena keeps at once. The room template
@@ -2713,10 +2788,72 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     this off, so ground objects were invisible on the map). Takes effect the next time the
                     arena is entered.</p>
                     {showground_html}
-                    <div style="margin-top:18px;"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
+                    
+                    </div>
+                    <div class="tabpane" id="tab-aircraft">
+                    <h3>War date (plane era)</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to restrict this arena to aircraft that had entered service by the date below, and push that date into the arena so the client shows it too (e.g. a 1943 arena hides 1944+ planes). Leave unticked for no restriction (all planes &mdash; today's behaviour). A stopgap for standing arenas; takes effect the next time the arena is entered.</p>
+                    {wardate_html}
+                    <h3>Fighters only</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:560px;">Tick to hide every bomber, attacker and transport in this arena &mdash; a pure fighter-vs-fighter setup. Fighter-bombers on fighter airframes (e.g. Typhoon, the Bf-109 bomb variants, Hurr-IID) stay available. Combines freely with the war date above; takes effect the next time the arena is entered.</p>
+                    {fighters_html}
+                    <h3>Aircraft per team</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">Tick which aircraft each nation may fly in this arena &mdash; a plane can be opened to several nations (coalition) or to none (hidden). The ticks start from the server's nation table; only planes you change are stored for this arena. The war date and Fighters-only filters above still apply on top (they can only hide). Takes effect the next time the arena is entered.</p>
+                    {planes_html}
+                    </div>
+                    <div class="tabpane" id="tab-world">
+                    <h3>Date, time &amp; weather</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">What the client shows read-only under
+                    Options &rarr; Misc: the arena's date and clock, time zone, time and night speed, position on the
+                    globe, wind, clouds and rain. Untick to keep the arena template's own values. Takes effect the
+                    next time the arena is entered (a client that stays in the arena keeps the old sky).</p>
+                    {reality_html}
+                    <h3>Radar</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">Radar failure: with the gate on, a plane
+                    farther than the always-visible range is shown to a pilot only while a standing radar antenna of
+                    his own side covers it (or it is within visual range of one of his side&#39;s installations) &mdash;
+                    destroy the antenna and its ring goes grey and the contacts in it vanish from the map unless another
+                    ring still reaches them. &quot;Under the radar&quot;: a plane lower than the given height above the
+                    terrain is dropped from the map beyond the always-visible range even inside coverage (the client
+                    tests the ground under it). The lower row edits the arena&#39;s own
+                    [Radar] block: ring display, range multiplier (also used by the gate) and the altitude under which a
+                    plane slips below the radar. Takes effect the next time the arena is entered.</p>
+                    {radar_html}
+                    </div>
+                    <div class="tabpane" id="tab-events">
+                    <h3>Tournament</h3>
+                    <p style="color:#888; font-size:0.85em; max-width:640px;">The Tournament group of the game&#39;s
+                    arena-creation dialog. The clock starts when the first pilot spawns (or with the console
+                    <code>event open &lt;room&gt;</code>): pilots may join during the joining window, then
+                    everybody flies unarmed until shooting starts (the cockpit shows both countdowns). Each pilot has
+                    the given number of lives; out of lives he is either grounded or, with ghosting, flies on as a
+                    ghost. With &quot;last one flying wins&quot; the server declares the winner when one pilot is left.
+                    Event mode is the game&#39;s own weapons lock: the arena starts locked (nobody can start engines,
+                    fire, launch rockets, drop bombs or troops - &quot;Event not started yet!&quot; on entry) until the host
+                    starts the event (<code>event fight</code> on the console or ##StartEvent in game); <code>event
+                    hold</code> locks it again. Arenas without the tick have no event timers at all. See EVENTS.md
+                    for the command chain. Values take effect the next time the arena is entered.</p>
+                    {tournament_html}
+                    </div>
+                    <div class="tabsave"><button type="submit" class="btn-green" style="width:auto; padding:10px 26px;">Save</button>
                         &nbsp; <a href="/admin" style="color:#666;">Cancel</a></div>
                 </form>
                 </div>
+                <script>
+                  function arTab(t){{
+                    document.querySelectorAll('.tabpane').forEach(function(p){{p.classList.toggle('active', p.id==='tab-'+t);}});
+                    document.querySelectorAll('.tabbar a.tabbtn').forEach(function(a){{a.classList.toggle('active', a.getAttribute('data-tab')===t);}});
+                    try{{ localStorage.setItem('arena_tab', t); }}catch(e){{}}
+                    if(history.replaceState){{ history.replaceState(null,'','#'+t); }}
+                    return false;
+                  }}
+                  (function(){{
+                    var t=(location.hash||'').replace('#','');
+                    if(!document.getElementById('tab-'+t)){{ try{{ t=localStorage.getItem('arena_tab')||''; }}catch(e){{ t=''; }} }}
+                    if(!document.getElementById('tab-'+t)){{ t='general'; }}
+                    arTab(t);
+                  }})();
+                </script>
             """
             self.send_html(content)
 
@@ -3333,6 +3470,32 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith('/admin/evs_library.json'):
+            # v958f5e: event-script library listing for the Events tab
+            if not is_user_admin(user):
+                self.send_error(403); return
+            _evs_lib_json(self, 200, {'dir': _evs_lib_dir(), 'scripts': _evs_lib_list()})
+
+        elif self.path.startswith('/admin/evs_library_get'):
+            if not is_user_admin(user):
+                self.send_error(403); return
+            _q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            _n = _evs_lib_safe(_q.get('name', [''])[0])
+            _p = os.path.join(_evs_lib_dir(), _n + '.json') if _n else ''
+            if not _n or not os.path.isfile(_p):
+                _evs_lib_json(self, 404, {'ok': False, 'error': 'no such script'}); return
+            with open(_p, encoding='utf-8') as f:
+                _txt = f.read()
+            if 'download' in _q:
+                body = _txt.encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Disposition', f'attachment; filename="{_n}.json"')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers(); self.wfile.write(body)
+            else:
+                _evs_lib_json(self, 200, {'ok': True, 'name': _n, 'script': _txt})
+
         elif self.path.startswith('/admin/logfiles.json'):
             # v321: directory listing for the admin Logs tab. Loaded lazily by the page so
             # /admin stays fast even with hundreds of run_*.log files accumulated.
@@ -3458,6 +3621,47 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(post_data)
         
         user = self.get_current_user()
+
+        if self.path == '/admin/evs_library':
+            # v958f5e: save / delete an event script in the server library (JSON reply for the page's JS)
+            if not is_user_admin(user):
+                _evs_lib_json(self, 403, {'ok': False, 'error': 'admin only'}); return
+            _act = qs.get('action', [''])[0]
+            _n = _evs_lib_safe(qs.get('name', [''])[0])
+            if not _n:
+                _evs_lib_json(self, 400, {'ok': False, 'error': 'give the script a name (letters, digits, space, - _ . )'}); return
+            _p = os.path.join(_evs_lib_dir(), _n + '.json')
+            if _act == 'delete':
+                try:
+                    os.remove(_p)
+                    SRV['log']('WEB', f'{user} deleted event script "{_n}" from the library')
+                    _evs_lib_json(self, 200, {'ok': True, 'scripts': _evs_lib_list()})
+                except FileNotFoundError:
+                    _evs_lib_json(self, 404, {'ok': False, 'error': 'no such script'})
+                except Exception as e:
+                    _evs_lib_json(self, 500, {'ok': False, 'error': str(e)})
+                return
+            _txt = qs.get('script', [''])[0].strip()
+            try:
+                _obj = json.loads(_txt)
+                if not isinstance(_obj, dict):
+                    raise ValueError('the script must be a JSON object')
+                _chk = SRV.get('evs_parse')
+                if _chk:
+                    _sc, _err = _chk(_txt)
+                    if _err:
+                        raise ValueError(_err)
+                _txt = json.dumps(_obj, indent=2)
+            except Exception as e:
+                _evs_lib_json(self, 400, {'ok': False, 'error': f'not a valid event script: {e}'}); return
+            try:
+                with open(_p, 'w', encoding='utf-8') as f:
+                    f.write(_txt)
+                SRV['log']('WEB', f'{user} saved event script "{_n}" to the library ({len(_txt)} bytes)')
+                _evs_lib_json(self, 200, {'ok': True, 'name': _n, 'scripts': _evs_lib_list()})
+            except Exception as e:
+                _evs_lib_json(self, 500, {'ok': False, 'error': str(e)})
+            return
 
         if self.path == '/admin/badwords':
             if not is_user_admin(user):
@@ -4120,7 +4324,26 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             # TOURNAMENT (v952f5): checkboxes stored 1/0, numbers only when given (blank = template value)
             for _tk in ('tn_enabled', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner', 'ev_enabled', 'ev_fly_button'):
                 settings[_tk] = 1 if qs.get('s_' + _tk, [''])[0].strip() else 0
-            for _tk, _lo, _hi in (('tn_lives', 0, 99), ('tn_start_delay', 0, 240), ('tn_shoot_delay', 0, 240), ('ev_start_delay', 0, 240)):
+            _scr = qs.get('s_ev_script', [''])[0].strip()
+            if _scr:
+                try:
+                    _j = json.loads(_scr)
+                    if not isinstance(_j, dict):
+                        raise ValueError('the script must be a JSON object')
+                    if SRV.get('evs_parse'):                       # v958f5e: full engine validation
+                        _sc_ok, _sc_err = SRV['evs_parse'](_scr)
+                        if _sc_err:
+                            raise ValueError(_sc_err)
+                    settings['ev_script'] = _scr
+                except Exception as _ex:
+                    self.send_html(f"<h2 style='color:red;'>Event script not saved</h2><p>{hesc(str(_ex))}</p>"
+                                   "<p>Fix the JSON and save again (the other settings were not saved either).</p>"
+                                   f"<a href='/admin/arena_settings?room_id={rid}#events'>&larr; Back to the arena</a>")
+                    return
+            else:
+                settings.pop('ev_script', None)
+            for _tk, _lo, _hi in (('tn_lives', 0, 99), ('tn_start_delay', 0, 240), ('tn_shoot_delay', 0, 240), ('ev_start_delay', 0, 240),
+                                  ('ev_length', 0, 1440)):
                 _tv = qs.get('s_' + _tk, [''])[0].strip()
                 try:
                     settings[_tk] = int(max(_lo, min(_hi, float(_tv)))) if _tv else None
@@ -4235,6 +4458,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     _log_settings['password'] = '***' if _log_settings['password'] else ''
                 SRV['log']('WEB', f"Admin {user} edited arena {rid}: name={room_name!r} title={category!r} "
                                   f"status={status} password_protected={pw_col} settings={_log_settings}")
+                try:
+                    if SRV.get('exec_console'):
+                        SRV['exec_console'](f'arena_changed {rid}', 'web:settings')   # v953f5e: tell pilots inside to re-enter
+                except Exception:
+                    pass
             self.send_response(302)
             self.send_header('Location', '/admin' if is_user_admin(user) else '/my_arenas')
             self.end_headers()
@@ -4502,10 +4730,12 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      date_read_fn=None, scoring_ref_fn=None, player_counts_fn=None,
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
                      server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None,
-                     reality_read_fn=None, radar_read_fn=None, tournament_read_fn=None):
+                     reality_read_fn=None, radar_read_fn=None, tournament_read_fn=None,
+                     evs_parse_fn=None):
     SRV['reality_read'] = reality_read_fn   # v948f5: date/time/weather editor defaults
     SRV['radar_read'] = radar_read_fn       # v949f5: radar editor defaults
     SRV['tournament_read'] = tournament_read_fn   # v952f5: tournament editor defaults
+    SRV['evs_parse'] = evs_parse_fn               # v958f5e: validate scripts saved to the library
     SRV['plane_roster'] = plane_roster_fn   # v932f5: () -> [(slot, name, default_camp, is_bomber, year)]
     SRV['server_py'] = server_py        # v731f5: where lobby_news.txt / lobby_welcome.txt live
     SRV['version'] = version            # v798f5: shown on the live console

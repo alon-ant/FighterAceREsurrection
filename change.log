@@ -1,3 +1,129 @@
+v958f5f docs (10-22): EVENT_SCRIPTING.md - moderators' guide to the event scripting system (recipes,
+      points table, modes, PPS / fox hunt, message templates, running it, troubleshooting, JSON reference);
+      EVENTS.md s7 points to it.
+
+v958f5f [EVENT SCRIPTS: TWO-WAY BUILDER SYNC] (10-22)
+      Typing in the JSON box now updates the form live (400 ms debounce; the box text is never
+      reformatted while typing; half-typed JSON leaves the form alone and says why; an emptied box
+      clears the form). Form edits no longer drop hand-written top-level keys the form does not
+      manage (carried through), and never rewrite the box mid-typing. Link above the box: 'reload
+      the form from this box'. VERSION v958f5f.
+
+v958f5e [EVENT SCRIPTS: MESSAGE TEMPLATES, FILES, LIBRARY] (10-22)
+      Every EVS broadcast is now a template (EVS_MSG_DEFAULTS, 18 keys) rendered by evs_msg/evs_say;
+      a script overrides any of them under "messages" ({placeholders}, '-' silences). evs_parse rejects
+      unknown keys and broken braces; missing placeholders are left as typed (never a crash).
+      Web: Message templates table in the builder (defaults as placeholders, allowed fields listed);
+      Export to PC (Blob download <name>.json) / Load from PC (FileReader -> box -> form); server
+      library event_scripts/*.json next to server.py: GET /admin/evs_library.json, GET
+      /admin/evs_library_get?name=[&download=1], POST /admin/evs_library action=save|delete (admin
+      session, JSON replies). Saves are validated with evs_parse (SRV['evs_parse'], new
+      evs_parse_fn kwarg of start_web_server); the arena Save now uses the same full validation
+      instead of json.loads only. VERSION v958f5e.
+
+v958f5d [PERSONAL EVENTS] (10-22)
+      Script field mode: team (default) | personal. Personal: per-pilot standings (points, or kills
+      via the new e['pkills'] when victory=kills), 'pilot +N (total T): what' broadcasts, fox-hunt line
+      shows the pilot's total, updates carry top 3 + next 5, evs_finish returns the winning pilot
+      name (evs_tag passes names through), same-camp kills count (FFA). Web: Scoring selector in the
+      builder, PPS and Fox hunt examples are personal. EVENTS.md s7. VERSION v958f5d.
+
+v958f5c [FOX HUNT] (10-22)
+      New objective type kill_target {target, points, teams?}: a kill of the named pilot awards the
+      killer's team the points regardless of camps (checked before the same-nation filter), with a
+      dedicated arena broadcast 'FOX HUNT: <killer> bagged <fox>! <team> +N (fox down xK)' and a
+      'FOX HUNT: shoot down <fox> for N pts!' line at scoring start. evs_award gained quiet=.
+      evs_parse requires a target on every objective. Web: Fox hunt block in the builder, example
+      script. FIX: the three example scripts under the Events tab rendered the literal text
+      '+ repr(EX_BOB) +' (quoting slip in v958f5) - now real JSON (EVS_EX_* constants). VERSION v958f5c.
+
+v958f5b [EVENT SCRIPTS: SUPPLIES + FORM BUILDER] (10-22)
+      New point keys: supply_delivered (per tonne landed and unloaded), supply_airdrop (per tonne
+      air-dropped), supply_specific {scene: pts per tonne} (either path, overrides the generic keys),
+      building_repaired (per building a delivery rebuilds). Hooked after the msg-106 landed-haul
+      credit and the msg-105 AIR-DROP credit (evs_on_supply).
+      Web Events tab: form builder above the JSON box (EVS_BUILDER_HTML) - name/victory/report
+      interval/announce, points grid (shared + per-team override columns), team objective lines,
+      specific-scene rows (capture/hold/damage/supply), Pin Point Parachuting block. Writes the
+      JSON box on every edit; 'Load from JSON' goes the other way; Save still stores the box.
+      EVENTS.md s7 updated. VERSION v958f5b.
+
+v958f5 [EVENT SCRIPTS] (10-22)
+    * Alon 15:16 'the biggest item today: an event scripting system' - complex victory conditions (most kills /
+      most points / custom points), per-team point tables and objectives (Battle of Britain: GE bombs, GB
+      defends; Pin Point Parachuting: land the canopy on PPS@HQ's plane), broadcast per score, fixed
+      progress updates every 30 min, team with most points wins.
+    * Per-arena JSON script in settings_json ev_script (web Events tab: textarea with validation + three
+      example scripts). Engine EVS per room: evs_parse (teams US/GB/SU/GE/JP -> camps, victory points|kills|
+      none, report_min, announce, objectives), evs_start at the fight (tournament competition start via
+      evs_schedule_start from start/close/fight re-bases, or the weapons-free moment of a plain event
+      arena), evs_award (team + pilot totals, announce line, EVS log), evs_report (every report_min: team
+      line, top 3, banner), evs_hold_tick (hold_specific per minute), evs_finish at event time-up / `event
+      end` (winner = best team by the rule, tie = draw; banner), evs_stop on reset. Hooks: score_on_death ->
+      evs_on_kill (fighter/bomber by is_bomber_plane), tc_trigger_scene -> evs_on_trigger, tc_capture_scene ->
+      evs_on_capture (capture_specific else scene_capture), _handle_ground_damage_31 -> evs_on_scene_damage
+      (per-% delta of the scene fraction; damage_specific else scene_damage) + bridge (object name),
+      tank_killed / train_killed -> evs_on_object, tc_para_landed -> evs_on_troops, the pilot's own canopy
+      (position tracked from its 34-B records, _chute_xy) -> evs_on_chute_landed at the parachuter delete
+      (chute_on_target: distance to the target pilot's _pos_xy). Console `event scores <room>`; status
+      shows standings. VERSION v958f5.
+    * Verify: paste the Battle of Britain example on a 2-team arena, `event fight` -> objectives announced;
+      a GB kill on a bomber -> 'GB +3: X shot down Y (bomber)'; a GE bomb run -> 'GE +N: ... damage to
+      <scene>'; 30-min update lines; `event end` -> 'GE WINS' / 'GB WINS'. PPS example: bail over PPS@HQ's
+      parked plane -> 'GB +10: X landed 23 m from PPS@HQ', a miss -> 'Missed: 140 m ...' to the pilot.
+
+v957f5 [WEB: TABBED ARENA EDITOR] (10-22)
+    * Alon 14:59: 'rework the arena editing page ... very long page, make it tabbed per section'. The 15
+      sections of /admin/arena_settings are now five tabs on one form (nothing changes in what is posted):
+      General (name/title/status, password, scoring, win condition & reset) | Flight & ground (feet
+      fields, enemy defences, exit = crash, runway craters, ground objects on the map) | Aircraft (war
+      date, fighters only, aircraft per team) | World & radar (date/time/weather, radar) | Events
+      (tournament + event mode + event length). Pure CSS/JS tabs (arTab), the active tab is kept in the
+      URL hash and localStorage so Save/Back returns to the same tab; sticky Save bar at the bottom.
+      Tournament blurb updated to the `event open/fight/hold` verbs.
+
+v956f5 [EVENT LENGTH] (10-22)
+    * Alon 14:45: 'a field for event length. when the time elapses the event ends'. Web (Tournament section):
+      'Event length' minutes, settings_json ev_length (0 = by hand). Server: event_arm_end(room, fight_t) arms
+      a Timer at fight + length (re-armed by every open/close/fight re-base; a plain event arena arms it
+      when the weapons go free, after the unlock delay), with 5-min and 1-min warnings (system line +
+      banner); event_time_up: tournament finished with the winner = unique fewest deaths among the pilots
+      still in (else draw) via tournament_finish, weapons locked again in event mode, 'EVENT OVER'. end /
+      hold / reset / arena reset cancel it; `event status` shows the time left. VERSION v956f5.
+    * Verify: event length 3 on room 60, `event fight 60` -> '1 minute left' at 2:00, 'EVENT OVER' at 3:00
+      with guns locked (and 'X has won' in a tournament arena); `event status 60` shows the countdown.
+
+v955f5 [ONE EVENT COMMAND] (10-22)
+    * Alon 14:34: 'we have a tournament command and an event command. they do similar things ... confusing'.
+      Merged into one family, `event <verb> <room>`, where each verb does whatever applies to the arena
+      (tournament clock / weapons lock / both): open [in <s>] (clock starts; weapons stay locked), close
+      (joining closed), fight [in <s>] (competition now + weapons free; = ##StartEvent), hold (weapons
+      locked again), end [winner], reset, fly on|off, status. `tournament ...` still works as an alias of
+      the same handler. Help line and EVENTS.md / MODERATION.md rewritten around the seven verbs.
+      VERSION v955f5.
+
+v954f5 [SYSOP ROSTER SECTION] (10-22)
+    * Alon 01:33: 'Sysop roster section (camp -2 for moderators) - lets work on it' (the v307 TODO). The
+      v307 note had the mechanism wrong: camp -2 (C_SYSOPS) is never sent - the msg-62 camp byte is masked
+      to 0..8 (else -1) - it is a DISPLAY camp the chat roster (Chat_Adv.cpp) derives from the player's
+      RIGHTS: FUN_006b8e80(rights) = (rights & 0x22) != 0 && (rights & 0x01) == 0 (masks: DAT_00c18e18
+      = 0x22 'Sysops' group, DAT_00bf53ec = 0x3f any staff, DAT_00bf53e8 = 0x23; bit 0 = incognito - a
+      sysop with it is listed under his nation). The sort/grouping (0x6b9309) files such an entry under
+      camp -2 with header Dlgs.str 0x6ba 'Sysops' (0x69f 'In Menu' = -1). Rights reach the client in two
+      places: his own MyRights via msg 218 (0xDA +9 -> the local REMOTE_PLAYER entry at the 201 grant,
+      FUN_004f88f0 -> FUN_004f3230(name, PI, camp, rights) +0x20) and everybody else's in the msg-62
+      record byte +5 (handler FUN_004fa5f0: local_2c = pcVar11[5] -> the same ctor arg) - which the
+      server always sent as 0, and our MyRights values (1 = bit 0 only, 3 = bits 0+1) never satisfied
+      the test: bit 1 missing, or bit 0 (incognito) set.
+    * mod_wire_rights(stored): 0 -> 0; else (r & 0x3f) | 0x02 with bit 0 cleared, or set when the stored
+      value carries MOD_HIDDEN_BIT 0x40 (console `mod <pilot> hidden|visible`). Applied in both 0xDA
+      builders (+9) and in the msg-62 records (push_player_roster_62, broadcast_player_join_62, the
+      roster-repair path) through the builder's existing 4th 'field' element. Stored admin_rights values
+      are unchanged (1/3 still = moderator). VERSION v954f5.
+    * Verify: a moderator in an arena -> the chat/arena roster shows him under 'Sysops' (himself and on
+      every other client that entered after the push); `mod Taurus@HQ hidden` -> back under his nation at
+      the next entry; ordinary pilots unchanged. Rights changes reach peers at their next arena entry.
+
 v953f5 [EVENT MODE = FIRING ENABLE / DISABLE] (10-22)
     * Alon 00:26: 'can we try and find a firing enable/disable command? might be an ## command or server
       console. very useful for events'. Found - it is the game's own [Event] system, next to [Tournament] in
@@ -25,6 +151,35 @@ v953f5 [EVENT MODE = FIRING ENABLE / DISABLE] (10-22)
       locks ANY arena at any time, `event start` frees it; the web checkbox is now 'Start with weapons and
       engines locked'. A client that was already in the arena keeps its old GAME_DEF (no lock) until it
       re-enters.
+    * v953f5c (Alon 01:43 'event timer running even in arenas that are not events', local run 01:39): the
+      client compares the 0x83 start with its OWN NET clock (Timer.cpp frame clock = connect base + STATUS
+      credits), which lags the server's wall clock after a lobby stay until the first in-game STATUS
+      credits catch it up - so a start of 'now' sat in the client's future and the cockpit counted
+      "You'll be able to open fire in MM:SS" down to it, in every arena (the lock is served everywhere
+      now). Checked against the 2009 capture (messages04 01:29:45 'in 131'6' -> 'GED: 2567437224, now:
+      2567446941' = the 2009 server sent the start ~10 s in the PAST at login; the NET-ms formula verified
+      to 124 ms against that log) - and the 2009 TC arena ran DelaysActive=yes, StartMethod=load,
+      FlyButtonEnabled=no, i.e. exactly this server-driven lock. Fix: every UNLOCK carries a start
+      EVENT_UNLOCK_BACKDATE_S (1 h) in the past; the arena's 'unlock N min' and `event start <room> in
+      <s>` are served by a server Timer (pilots told 'weapons free in N min'), and the served
+      Event.StartDelay is forced to 0 so the client never counts on its own.
+    * v953f5d (Alon 06:27 'you got it wrong. non event rooms shouldn't have any timers set ... none at all.
+      you can see the log message on arena entry of "event not started yet!"' = Texts.str 0x142, printed at
+      world start when DelaysActive is served and no start is known): EVENT_LOCK_ALL_ARENAS = False. The
+      [Event] flag is served only to arenas with event mode ticked on the web; every other arena keeps the
+      template's DelaysActive=no and never receives a 0x83 - no lock, no timers, no entry message. Event-
+      mode arenas start LOCKED (the 2009 way: FlyButtonEnabled=no / DelaysActive=yes, start sent by the
+      server) and the state goes out BEFORE the 201 grant (2009 messages04: 'in 131' then 201) so the
+      world starts with it, plus again at ServerConfirm. `event start|stop|fly` on a non-event arena are
+      refused with a console line. The v953f5b 'lock any arena at any time' idea is withdrawn.
+    * v953f5f (Alon 14:28 'make sure the event start timer is not 1 hour from starting, not +60 min'): the
+      1 h back-date of v953f5c is gone - the start is the real one minus 10 s (the 2009 server's margin).
+      With event arenas entered LOCKED (start 0) the lobby-lag problem cannot occur at entry, and by `event
+      start` the clocks have caught up. The unlock delay is the client's own again: Event.StartDelay is
+      served as configured ('Event will be started in MM:SS' + guns free at start + delay), and `event
+      start <room> in <s>` sends a future start for the same native countdown. Also v953f5e: a web save of
+      an arena's settings tells the pilots inside to re-enter (the GAME_DEF is only served at entry -
+      that is why 06:36's `event stop` had nothing to lock) and drops the server's caches.
     * Verify: web -> tick 'Lock weapons and engines until the host starts the event' on a test arena, enter:
       trigger -> "You'll be able to open fire after Event starts", engines will not start; ##StartEvent (or
       console `event start 149`) -> 'EVENT STARTED' banner, engines/guns work (after the unlock delay if

@@ -135,7 +135,7 @@ TODO list:
       message delivered as bc*16+1 while we sent fewer bytes makes the client read stale buffer,
       which is exactly how a control byte appears "at pos 1". v315 fixed two such messages
       (213 counts-only, 224); there may be more senders with the same defect.
-  [ ] SYSOP ROSTER SECTION (v307, deferred - cosmetic, powers already work without it).
+  [x] SYSOP ROSTER SECTION (v954f5: rights-driven, not camp -2 - see MOD_HIDDEN_BIT / mod_wire_rights).
       Goal: make moderator pilots appear under the client's dedicated "sysop" group in the
       chat/arena roster instead of a normal nation.
       WHAT'S KNOWN (traced from FA.exe, do not re-derive):
@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v953f5'
+VERSION = 'v958f5f'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -822,6 +822,28 @@ def db_delete_pilot(pilot_name, acct):
 
 MODERATORS_ENABLED = True    # master kill-switch for the whole moderator layer
 MOD_RIGHTS_DEFAULT = 1       # value written for 'mod <pilot>' (any non-zero = full mod)
+# v954f5 SYSOP ROSTER SECTION (Alon 10-22). MyRights is a BIT FIELD on the client: masks 0x3f
+# (DAT_00bf53ec, 'any staff' - the ## commands, O/B channels, free plane pick), 0x23 (DAT_00bf53e8) and
+# 0x22 (DAT_00c18e18) = the 'Sysops' group of the chat/arena roster (Chat_Adv.cpp FUN_006b8e80: shown
+# under 'Sysops' (Dlgs.str 0x6ba) iff (rights & 0x22) != 0 AND (rights & 0x01) == 0 - bit 0 is the
+# INCOGNITO bit, a sysop with it files under his nation like anyone else). The value reaches the
+# client twice: his own in msg 218 (0xDA +9 -> the local REMOTE_PLAYER entry via the 201 grant,
+# FUN_004f88f0 -> FUN_004f3230 +0x20) and everybody else's in the msg-62 roster record byte +5 (sign-
+# extended char -> REMOTE_PLAYER+0x20), which we always sent as 0. Stored admin_rights stays the
+# on/off value (1, 3, ...); the wire value is derived: bit 1 set (visible sysop), bit 0 cleared,
+# unless the pilot carries MOD_HIDDEN_BIT (console `mod <pilot> hidden`) -> bit 0 set = incognito.
+MOD_HIDDEN_BIT = 0x40        # stored flag (outside the client's 0x3f masks): sysop not listed under 'Sysops'
+
+def mod_wire_rights(r):
+    """The MyRights/roster byte the client should see for a stored admin_rights value."""
+    try:
+        r = int(r or 0)
+    except (TypeError, ValueError):
+        r = 0
+    if not r:
+        return 0
+    w = (r & 0x3f) | 0x02
+    return (w | 0x01) if (r & MOD_HIDDEN_BIT) else (w & ~0x01)
 
 # Client->server opcodes emitted by the '##' admin command handlers (group 0xc7ec18).
 # Derived by scanning each handler for its call to the net-send FUN_007e3350 and reading the
@@ -1504,6 +1526,8 @@ def tournament_start(room_id, by='console', at=None, announce=True):
                                   + (', last one flying wins' if cfg['tn_last_is_winner'] else ''))[:74])
     log('TOURNAMENT', f'room {room_id}: START by {by} at {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC '
                       f'(net_ms {tournament_net_ms(e["start"])}) -> {n} pilot(s); cfg {cfg}')
+    event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
+    evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
     return e
 
 # ----------------------------------------------------------------------------------------------------
@@ -1524,19 +1548,41 @@ def tournament_start(room_id, by='console', at=None, announce=True):
 EVENTS = {}       # room_id -> {'start': unix|None, 'fly': bool, 'by': str}
 EV_MSG_START = 0x83
 
+# v953f5c (Alon 01:43 'event timer running even in arenas that are not events'): the client compares the
+# start we send with ITS OWN NET clock (Timer.cpp frame clock, base + STATUS credits). After a lobby stay
+# that clock lags the server's wall clock until the first STATUS credits catch it up, so a start of 'now'
+# sat in the client's future and the cockpit counted "You'll be able to open fire in MM:SS" down to it.
+# An UNLOCK therefore always carries a start well in the past (EVENT_UNLOCK_BACKDATE_S): the client sees
+# start + delay <= now whatever its lag, and the weapons are free at once. The 'unlock N min after the
+# start' delay is served by the server (a Timer sends the unlock after N min) instead of the client's
+# own countdown text.
+# v953f5f (Alon 14:28 'make sure the event start timer is not 1 hour from starting, not +60 min'): the start
+# is the REAL start again. The lobby lag only matters for the state sent at ENTRY, and an event arena is
+# entered LOCKED (start 0, no clock involved); by the time the host types `event start` the pilots' clocks
+# have long caught up (first STATUS ~2 s after spawn). A 10 s back-date like the 2009 server's absorbs the
+# jitter. The unlock delay is the client's own again: Event.StartDelay is served as configured, the client
+# shows 'Event will be started in MM:SS' and frees the guns at start + delay; `event start <room> in <s>`
+# sends a FUTURE start for the same native countdown.
+EVENT_UNLOCK_BACKDATE_S = 10.0
+
 def build_event_83(fly_enable, start_t):
     return build_ingame_pkt(bytes([EV_MSG_START, 1 if fly_enable else 0])
                             + struct.pack('<I', tournament_net_ms(start_t) if start_t else 0))
 
+def event_mode(room_id):
+    """True when the arena is served with [Event] DelaysActive (web 'event mode'); only then do the
+    clients lock and only then does the server send 0x83."""
+    cfg = event_cfg_for_room(room_id) or {}
+    return bool(cfg.get('ev_enabled')) or (EVENT_LOCK_ALL_ARENAS and bool(cfg))
+
 def event_state(room_id):
     e = EVENTS.get(room_id)
     if e is None:
-        # initial state: locked when the arena says 'start locked' (ev_enabled), else started at server
-        # time 'now' (every joiner is told, so nothing is locked in a normal arena)
+        # an event-mode arena starts LOCKED ('Event not started yet!' on entry) until the host starts it
         cfg = event_cfg_for_room(room_id) or {}
-        locked = bool(cfg.get('ev_enabled')) if cfg else False
-        e = EVENTS[room_id] = {'start': None if locked else time.time(), 'fly': True, 'by': 'arena default'}
-        log('EVENT', f'room {room_id}: initial state {"LOCKED (arena setting)" if locked else "unlocked"}')
+        e = EVENTS[room_id] = {'start': None, 'fly': bool(cfg.get('ev_fly_button', 1)) if cfg else True,
+                               'by': 'arena default', 'timer': None}
+        log('EVENT', f'room {room_id}: event mode, initial state LOCKED (fly button {"on" if e["fly"] else "off"})')
     return e
 
 def event_cfg_for_room(room_id):
@@ -1569,26 +1615,53 @@ def event_push(room_id, label):
             _submit_send(send_rel, p, pkt, f'<- EVENT {label} (0x83 fly={int(e["fly"])} start={"set" if e["start"] else 0})', to=3.0); n += 1
     return n
 
-def event_start(room_id, by='console', at=None):
-    """Weapons/engines ON: the event start is set (now or `at`) and pushed to the room (0x83)."""
+def event_start(room_id, by='console', at=None, _delayed=False):
+    """Weapons/engines ON. With `at` in the future, or the arena's 'unlock N min' delay, the unlock is
+    scheduled server-side (the pilots are told); the 0x83 itself always carries a back-dated start."""
+    if not event_mode(room_id):
+        log('EVENT', f'room {room_id}: `event start` ignored - the arena is not in event mode (web: Tournament -> Event mode)')
+        return None
     e = event_state(room_id)
-    e['start'] = float(at or time.time()); e['fly'] = True; e['by'] = by
-    n = event_push(room_id, 'start')
     cfg = event_cfg_for_room(room_id) or {}
-    _d = cfg.get('ev_start_delay', 0)
-    room_system_msg(room_id, ('EVENT STARTED' + (f' - weapons free in {_d} min' if _d else ' - weapons free!'))[:74])
-    try:
-        room_banner(room_id, 'EVENT STARTED')
-    except Exception:
-        pass
+    _d = int(cfg.get('ev_start_delay', 0) or 0)
+    _old = e.get('timer')
+    if _old:
+        try: _old.cancel()
+        except Exception: pass
+    e['timer'] = None
+    _future = (at is not None and float(at) > time.time() + 1.0)
+    e['start'] = float(at) if _future else time.time() - EVENT_UNLOCK_BACKDATE_S
+    e['fly'] = True; e['by'] = by
+    n = event_push(room_id, 'start')
+    if not tournament_cfg_for_room(room_id):          # v956f5: the tournament arms its own clock at the competition start
+        event_arm_end(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)
+        evs_schedule_start(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)   # v958f5
+    _mins = int(round(((e['start'] - time.time()) if _future else 0.0) / 60.0 + _d))
+    if _mins > 0:
+        room_system_msg(room_id, f'EVENT: weapons free in {_mins} min.'[:74])
+    else:
+        room_system_msg(room_id, 'EVENT STARTED - weapons free!')
+        try:
+            room_banner(room_id, 'EVENT STARTED')
+        except Exception:
+            pass
     log('EVENT', f'room {room_id}: START by {by} at {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC -> {n} pilot(s)'
                  + ('' if (EVENT_LOCK_ALL_ARENAS or cfg.get('ev_enabled')) else ' (NOTE: [Event] DelaysActive is OFF in this arena - the clients never lock, nothing changes)'))
     return e
 
 def event_stop(room_id, by='console'):
     """Weapons/engines OFF again: start 0 -> every client is back to 'after Event starts'."""
+    if not event_mode(room_id):
+        log('EVENT', f'room {room_id}: `event stop` ignored - the arena is not in event mode (web: Tournament -> Event mode)')
+        return None
     e = event_state(room_id)
-    e['start'] = None; e['by'] = by
+    _old = e.get('timer')
+    if _old:
+        try: _old.cancel()
+        except Exception: pass
+    e['start'] = None; e['by'] = by; e['timer'] = None
+    if not tournament_cfg_for_room(room_id):
+        event_end_cancel(room_id)                       # v956f5: a plain event arena on hold has no clock
     n = event_push(room_id, 'stop')
     room_system_msg(room_id, 'EVENT HOLD - weapons and engines are locked until the host starts the event.')
     try:
@@ -1599,6 +1672,9 @@ def event_stop(room_id, by='console'):
     return e
 
 def event_fly_button(room_id, on, by='console'):
+    if not event_mode(room_id):
+        log('EVENT', f'room {room_id}: `event fly` ignored - the arena is not in event mode')
+        return None
     e = event_state(room_id)
     e['fly'] = bool(on)
     n = event_push(room_id, 'fly-button')
@@ -1609,23 +1685,630 @@ def event_on_spawn(s):
     """ServerConfirm: a joiner of a room whose event has started gets the start, else nothing (his
     GAME_DEF already says locked)."""
     rid = getattr(s, 'current_room', None)
-    if rid is None:
-        return
-    e = event_state(rid) if EVENT_LOCK_ALL_ARENAS else EVENTS.get(rid)
-    if e and (EVENT_LOCK_ALL_ARENAS or e['start'] or not e['fly']):
-        _submit_send(send_rel, s, build_event_83(e['fly'], e['start']), '<- EVENT state (0x83, late join)', to=3.0)
+    if rid is None or not event_mode(rid):
+        return                                   # v953f5d: nothing at all outside event-mode arenas
+    e = event_state(rid)
+    if e['start'] or not e['fly']:
+        _submit_send(send_rel, s, build_event_83(e['fly'], e['start']), '<- EVENT state (0x83, entry)', to=3.0)
 
 def event_status_text(rid=None):
     out = []
     rooms = [rid] if rid is not None else sorted(EVENTS)
     for r in rooms:
         cfg = event_cfg_for_room(r) or {}
+        if not event_mode(r):
+            out.append(f'room {r}: not an event arena (event mode off on the web) - no lock, no timers'); continue
         e = EVENTS.get(r) or {'start': None, 'fly': True, 'by': ''}
-        out.append(f'room {r}: [Event] start locked {cfg.get("ev_enabled", "?")}, unlock delay {cfg.get("ev_start_delay", "?")} min, '
+        out.append(f'room {r}: EVENT MODE, unlock delay {cfg.get("ev_start_delay", "?")} min, '
                    f'fly button initially {cfg.get("ev_fly_button", "?")} | '
                    + (f'STARTED {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC by {e["by"]}' if e['start'] else 'not started (locked)')
                    + f', fly button {"on" if e["fly"] else "off"}')
     return out or ['no event rooms (use: event start <room>)']
+
+# ----------------------------------------------------------------------------------------------------
+# v956f5 EVENT LENGTH (Alon 14:45 'a field for event length. when the time elapses the event ends'): web
+# setting ev_length (minutes, 0 = until ended by hand). The clock runs from the moment the fight is on -
+# the tournament's competition start, or the weapons-free moment of a plain event arena - and when it
+# elapses the server ends the event: tournament finished (winner = fewest deaths among the pilots still
+# in, a tie is a draw), weapons locked again, 'EVENT OVER' banner. Warnings at 5 and 1 minutes.
+# ----------------------------------------------------------------------------------------------------
+_EVENT_END = {}        # room_id -> {'end': unix, 'timers': [Timer, ...], 'by': str}
+
+def event_length_min(room_id):
+    try:
+        v = (db_get_room_settings(room_id) or {}).get('ev_length', '')
+        return max(0, int(float(v))) if v not in (None, '') else 0
+    except (TypeError, ValueError):
+        return 0
+
+def event_end_cancel(room_id):
+    ent = _EVENT_END.pop(room_id, None)
+    if ent:
+        for t in ent.get('timers', []):
+            try: t.cancel()
+            except Exception: pass
+
+def event_arm_end(room_id, fight_t, by='console'):
+    """Arm the end-of-event clock at fight_t + length (no-op when the arena has no length)."""
+    length = event_length_min(room_id)
+    event_end_cancel(room_id)
+    if not length:
+        return None
+    end_t = float(fight_t) + length * 60.0
+    timers = []
+    def _warn(mins, _rid=room_id):
+        room_system_msg(_rid, f'EVENT: {mins} minute{"s" if mins != 1 else ""} left.')
+        try:
+            room_banner(_rid, f'{mins} MIN LEFT')
+        except Exception:
+            pass
+    now = time.time()
+    for mins in (5, 1):
+        at = end_t - mins * 60.0
+        if at > now + 5.0:
+            t = threading.Timer(at - now, _warn, args=(mins,)); t.daemon = True; t.start(); timers.append(t)
+    t = threading.Timer(max(0.5, end_t - now), event_time_up, args=(room_id,)); t.daemon = True; t.start(); timers.append(t)
+    _EVENT_END[room_id] = {'end': end_t, 'timers': timers, 'by': by}
+    log('EVENT', f'room {room_id}: event ends at {time.strftime("%H:%M:%S", time.gmtime(end_t))} UTC ({length} min after the fight starts)')
+    return end_t
+
+def event_time_up(room_id):
+    _EVENT_END.pop(room_id, None)
+    done = []
+    if EVS.get(room_id) and not EVS[room_id].get('finished'):
+        _w, _rows = evs_finish(room_id, by='time up')                     # v958f5: the script's winner
+        done.append(f'script finished (winner {evs_tag(_w) if _w is not None else "draw"})')
+    cfg = tournament_cfg_for_room(room_id)
+    e = tournament_state(room_id, create=False)
+    if cfg and e and e['start'] is not None and not e['finished']:
+        alive = tournament_alive(room_id, e, cfg)
+        winner = None
+        if alive:
+            best = min(e['deaths'].get(p, 0) for p in alive)
+            top = [p for p in alive if e['deaths'].get(p, 0) == best]
+            winner = top[0] if len(top) == 1 else None
+        tournament_finish(room_id, winner=winner, by='time up')
+        done.append(f'tournament finished (winner {winner or "draw"})')
+    if event_mode(room_id):
+        event_stop(room_id, by='time up')
+        done.append('weapons locked')
+    room_system_msg(room_id, 'EVENT OVER - time is up.')
+    try:
+        room_banner(room_id, 'EVENT OVER')
+    except Exception:
+        pass
+    log('EVENT', f'room {room_id}: TIME UP -> ' + (', '.join(done) if done else 'nothing was running'))
+
+def event_end_left_s(room_id):
+    ent = _EVENT_END.get(room_id)
+    return int(ent['end'] - time.time()) if ent else None
+
+# ====================================================================================================
+# v958f5 EVENT SCRIPTS (Alon 10-22 'the biggest item today: an event scripting system'). A per-arena JSON
+# script (web: Events tab, settings_json ev_script) defines per-TEAM point tables, objectives and the
+# victory rule. The server books points from the hooks it already has (kills, scene trigger/capture/
+# damage, bridges, tanks, trains, troop drops, chute landings), announces each award, broadcasts a
+# progress report every N minutes and declares the winning team when the event length elapses (or on
+# `event end`). Team keys: nation tags US GB SU GE JP (or camp numbers 0..4).
+#
+#   {
+#     "name": "Battle of Britain",
+#     "victory": "points",                 // "points" (custom points) | "kills" (air kills) | "none"
+#     "report_min": 30,                    // progress broadcast interval, 0 = none
+#     "announce": true,                    // broadcast every award
+#     "points": { ... defaults for every team ... },
+#     "teams": {
+#       "GE": {"objective": "Bomb the British airfields", "points": {"scene_damage": 2, "scene_trigger": 20, "kill_fighter": 1}},
+#       "GB": {"objective": "Defend - shoot the bombers down", "points": {"kill_bomber": 3, "kill_fighter": 1}}
+#     },
+#     "objectives": [ {"type": "chute_on_target", "target": "PPS@HQ", "radius_m": 60, "points": 10} ]
+#   }
+#   point keys (points per unit): kill_fighter, kill_bomber, kill_any (per air kill); scene_trigger;
+#   scene_capture; capture_specific {"46": 50}; hold_specific {"46": 1} (per minute held); scene_damage
+#   (per 1 % of damage dealt); damage_specific {"46": 2} (per 1 % on that scene); bridge; tank; train;
+#   troops_drop (per troop chute landed); supply_delivered / supply_airdrop (per TONNE landed-delivered /
+#   air-dropped to a friendly scene), supply_specific {"46": pts per tonne}, building_repaired (per building a
+#   delivery rebuilt); chute_on_target (objective: the pilot's own canopy lands within radius_m of the target
+#   pilot's plane).
+# ====================================================================================================
+EVS = {}                 # room_id -> {'script', 'start', 'team': {camp: pts}, 'pilot': {name: pts}, 'kills': {camp: n},
+                         #             'log': [...], 'timers': [...], 'finished', 'by'}
+_EVS_TAGS = {'US': 0, 'GB': 1, 'SU': 2, 'GE': 3, 'JP': 4}
+_EVS_NAMES = {0: 'US', 1: 'GB', 2: 'SU', 3: 'GE', 4: 'JP', 5: 'C5', 6: 'C6', 7: 'C7'}
+
+# v958f5e: every arena broadcast the engine makes, as a template the script may override under
+# "messages": {key: "text with {placeholders}"}. A template of "-" silences that message.
+# Placeholders are listed per key in EVS_MSG_FIELDS (unknown ones are left as typed, never crash).
+EVS_MSG_DEFAULTS = {
+    'start':          'EVENT "{name}" is ON - scoring started.',
+    'personal':       'PERSONAL EVENT - every pilot scores for themselves.',
+    'objective':      '{team} objective: {objective}',
+    'fox_start':      'FOX HUNT: shoot down {fox} for {points} pts!',
+    'score_team':     '{team} {delta}: {pilot} {what}',
+    'score_personal': '{pilot} {delta} (total {total}): {what}',
+    'fox_team':       'FOX HUNT: {pilot} bagged {fox}! {team} {delta} (fox down x{count})',
+    'fox_personal':   'FOX HUNT: {pilot} bagged {fox}! {delta} (total {total}, fox down x{count})',
+    'pps_hit':        'landed {dist} m from {target}',
+    'pps_miss':       'Missed: {dist} m from {target} (target {radius} m).',
+    'update':         'EVENT UPDATE ({mins} min) - {name}: {scores}',
+    'final':          'FINAL - {name}: {scores}',
+    'top':            'Top: {list}',
+    'then':           'Then: {list}',
+    'win':            '{winner} WINS "{name}"!',
+    'win_banner':     '{winner} WINS',
+    'draw':           '"{name}" ends in a draw.',
+    'draw_banner':    'DRAW',
+}
+EVS_MSG_FIELDS = {
+    'start': 'name', 'personal': 'name', 'objective': 'team objective name', 'fox_start': 'fox points name',
+    'score_team': 'team delta pilot what total name', 'score_personal': 'pilot delta total what team name',
+    'fox_team': 'pilot fox team delta total count name', 'fox_personal': 'pilot fox team delta total count name',
+    'pps_hit': 'dist target radius pilot', 'pps_miss': 'dist target radius pilot',
+    'update': 'mins name scores', 'final': 'mins name scores', 'top': 'list name', 'then': 'list name',
+    'win': 'winner name', 'win_banner': 'winner name', 'draw': 'name', 'draw_banner': 'name',
+}
+
+class _EvsFmt(dict):
+    def __missing__(self, k):
+        return '{' + k + '}'
+
+def evs_msg(sc, key, **kw):
+    """Render broadcast `key` from the script's "messages" override or the default; None = silenced."""
+    tpl = ((sc.get('messages') or {}).get(key) if sc else None)
+    if tpl is None:
+        tpl = EVS_MSG_DEFAULTS.get(key, '')
+    tpl = str(tpl)
+    if tpl.strip() in ('', '-'):
+        return None
+    kw.setdefault('name', (sc or {}).get('name', 'event'))
+    try:
+        return tpl.format_map(_EvsFmt(kw))
+    except (ValueError, IndexError):
+        return tpl
+
+def evs_say(room_id, sc, key, camp=None, **kw):
+    txt = evs_msg(sc, key, **kw)
+    if txt:
+        room_system_msg(room_id, txt[:74], camp=camp) if camp is not None else room_system_msg(room_id, txt[:74])
+    return txt
+
+def evs_tag(camp):
+    if isinstance(camp, str) and camp and not camp.lstrip('-').isdigit():
+        return camp                                     # personal mode: the winner is a pilot name
+    try:
+        return _EVS_NAMES.get(int(camp), f'C{camp}')
+    except (TypeError, ValueError):
+        return '?'
+
+def evs_parse(text):
+    """(script dict, error) - validates the JSON and normalises team keys to camp numbers."""
+    if not text or not str(text).strip():
+        return None, None
+    try:
+        sc = json.loads(text)
+    except Exception as ex:
+        return None, f'not valid JSON: {ex}'
+    if not isinstance(sc, dict):
+        return None, 'the script must be a JSON object'
+    teams = {}
+    for k, v in (sc.get('teams') or {}).items():
+        ck = _EVS_TAGS.get(str(k).upper())
+        if ck is None:
+            try:
+                ck = int(k)
+            except ValueError:
+                return None, f'unknown team "{k}" (use US GB SU GE JP or 0..4)'
+        if not isinstance(v, dict):
+            return None, f'team "{k}" must be an object'
+        teams[ck] = {'objective': str(v.get('objective', '') or ''), 'points': dict(v.get('points') or {})}
+    sc['_teams'] = teams
+    sc['_points'] = dict(sc.get('points') or {})
+    v = str(sc.get('victory', 'points') or 'points').lower()
+    if v not in ('points', 'kills', 'none'):
+        return None, f'victory must be points, kills or none (got "{v}")'
+    sc['victory'] = v
+    m = str(sc.get('mode', 'team') or 'team').lower()                                          # v958f5d
+    if m not in ('team', 'personal'):
+        return None, f'mode must be team or personal (got "{m}")'
+    sc['mode'] = m
+    msgs = sc.get('messages') or {}
+    if not isinstance(msgs, dict):
+        return None, 'messages must be an object {key: template}'
+    for k, v in msgs.items():
+        if k not in EVS_MSG_DEFAULTS:
+            return None, f'unknown message key "{k}" (valid: {" ".join(EVS_MSG_DEFAULTS)})'
+        if not isinstance(v, str):
+            return None, f'message "{k}" must be a string'
+        try:
+            v.format_map(_EvsFmt({}))
+        except (ValueError, IndexError) as ex:
+            return None, f'message "{k}": bad braces ({ex})'
+    try:
+        sc['report_min'] = max(0, int(sc.get('report_min', 30) or 0))
+    except (TypeError, ValueError):
+        return None, 'report_min must be a number'
+    objs = sc.get('objectives') or []
+    if not isinstance(objs, list):
+        return None, 'objectives must be a list'
+    for o in objs:
+        if not isinstance(o, dict) or o.get('type') not in ('chute_on_target', 'kill_target'):
+            return None, 'each objective needs a type (chute_on_target or kill_target)'
+        if not str(o.get('target', '') or '').strip():
+            return None, f'objective {o.get("type")} needs a "target" pilot name'
+    return sc, None
+
+def evs_script_for_room(room_id):
+    try:
+        st = db_get_room_settings(room_id) or {}
+        sc, err = evs_parse(st.get('ev_script', ''))
+        if err:
+            log('EVS', f'room {room_id}: script error - {err}')
+        return sc
+    except Exception:
+        logx('EVS', 'script read failed'); return None
+
+def evs_points(sc, camp, key, sub=None):
+    """Points per unit for a team: the team's own table first, then the shared one."""
+    t = sc['_teams'].get(camp)
+    for table in ((t or {}).get('points', {}), sc['_points']):
+        v = table.get(key)
+        if isinstance(v, dict) and sub is not None:
+            v = v.get(str(sub))
+        if v is None or isinstance(v, dict):
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+def evs_points_table_raw(sc, key):
+    for t in list(sc['_teams'].values()) + [{'points': sc['_points']}]:
+        v = t.get('points', {}).get(key)
+        if v is not None:
+            return v
+    return None
+
+def evs_active(room_id):
+    e = EVS.get(room_id)
+    return e if (e and e.get('start') is not None and not e.get('finished')) else None
+
+def evs_stop(room_id):
+    e = EVS.pop(room_id, None)
+    if e:
+        for t in e.get('timers', []):
+            try: t.cancel()
+            except Exception: pass
+    return e
+
+def evs_start(room_id, by='console'):
+    """Start (or restart) the scoring for the room's script - called at `event fight`."""
+    evs_stop(room_id)
+    sc = evs_script_for_room(room_id)
+    if not sc:
+        return None
+    e = EVS[room_id] = {'script': sc, 'start': time.time(), 'team': {}, 'pilot': {}, 'kills': {}, 'pkills': {},
+                        'log': [], 'timers': [], 'finished': False, 'by': by}
+    if sc['mode'] == 'personal':
+        evs_say(room_id, sc, 'personal')
+    for ck, t in sc['_teams'].items():
+        e['team'].setdefault(ck, 0.0)
+        if t.get('objective'):
+            evs_say(room_id, sc, 'objective', camp=ck, team=evs_tag(ck), objective=t['objective'])
+    evs_say(room_id, sc, 'start')
+    for o in sc.get('objectives') or []:                                                    # v958f5c fox hunt
+        if o.get('type') == 'kill_target':
+            evs_say(room_id, sc, 'fox_start', fox=o.get('target'), points=f'{float(o.get("points", 1) or 1):g}')
+    if sc['report_min'] > 0:
+        t = threading.Timer(sc['report_min'] * 60.0, evs_report_tick, args=(room_id,)); t.daemon = True; t.start()
+        e['timers'].append(t)
+    if isinstance(evs_points_table_raw(sc, 'hold_specific'), dict):
+        t = threading.Timer(60.0, evs_hold_tick, args=(room_id,)); t.daemon = True; t.start()
+        e['timers'].append(t)
+    log('EVS', f'room {room_id}: scoring started by {by} - "{sc.get("name")}" victory={sc["victory"]} '
+               f'teams={ {evs_tag(k): v.get("points") for k, v in sc["_teams"].items()} } shared={sc["_points"]}')
+    return e
+
+def evs_award(room_id, pilot, camp, key, qty=1.0, what='', sub=None, pts=None, quiet=False):
+    """Book points for a pilot's team. `pts` overrides the table (objectives); `quiet` skips the
+    generic score broadcast (the caller sends its own)."""
+    e = evs_active(room_id)
+    if not e or camp is None:
+        return 0.0
+    sc = e['script']
+    try:
+        camp = int(camp)
+    except (TypeError, ValueError):
+        return 0.0
+    per = float(pts) if pts is not None else evs_points(sc, camp, key, sub)
+    total = per * float(qty)
+    if key in ('kill_fighter', 'kill_bomber'):
+        e['kills'][camp] = e['kills'].get(camp, 0) + int(qty)
+        if pilot:
+            e['pkills'][pilot] = e['pkills'].get(pilot, 0) + int(qty)
+    if abs(total) < 1e-9:
+        return 0.0
+    e['team'][camp] = e['team'].get(camp, 0.0) + total
+    if pilot:
+        e['pilot'][pilot] = e['pilot'].get(pilot, 0.0) + total
+    e['log'].append((time.time(), pilot, camp, key, total, what))
+    if len(e['log']) > 500:
+        del e['log'][:-500]
+    log('EVS', f'room {room_id}: {evs_tag(camp)} {total:+g} {pilot or ""} {key} {what} -> {evs_scoreline(e)}')
+    if sc.get('announce', True) and not quiet:
+        evs_say(room_id, sc, 'score_personal' if (sc['mode'] == 'personal' and pilot) else 'score_team',
+                team=evs_tag(camp), delta=f'{total:+g}', pilot=pilot or evs_tag(camp), what=what,
+                total=f'{e["pilot"].get(pilot, 0.0):g}' if pilot else f'{e["team"][camp]:g}')
+    return total
+
+def evs_scoreline(e):
+    sc = e['script']
+    if sc['mode'] == 'personal':
+        rows = evs_standings(e)[:3]
+        return '  '.join(f'{n} {v:g}' + (' kills' if sc['victory'] == 'kills' else '') for n, v in rows) or 'no scores yet'
+    camps = sorted(set(e['team']) | set(e['kills']))
+    if sc['victory'] == 'kills':
+        return '  '.join(f'{evs_tag(c)} {e["kills"].get(c, 0)} kills' for c in camps)
+    return '  '.join(f'{evs_tag(c)} {e["team"].get(c, 0.0):g}' for c in camps)
+
+def evs_standings(e):
+    """[(camp|pilot, value)] best first by the victory rule (pilots in personal mode)."""
+    sc = e['script']
+    if sc['mode'] == 'personal':
+        src = e['pkills'] if sc['victory'] == 'kills' else e['pilot']
+        return sorted(((n, float(v)) for n, v in src.items()), key=lambda r: (-r[1], r[0].lower()))
+    camps = set(e['team']) | set(e['kills'])
+    if sc['victory'] == 'kills':
+        rows = [(c, float(e['kills'].get(c, 0))) for c in camps]
+    else:
+        rows = [(c, float(e['team'].get(c, 0.0))) for c in camps]
+    return sorted(rows, key=lambda r: -r[1])
+
+def evs_report(room_id, final=False):
+    e = EVS.get(room_id)
+    if not e:
+        return
+    sc = e['script']
+    mins = int((time.time() - e['start']) / 60.0)
+    evs_say(room_id, sc, 'final' if final else 'update', mins=mins, scores=evs_scoreline(e))
+    if sc['mode'] == 'personal':
+        top = evs_standings(e)[3:8]                      # the scoreline already carried the top 3
+        if top:
+            evs_say(room_id, sc, 'then', list=', '.join(f'{n} {v:g}' for n, v in top))
+    else:
+        top = sorted(e['pilot'].items(), key=lambda kv: -kv[1])[:3]
+        if top:
+            evs_say(room_id, sc, 'top', list=', '.join(f'{n} {v:g}' for n, v in top))
+    try:
+        room_banner(room_id, evs_scoreline(e)[:60])
+    except Exception:
+        pass
+
+def evs_report_tick(room_id):
+    e = evs_active(room_id)
+    if not e:
+        return
+    evs_report(room_id)
+    t = threading.Timer(e['script']['report_min'] * 60.0, evs_report_tick, args=(room_id,)); t.daemon = True; t.start()
+    e['timers'].append(t)
+
+def evs_hold_tick(room_id):
+    """Every minute: the owning team of each hold_specific scene earns its points."""
+    e = evs_active(room_id)
+    if not e:
+        return
+    sc = e['script']; terrain = _probe_terrain_for_room(room_id)
+    table = evs_points_table_raw(sc, 'hold_specific') or {}
+    if isinstance(table, dict):
+        for sid in table:
+            try:
+                owner = scene_camp(terrain, int(sid))
+            except Exception:
+                owner = None
+            if owner is not None and owner >= 0:
+                evs_award(room_id, None, owner, 'hold_specific', 1.0, f'holds scene {sid}', sub=int(sid))
+    t = threading.Timer(60.0, evs_hold_tick, args=(room_id,)); t.daemon = True; t.start()
+    e['timers'].append(t)
+
+def evs_finish(room_id, by='time up'):
+    """Declare the winning team (victory rule), broadcast, stop scoring. Returns (winner_camp|None, rows)."""
+    e = EVS.get(room_id)
+    if not e or e.get('finished'):
+        return None, []
+    e['finished'] = True
+    for t in e.get('timers', []):
+        try: t.cancel()
+        except Exception: pass
+    rows = evs_standings(e)
+    sc = e['script']
+    winner = None
+    if sc['victory'] != 'none' and rows:
+        if len(rows) == 1 or rows[0][1] > rows[1][1]:
+            winner = rows[0][0]
+    evs_report(room_id, final=True)
+    if winner is not None:
+        evs_say(room_id, sc, 'win', winner=evs_tag(winner))
+        try:
+            _b = evs_msg(sc, 'win_banner', winner=evs_tag(winner))
+            if _b: room_banner(room_id, _b[:60])
+        except Exception:
+            pass
+    elif sc['victory'] != 'none':
+        evs_say(room_id, sc, 'draw')
+        try:
+            _b = evs_msg(sc, 'draw_banner')
+            if _b: room_banner(room_id, _b[:60])
+        except Exception:
+            pass
+    log('EVS', f'room {room_id}: FINISHED ({by}) winner={evs_tag(winner) if winner is not None else "draw"} '
+               f'standings={[(evs_tag(c), v) for c, v in rows]} pilots={sorted(e["pilot"].items(), key=lambda kv: -kv[1])[:10]}')
+    return winner, rows
+
+def evs_status_text(room_id):
+    e = EVS.get(room_id)
+    sc = e['script'] if e else evs_script_for_room(room_id)
+    if not sc:
+        return [f'room {room_id}: no event script']
+    out = [f'room {room_id}: script "{sc.get("name")}" mode={sc["mode"]} victory={sc["victory"]} report every {sc["report_min"]} min, '
+           f'teams {[evs_tag(c) for c in sc["_teams"]]}' + ('' if e else ' - scoring NOT running (starts at event fight)')]
+    if e:
+        out.append(f'    since {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC: ' + evs_scoreline(e)
+                   + (' (finished)' if e.get('finished') else ''))
+        for n, v in sorted(e['pilot'].items(), key=lambda kv: -kv[1])[:10]:
+            out.append(f'    {n:<24} {v:g}')
+    return out
+
+_EVS_START_TIMERS = {}
+def evs_schedule_start(room_id, at, by='clock'):
+    """Start the script's scoring at wall time `at` (now or past -> at once). No script -> nothing."""
+    t_old = _EVS_START_TIMERS.pop(room_id, None)
+    if t_old:
+        try: t_old.cancel()
+        except Exception: pass
+    if not evs_script_for_room(room_id):
+        return
+    delay = float(at) - time.time()
+    if delay <= 1.0:
+        evs_start(room_id, by=by)
+    else:
+        t = threading.Timer(delay, evs_start, args=(room_id, by)); t.daemon = True; t.start()
+        _EVS_START_TIMERS[room_id] = t
+        log('EVS', f'room {room_id}: scoring starts in {delay:.0f} s (competition start)')
+
+# ---- hooks (each is a no-op unless the room's scoring is running) ----
+def evs_on_kill(killer, victim):
+    try:
+        rid = getattr(killer, 'current_room', None)
+        if not evs_active(rid) or getattr(victim, 'current_room', None) != rid:
+            return
+        kc = getattr(killer, 'nation', None); vc = getattr(victim, 'nation', None)
+        if kc is None:
+            return
+        # fox hunt: a kill of the named pilot scores for the killer's team whatever the camps      # v958f5c
+        vname = (victim.current_pilot or '').lower()
+        for o in EVS[rid]['script'].get('objectives') or []:
+            if o.get('type') != 'kill_target' or str(o.get('target', '') or '').lower() != vname:
+                continue
+            teams = [_EVS_TAGS.get(str(t).upper(), t) for t in (o.get('teams') or [])]
+            if teams and kc not in teams:
+                continue
+            fpts = float(o.get('points', 1) or 1)
+            got = evs_award(rid, killer.current_pilot, kc, 'kill_target', 1.0, f'bagged the fox {victim.current_pilot}',
+                            pts=fpts, quiet=True)
+            if got:
+                e = EVS.get(rid) or {}
+                e['fox'] = e.get('fox', 0) + 1
+                evs_say(rid, e['script'], 'fox_personal' if e['script']['mode'] == 'personal' else 'fox_team',
+                        pilot=killer.current_pilot, fox=victim.current_pilot, team=evs_tag(kc), delta=f'{got:+g}',
+                        total=f'{e["pilot"].get(killer.current_pilot, 0.0):g}', count=e['fox'])
+        if kc == vc and EVS[rid]['script']['mode'] != 'personal':      # personal events (FFA): any kill counts
+            return
+        bomber = is_bomber_plane(getattr(victim, 'plane_type', None))
+        key = 'kill_bomber' if bomber else 'kill_fighter'
+        what = f'shot down {victim.current_pilot} ({"bomber" if bomber else "fighter"})'
+        if evs_award(rid, killer.current_pilot, kc, key, 1.0, what) == 0.0:
+            evs_award(rid, killer.current_pilot, kc, 'kill_any', 1.0, what)
+    except Exception:
+        logx('EVS', 'kill hook failed')
+
+def evs_on_trigger(room_id, pilot_sess, sidx, scene_name=''):
+    try:
+        if pilot_sess is None or not evs_active(room_id):
+            return
+        evs_award(room_id, pilot_sess.current_pilot, getattr(pilot_sess, 'nation', None), 'scene_trigger', 1.0,
+                  f'triggered {scene_name or "scene"} ({sidx})')
+    except Exception:
+        logx('EVS', 'trigger hook failed')
+
+def evs_on_capture(room_id, camp, sidx, by_pilot=None, scene_name=''):
+    try:
+        if not evs_active(room_id):
+            return
+        what = f'captured {scene_name or "scene"} ({sidx})'
+        if evs_award(room_id, by_pilot, camp, 'capture_specific', 1.0, what, sub=int(sidx)) == 0.0:
+            evs_award(room_id, by_pilot, camp, 'scene_capture', 1.0, what)
+    except Exception:
+        logx('EVS', 'capture hook failed')
+
+def evs_on_scene_damage(room_id, s, sidx, old_frac, new_frac, scene_name=''):
+    try:
+        if not evs_active(room_id) or new_frac <= old_frac:
+            return
+        pct = (new_frac - old_frac) * 100.0
+        what = f'{pct:.0f}% damage to {scene_name or "scene"} ({sidx})'
+        if evs_award(room_id, s.current_pilot, getattr(s, 'nation', None), 'damage_specific', pct, what, sub=int(sidx)) == 0.0:
+            evs_award(room_id, s.current_pilot, getattr(s, 'nation', None), 'scene_damage', pct, what)
+    except Exception:
+        logx('EVS', 'damage hook failed')
+
+def evs_on_object(room_id, s, key, what):
+    """bridge / tank / train destroyed by pilot s."""
+    try:
+        if s is None or not evs_active(room_id):
+            return
+        evs_award(room_id, s.current_pilot, getattr(s, 'nation', None), key, 1.0, what)
+    except Exception:
+        logx('EVS', f'{key} hook failed')
+
+def evs_on_supply(room_id, s, sidx, kg, repaired_n=0, airdrop=False, scene_name=''):
+    """v958f5b supplies: points per TONNE delivered (landed drop) or air-dropped, per-scene override,
+    and per building rebuilt by the delivery."""
+    try:
+        if s is None or not evs_active(room_id) or kg <= 0:
+            return
+        tonnes = float(kg) / 1000.0
+        camp = getattr(s, 'nation', None)
+        what = f'{"air-dropped" if airdrop else "delivered"} {int(kg)} kg to {scene_name or "scene"} ({sidx})'
+        if evs_award(room_id, s.current_pilot, camp, 'supply_specific', tonnes, what, sub=int(sidx)) == 0.0:
+            evs_award(room_id, s.current_pilot, camp, 'supply_airdrop' if airdrop else 'supply_delivered', tonnes, what)
+        if repaired_n:
+            evs_award(room_id, s.current_pilot, camp, 'building_repaired', float(repaired_n),
+                      f'rebuilt {repaired_n} building(s) at {scene_name or "scene"} ({sidx})')
+    except Exception:
+        logx('EVS', 'supply hook failed')
+
+def evs_on_troops(room_id, s, where=''):
+    try:
+        if not evs_active(room_id):
+            return
+        evs_award(room_id, s.current_pilot, getattr(s, 'nation', None), 'troops_drop', 1.0, f'dropped troops {where}')
+    except Exception:
+        logx('EVS', 'troops hook failed')
+
+def evs_on_chute_landed(s, xy):
+    """The pilot's own canopy came down at xy: 'chute_on_target' objectives (Pin Point Parachuting)."""
+    try:
+        rid = getattr(s, 'current_room', None)
+        e = evs_active(rid)
+        if not e or xy is None:
+            return
+        for o in e['script'].get('objectives') or []:
+            if o.get('type') != 'chute_on_target':
+                continue
+            tname = str(o.get('target', '') or '').lower()
+            tgt = next((p for p in get_sessions_in_room(rid) if (p.current_pilot or '').lower() == tname), None)
+            tpos = tgt.__dict__.get('_pos_xy') if tgt is not None else None
+            if tpos is None:
+                log('EVS', f'room {rid}: chute of {s.current_pilot} down at {tc_grid(xy[0], xy[1])} - target "{o.get("target")}" '
+                           f'{"not in the arena" if tgt is None else "has no position yet"}')
+                continue
+            teams = [_EVS_TAGS.get(str(t).upper(), t) for t in (o.get('teams') or [])]
+            if teams and getattr(s, 'nation', None) not in teams:
+                continue
+            dist = math.hypot(xy[0] - tpos[0], xy[1] - tpos[1])
+            radius = float(o.get('radius_m', 50) or 50)
+            if dist <= radius:
+                evs_award(rid, s.current_pilot, getattr(s, 'nation', None), 'chute_on_target', 1.0,
+                          evs_msg(e['script'], 'pps_hit', dist=f'{dist:.0f}', target=tgt.current_pilot,
+                                  radius=f'{radius:.0f}', pilot=s.current_pilot) or '', pts=float(o.get('points', 1) or 1))
+            else:
+                log('EVS', f'room {rid}: {s.current_pilot} landed {dist:.0f} m from {tgt.current_pilot} (needs {radius:.0f} m)')
+                if e['script'].get('announce', True):
+                    _m = evs_msg(e['script'], 'pps_miss', dist=f'{dist:.0f}', target=tgt.current_pilot,
+                                 radius=f'{radius:.0f}', pilot=s.current_pilot)
+                    if _m: send_system_msg(s, _m[:74])
+    except Exception:
+        logx('EVS', 'chute hook failed')
 
 def _tournament_rebase(room_id, by, back_s, label):
     """Move the room's tournament start `back_s` seconds into the past and re-send 0x5c to everyone, so
@@ -1649,6 +2332,8 @@ def _tournament_rebase(room_id, by, back_s, label):
             if getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
                 e['participants'].add(p.current_pilot)
     log('TOURNAMENT', f'room {room_id}: {label.upper()} by {by} -> {n} pilot(s); participants {sorted(e["participants"])}')
+    event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5 re-armed
+    evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
     return e, cfg
 
 def tournament_close_joining(room_id, by='console'):
@@ -1663,6 +2348,8 @@ def tournament_close_joining(room_id, by='console'):
     for p in get_sessions_in_room(room_id):
         if getattr(p, 'entered_game', False):
             _submit_send(send_rel, p, pkt, '<- TOURNAMENT close-joining (0x5c)', to=3.0)
+    event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
+    evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
     room_system_msg(room_id, (f'TOURNAMENT: joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.')[:74])
     return e
 
@@ -1784,6 +2471,7 @@ def tournament_finish(rid, winner=None, by='console'):
     """Close the tournament: msg 0x30 to the room (winner PlayerIndex, -1 = draw/finished)."""
     e = tournament_state(rid)
     e['finished'] = True; e['winner'] = winner
+    event_end_cancel(rid)                               # v956f5
     pi = -1
     if winner:
         for p in get_sessions_in_room(rid):
@@ -1858,9 +2546,12 @@ def enact_mod_action(s, op, body):
             event_fly_button(room, True, by=by)
             log('MODERATOR', f'FLY BUTTON ENABLED (EnableFlyButton) in room {room} by {by}')
             room_system_msg(room, 'The Fly button is enabled.')
-        elif op == EVENT_START_OPCODE:         # v953f5: ##StartEvent -> event start (0x83) = weapons/engines free
-            event_start(room, by=by)
-            log('MODERATOR', f'EVENT STARTED in room {room} by {by} (##StartEvent)')
+        elif op == EVENT_START_OPCODE:         # ##StartEvent = `event fight`: competition now + weapons free
+            if tournament_cfg_for_room(room):
+                tournament_go(room, by=by)
+            if event_mode(room):
+                event_start(room, by=by)
+            log('MODERATOR', f'EVENT FIGHT in room {room} by {by} (##StartEvent)')
         elif op == 0x8b:                       # ClearScores: not modelled (scores are the ladder's) - logged
             log('MODERATOR', f'CLEARSCORES from {by} in room {room} - not implemented (arena scores live in the ladder)')
         elif op == 0x5f:                       # Join enable(0)/disable(1)
@@ -4802,7 +5493,12 @@ EV_FLAG_DELAYS, EV_FLAG2_FLYBUTTON = 0x01, 0x80      # v953f5 [Event] DelaysActi
 # arena now carries DelaysActive=1 and the server tells each joiner the event state at ServerConfirm (msg
 # 0x83): normally 'started long ago' = unlocked, nothing changes for anyone - but `event stop <room>` now
 # locks any arena at any time and `event start` frees it again. The web checkbox becomes 'start locked'.
-EVENT_LOCK_ALL_ARENAS = True
+# v953f5d (Alon 06:27 'non event rooms shouldn't have any timers set ... none at all. you can see the log
+# message on arena entry of "event not started yet!"' - Texts.str 0x142, printed at world start when
+# DelaysActive is on and no start is known): the flag is served ONLY to arenas with event mode ticked on
+# the web (ev_enabled); every other arena carries the template's DelaysActive=no and gets no 0x83 at all.
+# `event stop` / `event start` therefore work in event-mode arenas only (the console says so otherwise).
+EVENT_LOCK_ALL_ARENAS = False
 
 def _gamedef_tournament_offsets(d):
     """Offsets of the [Tournament] bytes in a DECOMPRESSED GAME_DEF, or None when the tail does not
@@ -4855,6 +5551,9 @@ def apply_tournament_settings(d, settings):
     changes = []
     if EVENT_LOCK_ALL_ARENAS and not (d[o['flags']] & EV_FLAG_DELAYS):
         d[o['flags']] |= EV_FLAG_DELAYS; changes.append('Event.DelaysActive 0->1 (server lock, see EVENT_LOCK_ALL_ARENAS)')
+    if EVENT_LOCK_ALL_ARENAS and d[o['ev_start_delay']] != 0:
+        # v953f5c: the unlock delay is a server timer now; the client's own countdown stays off
+        changes.append(f'Event.StartDelay {d[o["ev_start_delay"]]}->0 (server timer)'); d[o['ev_start_delay']] = 0
     def _int(k, lo, hi):
         v = settings.get(k)
         if v in (None, ''):
@@ -4876,8 +5575,8 @@ def apply_tournament_settings(d, settings):
             changes.append(f'{name} {old}->{v}')
             d[o[fk]] = (d[o[fk]] | bit) if v else (d[o[fk]] & ~bit & 0xff)
     if not EVENT_LOCK_ALL_ARENAS:
-        _set_bit('ev_enabled', EV_FLAG_DELAYS, 'Event.DelaysActive')   # with the knob, ev_enabled = 'start locked' (runtime)
-    _set_u8('ev_start_delay', 'ev_start_delay', 0, 240)
+        _set_bit('ev_enabled', EV_FLAG_DELAYS, 'Event.DelaysActive')   # v953f5d: event mode = this arena only
+        _set_u8('ev_start_delay', 'ev_start_delay', 0, 240)            # v953f5f: the client's own unlock countdown
     _set_bit('ev_fly_button', EV_FLAG2_FLYBUTTON, 'Event.FlyButtonEnabled', 'flags2')
     _set_bit('tn_enabled', TN_FLAG_ACTIVE, 'Active')
     _set_u8('lives', 'tn_lives', 0, 99)
@@ -6575,16 +7274,23 @@ def console_handler():
                     log('CONSOLE', f'usage: vcnc <pilot> <cmd hex> [payload hex]  ({e})')
             elif cmd == 'mod':
                 if len(parts) < 2:
-                    log('CONSOLE', f'Usage: mod <pilot_name> [rights]   (default {MOD_RIGHTS_DEFAULT}; any non-zero = full mod)')
+                    log('CONSOLE', f'Usage: mod <pilot_name> [rights|hidden|visible]   (default {MOD_RIGHTS_DEFAULT}; any non-zero = full mod; hidden = not listed under Sysops)')
                 else:
                     _a = parts[1].split()
                     _pilot = _a[0]
-                    try: _val = int(_a[1]) if len(_a) > 1 else MOD_RIGHTS_DEFAULT
-                    except ValueError: _val = MOD_RIGHTS_DEFAULT
+                    _cur = db_get_admin_rights(_pilot) or 0
+                    if len(_a) > 1 and _a[1].lower() in ('hidden', 'incognito', 'visible', 'shown'):
+                        # v954f5: incognito sysop = listed under his nation, not under 'Sysops'
+                        _val = ((_cur or MOD_RIGHTS_DEFAULT) | MOD_HIDDEN_BIT) if _a[1].lower() in ('hidden', 'incognito') \
+                               else ((_cur or MOD_RIGHTS_DEFAULT) & ~MOD_HIDDEN_BIT)
+                    else:
+                        try: _val = int(_a[1]) if len(_a) > 1 else MOD_RIGHTS_DEFAULT
+                        except ValueError: _val = MOD_RIGHTS_DEFAULT
                     if _val == 0:
                         log('CONSOLE', 'rights=0 would REVOKE - use `unmod` if that is what you meant')
                     elif db_set_admin_rights(_pilot, _val):
-                        log('CONSOLE', f'MODERATOR: "{_pilot}" rights={_val}')
+                        log('CONSOLE', f'MODERATOR: "{_pilot}" rights={_val} (wire {mod_wire_rights(_val)}: '
+                                       f'{"incognito" if _val & MOD_HIDDEN_BIT else "listed under Sysops"}; peers see it at their next arena entry)')
                         _live = [x for x in get_all_sessions() if getattr(x,'current_pilot',None) == _pilot]
                         for _s in _live: push_myrights(_s, '(live promote)')
                         log('CONSOLE', 'Takes effect at next pilot select'
@@ -6657,59 +7363,117 @@ def console_handler():
                         log('CONSOLE', f'  {n!r:32} account {a}')
                 except Exception as _ex:
                     log('CONSOLE', f'badnames failed: {_ex}')
-            elif cmd == 'event':
-                # v953f5: event start <room> [in <s>] | stop <room> | fly <room> on|off | status [room]
-                _a = (parts[1].split() if len(parts) > 1 else [])
-                _sub = (_a[0].lower() if _a else 'status')
+            elif cmd == 'arena_changed':
+                # v953f5e: the web editor saved an arena's settings. The served GAME_DEF only reaches a client at
+                # arena ENTRY (a pilot already inside keeps the old one - Alon 06:41: event mode ticked while
+                # inside -> `event stop` had nothing to lock), so warn the pilots inside and drop the caches.
                 try:
-                    _by = 'console' if _src == 'terminal' else _src
-                    if _sub in ('start', 'go', 'fire'):
-                        _rid = int(_a[1], 0); _at = None
-                        if len(_a) > 3 and _a[2].lower() == 'in':
-                            _at = time.time() + float(_a[3])
-                        event_start(_rid, by=_by, at=_at); log('CONSOLE', f'event start room {_rid}: pushed')
-                    elif _sub in ('stop', 'hold', 'lock'):
-                        _rid = int(_a[1], 0); event_stop(_rid, by=_by); log('CONSOLE', f'event stop room {_rid}: pushed (weapons locked)')
-                    elif _sub == 'fly':
-                        _rid = int(_a[1], 0); _on = (_a[2].lower() in ('on', '1', 'yes', 'enable')) if len(_a) > 2 else True
-                        event_fly_button(_rid, _on, by=_by); log('CONSOLE', f'event fly room {_rid}: {"on" if _on else "off"}')
-                    else:
-                        _rid = int(_a[1], 0) if len(_a) > 1 else None
-                        for _l in event_status_text(_rid):
-                            log('CONSOLE', _l)
+                    _rid = int(parts[1].split()[0], 0)
+                    _TN_CFG.pop(_rid, None); _RADAR_CFG.pop(_rid, None)
+                    _n = sum(1 for p in get_sessions_in_room(_rid) if getattr(p, 'entered_game', False))
+                    if _n:
+                        room_system_msg(_rid, 'The host changed this arena\'s settings - leave to the lobby and re-enter to get them.')
+                    log('CONSOLE', f'arena {_rid} settings changed on the web -> {_n} pilot(s) inside told to re-enter')
                 except (IndexError, ValueError):
-                    log('CONSOLE', 'usage: event start <room> [in <seconds>] | stop <room> | fly <room> on|off | status [room]')
-            elif cmd == 'tournament':
-                # v952f5: tournament status [room] | start <room> [in <seconds>] | end <room> [winner] | reset <room>
+                    log('CONSOLE', 'usage: arena_changed <room>')
+            elif cmd in ('event', 'tournament'):
+                # v955f5 ONE command family for the whole event toolbox (Alon 14:34: 'tournament and event do similar
+                # things ... confusing'). The room's two mechanisms (tournament clock/lives/winner, weapons lock)
+                # are driven by the same verbs; each verb does whatever applies to the arena:
+                #   open  <room>           open the event: tournament clock starts (joining window); weapons stay locked
+                #   close <room>           joining closed - shooting countdown runs (tournament)
+                #   fight <room> [in <s>]  the fight is on: competition now (tournament) + weapons free (event mode)
+                #   hold  <room>           weapons locked again (event mode); the tournament clock is untouched
+                #   end   <room> [winner]  tournament finished (winner announced if named)
+                #   reset <room>           everything back to the start: next spawn re-opens
+                #   fly   <room> on|off    the HQ Fly button
+                #   status [room]
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _sub = (_a[0].lower() if _a else 'status')
+                _by = 'console' if _src == 'terminal' else _src
                 try:
-                    if _sub == 'start':
+                    if _sub in ('open', 'start'):
                         _rid = int(_a[1], 0); _at = None
                         if len(_a) > 3 and _a[2].lower() == 'in':
                             _at = time.time() + float(_a[3])
-                        _e = tournament_start(_rid, by=('console' if _src == 'terminal' else _src), at=_at)
-                        log('CONSOLE', f'tournament start room {_rid}: ' + ('ok' if _e else 'no tournament in this arena (Active off)'))
+                        _t = tournament_start(_rid, by=_by, at=_at) if tournament_cfg_for_room(_rid) else None
+                        _ev = event_mode(_rid)
+                        if _ev and not _t:
+                            event_stop(_rid, by=_by)          # a plain event arena: open = locked, waiting for 'fight'
+                        log('CONSOLE', f'event open room {_rid}: ' + ', '.join(
+                            ([f'tournament clock started (joining {tournament_cfg_for_room(_rid)["tn_start_delay"]} min)'] if _t else [])
+                            + (['weapons locked until fight'] if _ev else [])) if (_t or _ev) else
+                            f'event open room {_rid}: this arena has neither tournament nor event mode (web: Tournament section)')
                     elif _sub in ('close', 'closejoin', 'nojoin'):
                         _rid = int(_a[1], 0)
-                        _e = tournament_close_joining(_rid, by=('console' if _src == 'terminal' else _src))
-                        log('CONSOLE', f'tournament close room {_rid}: ' + ('joining closed, shooting countdown running' if _e else 'no tournament in this arena (Active off)'))
-                    elif _sub in ('go', 'fight', 'begin'):
+                        _e = tournament_close_joining(_rid, by=_by)
+                        log('CONSOLE', f'event close room {_rid}: ' + ('joining closed, shooting countdown running' if _e else 'no tournament in this arena'))
+                    elif _sub in ('fight', 'go', 'begin', 'unlock'):
+                        _rid = int(_a[1], 0); _at = None
+                        if len(_a) > 3 and _a[2].lower() == 'in':
+                            _at = time.time() + float(_a[3])
+                        _done = []
+                        if tournament_cfg_for_room(_rid) and _at is None:
+                            if tournament_go(_rid, by=_by): _done.append('competition now')
+                        if event_mode(_rid):
+                            if event_start(_rid, by=_by, at=_at): _done.append('weapons free' + (f' in {int(_at - time.time())} s' if _at else ''))
+                        log('CONSOLE', f'event fight room {_rid}: ' + (', '.join(_done) if _done else 'nothing to do (no tournament / event mode in this arena)'))
+                    elif _sub in ('hold', 'stop', 'lock'):
                         _rid = int(_a[1], 0)
-                        _e = tournament_go(_rid, by=('console' if _src == 'terminal' else _src))
-                        log('CONSOLE', f'tournament go room {_rid}: ' + ('competition phase now' if _e else 'no tournament in this arena (Active off)'))
+                        _e = event_stop(_rid, by=_by)
+                        log('CONSOLE', f'event hold room {_rid}: ' + ('weapons locked' if _e else 'not an event-mode arena (web: Tournament -> Event mode)'))
                     elif _sub in ('end', 'finish'):
                         _rid = int(_a[1], 0); _w = _a[2] if len(_a) > 2 else None
-                        _e = tournament_finish(_rid, winner=_w, by='console'); log('CONSOLE', f'tournament end room {_rid}: done')
+                        if EVS.get(_rid) and not EVS[_rid].get('finished'):
+                            evs_finish(_rid, by='console')                                 # v958f5
+                        if tournament_cfg_for_room(_rid):
+                            tournament_finish(_rid, winner=_w, by=_by)
+                        event_end_cancel(_rid)
+                        log('CONSOLE', f'event end room {_rid}: done')
                     elif _sub == 'reset':
-                        _rid = int(_a[1], 0); TOURNAMENTS.pop(_rid, None); _TN_CFG.pop(_rid, None)
-                        log('CONSOLE', f'tournament reset room {_rid}: cleared (next spawn restarts the clock)')
+                        _rid = int(_a[1], 0)
+                        TOURNAMENTS.pop(_rid, None); _TN_CFG.pop(_rid, None)
+                        event_end_cancel(_rid); evs_stop(_rid)                              # v958f5
+                        _t0 = _EVS_START_TIMERS.pop(_rid, None)
+                        if _t0:
+                            try: _t0.cancel()
+                            except Exception: pass
+                        _ev = EVENTS.pop(_rid, None)
+                        if _ev and _ev.get('timer'):
+                            try: _ev['timer'].cancel()
+                            except Exception: pass
+                        if event_mode(_rid):
+                            event_stop(_rid, by=_by)
+                        log('CONSOLE', f'event reset room {_rid}: cleared - the next spawn re-opens it')
+                    elif _sub in ('scores', 'score', 'report'):
+                        _rid = int(_a[1], 0)
+                        for _l in evs_status_text(_rid):
+                            log('CONSOLE', _l)
+                        if evs_active(_rid):
+                            evs_report(_rid)                                                # v958f5: push an update now
+                    elif _sub == 'fly':
+                        _rid = int(_a[1], 0); _on = (_a[2].lower() in ('on', '1', 'yes', 'enable')) if len(_a) > 2 else True
+                        _e = event_fly_button(_rid, _on, by=_by)
+                        log('CONSOLE', f'event fly room {_rid}: ' + (f'{"on" if _on else "off"}' if _e else 'not an event-mode arena'))
                     else:
                         _rid = int(_a[1], 0) if len(_a) > 1 else None
                         for _l in tournament_status_text(_rid):
                             log('CONSOLE', _l)
+                        for _l in event_status_text(_rid):
+                            log('CONSOLE', _l)
+                        for _r in ([_rid] if _rid is not None else sorted(set(EVS) | {k for k in [_rid] if k is not None})):
+                            for _l in evs_status_text(_r):
+                                log('CONSOLE', _l)
+                        for _r in ([_rid] if _rid is not None else sorted(_EVENT_END)):
+                            _left = event_end_left_s(_r)
+                            if _left is not None:
+                                log('CONSOLE', f'room {_r}: event ends in {max(0, _left) // 60} min {max(0, _left) % 60} s'
+                                               f' (length {event_length_min(_r)} min)')
+                            elif _rid is not None and event_length_min(_r):
+                                log('CONSOLE', f'room {_r}: event length {event_length_min(_r)} min - clock starts with the fight')
                 except (IndexError, ValueError):
-                    log('CONSOLE', 'usage: tournament status [room] | start <room> [in <seconds>] | close <room> | go <room> | end <room> [winner] | reset <room>')
+                    log('CONSOLE', 'usage: event open|close|fight|hold|end|reset|fly|status|scores  -  '
+                                   'open <room> | close <room> | fight <room> [in <s>] | hold <room> | end <room> [winner] | reset <room> | fly <room> on|off | status [room]')
             elif cmd == 'poll':
                 # v951f5: poll start <room|all> <secs> <question> | <choice> | <choice> ...
                 #         poll status [room] | poll end [room] | poll cancel [room]
@@ -7813,14 +8577,14 @@ def console_handler():
                         'unban|unbanall <pilot>            - lift a ban          bans - list active bans',
                         'gag|gagall <pilot> [hours]        - mute everywhere (default 1 h); his chat input locks',
                         'ungag|ungagall <pilot>            - unmute              gags - list active gags',
-                        'mod <pilot> [rights] | unmod <pilot> | mods - moderator rights (##commands in game)',
+                        'mod <pilot> [rights|hidden|visible] | unmod <pilot> | mods - moderator rights (##commands; listed under Sysops unless hidden)',
                         'badnames                          - list pilot names with spaces/punctuation (fix via web admin rename)',
                         'say <room|all> <text>             - yellow system line + 10 s on-screen banner',
                         'gsm <pilot> <text>                - private flashing message to one pilot, wherever he is (##GSM)',
                         'broadcast <text>                  - server-wide banner (in-game) + Server chat (lobby)',
                         'poll start <room|all> <secs> <q> | <c0> | <c1> ... - open a poll (pilots: !!vote N, !!poll); poll status|end|cancel [room]',
-                        'tournament status|start <room> [in <s>]|close <room>|go <room>|end <room> [winner]|reset <room>',
-                        'event start|stop <room> | fly <room> on|off | status - weapons/engines lock (arena [Event] mode; ##StartEvent)',
+                        'event open|close|fight|hold|end|reset|scores <room> | fly <room> on|off | status [room]',
+                        '                                  - the event toolbox (tournament clock/lives/winner + weapons lock); see EVENTS.md',
                         '                                  - clock / close joining now / fight now / lives / result',
                         'boot <pilot> [text]               - EShutDown with text (client exits the game)',
                         'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
@@ -8424,7 +9188,7 @@ def build_da_session(rights=0, squadron_id=0):
     squadron_id is 1, for plain members; an officer with DAT=3 enabled exactly FAVG id=3)."""
     data=bytearray(17); data[0]=0xDA
     struct.pack_into('<I', data, 1, (int(squadron_id) or DA_NO_SQUADRON_SENTINEL) & 0xffffffff)
-    struct.pack_into('<I', data, 9, int(rights) & 0xffffffff)
+    struct.pack_into('<I', data, 9, mod_wire_rights(rights) & 0xffffffff)   # v954f5: wire form (visible/incognito)
     return build_appspace_pkt(bytes(data))
 
 def db_pilot_admin_squadron_id(pilot_name):
@@ -8463,7 +9227,7 @@ def build_da_session_safe(rights=0, squadron_id=0):
     v301: MyRights u32 at offset +9 (fits inside the 15 bytes: +9..+12)."""
     data = bytearray([0xDA]) + bytearray(14)
     struct.pack_into('<I', data, 1, (int(squadron_id) or DA_NO_SQUADRON_SENTINEL) & 0xffffffff)   # 0 forbidden - see build_da_session
-    struct.pack_into('<I', data, 9, int(rights) & 0xffffffff)
+    struct.pack_into('<I', data, 9, mod_wire_rights(rights) & 0xffffffff)   # v954f5: wire form (visible/incognito)
     return build_ingame_pkt(bytes(data))
 
 def build_e1_pilot_list(pilots):
@@ -9859,11 +10623,13 @@ def build_add_player_62(records):
     caused by bc*16+1 framing garbage - see v187 - but this delete+re-add hazard is
     real independent of framing, so the invariant stands. Peers only.)"""
     data = bytearray([MSG_ADD_PLAYER_62])
-    for pi, side, name in records:
+    for rec in records:
+        pi, side, name = rec[0], rec[1], rec[2]
+        rb = (int(rec[3]) & 0x7f) if len(rec) > 3 and rec[3] else 0    # v954f5: byte +5 = MyRights -> 'Sysops' group
         sb = 0xff if side is None else (side & 0xff)
         nb = (name.encode('ascii', 'replace') if isinstance(name, str) else name)
         data += (pi & 0xFFFFFFFF).to_bytes(4, 'little')
-        data += bytes([sb, 0x00])
+        data += bytes([sb, rb])
         data += nb + b'\x00'      # name
         data += b'\x00'           # str2 (empty, NUL-terminated)
     # TILE to bc*16+1 (see CRITICAL FRAMING): the handler scans str2 to its NUL, so
@@ -9875,7 +10641,7 @@ def build_add_player_62(records):
         data = data[:-1] + (b'\x20' * pad) + b'\x00'   # spaces inside str2, then NUL
     assert len(data) % 16 == 1, f'62 framing {len(data)} !==1 mod16'
     log('PLAYER62', f'AddPlayer {len(records)} rec(s) (pad={pad}): '
-                    f'{[(pi, sd, (n if isinstance(n,str) else n.decode("ascii","replace"))) for pi,sd,n in records]}')
+                    f'{[(r[0], r[1], (r[2] if isinstance(r[2],str) else r[2].decode("ascii","replace"))) + ((f"rights={r[3]}",) if len(r) > 3 and r[3] else ()) for r in records]}')
     return build_appspace_pkt_exact(bytes(data))
 
 # Dummy PlayerIndex for 63 padding records: a value the client's player table will
@@ -10530,7 +11296,7 @@ def push_player_roster_62(s, reason=''):
     if not peers:
         log('PLAYER62', f'no peers in room {room_id} to advertise to {s.current_pilot} {reason}')
         return
-    records = [(p.player_index, p.nation, p.current_pilot or 'Player') for p in peers]
+    records = [(p.player_index, p.nation, p.current_pilot or 'Player', mod_wire_rights(sess_rights(p))) for p in peers]
     pkt = build_msg13(build_add_player_62(records))   # WRAP in msg-13 batch (build_add_player_62
                                                       # returns a RAW sub-message; sending it
                                                       # unwrapped made the client read bc=0x3e=62)
@@ -10549,7 +11315,7 @@ def broadcast_player_join_62(joiner, reason=''):
         log('PLAYER62', f'no peers in room {room_id} to announce {joiner.current_pilot} to '
                         f'{(reason or "").strip()}')
         return
-    rec = [(joiner.player_index, joiner.nation, joiner.current_pilot or 'Player')]
+    rec = [(joiner.player_index, joiner.nation, joiner.current_pilot or 'Player', mod_wire_rights(sess_rights(joiner)))]
     sub62 = build_add_player_62(rec)                  # RAW sub-message (sent raw -> bc=62 CTD)
     # v926f5 [SLOT-REUSE SCRUB RIDES IN THE JOIN BATCH]: when assign_player_slot gave this pilot
     # an index another pilot last held, peers may still bind the OLD name to it. The 2009 form
@@ -12043,6 +12809,10 @@ def _maybe_grant_create_entry(s):
     s.nation = None                                   # "In Menu" until a side is picked
     assign_player_slot(s, s.current_room)
     s.client_granted = True
+    try:
+        event_on_spawn(s)                      # v953f5d: event-mode state BEFORE the grant (2009: 'in 131' then 201)
+    except Exception:
+        logx('EVENT', 'pre-grant state failed')
     send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
              f'<- JoinToGameAnswer 201 (ClientNumber={s.client_number} '
              f'PlayerIndex={s.player_index} -> GRANT, create auto-join)', to=5.0)
@@ -14157,6 +14927,8 @@ def tank_killed(onum, killer, reason=''):
     if t is None or t.get('dead'):
         return
     t['dead'] = True
+    if killer is not None and getattr(killer, 'current_pilot', None):
+        evs_on_object(t.get('room'), killer, 'tank', 'destroyed a tank')           # v958f5
     col = COLUMNS.get(t.get('column'))
     # v673f5: capture the column's destination BEFORE the goal is cleared and hand it to the new
     # leader - the promoted tank used to keep its follower-slot goal (a point beside the wreck),
@@ -14757,6 +15529,7 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
         pass
     log('TC', f'room {room_id}: scene {sidx} "{txy[2].strip()}" (camp {tcamp}) TRIGGERED by {pname} '
               f'(camp {pcamp}) {reason}')
+    evs_on_trigger(room_id, pilot_sess, sidx, txy[2].strip())           # v958f5 event script
     _kind = tc_scene_kind_word(txy[2])
     # v600f5 film wording: to the pilot, then the broadcast
     tc_say(room_id, f'You have triggered tank attack on the {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=pilot_sess)
@@ -15050,6 +15823,7 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
         logx('TC', 'capture helper lines failed')
     TRIGGERS.pop((room_id, int(sidx)), None)
     _TC_CAPTURED_AT[(room_id, int(sidx))] = time.time()      # v897f5: post-capture trigger grace
+    evs_on_capture(room_id, int(camp), int(sidx), by_pilot, txy[2].strip())   # v958f5 event script
     try:                                                     # v949f5: a taken scene must be repaired below
         _TC_DISARMED[(room_id, int(sidx))] = {'at': time.time(), 'why': f'captured by camp {camp}',      # TC_REARM_PERCENT
                                               'pct': int(round(trn_scene_damage_frac(room_id, sidx) * 100))}   # before it can be
@@ -15577,6 +16351,8 @@ def _handle_cargo_request_106(s, pl):
                          f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus}'
                          + ('' if _haul_ok else ', same base as the pick-up - no points') + ')')
             s.__dict__.pop('_cargo_origin', None)
+            if _haul_ok:
+                evs_on_supply(rid, s, sidx, gm + gf + ga, len(repaired), False, txy[2].strip())     # v958f5b
             if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
                 try:
                     _mode = scoring_mode_for_room(rid)
@@ -15687,6 +16463,7 @@ def _handle_give_rsc_105(s, pl):
             parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
             log('CARGO', f'{s.current_pilot} AIR-DROP -> scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
                          f'{", ".join(parts) or "nothing"}, repaired {len(repaired)} obj(s) ({spent} kg metal)')
+            evs_on_supply(rid, s, sidx, gm + gf + ga, len(repaired), True, txy[2].strip())           # v958f5b
             if parts:
                 tc_say(rid, f'AI: {s.current_pilot} air-dropped {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}' + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
@@ -16191,6 +16968,8 @@ def train_killed(onum, killer, reason='', ai_hunter=None):
     tr['dead'] = True
     _TRAIN_LOST_AT[(tr['room'], tr['camp'], tr['road'], tr.get('start', 'rear'))] = time.time()   # v679f5: per slot
     kname = getattr(killer, 'current_pilot', None) if killer is not None else None
+    if kname:
+        evs_on_object(tr['room'], killer, 'train', 'destroyed a train')              # v958f5
     log('TRAIN', f'train 0x{onum:04x} camp {tr["camp"]} DESTROYED by {kname or "?"} {reason} - cargo lost {tr.get("load")}')
     if killer is not None and kname and GROUND_KILL_SCORE:
         try:
@@ -16801,6 +17580,8 @@ def arena_reset_state(room_id):
     except Exception:
         logx('CLOCK', 'clock re-base on reset failed')
     TOURNAMENTS.pop(room_id, None); _TN_CFG.pop(room_id, None)   # v952f5: the next spawn restarts the tournament clock
+    event_end_cancel(room_id)                                    # v956f5
+    evs_stop(room_id)                                            # v958f5
     EVENTS.pop(room_id, None)                                    # v953f5: event back to 'not started'
     for onum in [o for o, t in list(TANKS.items()) if t['room'] == room_id]:
         delete_tank(onum, reason='(arena reset)')
@@ -17831,6 +18612,7 @@ def tc_para_landed(s, onum, ent):
     st['last'] = now
     if len(st['objs']) < SOLDIER_MAX_PER_STICK:
         st['objs'] += spawn_soldiers(rid, camp, [(pos[0], pos[1], 0.0)], st['id'], reason='(chute landed)')
+    evs_on_troops(rid, s, f'at {tc_grid(pos[0], pos[1])}')                           # v958f5
     log('PARA', f'{s.current_pilot}: paratroop landed at {tc_grid(pos[0], pos[1])} - stick {st["id"]} now {st["n"]} '
                 f'({st["purpose"]} scene {st["target"]})')
 
@@ -21245,6 +22027,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         if killer is not None:
             threading.Thread(target=_restate, args=(killer, '(kill)'), daemon=True).start()
 
+    if killer is not None:
+        evs_on_kill(killer, victim)                       # v958f5 event script
     return killer, _bailed   # v368f5: also report bail so the caller can fire the announce-only
                              # msg-33 (the bail path never self-announces on the shooter's client)
 
@@ -22199,6 +22983,12 @@ def relay_telemetry(src, data, _split_obj=None):
                 _co_pos = (_ox, _oy)
             except Exception:
                 pass
+        if _co_onum == getattr(src, 'para_obj_number', None):
+            try:
+                _cx, _cy, _cz = unpack_plane_pos9(pl[9:18])
+                src._chute_xy = (_cx, _cy, _cz); src._chute_at = time.time()      # v958f5: the pilot's own canopy
+            except Exception:
+                pass
         _crew_ent = (src.__dict__.get('crew_para_objs') or {}).get(_co_onum)
         if _crew_ent is not None:
             try:
@@ -22985,7 +23775,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
         _missing = [p for p in get_sessions_in_room(s.current_room)
                     if p is not s and p.addr not in _cp]
         if _missing:
-            records = [(p.player_index, p.nation, p.current_pilot or 'Player') for p in _missing]
+            records = [(p.player_index, p.nation, p.current_pilot or 'Player', mod_wire_rights(sess_rights(p))) for p in _missing]
             _pkt = build_msg13(build_add_player_62(records))
             send_rel(s, _pkt, f'<- AddPlayer 62 ({len(records)} peer(s)) (re-fly roster rebuild)', to=5.0)
             log('PLAYER62', f're-fly: re-advertised {len(records)} missing peer(s) to '
@@ -24021,6 +24811,10 @@ def handle_compound(s, outer_cmd, pl):
             log('COMPOUND', 'JoinToGameAnswer 201 already granted this entry - suppressing duplicate')
         else:
             s.client_granted = True
+            try:
+                event_on_spawn(s)              # v953f5d: event-mode state BEFORE the grant (2009 timing)
+            except Exception:
+                logx('EVENT', 'pre-grant state failed')
             send_rel(s, build_join_game_answer_201(s.client_number, s.player_index),
                      f'<- JoinToGameAnswer 201 (ClientNumber={s.client_number} '
                      f'PlayerIndex={s.player_index} -> GRANT)', to=5.0)
@@ -25244,9 +26038,17 @@ def _handle_ground_damage_31(s, body, via=''):
             # the production scaling all read SCENE_HP, so the map tallies each building
             # (fix for 'scene damage not tallied and didn't apply on the map'). When the
             # LAST destructible dies, the scene is gone - stores lost (v291 model).
+            if 'bridge' in str(oi.get('name', '')).lower():
+                evs_on_object(s.current_room, s, 'bridge', f'destroyed {oi.get("name")}')     # v958f5
             if _sc is not None and _sc >= 0:
                 _frac = trn_scene_damage_frac(s.current_room, _sc)
+                _old_frac = 1.0 - (SCENE_HP.get((s.current_room, _sc), SCENE_DEFAULT_HP) / float(SCENE_DEFAULT_HP or 1))
                 SCENE_HP[(s.current_room, _sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - _frac)))
+                try:
+                    evs_on_scene_damage(s.current_room, s, _sc, max(0.0, _old_frac), _frac,
+                                        (trn_scene_info(s.current_room, _sc) or {}).get('name', ''))   # v958f5
+                except Exception:
+                    logx('EVS', 'scene damage hook failed')
                 if _frac > 0:
                     log('AUTOPVE', f'scene {_sc} damage now {int(round(_frac * 100))}% '
                                    f'(destroyed value fraction; map/panel + production follow)')
@@ -26019,6 +26821,13 @@ def _ingame_own_object_removed(s, tb, stored):
             log('PARA', f'{s.current_pilot} parachuter 0x{_onum:04x} removed (landed or killed) '
                         f'-> relaying the delete to peers; the plane (0x{s.my_obj_number:04x}) is '
                         f'unaffected')
+            try:
+                _cxy = s.__dict__.get('_chute_xy')
+                _cexit = stored[7] if len(stored) > 7 else 0
+                if _cxy is not None and (_cexit & 0xf) != 12:
+                    evs_on_chute_landed(s, _cxy)                                   # v958f5 Pin Point Parachuting
+            except Exception:
+                logx('EVS', 'chute landing hook failed')
             # v497f5: the parachuter's exit byte says how the pilot came down. SE=12 (exit 0x2c) =
             # CAPTURED on enemy ground -> the DEFERRED pilot death (the plane was already counted when
             # it came down at the bail). Any other landing = pilot safe, streak/aces intact.
@@ -32401,6 +33210,7 @@ threading.Thread(
             'reality_read_fn': extract_reality_from_gamedef,   # v948f5: date/time/weather editor defaults
             'radar_read_fn': extract_radar_from_gamedef,       # v949f5: radar editor defaults
             'tournament_read_fn': extract_tournament_from_gamedef,   # v952f5: tournament editor defaults
+            'evs_parse_fn': evs_parse,                      # v958f5e: script library validation
             'version': VERSION},                            # v798f5: shown on the live console
     daemon=True
 ).start()
