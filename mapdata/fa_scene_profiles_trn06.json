@@ -1,0 +1,9312 @@
+{
+ "terrain": 6,
+ "defs": {
+  "storage": [
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "metal",
+    "max": 2500
+   },
+   {
+    "resource": "ammo",
+    "max": 18000
+   },
+   {
+    "resource": "ammo",
+    "max": 10000
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "metal",
+    "max": 3000
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "fuel",
+    "max": 1500
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   },
+   {
+    "resource": "ammo",
+    "max": 10000
+   },
+   {
+    "resource": "fuel",
+    "max": 1500
+   },
+   {
+    "resource": "fuel",
+    "max": 3000
+   }
+  ],
+  "producer": [
+   {
+    "resource": "ammo",
+    "max": 5000,
+    "rate_per_min": 80,
+    "f3": 25000
+   },
+   {
+    "resource": "ammo",
+    "max": 8000,
+    "rate_per_min": 400,
+    "f3": 25000
+   },
+   {
+    "resource": "fuel",
+    "max": 30000,
+    "rate_per_min": 1000,
+    "f3": 25000
+   },
+   {
+    "resource": "ammo",
+    "max": 45000,
+    "rate_per_min": 4500,
+    "f3": 25000
+   },
+   {
+    "resource": "metal",
+    "max": 5000,
+    "rate_per_min": 1000,
+    "f3": 25000
+   }
+  ],
+  "unit": [
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 4000,
+    "rate_per_min": 80,
+    "cost": 35000,
+    "flags": 7
+   },
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 4000,
+    "rate_per_min": 80,
+    "cost": 35000,
+    "flags": 7
+   },
+   {
+    "unit": "tank",
+    "resource": "metal",
+    "max": 4000,
+    "rate_per_min": 250,
+    "cost": 35000,
+    "flags": 7
+   },
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 6000,
+    "rate_per_min": 500,
+    "cost": 35000,
+    "flags": 7
+   },
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 6000,
+    "rate_per_min": 80,
+    "cost": 35000,
+    "flags": 7
+   },
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 6000,
+    "rate_per_min": 80,
+    "cost": 60000,
+    "flags": 7
+   },
+   {
+    "unit": "plane",
+    "resource": "metal",
+    "max": 4000,
+    "rate_per_min": 80,
+    "cost": 1000,
+    "flags": 7
+   },
+   {
+    "unit": "ship",
+    "resource": "metal",
+    "max": 15000,
+    "rate_per_min": 300,
+    "cost": 60000,
+    "flags": 7
+   }
+  ]
+ },
+ "scenes": {
+  "0": {
+   "name": "Bomber Airfield ",
+   "camp": 1,
+   "x": 21985.984375,
+   "y": 98521.875,
+   "caps": {
+    "metal": 9000,
+    "fuel": 12000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 11,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 12,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 13,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 65,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 66,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 67,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 68,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 69,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 70,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 71,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "1": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -55476.3125,
+   "y": 81202.75,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 73,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 74,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 75,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 76,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 77,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 78,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 79,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "2": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -74868.28125,
+   "y": 90387.65625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 83,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 84,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 85,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 86,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 87,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 88,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 89,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "3": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -85088.03125,
+   "y": 37730.84375,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 93,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 94,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 95,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 96,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 97,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 98,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 99,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 103,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 105,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 106,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "4": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -85689.7109375,
+   "y": 44775.796875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 109,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 110,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 111,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 112,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 113,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 114,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 115,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "5": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": -38550.4296875,
+   "y": 77204.34375,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 119,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 120,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 121,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 122,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 123,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 124,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 125,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "6": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": -38550.4296875,
+   "y": 60724.75,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 129,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 130,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 131,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 132,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 133,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 134,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 135,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 139,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 141,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 142,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "7": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": -45759.8671875,
+   "y": 40766.875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 145,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 146,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 147,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 148,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 149,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 150,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 151,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "8": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": -31850.71875,
+   "y": 25116.40625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 155,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 156,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 157,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 158,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 159,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 160,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 161,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 165,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 167,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 168,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "9": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 65954.96875,
+   "y": -15257.796875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 171,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 172,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 173,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 174,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 175,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 176,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 177,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "10": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 91308.3125,
+   "y": -61561.078125,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 181,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 182,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 183,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 184,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 185,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 186,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 187,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 191,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 193,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 194,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "11": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 63161.515625,
+   "y": -2361.71875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 197,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 198,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 199,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 200,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 201,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 202,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 203,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "12": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 85978.25,
+   "y": -6135.5546875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 207,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 208,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 209,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 210,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 211,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 212,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 213,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 217,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 219,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 220,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "13": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 33032.515625,
+   "y": -15057.4765625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 223,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 224,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 225,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 226,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 227,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 228,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 229,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "14": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 55933.828125,
+   "y": -50634.328125,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 233,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 234,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 235,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 236,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 237,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 238,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 239,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 243,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 245,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 246,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "15": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 13016.796875,
+   "y": -72564.046875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 249,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 250,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 251,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 252,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 253,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 254,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 255,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "16": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 52995.8125,
+   "y": -102973.671875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 259,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 260,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 261,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 262,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 263,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 264,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 265,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 269,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 271,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 272,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "17": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -21363.4296875,
+   "y": -82668.0546875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 275,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 276,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 277,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 278,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 279,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 280,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 281,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "18": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -42433.0,
+   "y": -87501.84375,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 285,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 286,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 287,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 288,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 289,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 290,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 291,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 295,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 297,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 298,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "19": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -79377.0703125,
+   "y": -67686.8046875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 301,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 302,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 303,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 304,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 305,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 306,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 307,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "20": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -23400.6796875,
+   "y": -69612.515625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 311,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 312,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 313,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 314,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 315,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 316,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 317,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 321,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 323,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 324,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "21": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 9930.265625,
+   "y": -100342.1953125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "22": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 23888.6875,
+   "y": -101023.2109375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "23": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 16300.453125,
+   "y": -81880.859375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "24": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 13018.734375,
+   "y": -80817.734375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "25": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 50833.875,
+   "y": -102177.75,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "26": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 53142.890625,
+   "y": -104446.265625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "27": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 55932.015625,
+   "y": -104074.6953125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "28": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 60981.09375,
+   "y": -86517.0703125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "29": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 56974.28125,
+   "y": -50631.125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "30": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 57772.890625,
+   "y": -51043.46875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "31": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 37692.09375,
+   "y": -38368.515625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "32": {
+   "name": "Anti-Aircraft",
+   "camp": 2,
+   "x": 93208.984375,
+   "y": -8256.6953125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "33": {
+   "name": "Anti-Aircraft",
+   "camp": 2,
+   "x": 74684.859375,
+   "y": -5963.1171875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "34": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": 21025.515625,
+   "y": 29243.484375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "35": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -8042.046875,
+   "y": 33828.84375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "36": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -41152.890625,
+   "y": 32781.9375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "37": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -37281.609375,
+   "y": 34408.53125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "38": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -78100.8671875,
+   "y": 13201.328125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "39": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -87864.2890625,
+   "y": 313.6875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "40": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -89035.6171875,
+   "y": 131.390625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "41": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -25036.4140625,
+   "y": 42682.625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "42": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -38963.265625,
+   "y": 40753.859375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "43": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -48160.3046875,
+   "y": 42457.21875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "44": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -55080.734375,
+   "y": 39703.9375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "45": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -58706.484375,
+   "y": 38909.5,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "46": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -107210.515625,
+   "y": 36739.65625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "47": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -112847.7734375,
+   "y": 41141.375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "48": {
+   "name": "Anti-Aircraft",
+   "camp": 0,
+   "x": -68682.0546875,
+   "y": 72269.90625,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "49": {
+   "name": "Anti-Aircraft",
+   "camp": 1,
+   "x": -40486.671875,
+   "y": 44913.796875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "50": {
+   "name": "Bomber Airfield ",
+   "camp": 2,
+   "x": 88576.53125,
+   "y": 9651.15625,
+   "caps": {
+    "metal": 9000,
+    "fuel": 12000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 473,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 483,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 484,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 485,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 537,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 538,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 539,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 540,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 541,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 542,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 543,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "51": {
+   "name": "Bomber Airfield ",
+   "camp": 0,
+   "x": -87358.7421875,
+   "y": 91849.453125,
+   "caps": {
+    "metal": 9000,
+    "fuel": 12000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 546,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 556,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 557,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 558,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 610,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 611,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 612,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 613,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 614,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 615,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 616,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "52": {
+   "name": "Bomber Airfield ",
+   "camp": 3,
+   "x": 63064.546875,
+   "y": -88353.765625,
+   "caps": {
+    "metal": 9000,
+    "fuel": 12000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 619,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 629,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 630,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 631,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 683,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 684,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 685,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 686,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 687,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 688,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 689,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "53": {
+   "name": "Bomber Airfield ",
+   "camp": 4,
+   "x": -79588.6328125,
+   "y": -83287.0390625,
+   "caps": {
+    "metal": 9000,
+    "fuel": 12000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 692,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 702,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 703,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 704,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 756,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 757,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 758,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 759,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 760,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 761,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 762,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "54": {
+   "name": "Airfield",
+   "camp": 1,
+   "x": 17385.6875,
+   "y": 20290.609375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 769,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 773,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 811,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 812,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 815,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 822,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 823,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 824,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 825,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 826,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "55": {
+   "name": "Airfield",
+   "camp": 1,
+   "x": -22068.8203125,
+   "y": 45238.578125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 832,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 836,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 874,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 875,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 878,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 885,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 886,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 887,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 888,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 889,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "56": {
+   "name": "Airfield",
+   "camp": 0,
+   "x": -89143.8984375,
+   "y": 54631.625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 895,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 899,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 937,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 938,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 941,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 948,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 949,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 950,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 951,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 952,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "57": {
+   "name": "Airfield",
+   "camp": 0,
+   "x": -101049.8515625,
+   "y": 31858.15625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 958,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 962,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1000,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1001,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1004,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1011,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1012,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1013,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1014,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1015,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "58": {
+   "name": "Airfield",
+   "camp": 4,
+   "x": -84985.0546875,
+   "y": -61961.5,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1021,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1025,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1063,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1064,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1067,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1074,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1075,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1076,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1077,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1078,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "59": {
+   "name": "Airfield",
+   "camp": 4,
+   "x": -52521.25,
+   "y": -82796.765625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1084,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1088,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1126,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1127,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1130,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1137,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1138,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1139,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1140,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1141,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "60": {
+   "name": "Airfield",
+   "camp": 3,
+   "x": 11147.875,
+   "y": -78059.328125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1147,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1151,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1189,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1190,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1193,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1200,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1201,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1202,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1203,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1204,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "61": {
+   "name": "Airfield",
+   "camp": 3,
+   "x": 10553.109375,
+   "y": -50002.8125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1210,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1214,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1252,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1253,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1256,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1263,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1264,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1265,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1266,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1267,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "62": {
+   "name": "Airfield",
+   "camp": 2,
+   "x": 106748.421875,
+   "y": 17491.25,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1273,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1277,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1315,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1316,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1319,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1326,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1327,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1328,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1329,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1330,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "63": {
+   "name": "Airfield",
+   "camp": 2,
+   "x": 108072.421875,
+   "y": -9300.3828125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 15000,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1336,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1340,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1378,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1379,
+     "class": 88,
+     "name": "Fuel Storage",
+     "kind": 0,
+     "index": 6,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1382,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1389,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1390,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1391,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1392,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1393,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    }
+   ]
+  },
+  "64": {
+   "name": "Front Line Airfield",
+   "camp": 3,
+   "x": 41420.421875,
+   "y": 7475.96875,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1395,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1409,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1410,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1411,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1412,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1413,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1414,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "65": {
+   "name": "Front Line Airfield",
+   "camp": 3,
+   "x": 39169.296875,
+   "y": -38115.75,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1431,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1445,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1446,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1447,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1448,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1449,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1450,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "66": {
+   "name": "Front Line Airfield",
+   "camp": 3,
+   "x": 71838.015625,
+   "y": -50808.53125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1467,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1481,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1482,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1483,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1484,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1485,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1486,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "67": {
+   "name": "Front Line Airfield",
+   "camp": 3,
+   "x": 15695.6875,
+   "y": -97318.6328125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1503,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1517,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1518,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1519,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1520,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1521,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1522,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "68": {
+   "name": "Front Line Airfield",
+   "camp": 2,
+   "x": 59396.953125,
+   "y": 12646.984375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1539,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1553,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1554,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1555,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1556,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1557,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1558,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "69": {
+   "name": "Front Line Airfield",
+   "camp": 2,
+   "x": 85780.15625,
+   "y": 22156.5625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1575,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1589,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1590,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1591,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1592,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1593,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1594,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "70": {
+   "name": "Front Line Airfield",
+   "camp": 2,
+   "x": 71754.6875,
+   "y": -27842.78125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1611,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1625,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1626,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1627,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1628,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1629,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1630,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "71": {
+   "name": "Front Line Airfield",
+   "camp": 2,
+   "x": 92665.984375,
+   "y": -52400.9375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1647,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1661,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1662,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1663,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1664,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1665,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1666,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "72": {
+   "name": "Front Line Airfield",
+   "camp": 4,
+   "x": -40867.921875,
+   "y": -89996.03125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1683,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1697,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1698,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1699,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1700,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1701,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1702,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "73": {
+   "name": "Front Line Airfield",
+   "camp": 4,
+   "x": -21488.609375,
+   "y": -68858.484375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1719,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1733,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1734,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1735,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1736,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1737,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1738,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "74": {
+   "name": "Front Line Airfield",
+   "camp": 4,
+   "x": -3279.671875,
+   "y": -88960.7578125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1755,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1769,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1770,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1771,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1772,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1773,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1774,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "75": {
+   "name": "Front Line Airfield",
+   "camp": 0,
+   "x": -67779.5703125,
+   "y": 55045.125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1791,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1805,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1806,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1807,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1808,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1809,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1810,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "76": {
+   "name": "Front Line Airfield",
+   "camp": 0,
+   "x": -76333.1796875,
+   "y": 11494.40625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1827,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1841,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1842,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1843,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1844,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1845,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1846,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "77": {
+   "name": "Front Line Airfield",
+   "camp": 0,
+   "x": -93039.890625,
+   "y": 949.390625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1863,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1877,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1878,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1879,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1880,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1881,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1882,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "78": {
+   "name": "Front Line Airfield",
+   "camp": 0,
+   "x": -63286.9609375,
+   "y": 102113.984375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1899,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1913,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1914,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1915,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1916,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1917,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1918,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "79": {
+   "name": "Front Line Airfield",
+   "camp": 1,
+   "x": -31095.109375,
+   "y": 97979.890625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1935,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1949,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1950,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1951,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1952,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1953,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1954,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "80": {
+   "name": "Front Line Airfield",
+   "camp": 1,
+   "x": -7620.3828125,
+   "y": 4744.734375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 1971,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 1985,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 1986,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1987,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 1988,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 1989,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 1990,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "81": {
+   "name": "Front Line Airfield",
+   "camp": 1,
+   "x": -45315.734375,
+   "y": 17771.84375,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2007,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2021,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 2022,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2023,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2024,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 2025,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2026,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "82": {
+   "name": "Front Line Airfield",
+   "camp": 1,
+   "x": -57531.84375,
+   "y": 37730.078125,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2043,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2057,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 2058,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2059,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2060,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 2061,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2062,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "83": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -70559.5859375,
+   "y": 72186.8125,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2078,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2079,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2080,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2081,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2082,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2083,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2084,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "84": {
+   "name": "Tank Factory",
+   "camp": 0,
+   "x": -88505.3515625,
+   "y": 17509.140625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2088,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2089,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2090,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2091,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2092,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2093,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2094,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "85": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": -28335.6953125,
+   "y": 5294.21875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2098,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2099,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2100,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2101,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2102,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2103,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2104,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "86": {
+   "name": "Tank Factory",
+   "camp": 1,
+   "x": 17120.125,
+   "y": 72660.953125,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2108,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2109,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2110,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2111,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2112,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2113,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2114,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "87": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -20215.9375,
+   "y": -89707.3671875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2118,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2119,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2120,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2121,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2122,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2123,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2124,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2128,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 2130,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2131,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "88": {
+   "name": "Tank Factory",
+   "camp": 4,
+   "x": -61194.453125,
+   "y": -84044.390625,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2134,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2135,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2136,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2137,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2138,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2139,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2140,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2144,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 2146,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2147,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "89": {
+   "name": "Front Line Airfield",
+   "camp": 4,
+   "x": -69724.0,
+   "y": -90822.625,
+   "caps": {
+    "metal": 3000,
+    "fuel": 7500,
+    "ammo": 20000
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [
+    {
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2151,
+     "class": 43,
+     "name": "Hangar",
+     "kind": 2,
+     "index": 5,
+     "unit": "plane",
+     "resource": "metal",
+     "max": 6000,
+     "rate_per_min": 80,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2165,
+     "class": 50,
+     "name": "Workshop",
+     "kind": 0,
+     "index": 7,
+     "resource": "metal",
+     "max": 3000
+    },
+    {
+     "obj": 2166,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2167,
+     "class": 90,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 13,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2168,
+     "class": 91,
+     "name": "Fuel tanks",
+     "kind": 0,
+     "index": 12,
+     "resource": "fuel",
+     "max": 1500
+    },
+    {
+     "obj": 2169,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2170,
+     "class": 87,
+     "name": "Ammo Storage",
+     "kind": 0,
+     "index": 5,
+     "resource": "ammo",
+     "max": 10000
+    }
+   ]
+  },
+  "90": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 29160.9375,
+   "y": -64913.203125,
+   "caps": {
+    "metal": 7500,
+    "fuel": 36000,
+    "ammo": 45000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2186,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2187,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2188,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2189,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2190,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2191,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2192,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "91": {
+   "name": "Tank Factory",
+   "camp": 3,
+   "x": 73937.0,
+   "y": -75443.3359375,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2196,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2197,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2198,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2199,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2200,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2201,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2202,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2206,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 2208,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2209,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "92": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 90525.421875,
+   "y": -33210.46875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2212,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2213,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2214,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2215,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2216,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2217,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2218,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2222,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 2224,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2225,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "93": {
+   "name": "Tank Factory",
+   "camp": 2,
+   "x": 83514.578125,
+   "y": -8947.796875,
+   "caps": {
+    "metal": 7500,
+    "fuel": 42000,
+    "ammo": 63000
+   },
+   "rates": {
+    "metal": 1000,
+    "fuel": 1000,
+    "ammo": 4500
+   },
+   "unit_producers": [
+    {
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2228,
+     "class": 23,
+     "name": "Tank Factory",
+     "kind": 2,
+     "index": 2,
+     "unit": "tank",
+     "resource": "metal",
+     "max": 4000,
+     "rate_per_min": 250,
+     "cost": 35000,
+     "flags": 7
+    },
+    {
+     "obj": 2229,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2230,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2231,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2232,
+     "class": 27,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 1,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2233,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2234,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2238,
+     "class": 13,
+     "name": "Ammo Bunker",
+     "kind": 0,
+     "index": 4,
+     "resource": "ammo",
+     "max": 18000
+    },
+    {
+     "obj": 2240,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2241,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    }
+   ]
+  },
+  "94": {
+   "name": "Anti-Aircraft",
+   "camp": 3,
+   "x": 11795.8125,
+   "y": -74880.0546875,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "95": {
+   "name": "Anti-Aircraft",
+   "camp": 4,
+   "x": -68304.78125,
+   "y": -80593.984375,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "96": {
+   "name": "Anti-Aircraft",
+   "camp": 4,
+   "x": -68404.8984375,
+   "y": -89653.0703125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "97": {
+   "name": "Anti-Aircraft",
+   "camp": 4,
+   "x": -40635.75,
+   "y": -88808.4453125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "98": {
+   "name": "Anti-Aircraft",
+   "camp": 2,
+   "x": 103981.5625,
+   "y": 14821.453125,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "99": {
+   "name": "Paris",
+   "camp": 3,
+   "x": 58847.9375,
+   "y": -106146.4375,
+   "caps": {
+    "metal": 5000,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": [
+    {
+     "obj": 2494,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2495,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    }
+   ]
+  },
+  "100": {
+   "name": "London",
+   "camp": 1,
+   "x": -27210.8984375,
+   "y": 40797.53125,
+   "caps": {
+    "metal": 12500,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": [
+    {
+     "obj": 2719,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2720,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2724,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2725,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    },
+    {
+     "obj": 2726,
+     "class": 36,
+     "name": "Rail Yard",
+     "kind": 0,
+     "index": 3,
+     "resource": "metal",
+     "max": 2500
+    }
+   ]
+  },
+  "101": {
+   "name": "Birmingem",
+   "camp": 0,
+   "x": -87036.171875,
+   "y": 95958.0,
+   "caps": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "rates": {
+    "metal": 0,
+    "fuel": 0,
+    "ammo": 0
+   },
+   "unit_producers": [],
+   "buildings": []
+  },
+  "102": {
+   "name": "Port",
+   "camp": 3,
+   "x": 39917.3125,
+   "y": 9860.4375,
+   "caps": {
+    "metal": 10000,
+    "fuel": 78000,
+    "ammo": 155000
+   },
+   "rates": {
+    "metal": 2000,
+    "fuel": 2000,
+    "ammo": 9080
+   },
+   "unit_producers": [
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2822,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2823,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2824,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2825,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2826,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2827,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2854,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2855,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2856,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2857,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2858,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2859,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2889,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2890,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2891,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2892,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2893,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2894,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2895,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 2896,
+     "class": 2,
+     "name": "Hardened Ammo Bunker",
+     "kind": 1,
+     "index": 0,
+     "resource": "ammo",
+     "max": 5000,
+     "rate_per_min": 80,
+     "f3": 25000
+    },
+    {
+     "obj": 2897,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "103": {
+   "name": "Port",
+   "camp": 1,
+   "x": 21057.28125,
+   "y": 18475.546875,
+   "caps": {
+    "metal": 10000,
+    "fuel": 78000,
+    "ammo": 155000
+   },
+   "rates": {
+    "metal": 2000,
+    "fuel": 2000,
+    "ammo": 9080
+   },
+   "unit_producers": [
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 2928,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2929,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2930,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2931,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2932,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2933,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 2960,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2961,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2962,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2963,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2964,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2965,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 2995,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2996,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 2997,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2998,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 2999,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3000,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3001,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3002,
+     "class": 2,
+     "name": "Hardened Ammo Bunker",
+     "kind": 1,
+     "index": 0,
+     "resource": "ammo",
+     "max": 5000,
+     "rate_per_min": 80,
+     "f3": 25000
+    },
+    {
+     "obj": 3003,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "104": {
+   "name": "Port",
+   "camp": 2,
+   "x": 58500.609375,
+   "y": 14505.5,
+   "caps": {
+    "metal": 10000,
+    "fuel": 78000,
+    "ammo": 155000
+   },
+   "rates": {
+    "metal": 2000,
+    "fuel": 2000,
+    "ammo": 9080
+   },
+   "unit_producers": [
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 3034,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3035,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3036,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3037,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3038,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3039,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3066,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3067,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3068,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3069,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3070,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3071,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3101,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3102,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3103,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3104,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3105,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3106,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3107,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3108,
+     "class": 2,
+     "name": "Hardened Ammo Bunker",
+     "kind": 1,
+     "index": 0,
+     "resource": "ammo",
+     "max": 5000,
+     "rate_per_min": 80,
+     "f3": 25000
+    },
+    {
+     "obj": 3109,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "105": {
+   "name": "Port",
+   "camp": 4,
+   "x": -83720.7578125,
+   "y": -60236.296875,
+   "caps": {
+    "metal": 10000,
+    "fuel": 78000,
+    "ammo": 155000
+   },
+   "rates": {
+    "metal": 2000,
+    "fuel": 2000,
+    "ammo": 9080
+   },
+   "unit_producers": [
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 3140,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3141,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3142,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3143,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3144,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3145,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3172,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3173,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3174,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3175,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3176,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3177,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3207,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3208,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3209,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3210,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3211,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3212,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3213,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3214,
+     "class": 2,
+     "name": "Hardened Ammo Bunker",
+     "kind": 1,
+     "index": 0,
+     "resource": "ammo",
+     "max": 5000,
+     "rate_per_min": 80,
+     "f3": 25000
+    },
+    {
+     "obj": 3215,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  },
+  "106": {
+   "name": "Port",
+   "camp": 0,
+   "x": -62919.34375,
+   "y": 1124.09375,
+   "caps": {
+    "metal": 10000,
+    "fuel": 78000,
+    "ammo": 155000
+   },
+   "rates": {
+    "metal": 2000,
+    "fuel": 2000,
+    "ammo": 9080
+   },
+   "unit_producers": [
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    }
+   ],
+   "buildings": [
+    {
+     "obj": 3246,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3247,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3248,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3249,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3250,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3251,
+     "class": 26,
+     "name": "Fuel Tank",
+     "kind": 0,
+     "index": 10,
+     "resource": "fuel",
+     "max": 3000
+    },
+    {
+     "obj": 3278,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3279,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3280,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3281,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3282,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3283,
+     "class": 125,
+     "name": "Dump",
+     "kind": 0,
+     "index": 11,
+     "resource": "ammo",
+     "max": 10000
+    },
+    {
+     "obj": 3313,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3314,
+     "class": 131,
+     "name": "Shipway",
+     "kind": 2,
+     "index": 7,
+     "unit": "ship",
+     "resource": "metal",
+     "max": 15000,
+     "rate_per_min": 300,
+     "cost": 60000,
+     "flags": 7
+    },
+    {
+     "obj": 3315,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3316,
+     "class": 22,
+     "name": "Ammo Factory",
+     "kind": 1,
+     "index": 3,
+     "resource": "ammo",
+     "max": 45000,
+     "rate_per_min": 4500,
+     "f3": 25000
+    },
+    {
+     "obj": 3317,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3318,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3319,
+     "class": 29,
+     "name": "Metal Factory",
+     "kind": 1,
+     "index": 4,
+     "resource": "metal",
+     "max": 5000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    },
+    {
+     "obj": 3320,
+     "class": 2,
+     "name": "Hardened Ammo Bunker",
+     "kind": 1,
+     "index": 0,
+     "resource": "ammo",
+     "max": 5000,
+     "rate_per_min": 80,
+     "f3": 25000
+    },
+    {
+     "obj": 3321,
+     "class": 25,
+     "name": "Fuel Factory",
+     "kind": 1,
+     "index": 2,
+     "resource": "fuel",
+     "max": 30000,
+     "rate_per_min": 1000,
+     "f3": 25000
+    }
+   ]
+  }
+ }
+}

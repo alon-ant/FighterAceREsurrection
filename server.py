@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v958f5f'
+VERSION = 'v958f5g'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -25003,6 +25003,39 @@ def scene_snapshot_entries(terrain):
 # send the raw territory numbers, so a 2-nation arena showed five colours online while the
 # same GAME_DEF showed two offline ('Mediterran test II', Taurus 2026-09-09).
 SCENE_TERRITORY_BY_TERRAIN = {t: dict(v) for t, v in SCENE_CAMP_BY_TERRAIN.items()}   # frozen originals
+
+# v958f5g: terrains without a hand-typed table above get their scene -> territory map from the
+# live dump (mapdata\trn_tables_trnNN.json, 'gsi' records: i, camp). Verified identical to the
+# hand table for TRN02 (60/60). This is what makes TC/ownership work on a newly added map: run
+# fa_dump_trn_tables.py once with the map loaded offline and drop the file in mapdata\.
+def _seed_territories_from_dumps():
+    n = 0
+    try:
+        for _fn in sorted(os.listdir(MAPDATA_DIR)):
+            _m = re.match(r'trn_tables_trn(\d+)\.json$', _fn)
+            if not _m:
+                continue
+            _t = int(_m.group(1))
+            if _t in SCENE_TERRITORY_BY_TERRAIN:
+                continue
+            try:
+                with open(os.path.join(MAPDATA_DIR, _fn), encoding='utf-8') as _f:
+                    _d = json.load(_f)
+                _tab = {int(r['i']): int(r['camp']) for r in (_d.get('gsi') or [])
+                        if r.get('camp') is not None and 0 <= int(r['camp']) <= 7}
+            except Exception as _e:
+                log('SCENE42', f'terrain {_t}: territory seed from {_fn} failed ({_e})')
+                continue
+            if _tab:
+                SCENE_CAMP_BY_TERRAIN[_t] = dict(_tab)
+                SCENE_TERRITORY_BY_TERRAIN[_t] = dict(_tab)
+                n += 1
+                log('SCENE42', f'terrain {_t} ({TERRAIN_NAMES.get(_t, "?")}): scene ownership seeded from {_fn} '
+                               f'({len(_tab)} scenes, camps {sorted(set(_tab.values()))})')
+    except Exception as _e:
+        log('SCENE42', f'territory seed scan failed ({_e})')
+    return n
+_seed_territories_from_dumps()
 ROOM_TERRITORIES_APPLIED = {}    # room_id -> (terrain, tmap tuple)
 CAMP_NAMES_BY_TERRAIN = {}       # terrain -> {camp: (code2, abbrev3, fullname)}
 

@@ -1,3 +1,10 @@
+v958f5g [NEW-MAP SEED] (10-22)
+      Scene ownership (SCENE_CAMP_BY_TERRAIN / SCENE_TERRITORY_BY_TERRAIN) for terrains without a
+      hand-typed table is seeded at start-up from mapdata\trn_tables_trnNN.json ('gsi' i/camp) -
+      verified identical to the hand table on TRN02 (60/60). ADDING_A_MAP.md: the dump pipeline
+      (fa_dump_trn_tables -> fa_memdump --dump -> fa_build_scene_profiles; fa_dump_tank_tables ->
+      fa_make_rails) for TC on a new terrain. VERSION v958f5g.
+
 v958f5f docs (10-22): EVENT_SCRIPTING.md - moderators' guide to the event scripting system (recipes,
       points table, modes, PPS / fox hunt, message templates, running it, troubleshooting, JSON reference);
       EVENTS.md s7 points to it.
