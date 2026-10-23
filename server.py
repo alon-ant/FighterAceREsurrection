@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v960f5c'
+VERSION = 'v961f5b'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1538,7 +1538,7 @@ def tournament_start(room_id, by='console', at=None, announce=True):
             if getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
                 e['participants'].add(p.current_pilot)
     if announce:
-        room_system_msg(room_id, (f'TOURNAMENT: joining open for {cfg["tn_start_delay"]} min, shooting '
+        room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining open for {cfg["tn_start_delay"]} min, shooting '
                                   f'{cfg["tn_shoot_delay"]} min later; lives: '
                                   f'{cfg["tn_lives"] or "unlimited"}'
                                   + (', ghosting' if cfg['tn_ghosting'] else '')
@@ -1659,7 +1659,7 @@ def event_start(room_id, by='console', at=None, _delayed=False):
     if _mins > 0:
         room_system_msg(room_id, f'EVENT: weapons free in {_mins} min.')
     else:
-        room_system_msg(room_id, 'EVENT STARTED - weapons free!')
+        room_system_msg(room_id, 'EVENT: STARTED - weapons free!')
         try:
             room_banner(room_id, 'EVENT STARTED')
         except Exception:
@@ -1682,7 +1682,7 @@ def event_stop(room_id, by='console'):
     if not tournament_cfg_for_room(room_id):
         event_end_cancel(room_id)                       # v956f5: a plain event arena on hold has no clock
     n = event_push(room_id, 'stop')
-    room_system_msg(room_id, 'EVENT HOLD - weapons and engines are locked until the host starts the event.')
+    room_system_msg(room_id, 'EVENT: HOLD - weapons and engines are locked until the host starts the event.')
     try:
         room_banner(room_id, 'HOLD FIRE')
     except Exception:
@@ -1791,7 +1791,7 @@ def event_time_up(room_id):
     if event_mode(room_id):
         event_stop(room_id, by='time up')
         done.append('weapons locked')
-    room_system_msg(room_id, 'EVENT OVER - time is up.')
+    room_system_msg(room_id, 'EVENT: OVER - time is up.')
     try:
         room_banner(room_id, 'EVENT OVER')
     except Exception:
@@ -1885,9 +1885,11 @@ def evs_msg(sc, key, **kw):
     except (ValueError, IndexError):
         return tpl
 
+EVS_MSG_KIND = {'score_team': 'SCORE', 'score_personal': 'SCORE', 'fox_team': 'SCORE', 'fox_personal': 'SCORE'}
 def evs_say(room_id, sc, key, camp=None, **kw):
     txt = evs_msg(sc, key, **kw)
     if txt:
+        txt = msg_prefixed(EVS_MSG_KIND.get(key, 'EVENT'), txt)      # v961f5: Score / Events filter boxes
         room_system_msg(room_id, txt, camp=camp) if camp is not None else room_system_msg(room_id, txt)
     return txt
 
@@ -2369,7 +2371,7 @@ def tournament_close_joining(room_id, by='console'):
             _submit_send(send_rel, p, pkt, '<- TOURNAMENT close-joining (0x5c)', to=3.0)
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
     evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
-    room_system_msg(room_id, (f'TOURNAMENT: joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.'))
+    room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.'))
     return e
 
 def tournament_go(room_id, by='console'):
@@ -2502,7 +2504,7 @@ def tournament_finish(rid, winner=None, by='console'):
     for p in get_sessions_in_room(rid):
         if getattr(p, 'entered_game', False):
             _submit_send(send_rel, p, pkt, f'<- TOURNAMENT result (0x30, PI {pi})', to=3.0); n += 1
-    room_system_msg(rid, (f'TOURNAMENT: {winner} has won!' if winner else 'TOURNAMENT finished - no winner.'))
+    room_system_msg(rid, (f'EVENT: TOURNAMENT - {winner} has won!' if winner else 'EVENT: TOURNAMENT finished - no winner.'))
     try:
         room_banner(rid, f'TOURNAMENT: {winner} HAS WON' if winner else 'TOURNAMENT FINISHED')
     except Exception:
@@ -7254,6 +7256,16 @@ def console_handler():
                     broadcast_everyone(parts[1].strip(), src='console')
                 else:
                     log('CONSOLE', 'usage: broadcast <text>')
+            elif cmd == 'ai':
+                # v961f5: ai <room|all> <text>  - the native AI line (msg 66, 'AI: text', the Chat tab's AI box)
+                _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
+                if len(_a) < 2:
+                    log('CONSOLE', 'usage: ai <room|all> <text>   (prefix the text with NEWS: / EVENT: / SCORE: / HINT: / WEATHER: / HELP: to use those filter boxes)')
+                else:
+                    _rooms = sorted({p.current_room for p in get_all_sessions() if getattr(p, 'current_room', None) is not None}) if _a[0] == 'all' else [int(_a[0], 0)]
+                    for _r in _rooms:
+                        tc_say(_r, _a[1])
+                    log('CONSOLE', f'ai: {_a[1]!r} -> room(s) {_rooms}')
             elif cmd == 'say':
                 # v646f5: say <room|all> <text>  - yellow server system message (vcnc 0xc9)
                 # v950f5 (sysop report: 'say no longer broadcasts the flashing message'): say = the yellow
@@ -9497,7 +9509,7 @@ def motd_on_spawn(s):
             if not getattr(_s, 'entered_game', False) or getattr(_s, 'current_room', None) != _room:
                 _s.__dict__.pop('_motd_room', None)      # left before it was shown - show it next time
                 return
-            send_system_msg(_s, ln)
+            send_system_msg(_s, msg_prefixed('NEWS', ln))          # v961f5: the News box
             time.sleep(MOTD_LINE_GAP_S)
         log('MOTD', f'{getattr(_s, "current_pilot", "?")}: message of the day sent ({len(_lines)} line(s))')
     threading.Thread(target=_send, daemon=True).start()
@@ -10345,7 +10357,7 @@ def guns_set(room_id, cold, by='console'):
         if room_id in GUNS_COLD:
             return 'already cold'
         GUNS_COLD[room_id] = {'by': by, 'since': time.time()}
-        room_system_msg(room_id, f'GUNS COLD - weapons hold by {by}. Hits and bombs do not count.')
+        room_system_msg(room_id, f'EVENT: GUNS COLD - weapons hold by {by}. Hits and bombs do not count.')
         try: room_banner(room_id, 'GUNS COLD - WEAPONS HOLD')
         except Exception: pass
         log('GUNS', f'room {room_id}: GUNS COLD by {by} (server-side: damage reports dropped)')
@@ -10353,7 +10365,7 @@ def guns_set(room_id, cold, by='console'):
     if room_id not in GUNS_COLD:
         return 'already hot'
     GUNS_COLD.pop(room_id, None)
-    room_system_msg(room_id, f'GUNS HOT - weapons free ({by}).')
+    room_system_msg(room_id, f'EVENT: GUNS HOT - weapons free ({by}).')
     try: room_banner(room_id, 'GUNS HOT - WEAPONS FREE')
     except Exception: pass
     log('GUNS', f'room {room_id}: GUNS HOT by {by}')
@@ -10457,6 +10469,16 @@ def reflect_chat_20(s, channel, text, player_index=0):
     room = s.current_room
     if chat_server_command(s, disp):                       # v960f5: ##GunsCold / ##GunsHot ... never reflected
         return
+    # v961f5b (Alon): the client's filter prefixes (NEWS: EVENT: SCORE: HELP: WEATHER: HINT:) are the
+    # server's / the sysops' - a pilot typing 'NEWS: ...' would land in everyone's News box looking
+    # official. For a sender without rights the token is defused ('NEWS:' -> 'NEWS -') before reflect.
+    if not sess_rights(s):
+        _t = str(disp)                                     # the client's strstr() is case-sensitive: only
+        if any(p in _t for p in MSG_PREFIXES):             # the exact upper-case tokens trigger a box
+            for p in MSG_PREFIXES:
+                _t = _t.replace(p, p[:-1] + ' -')
+            log('MODERATOR', f'prefix defused in chat from non-sysop "{s.current_pilot}": {disp!r} -> {_t!r}')
+            disp = _t; text = _t
     # v304 GAG: a gagged sender's chat is dropped at the server (the authoritative reflect point).
     # We swallow silently rather than bouncing an error, matching how the retail server behaved -
     # the gagged player sees their own text vanish. Moderators (rights!=0) are never gagged.
@@ -15278,6 +15300,41 @@ def ensure_ai_roster_on(s):
     pkt = build_msg13(build_add_player_62([(AI_ROSTER_PI, AI_ROSTER_NATION, 'AI')]))
     _submit_send(send_rel, s, pkt, '<- AddPlayer 62 (AI roster player)', to=3.0)
 
+# ---- v961f5 THE CHAT TAB'S FILTER BOXES, FROM THE EXE (Alon 10-23) ----
+# Flight_Chat dialog: Chat (All, Team, Squad), Logins, Hits, AI, Score, Help, News, Events, Weather,
+# Hints - a HUD row and a LOG row. Two different mechanisms behind them:
+#   * Logins / Hits / AI are set by the PRINTER of each line: the msg-62/63 join-leave printer
+#     (FUN_004fa5f0/FUN_004fa9c0) reads DAT_00bfa4a4/c8, hit lines (parachute/plane) read
+#     DAT_00bfa4a0/c4, and the two SERVER AI-TEXT messages read DAT_00bfa4a8/cc:
+#         msg 66  (0x42)  FUN_004f7070  [0x42][3 bytes ignored][text\0]   -> 'AI: %s' (Texts.str 0x108)
+#         msg 121 (0x79)  FUN_004f82e0  [0x79][4 bytes ignored][text\0]   -> 'AI: %s'
+#     in the AI colour (palette slot DAT_00bf5cb5). The 2009 server sent a burst of 7 msg-66 lines
+#     (89-105 chars each) at every arena entry (messages04 01:34:43) - the arena news. These are
+#     the lines the 'AI' box hides. (Our old route - chat channel 3 from the 'AI' roster player -
+#     showed as 'AI (O):' and was filtered under Chat, not AI.)
+#   * Score / Help / News / Events / Weather / Hints are TEXT PREFIX filters: both line printers
+#     (FUN_0046a420 chat-style, FUN_00469cf0 event-style) strstr() the finished text for
+#     'SCORE:', 'HELP:', 'NEWS:', 'EVENT:', 'WEATHER:', 'HINT:' (literals at 0x62a3a4..0x62a3d0) and
+#     consult the matching HUD/LOG box (DAT_00bfa4ac..c0 / DAT_00bfa4d0..e4). The 2009 films carry
+#     'SCORE: 5 (based on point value of the triggered base)' lines; the other prefixes are the
+#     server's convention. So any line we send with such a prefix - on any transport - obeys the
+#     box; the server composes the prefix.
+MSG_PREFIXES = ('SCORE:', 'HELP:', 'NEWS:', 'EVENT:', 'WEATHER:', 'HINT:')
+
+def msg_prefixed(kind, text):
+    """'EVENT: text' unless the text already carries one of the client's filter prefixes."""
+    t = str(text)
+    if any(p in t for p in MSG_PREFIXES):
+        return t
+    return f'{kind}: {t}'
+
+AI_LINE_OPCODE = 0x42          # msg 66
+TC_AI_VIA_66   = True          # v961f5: AI lines as msg 66 (native 'AI: ' + the AI filter box) instead of chat ch 3
+
+def build_ai_line_66(text):
+    tb = str(text).encode('latin1', 'replace')[:250]
+    return build_ingame_pkt(bytes([AI_LINE_OPCODE, 0, 0, 0]) + tb + b'\x00')
+
 def tc_say(room_id, text, camp=None, to=None):
     """AI chat line to the room, one camp, or one session: channel 3 from the 'AI' roster player,
     so the client renders 'AI: <text>' itself (the text must not carry the prefix)."""
@@ -15286,15 +15343,16 @@ def tc_say(room_id, text, camp=None, to=None):
     if text.startswith('AI: '):
         text = text[4:]
     pi = TC_AI_CHAT_PI if TC_AI_CHAT_PI is not None else AI_ROSTER_PI
-    pkt = build_chat_display_20(TC_AI_CHANNEL, text, pi)
+    pkt = build_ai_line_66(text) if TC_AI_VIA_66 else build_chat_display_20(TC_AI_CHANNEL, text, pi)   # v961f5
     n = 0
     for p in ([to] if to is not None else get_sessions_in_room(room_id)):
         if not getattr(p, 'entered_game', False):
             continue
         if camp is not None and getattr(p, 'nation', None) != camp:
             continue
-        ensure_ai_roster_on(p)
-        _submit_send(send_rel, p, pkt, f'<- AI chat: {text[:60]}', to=3.0)
+        if not TC_AI_VIA_66:
+            ensure_ai_roster_on(p)
+        _submit_send(send_rel, p, pkt, f'<- AI {"66" if TC_AI_VIA_66 else "chat"}: {text[:60]}', to=3.0)
         n += 1
     log('TC', f'room {room_id} AI{"" if camp is None else f" (camp {camp})"}{" -> " + to.current_pilot if to is not None else ""}: {text}  -> {n}')
 

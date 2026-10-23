@@ -1,3 +1,21 @@
+v961f5b [FILTER PREFIXES ARE SYSOP-ONLY] (10-23)
+      User: NEWS:/EVENT:/SCORE:/HELP:/WEATHER:/HINT: should only be available to admins. A pilot without
+      rights who types one of the client's filter tokens in chat gets it defused before reflect
+      ('NEWS:' -> 'NEWS -'; exact upper-case match, the client's strstr is case-sensitive), logged as
+      MODERATOR 'prefix defused'. Sysops' chat is untouched. VERSION v961f5b.
+
+v961f5 [CHAT FILTER BOXES: AI CHANNEL + PREFIX FILTERS] (10-23)
+      User: the Chat tab filters AI / News / Weather / Events - find the channels. RE: Logins (msg 62/63
+      printers, DAT_00bfa4a4/c8), Hits (DAT_00bfa4a0/c4) and AI (DAT_00bfa4a8/cc) are set by the printer;
+      AI = server text messages msg 66 (FUN_004f7070, text at +4) and msg 121 (FUN_004f82e0, text at +5),
+      printed as 'AI: %s' (Texts.str 0x108) - 2009 sent 7 of them at arena entry. Score/Help/News/
+      Events/Weather/Hints are strstr() prefix filters in both line printers (FUN_0046a420 /
+      FUN_00469cf0; literals 0x62a3a4..d0); films carry 'SCORE: N (based on point value of the
+      triggered base)'. Server: build_ai_line_66 + tc_say via msg 66 (TC_AI_VIA_66), console `ai`,
+      msg_prefixed(): MOTD -> NEWS:, script score lines -> SCORE:, event/tournament/guns lines ->
+      EVENT:. Open: whether the yellow ESystemMsg path (vcnc 0x8032 -> listener vtable+0x18) honours
+      the prefixes - field test with the News box off. MODERATION.md section. VERSION v961f5.
+
 v960f5c [TC ECONOMY IS ITS OWN SWITCH] (10-23)
       User: Battle of Britain arena (trn06) set to the events type - trains do not spawn. Live log
       04:49: 'spawn-59 -> ARCADE full service (mode=events)', objs Tr0 - room_has_economy() was
