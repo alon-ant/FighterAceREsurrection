@@ -1,3 +1,259 @@
+=====================================================================================
+BANK 2026-10-23 - v960f5c .. v966f5d (local build; live server last seen at v960f5b)
+=====================================================================================
+Deploy together: server.py, web_server.py, fa_logging.py, fa_dump_tank_tables.py (v10),
+mapdata\tank_tables.json (must carry 'car_classes' - run the dump in a TC arena once).
+Chapter summary (details in the per-version entries below):
+- Economy is its own switch (v960f5c) and an economy arena is always a Mission-type world on
+  the client (v966f5c); the in-game 'Score' box follows the server's scoring switch (v966f5d).
+- Chat tab filters mapped and used: AI channel via msg 66, NEWS:/EVENT:/SCORE: prefixes,
+  admin-only (v961f5). Live weather: msg 137, ladder/presets/cycle, ##Weather, max wind (v962f5).
+- NetCars: probe (v963f5), class names (b), damage + kills + joiner re-create (c), friendly-fire
+  camp rule (d). Road convoys: rail mover (v964f5/b, superseded), overland tank-style driver
+  (v965f5), calibration race/ruler -> gain 16.67 m/s, look-ahead 0.1 s (v965f5b-h), cars as
+  full AI objects incl. AI kills (v965f5g). Map lorry glyph -> convoys/cars (v966f5), on-demand
+  convoys independent of the supply mode (v966f5b).
+Field-verified today: economy switch, live weather, car spawns/hits/kills, escort AA fire,
+convoy columns smooth at gain 16.67 + 0.1 s look-ahead, map boxes, Mission type / Score box.
+Not yet field-verified: scheduled/on-demand convoy cadence over a session, convoy unload
+accounting, event-script rounds (v958f5b-f), rights/roster fixes, guns cold, wrapping.
+
+v966f5d (2026-10-23) - the in-game 'Score:' checkbox follows the server's scoring switch
+- User: an arena created with the Game Settings 'Score' box unticked shows no career scoring in
+  the game although the server accumulates it. RE: the box is GAME_DEF ScoreGlobal (live +0x3b0,
+  param 0xec; dumped as '[ScoreAndDamage] ScoreGlobal='). In the 0x8a format (FUN_0057bee0) the
+  [ScoreAndDamage] booleans are bit-packed in the tail: ScoreGlobal = bit0 of the byte 60 from the
+  end (F2), ScoreAI/Collision/DoNotDropAce/DoNotPenalty/KillFriendPenalty/ExitAsCrash/
+  CrashOnEnemyRunway/AlternateAce = bits 7..0 of end-59 (F3); then params 0x139, 0xea and
+  3 x 16 B to Source.End(). Cross-checked with the client's dump of BOB and three ticked arenas.
+- build_lz_gamedef: apply_score_global(d, scoring_mode_for_room(room) is not None) on every served
+  212 - scoring ffa/tc/events -> box ticked, no scoring -> cleared. Same-length bit write, guarded
+  by the tail signature (end-50 == 0, end-49 in 0/1) and the existing walk guard.
+
+v966f5c (2026-10-23) - economy arena is stamped GAME_DEF Type=1 (Mission) whatever it scores on
+- FIELD (Alon 20:43): BOB with economy=on and scoring 'by title' (Custom Arenas -> no scoring mode)
+  showed NO economy on the client although the server ran trains and production. Cause: the served
+  GAME_DEF's Type byte (+0xa8) was stamped 1 'Mission' only when scoring_mode_for_room() was not
+  None (v438f5b official-vs-custom rule); Type=2 'Private' disables the client's Production Complex
+  panel, the msg-59/71 resource requests and the ground-war UI. Now: official OR room_has_economy
+  -> Type=1. Pilots inside re-enter the arena to pick the new GAME_DEF up (the usual notice).
+
+v966f5b (2026-10-23) - on-demand convoys as the safety net under the trains
+- User: a team down to its bomber base and two factories, no rail station -> no train; the BBB is
+  bombed out -> a convoy must come. convoy_request no longer requires supply_mode car/both: it runs
+  in every mode (convoy_on_demand on), but in trains-only mode a scene that is a rail station with a
+  live supply train of its camp on that line is left to the train (scene_served_by_train).
+- convoy_low_stock_scan (once a minute from the dispatcher): every non-producer supply scene below
+  CONVOY_LOW_FRAC (35%) requests a convoy - stock drained by refuelling counts, not only a destroyed
+  storage building. Cooldown 10 min per scene, CONVOY_PER_CAMP_MAX=2, depot within 120 km with stock.
+- ensure_camp_convoys self-gates: the scan in every mode, the scheduled cadence only in car/both.
+- Web text updated (trains-only option names the safety net; on-demand description).
+
+v966f5 (2026-10-23) - map boxes: lorry glyph moves from the trains to the convoys / cars
+- User: 'lose the train (lorry) icon and box on the map and use it on each lorry/car/mobile AA
+  unit/group'. TRAIN_GROUP_RECORDS=False (no msg-26 record for trains; they stay on the big map via
+  msg 70 under their loco class). CAR_GROUP_RECORDS: one kind-7 record per convoy (drawn at the lead
+  vehicle, objective = destination scene going out / depot coming back, count = vehicles alive,
+  strategy Go to / Defend while unloading / Return, w6 = convoy id) and one per loose car (AA/Flak
+  car = Defend, a driving car = Go to, a parked one = none). Refresh follows the existing msg-26
+  push (5 s while the map is open).
+
+v965f5h (2026-10-23) - CAR_LOOKAHEAD_S default 0.1 (field-confirmed smooth columns)
+- With the gain confirmed (16.67) the only remaining tick was latency; `car ahead 0.1` removed it
+  (Alon 20:10). Baked as the default. TODO online: derive per pilot from RTT/2 if far pilots tick.
+
+v965f5g (2026-10-23) - cars as full AI objects: cull lists, delete notify, AI kills, ranged re-create
+- FIELD (Alon 20:00): the AA Car and Flak Car FIRE on their own - at the player in range and at
+  buildings - the client's gun AI runs for NetCars as for NetTanks. Convoy escorts therefore defend
+  the column for free, and a Flak/AA car parked anywhere is a working flak position. Their hits on
+  the pilot are applied by his own client (Texts 282 '%s car %s your %s'); hits on buildings are
+  cosmetic (the client reports nothing for AI-object fire, v599 note).
+- Every 'is this one of our AI objects' check now includes CARS: the client cull list and the msg-3
+  delete notify drop the car's peer (re-created when back in range, cull cooldown noted) and keep
+  the AI-station bookkeeping right; the exit-tail parse; death attribution: a plane shot down with
+  a car as hunter -> 'Planes Lost to AI' ('shot down by AI car (Flak Car) 0x..').
+- car_recreate_for honours the tanks' range rule (REJOIN_RADIUS_BY_KIND['car'] = 18 km + cull
+  cooldown) instead of re-creating every car of the room - a far create only fed the distance cull.
+
+v965f5f (2026-10-23) - car speed gain CONFIRMED 16.67 m/s
+- Ruler test (Alon 19:58): B vanished beside marker 3 (Fuel, 220 m) after 20 s = 11.0 m/s with
+  throttle 11/16.67 -> the client's throttle gain is the class record's +0x54 (60 km/h), not +0x4c.
+  Server model and client physics now agree on speed; the earlier 'A lagged' is the one-update-old
+  display of a position-only car. `car race` / `car ruler` / `car gain` / `car ahead` kept for
+  other terrains and for latency tuning online.
+
+v965f5c (2026-10-23) - car gain provisional 16.67; race fits the cull window
+- FIELD (Alon 19:04): race - A (server-driven) jumpy as expected; B (client-driven from one packet)
+  smooth but SLOW, then despawned (the client culls a silent object at ~28 s; B's updates were
+  muted). => the client's throttle gain is below 27.78 m/s. Provisional CAR_MAX_MPS = 16.67 (the
+  class record's second speed, 60 km/h) so a convoy at 11 m/s sends throttle 0.66 instead of 0.40.
+- `car race` now runs 20 s (report at 20 s, both cars deleted at 24 s); drive-test cars auto-delete
+  at 25 s. Race reply names the sides: A LEFT/north jumpy, B RIGHT/south smooth.
+
+v965f5b (2026-10-23) - car motion calibration: look-ahead, live gain, race test
+- FIELD (Alon 16:50): columns spawn well; integration ON = slightly jumpy, OFF = jumpier (expected:
+  2.75 m steps). Residual = gain mismatch and/or latency (the car's Unpack SETS the position, no
+  clock catch-up like the tank's v884).
+- CAR_LOOKAHEAD_S (`car ahead <s>`): sent position advanced by speed x s. `car gain <mps>`: live
+  CAR_MAX_MPS. `car race <room> <x> <y> [camp] [mps]`: lorry A server-driven position-only vs lorry
+  B client-driven from ONE packet, side by side heading east; after 60 s the log prints A's
+  distance and the gain formula from where the pilot sees B relative to A.
+
+v965f5 (2026-10-23) - convoys drive like tanks: overland, client-integrated, no rails
+- User: 'no sense making them run on tracks, trains overtake them; use the tank driving system'.
+  The rail-bound car mover (v964f5/b) is gone. Cars now run the TANK driver's control law
+  (_car_drive_step = the v566f5 contract): server mirrors the client's car physics (throttle ->
+  speed, heading slew CAR_TURN_RATE_DPS=25 = the client's 0.436 rad/s steer gain), windowed A*
+  around obstacles (tank_plan_path), throttle/steer/speed-seed words + a small position correction
+  each tick (CAR_TICK_HZ=4), idle keep-alive every CAR_IDLE_S from the same loop (per-car Timer
+  chain removed). car_motion_aux: [0][throttle/32767][steer/32767][speed m/tick x16384][0].
+  CAR_CLIENT_INTEGRATE back ON; `car integrate off` = position-only fallback; `car drive <onum>
+  <mps>` calibrates CAR_MAX_MPS (gain) if the client runs away from / lags the server.
+- Convoys overland: convoy_spawn(room, camp, src_scene, dst_scene, lorries): the column forms
+  CONVOY_ARRIVE_M=150 m out of the depot (tank_clear_spot for each slot), the lead drives to a
+  point 150 m short of the destination scene, every other vehicle follows the one AHEAD at
+  CONVOY_GAP_M (tank column follower rule: speed = leader speed + 0.6 x slot error). A killed
+  vehicle is relinked out of the chain (_convoy_relink); the first survivor leads. Arrival =
+  lead arrived + all followers settled (or 45 s). Unload, CONVOY_UNLOAD_S, then the tail car
+  leads the column home in reverse order; despawn at the depot.
+- Depot/consumer choice is now by distance, not by rail line: convoy_pick_source = the camp's
+  supply scene within CONVOY_MAX_KM=120 holding the most of the need (producers x1.5), nearer
+  wins ties; scheduler and on-demand request unchanged otherwise.
+- Console: convoy run <room> <camp> [src dst] | list | request <room> <sidx> | stop <id|all>;
+  car goto <onum> <x> <y> [mps] (single-car driving test).
+- Offline sim: 5-vehicle column forms at 60 m, holds the interval through a 45 deg turn at
+  11 m/s, settles 4 s after the lead stops.
+
+v964f5b (2026-10-23) - cars: rubber band -> server-positioned; drive calibration; road filter
+- FIELD (Alon 10-23 16:19): convoy lorries rubber-band. RE: the client's car speed word is capped at
+  2.0 (Pack x16383.5 / Unpack x1/16384, 0x689e8c / 0x689c52) so its unit is not m/s and the throttle
+  gain (pCI+8/+0xc) is in a struct the dump does not reach - the client drove at a different speed
+  between our 4 Hz corrections and snapped back.
+- CAR_CLIENT_INTEGRATE=False: speed/throttle words 0, pose streamed at CAR_TICK_HZ=8 (1.4 m steps
+  at 40 km/h). `car integrate on|off` toggles. `car drive <onum> <mps>`: one packet with the
+  throttle/speed words and NO further updates (keep-alive muted) - the client drives alone, and how
+  fast it goes calibrates CAR_TICK_MPS_UNIT (then integration can go back on).
+- CONVOY_ROADS_BY_TERRAIN / `car roads <terrain> <i,j,..>|all`: restrict convoys to a road subset
+  (user: 'no sense making them run on tracks, trains overtake them'). The terrain ROADMAP flags
+  ROAD+8 on trn06 roads 2, 6, 11 only - railway-vs-road meaning to be confirmed on the map.
+
+v964f5 (2026-10-23) - ROAD CONVOYS: NetCar movement on the road network + lorry supply
+- RE: the client integrates a NetCar between updates (FUN_00687a10 = car step: +0x2f8 throttle ->
+  speed via the class gain (info +0x4c = 27.78 m/s), +0x2fc steer -> heading; trailers follow),
+  but a NetCar carries no road, so the SERVER drives it: pose streamed at CAR_TICK_HZ=4 along the
+  rails_trnNN.json network (the client builds ONE AI::ROADMAP per terrain, kind 2, used by RAILCAR
+  and ROADCAR alike - the 'rails' are the terrain's roads). Update words: [+0xc int][+0xe throttle
+  /32767][+0x10 steer][+0x12 speed m/tick x16384][+0x14 turn] (car_motion_aux).
+- Road geometry by distance-along-road s: road_locate / road_pose (loops wrap, open lines clamp,
+  heading from the segment, reversed for dir=-1); car_tick thread advances every car with mps>0,
+  stops it at stop_s, broadcasts.
+- Convoys (CONVOYS, convoy_spawn): WWII road serial - AA Car at the head, 1-6 cargo lorries
+  (Car for Fuel 3000 kg, Car for Ammo 3000 kg, Furgon 2500 kg metal), Flak Car at the tail,
+  CONVOY_GAP_M=60 apart, CONVOY_MPS=11 (40 km/h); drives src station -> dst station on one road
+  (shorter way round on a loop), unloads into the scene store (_scene_store_add; metal repairs via
+  cargo_repair_scene), halts CONVOY_UNLOAD_S=60, drives home in reverse order and despawns at the
+  depot. AI-channel lines to the owning camp: departure, arrival/unload, each lorry lost (+cargo
+  kg), wipe-out. car_killed -> convoy_on_car_lost.
+- Scheduling: ensure_camp_convoys every convoy_minutes (default 10) per camp, CONVOY_PER_CAMP_MAX=2:
+  from the best-stocked depot (producers x1.5) to the emptiest consumer on the same road.
+  On-demand: supply_on_building_destroyed -> convoy_request: a store below CONVOY_LOW_FRAC=35%
+  calls a convoy sized to the shortfall (ceil(kg/3000) per kind, max 3 each, 6 total), one per
+  scene per CONVOY_REQUEST_COOLDOWN_S=600.
+- Settings (web TC tab): supply_mode train|car|both (trains only / convoys only / both - the train
+  spawner is skipped in 'car'), convoy_minutes 2..120, convoy_on_demand on|off.
+- Console: convoy list | run <room> <camp> [road] | request <room> <sidx> | stop <id|all>.
+- Spawn-camp check from v963f5d applies (a convoy of a camp outside the arena would be unhittable).
+
+v963f5d (2026-10-23) - NetCar: 'hits reflected to my aircraft' = friendly fire on a non-arena camp
+- FIELD (Alon 10-23 15:31, BOB room 61 'Camps=1-3'): a camp-2 car and a camp-1 car both made
+  the shooter's rounds hit HIS OWN plane ('GBR 1Lt AC2E_Bigalon^CO sprayed your engine').
+- RE: the car's bullet handler (roadhit.cpp FUN_00689380) first calls FUN_00427b00 = the game's
+  FRIENDLY-FIRE rule: FUN_0046bba0(car camp, bullet camp) consults the GAME_DEF alliance table
+  (+0xc, ARR<int,8>); when the target is not hostile and the shooter is local, the damage
+  (x GAME_DEF FriendlyFire %) is applied to the SHOOTER's plane via owner->vtbl+0x24. Tanks use
+  the identical check (0x61d6e3). Camp 1 = GB = his own side -> reflected (correct 2009 rule);
+  camp 2 is NOT an active camp in BOB (the 'SU' label came from the client's global camp table),
+  so it is hostile to nobody -> reflected as well. No real hit ever reached the car: the only
+  registered hits (dmg 95 / 30-8) were plane-vs-car COLLISIONS (collision path FUN_00689850).
+- spawn_car refuses a camp that is not active in the arena (room_active_camp_names from the
+  GAME_DEF camps block) and the console names the valid camps. In BOB: 1=GB, 3=GE.
+
+v963f5c (2026-10-23) - NetCar: field-proven, damage + kills, joiner re-create
+- FIELD (Alon 10-23, room 61): Ammo, Fuel, AA, Ambulance, Flak, Furgon and Radar cars all
+  spawn ('Create NetCar (car4ammo). St=496, ONumber=283. Camp=2'), hold position on the 2 s
+  keep-alive, and take gun hits: the client prints 'You have hit SU car' and reports each hit
+  on msg-51 (0x33) exactly like a tank hit (dmg=30/1/2/2/2/2/4/8 on 0x010e).
+- Cistern and Fura CTD: 'Assertion failed (pCar||pInfo->pCI) roadcar.cpp:55' - they are
+  TRAILERS without driving info and need a towing car. spawn_car refuses them (CAR_TRAILER_NAMES).
+- _handle_tank_hit_51 routes a victim in CARS to _handle_car_hit: raw damage (no armour bands),
+  CAR_HP_BY_NAME (Fuel 40 .. Flak 90, fallback 60); at 0 -> car_killed: EVS hook 'car',
+  CAR_KILL_SCORE 100 (+ai_ground counter, stat block), delete_car with the 12-byte kill entry
+  ([id][0x53][hunter tail]) -> cyan 'has destroyed' line like a tank kill. `car list` shows hp.
+- tank_recreate_for also re-creates live cars for a joiner / re-fly (car_recreate_for), and
+  cars are forgotten per peer on side change / leave, deleted on arena reset.
+- TODO: movement model on the road network (rails_trnNN.json), Fuel/Ammo lorries as convoy
+  supply, Flak/AA cars that shoot (the AA Car/Flak Car have gun models; whether the client's
+  own AI fires them like a tank's gun is untested).
+
+v963f5b (2026-10-23) - NetCar probe: class names resolved
+- fa_dump_tank_tables.py v10 run in a TC arena found 9 car classes (ids 180-188):
+  180 Ambulance, 181 Car for Ammo, 182 Car for Fuel, 183 AA Car, 184 Flak Car,
+  185 Radar Car, 186 Cistern, 187 Fura, 188 Furgon (names = ai0.str ids 1187-1195,
+  stored as head dword[5] of each class record; models objects\cars\gruzovik*).
+- server: CAR_NAME_BY_STR + CAR_ALIASES; car_classes_load() names classes from
+  head_dwords[5]; car_class_lookup() accepts id, alias (ammo fuel aa flak radar
+  ambulance cistern fura furgon) or full name; `car classes` lists id=name.
+- `car spawn <room> <class> <x> <y> [camp] [hdg]` now takes the alias; unknown
+  class -> refused (an unknown id would NULL-deref in FUN_0067fe30 = CTD).
+
+v963f5 [NetCar PROBE] (10-23)
+      User: the tag-visibility entry for cars suggests spawnable cars/lorries (targets, supply vehicles).
+      RE: create dispatcher FUN_004f26b0 case 5 -> FUN_0067fe30 carinfo.cpp 'Create NetCar (%s)...
+      Camp=%i'; record [5|nation<<4][class id][8 unused] + trailer [St][ONumber][9x0] = 23 B (header
+      table type 5 = 10/22); class list @0xcab130 (node+0x10 -> info, info+0x1c = id); the car NET
+      Unpack 0x689ba0 (vtable 0xa56408) = the tank's 26-B update minus the 4 turret bytes: pos 7 +
+      dir 4 + flags 1 + 5 x s16 = 22 B. Client models (ai0.str 1129-1195, objects\cars\gruzovik*):
+      Ambulance, Car for Ammo, Car for Fuel, AA Car, Flak Car, Radar Car, Cistern/Fura/Furgon
+      trailers. An unknown class id CTDs the client (NULL deref after FUN_0067fe30), so the probe
+      needs the ids from the live dump: fa_dump_tank_tables.py v10 adds 'car_classes'. Server:
+      CAR_CLASSES (from tank_tables.json), build_car_record, pack_car_state, build_car_update,
+      spawn_car (create + first state 0.5 s later + 2 s keep-alive), delete_car, console `car
+      classes|spawn <room> <class> <x> <y> [camp] [hdg]|list|del|move|aux|flags`. No joiner
+      re-create, no movement model yet (probe only). VERSION v963f5.
+
+v962f5c [DYNAMIC WEATHER: MAX WIND] (10-23)
+      User: a max wind setting under the live weather cycle so aircraft are not blown off the runway.
+      The ladder now carries a wind per rung (2 m/s clear .. 12 m/s storm); the cycle sends it as a
+      Constant wind, speed capped by the arena's weather_max_wind (web field, default 8 m/s = 18 mph,
+      0 = leave the wind alone), x0.8-1.0 jitter, direction drifting +-30 deg per step; the WEATHER:
+      line carries the wind in mph; `weather status` shows the cap. Manual `weather ... wind` is not
+      capped (a sysop's explicit choice). VERSION v962f5c.
+
+v962f5b [##WEATHER + RAIN OFF FIX] (10-23)
+      User: works well (field-verified live weather); wants ##Weather for admins; 'rain off' did not
+      stop the rain and switched it on when dry. Cause: the console matched the word 'rain' as the
+      PRESET (rung 4, overcast + rain) before the 'rain on|off' branch, so both forms applied the
+      preset. One parser now (weather_command): 'rain on|off' is tested first, 'rain on' without
+      Stratus is refused with a hint (the client only draws rain under Stratus, TrnWorld.cpp
+      rebuild: +0x19c != 0 AND +0x18c == 2). In game: ##Weather <same args> (sysops; multi-line
+      replies as yellow lines) - ##Weather storm / ##Weather rain off / ##Weather status. VERSION v962f5b.
+
+v962f5 [LIVE WEATHER - msg 137] (10-23)
+      User: WEATHER: messages and cycling rain/clouds in game without changing the arena. RE: FA.exe
+      msg 137 (0x89, handler FUN_004f4af0 @ VNet 0xc820fc) = live weather change, world only:
+      [0x89][WindType u8][CloudsType u8][CloudsDensity u8][Rain u8][CloudsMin u16][CloudsMax u16]
+      [WindParam cstr] -> the client drops its wind/cloud objects, writes the live GAME_DEF
+      (FUN_004f4220: +0x18c/+0x190/+0x194/+0x198/+0x19c, wind name by type 0 Constant / 1
+      RotateConstant / 2 Rotate, +0x188 param) and rebuilds wind (0x590780) and clouds (0x56ad30).
+      Never sent in the 2009 captures. Wiki (The Menu System): 'Weather information - specific weather
+      information sent by the game's AI' -> announcements go as AI lines 'WEATHER: ...'. Server:
+      build_weather_137, WEATHER[room] live state, weather_set/push, joiners get the live state at
+      spawn (weather_on_spawn), a 6-rung ladder clear..storm, per-arena 'Dynamic weather every N min'
+      (settings weather_cycle; random one-rung walk, announced; re-armed on web save), console
+      `weather <room> status|clear|scattered|broken|overcast|rain|storm|clouds ...|rain on|off|wind
+      <m/s> <deg>|reset|cycle`, arena reset clears. Needs field test (the rebuild may hitch the
+      client for a moment; rain is only drawn with Stratus). VERSION v962f5.
+
 v961f5b [FILTER PREFIXES ARE SYSOP-ONLY] (10-23)
       User: NEWS:/EVENT:/SCORE:/HELP:/WEATHER:/HINT: should only be available to admins. A pilot without
       rights who types one of the client's filter tokens in chat gets it defused before reflect

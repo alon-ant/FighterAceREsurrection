@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v961f5b'
+VERSION = 'v966f5d'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -3450,6 +3450,35 @@ def gamedef_startground_offset(d):
 GAMETYPE_FORCE_TC = True
 GAMETYPE_TC = 1
 
+# v966f5d [SCORE CHECKBOX = SERVER SCORING SWITCH] (Alon 10-23 20:52): the in-game Game Settings
+# panel's 'Score:' box is GAME_DEF ScoreGlobal (live struct +0x3b0, param 0xec). Created unticked,
+# the client shows no career scoring in the arena even though the server books it. RE of the 0x8a
+# deserializer FUN_0057bee0: the [ScoreAndDamage] booleans are BIT-PACKED at the tail of the blob -
+# 12 flag bytes, then 2 bytes (params 0x139, 0xea), then 3 x 16-byte blocks to Source.End():
+#   end-60 = F2: 0x74 0x76 0x79 0x7b 0x7c 0x7d 0x7e | bit0 = ScoreGlobal (0xec)
+#   end-59 = F3: bit7 ScoreAI 0xed, 0x40 Collision, 0x20 DoNotDropAce, 0x10 DoNotPenalty,
+#                8 KillFriendPenalty, 4 ExitAsCrash, 2 CrashOnEnemyRunway, 1 AlternateAce
+# Verified against the client's own dump of BOB (ScoreGlobal=no, F3 = 0x02 = CrashOnEnemyRunway
+# only) and three web-created arenas with the box ticked (bit set).
+GAMEDEF_SCOREGLOBAL_FROM_END = 60
+
+def apply_score_global(d, on):
+    """In-place set the ScoreGlobal bit of a DECOMPRESSED GAME_DEF to `on`. Returns (offset, old)
+    on write, None on no-op / refusal (blob too short, or the tail does not look like the format)."""
+    try:
+        n = len(d)
+        if n < 80 or d[n - 50] != 0 or d[n - 49] not in (0, 1):     # params 0x139 / 0xea as seen in every blob
+            return None
+        off = n - GAMEDEF_SCOREGLOBAL_FROM_END
+        old = d[off]
+        new = (old | 1) if on else (old & 0xfe)
+        if new == old:
+            return None
+        d[off] = new
+        return off, old
+    except Exception:
+        return None
+
 def _gamedef_type_offset(d):
     """Byte offset of the game-type byte (param[0x2a] = live struct +0xa8) in a
     DECOMPRESSED GAME_DEF: the byte right after the NAME/COMMENT/PASSWORD cstrings -
@@ -5112,6 +5141,246 @@ def extract_reality_from_gamedef(game_def_raw):
     except Exception:
         return None
 
+
+# ---- v962f5 LIVE WEATHER (Alon 10-23: "cycle the rain and the clouds in game without changing the arena") ----
+# FA.exe msg 137 (0x89), handler FUN_004f4af0 (VNet table 0xc820fc), valid only in the world:
+#   [0x89][WindType u8][CloudsType u8][CloudsDensity u8 %][Rain u8][CloudsMin u16 m][CloudsMax u16 m][WindParam cstr]
+# The client tears down its wind and cloud objects, stores the fields into the live GAME_DEF
+# (FUN_004f4220: +0x18c clouds type, +0x190 density, +0x194/+0x198 min/max, +0x19c rain, +0x184
+# wind name by type 0 'Constant' / 1 'RotateConstant' / 2 'Rotate', +0x188 the WindParam text) and
+# rebuilds wind (0x590780) and clouds (0x56ad30) at once. Never seen in the 2009 captures (the 2009
+# arenas ran fixed weather); the wiki's Options text confirms "weather information sent by the
+# game's AI", so the announcement travels as an AI line with the WEATHER: prefix (the Weather box).
+# A joiner loads the arena's GAME_DEF weather, so the room's live state is re-sent to him at spawn.
+WEATHER_OPCODE = 0x89
+WEATHER = {}                     # room_id -> {'wind_type','wind_param','clouds_type','density','rain','cmin','cmax','by','since','step'}
+_WEATHER_TIMERS = {}
+# the cycle ladder (step 0..5): the automatic weather walks one rung up or down every N minutes
+WEATHER_LADDER = [
+    # clouds_type, density %, min m, max m, rain, announcement, wind m/s (the cycle's wind, capped per arena)
+    (0,   0,    0,    0, 0, 'Skies clearing - no cloud', 2.0),
+    (1,  25, 1500, 2500, 0, 'Scattered cumulus forming at 1500 m', 3.5),
+    (1,  55, 1200, 2800, 0, 'Broken cumulus, cloud base 1200 m', 5.0),
+    (2,  70,  900, 2200, 0, 'Stratus overcast rolling in, base 900 m', 7.0),
+    (2,  90,  600, 2000, 1, 'Overcast and rain, cloud base 600 m', 9.0),
+    (2, 100,  300, 1800, 1, 'Heavy rain, low overcast at 300 m - visibility poor', 12.0),
+]
+WEATHER_MAX_WIND_DEFAULT = 8.0   # m/s (~18 mph) - the cycle never blows harder than the arena's cap
+                                 # (settings weather_max_wind; 0 = the cycle leaves the wind alone)
+
+def weather_max_wind(room_id):
+    try:
+        v = (db_get_room_settings(room_id) or {}).get('weather_max_wind', '')
+        return float(v) if v not in (None, '') else WEATHER_MAX_WIND_DEFAULT
+    except (TypeError, ValueError):
+        return WEATHER_MAX_WIND_DEFAULT
+
+def weather_cycle_wind(room_id, rung, prev_param):
+    """The cycle's wind for a rung: the rung's speed capped by the arena's max, direction drifting
+    +-30 deg from the previous constant wind (or the arena's). 0 cap = keep the current wind."""
+    cap = weather_max_wind(room_id)
+    if cap <= 0:
+        return None
+    import random as _r
+    spd = min(float(WEATHER_LADDER[rung][6]), cap) * _r.uniform(0.8, 1.0)
+    m = re.search(r'Dir=(-?\d+)', prev_param or '')
+    base_dir = int(m.group(1)) if m else _r.randint(0, 359)
+    return '(Speed=%.1f,Dir=%d)' % (spd, (base_dir + _r.randint(-30, 30)) % 360)
+WEATHER_PRESETS = {              # console `weather <room> <preset>`
+    'clear':     0, 'scattered': 1, 'broken': 2, 'overcast': 3, 'rain': 4, 'storm': 5,
+}
+
+def build_weather_137(w):
+    wp = str(w.get('wind_param') or '(Speed=2,Dir=0)').encode('latin1', 'replace')[:120]
+    body = (bytes([WEATHER_OPCODE, int(w.get('wind_type', 0)) & 0xff, int(w.get('clouds_type', 0)) & 0xff,
+                   max(0, min(100, int(w.get('density', 0)))) & 0xff, 1 if w.get('rain') else 0])
+            + struct.pack('<HH', max(0, min(65535, int(w.get('cmin', 0)))), max(0, min(65535, int(w.get('cmax', 0)))))
+            + wp + b'\x00')
+    return build_ingame_pkt(body)
+
+def weather_base_for_room(room_id):
+    """The weather the arena's GAME_DEF (plus the web rw_* overrides) gives a joiner."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        r = extract_reality_from_gamedef(bytes(row[0])) if (row and row[0]) else None
+    except Exception:
+        r = None
+    if not r:
+        return None
+    st = db_get_room_settings(room_id) or {}
+    if st.get('rw_enabled'):
+        for k in ('rw_clouds_type', 'rw_clouds_density', 'rw_clouds_min', 'rw_clouds_max', 'rw_rain', 'rw_wind_type',
+                  'rw_wind_speed', 'rw_wind_dir', 'rw_wind_rot_time', 'rw_wind_min', 'rw_wind_max', 'rw_wind_osc_time'):
+            v = st.get(k, '')
+            if v not in (None, ''):
+                try: r[k] = float(v) if k in ('rw_wind_speed', 'rw_wind_min', 'rw_wind_max') else int(float(v))
+                except (TypeError, ValueError): pass
+        r['rw_wind_param'] = wind_param_string(r.get('rw_wind_type', 0), r.get('rw_wind_speed', 2.0), r.get('rw_wind_dir', 0),
+                                               r.get('rw_wind_rot_time', 0), r.get('rw_wind_min', 0), r.get('rw_wind_max', 0),
+                                               r.get('rw_wind_osc_time', 0))
+    return {'wind_type': int(r.get('rw_wind_type', 0) or 0), 'wind_param': r.get('rw_wind_param') or '(Speed=2,Dir=0)',
+            'clouds_type': int(r.get('rw_clouds_type', 0) or 0), 'density': int(r.get('rw_clouds_density', 0) or 0),
+            'rain': int(r.get('rw_rain') or 0), 'cmin': int(r.get('rw_clouds_min', 0) or 0), 'cmax': int(r.get('rw_clouds_max', 0) or 0)}
+
+def weather_text(w):
+    ct = CLOUD_TYPE_NAMES[w['clouds_type']] if 0 <= int(w['clouds_type']) < 3 else '?'
+    if int(w['clouds_type']) == 0:
+        return 'no cloud' + (', rain' if w.get('rain') else '')
+    return f'{ct} {w["density"]}% at {w["cmin"]}-{w["cmax"]} m' + (', rain' if w.get('rain') else '') + f', wind {w.get("wind_param", "")}'
+
+def weather_push(room_id, w, to=None, reason=''):
+    pkt = build_weather_137(w)
+    n = 0
+    for p in ([to] if to is not None else get_sessions_in_room(room_id)):
+        if not getattr(p, 'entered_game', False):      # the handler needs a loaded world
+            continue
+        _submit_send(send_rel, p, pkt, f'<- WEATHER 137 ({weather_text(w)}) {reason}', to=3.0)
+        n += 1
+    return n
+
+def weather_set(room_id, w, by='console', announce=None, step=None):
+    """Apply a live weather state to the room now (and remember it for joiners)."""
+    cur = dict(WEATHER.get(room_id) or {})
+    cur.update(w); cur['by'] = by; cur['since'] = time.time()
+    if step is not None:
+        cur['step'] = step
+    WEATHER[room_id] = cur
+    n = weather_push(room_id, cur, reason=f'by {by}')
+    if announce:
+        tc_say(room_id, msg_prefixed('WEATHER', announce))
+    log('WEATHER', f'room {room_id}: {weather_text(cur)} by {by} -> {n} client(s)' + (f' [step {step}]' if step is not None else ''))
+    return cur
+
+def weather_on_spawn(s):
+    rid = getattr(s, 'current_room', None)
+    w = WEATHER.get(rid)
+    if w:
+        weather_push(rid, w, to=s, reason='(joiner: the room\'s live weather)')
+
+def weather_step_for(w):
+    """Nearest ladder rung for a weather state (for the cycle's starting point)."""
+    best, bd = 0, 1e9
+    for i, (ct, dn, mn, mx, rn, _t, _ws) in enumerate(WEATHER_LADDER):
+        d = abs(ct - int(w.get('clouds_type', 0))) * 100 + abs(dn - int(w.get('density', 0))) + abs(rn - int(w.get('rain', 0))) * 50
+        if d < bd:
+            best, bd = i, d
+    return best
+
+def weather_cycle_minutes(room_id):
+    try:
+        return max(0, int(float((db_get_room_settings(room_id) or {}).get('weather_cycle', 0) or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+def weather_cycle_tick(room_id):
+    """Every weather_cycle minutes: walk one rung (random direction, bounded), announce, re-arm."""
+    _WEATHER_TIMERS.pop(room_id, None)
+    mins = weather_cycle_minutes(room_id)
+    if mins <= 0 or not any(getattr(p, 'entered_game', False) for p in get_sessions_in_room(room_id)):
+        if mins > 0:
+            weather_cycle_arm(room_id, mins)          # nobody in: try again later, no change
+        return
+    w = WEATHER.get(room_id) or weather_base_for_room(room_id) or {'wind_type': 0, 'wind_param': '(Speed=2,Dir=0)',
+                                                                   'clouds_type': 0, 'density': 0, 'rain': 0, 'cmin': 0, 'cmax': 0}
+    step = w.get('step', weather_step_for(w))
+    import random as _r
+    delta = _r.choice([-1, -1, 0, 1, 1]) if 0 < step < len(WEATHER_LADDER) - 1 else (1 if step == 0 else -1)
+    if _r.random() < 0.15 and 0 < step < len(WEATHER_LADDER) - 1:
+        delta = 0
+    new = max(0, min(len(WEATHER_LADDER) - 1, step + delta))
+    if new != step:
+        ct, dn, mn, mx, rn, txt, _ws = WEATHER_LADDER[new]
+        wp = weather_cycle_wind(room_id, new, w.get('wind_param'))
+        wt = 0 if wp else w.get('wind_type', 0)
+        wp = wp or w.get('wind_param', '(Speed=2,Dir=0)')
+        _m = re.search(r'Speed=([-0-9.]+)', wp)
+        if _m:
+            txt = f'{txt}; wind {float(_m.group(1)) * 2.237:.0f} mph'
+        weather_set(room_id, {'wind_type': wt, 'wind_param': wp,
+                              'clouds_type': ct, 'density': dn, 'cmin': mn, 'cmax': mx, 'rain': rn},
+                    by='weather cycle', announce=txt, step=new)
+    weather_cycle_arm(room_id, mins)
+
+def weather_cycle_arm(room_id, mins=None):
+    t_old = _WEATHER_TIMERS.pop(room_id, None)
+    if t_old:
+        try: t_old.cancel()
+        except Exception: pass
+    mins = weather_cycle_minutes(room_id) if mins is None else mins
+    if mins <= 0:
+        return False
+    t = threading.Timer(mins * 60.0, weather_cycle_tick, args=(room_id,)); t.daemon = True; t.start()
+    _WEATHER_TIMERS[room_id] = t
+    return True
+
+WEATHER_USAGE = ('status | clear|scattered|broken|overcast|rain|storm | clouds <none|cumulus|stratus> <density%> <min m> <max m> [rain] '
+                 '| rain on|off | wind <m/s> <deg> | reset | cycle')
+
+def weather_command(room_id, args, by='console'):
+    """One parser for the console `weather <room> ...` and the in-game `##Weather ...` (sysops).
+    Returns the reply text (lines joined with newlines)."""
+    if not args:
+        return 'usage: ' + WEATHER_USAGE
+    v = args[0].lower()
+    cur = WEATHER.get(room_id) or weather_base_for_room(room_id) or {'wind_type': 0, 'wind_param': '(Speed=2,Dir=0)',
+                                                                   'clouds_type': 0, 'density': 0, 'rain': 0, 'cmin': 0, 'cmax': 0}
+    try:
+        if v == 'status':
+            return '\n'.join(weather_status_text(room_id))
+        if v == 'rain' and len(args) >= 2 and args[1].lower() in ('on', 'off', '1', '0', 'yes', 'no'):
+            # v962f5b: 'rain off' used to hit the 'rain' PRESET first and switch the rain ON (Alon 13:51)
+            rn = 1 if args[1].lower() in ('on', '1', 'yes') else 0
+            if rn and int(cur.get('clouds_type', 0)) != 2:
+                return 'rain needs Stratus clouds - use overcast / storm or clouds stratus ... first (the client only draws rain under Stratus)'
+            w = weather_set(room_id, {'rain': rn}, by=by, announce='Rain setting in' if rn else 'Rain easing off')
+            return 'rain ' + ('on' if rn else 'off') + ' - ' + weather_text(w)
+        if v in WEATHER_PRESETS:
+            st = WEATHER_PRESETS[v]; ct, dn, mn, mx, rn, txt, _ws = WEATHER_LADDER[st]
+            w = weather_set(room_id, {'clouds_type': ct, 'density': dn, 'cmin': mn, 'cmax': mx, 'rain': rn,
+                                      'wind_type': cur['wind_type'], 'wind_param': cur['wind_param']}, by=by, announce=txt, step=st)
+            return f'{v}: ' + weather_text(w)
+        if v == 'clouds' and len(args) >= 5:
+            ct = {'none': 0, 'no': 0, 'cumulus': 1, 'stratus': 2}.get(args[1].lower(), 0)
+            rn = 1 if (len(args) > 5 and args[5].lower() == 'rain' and ct == 2) else 0
+            w = weather_set(room_id, {'clouds_type': ct, 'density': int(args[2]), 'cmin': int(args[3]), 'cmax': int(args[4]), 'rain': rn,
+                                      'wind_type': cur['wind_type'], 'wind_param': cur['wind_param']},
+                            by=by, announce=f'{CLOUD_TYPE_NAMES[ct]} {int(args[2])}% at {int(args[3])}-{int(args[4])} m' + (' with rain' if rn else ''))
+            return weather_text(w)
+        if v == 'wind' and len(args) >= 3:
+            spd = float(args[1]); deg = int(float(args[2])) % 360
+            w = weather_set(room_id, {'wind_type': 0, 'wind_param': '(Speed=%g,Dir=%d)' % (spd, deg)}, by=by,
+                            announce=f'Wind {spd * 2.237:.0f} mph from {deg} deg')
+            return weather_text(w)
+        if v == 'reset':
+            b = weather_base_for_room(room_id)
+            if not b:
+                return "no weather block in this arena's GAME_DEF"
+            weather_set(room_id, b, by=by, announce='Weather back to the arena forecast')
+            WEATHER.pop(room_id, None)
+            return 'back to the arena setting: ' + weather_text(b)
+        if v == 'cycle':
+            weather_cycle_tick(room_id)
+            return 'cycle step fired - ' + weather_text(WEATHER.get(room_id) or cur)
+    except (TypeError, ValueError) as e:
+        return f'bad number: {e}'
+    return 'usage: ' + WEATHER_USAGE
+
+def weather_status_text(room_id):
+    w = WEATHER.get(room_id)
+    base = weather_base_for_room(room_id)
+    out = [f'room {room_id}: arena setting: ' + (weather_text(base) if base else '(no weather block found)')]
+    if w:
+        out.append(f'    live now: {weather_text(w)} (by {w.get("by")} at {time.strftime("%H:%M:%S", time.gmtime(w["since"]))} UTC'
+                   + (f', ladder step {w["step"]}' if w.get('step') is not None else '') + ')')
+    else:
+        out.append('    live: same as the arena setting (nothing changed since the arena was built)')
+    m = weather_cycle_minutes(room_id)
+    out.append((f'    cycle: every {m} min' if m else '    cycle: off (web: Reality/Weather -> Dynamic weather)')
+               + f', max wind {weather_max_wind(room_id):g} m/s ({weather_max_wind(room_id) * 2.237:.0f} mph)')
+    return out
+
 def apply_reality_settings(d, settings):
     """In-place patch of the [Reality]/[Weather] fields from a per-arena settings dict (the web
     editor's rw_* keys; only keys present are written). Returns a list of 'field old->new' strings
@@ -6152,6 +6421,16 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                 _go, _gold = _gr
                 log('GAMEDEF212', f'game-type @+{_go}: {_gold} -> {_gt} '
                                   f'(+0xa8 panel gate; 1=TC 2=custom 3=training)')
+    # v966f5d: the Score checkbox follows the server's scoring switch (see apply_score_global)
+    try:
+        if room_id is not None:
+            _sg_on = scoring_mode_for_room(room_id) is not None
+            _sgr = apply_score_global(d, _sg_on)
+            if _sgr:
+                log('GAMEDEF212', f'ScoreGlobal @{_sgr[0]} (end-{GAMEDEF_SCOREGLOBAL_FROM_END}): 0x{_sgr[1]:02x} -> '
+                                  f'{"set" if _sg_on else "cleared"} (scoring {scoring_mode_for_room(room_id)})')
+    except Exception:
+        logx('GAMEDEF212', 'ScoreGlobal stamp failed')
     # v890f5 [GAME_DEF GUARD]: the served blob must walk like the client's deserializer does
     # (_gamedef_aa_offset replays FUN_0057bee0 to the AA bytes). Arena 134 ('TC Reborn Beta',
     # created on the web 09-28 14:05) failed that walk after our patches and every client that
@@ -7256,6 +7535,14 @@ def console_handler():
                     broadcast_everyone(parts[1].strip(), src='console')
                 else:
                     log('CONSOLE', 'usage: broadcast <text>')
+            elif cmd == 'weather':
+                # v962f5: weather <room> <args> - see weather_command()
+                _wa = (parts[1].split() if len(parts) > 1 else [])
+                if len(_wa) < 2:
+                    log('CONSOLE', 'usage: weather <room> ' + WEATHER_USAGE)
+                else:
+                    for _l in weather_command(int(_wa[0], 0), _wa[1:], by='console').split('\n'):
+                        log('CONSOLE', _l)
             elif cmd == 'ai':
                 # v961f5: ai <room|all> <text>  - the native AI line (msg 66, 'AI: text', the Chat tab's AI box)
                 _a = (parts[1].split(None, 1) if len(parts) > 1 else [])
@@ -7403,6 +7690,7 @@ def console_handler():
                 try:
                     _rid = int(parts[1].split()[0], 0)
                     _TN_CFG.pop(_rid, None); _RADAR_CFG.pop(_rid, None)
+                    weather_cycle_arm(_rid)                                  # v962f5: new cycle interval (or off)
                     _n = sum(1 for p in get_sessions_in_room(_rid) if getattr(p, 'entered_game', False))
                     if _n:
                         room_system_msg(_rid, 'The host changed this arena\'s settings - leave to the lobby and re-enter to get them.')
@@ -7909,6 +8197,12 @@ def console_handler():
                             log('CONSOLE', f'tc trigger scene {_sidx} as {_pil.current_pilot}: {"fired" if _ok else "not fired (same camp / unknown scene)"}')
                 else:
                     log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc paradrop <scene> [n] [camp] | tc reset')
+            elif cmd == 'convoy':                                   # v964f5 road convoys
+                for _l in convoy_console(parts[1].split() if len(parts) > 1 else [], by='console'):
+                    log('CONSOLE', _l)
+            elif cmd == 'car':                                      # v963f5 NetCar probe
+                for _l in car_console(parts[1].split() if len(parts) > 1 else [], by='console'):
+                    log('CONSOLE', _l)
             elif cmd == 'tank':
                 # v559f5/v560f5:
                 #   tank <class> <x> <y> [camp] [group]        spawn at world coords
@@ -10168,8 +10462,13 @@ def build_gamedef_212(room, hide_planes=None):
     # CUSTOM/unrecognized room type keep the client-created Type=2 ('Private').
     # (v438f5's first cut scoped Type=1 to TC only, which wrongly made Dogfighting
     # rooms 'Private'.)
+    # v966f5c [ECONOMY ARENA = MISSION TYPE] (Alon 10-23 20:43: 'scoring mode by title -> no economy'):
+    # the client gates its WHOLE TC side on this byte (+0xa8 == 1: Production Complex panel, msg-59/71
+    # resource requests, ground-war display). The server economy ran (trains, production) but the
+    # Custom Arena with scoring on default kept Type=2 'Private' and the client showed none of it.
+    # An arena with the economy switch ON is stamped Mission whatever it scores on.
     try:
-        _room_official = (scoring_mode_for_room(room[0]) is not None)
+        _room_official = (scoring_mode_for_room(room[0]) is not None) or bool(room_has_economy(room[0]))
     except Exception:
         _room_official = False
     comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
@@ -10413,7 +10712,12 @@ def _cmd_guns(s, args, cold):
     if not sess_rights(s):
         return 'Sysops only.'
     return guns_set(getattr(s, 'current_room', None), cold, by=getattr(s, 'current_pilot', None) or 'sysop')
+def _cmd_weather(s, args):
+    if not sess_rights(s):
+        return 'Sysops only.'
+    return weather_command(getattr(s, 'current_room', None), args or ['status'], by=getattr(s, 'current_pilot', None) or 'sysop')
 CHAT_SERVER_COMMANDS = {
+    'weather':  _cmd_weather,                       # v962f5b: ##Weather storm / ##Weather rain off / ##Weather status ...
     'gunscold': lambda s, a: _cmd_guns(s, a, True),
     'gunshot':  lambda s, a: _cmd_guns(s, a, False),
     'gunsstatus': lambda s, a: ' / '.join(guns_status_text(getattr(s, 'current_room', None))),
@@ -10436,7 +10740,8 @@ def chat_server_command(s, disp):
         logx('GUNS', 'chat command failed'); reply = f'command failed: {e}'
     log('MODERATOR', f'server-side ## command {t!r} by "{s.current_pilot}" (rights {sess_rights(s)}) -> {reply}')
     if reply:
-        send_system_msg(s, str(reply))
+        for _ln in str(reply).split('\n'):
+            send_system_msg(s, _ln.strip())
     return True
 
 def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
@@ -14577,6 +14882,957 @@ def spawn_tank(room_id, camp, class_id, group_id=0, pos=None, reason='', send=Tr
                     f'will cull it after ~28 s')
     return onum
 
+
+# ---- v963f5 NetCar PROBE (Alon 10-23: the tag-visibility entry for cars - can we spawn lorries?) ----
+# FA.exe create dispatcher FUN_004f26b0 case 5 -> FUN_0067fe30 (carinfo.cpp) 'Create NetCar (%s).
+# St=%i, ONumber=%i. Camp=%i': record byte [0] = 5 | nation<<4, byte [1] = class id looked up in the
+# car class list @0xcab130 (node+0x10 -> info, info+0x1c = id). Header table @0xa30c98: Type 5 =
+# 10-byte header + the 13-byte trailer [St u16][ONumber u16][9 x 0] = 23 B; telemetry 22 B.
+# Car Unpack (NET vtable 0xa56408 slot 1 = 0x689ba0): [0..6] packed position (s24 X, s24 Y, u8 Z, the
+# NET::OBJECT common part FUN_004275f0), [7..10] forward vector (FUN_007ccf90, two s14 + dropped
+# axis), [0xb] flags (bit0 -> +0xf4), [0xc] s16 -> +0x1d8, [0xe]/[0x10] s16 x c16560 -> +0x250/+0x254
+# (throttle / steer, the tank's +0x31c/+0x320), [0x12] s16/16384 -> +0x258, [0x14] s16 x 1.9175e-5
+# -> +0x25c = the TANK update minus its 4 turret bytes. Models in the client (ai0.str 1129-1195):
+# Ambulance, Car for Ammo, Car for Fuel, AA Car, Flak Car, Radar Car, Cistern / Fura / Furgon
+# trailers - all 'gruzovik' (lorry) bodies in objects\cars\. CLASS IDS come from the live dump
+# (fa_dump_tank_tables.py v10 'car_classes'): an id the client does not know makes FUN_0067fe30
+# return NULL and the dispatcher dereferences it -> CTD, so the probe refuses ids that are not in
+# CAR_CLASSES / tank_tables.json.
+CAR_OBJ_TYPE     = 5
+CAR_HEADER_SIZE  = 10
+CAR_UPDATE_SIZE  = 22
+CAR_CLASSES      = {}          # class_id -> name (loaded from tank_tables.json 'car_classes')
+CARS             = {}          # onum -> {'room','camp','class','pos','fwd','peers','created','name'}
+CAR_KEEPALIVE_S  = 2.0
+
+# ai0.str name ids found in each car class record (head dword[5]); the dump
+# cannot see these strings (they live in Data00\TXT\ai0.str, not in the info).
+CAR_NAME_BY_STR = {1187: 'Ambulance', 1188: 'Car for Ammo', 1189: 'Car for Fuel',
+                   1190: 'AA Car', 1191: 'Flak Car', 1192: 'Radar Car',
+                   1193: 'Cistern', 1194: 'Fura', 1195: 'Furgon'}
+# short aliases accepted by `car spawn`
+CAR_ALIASES = {'ambulance': 'Ambulance', 'ammo': 'Car for Ammo', 'fuel': 'Car for Fuel',
+               'aa': 'AA Car', 'flak': 'Flak Car', 'radar': 'Radar Car',
+               'cistern': 'Cistern', 'fura': 'Fura', 'furgon': 'Furgon'}
+
+def car_classes_load():
+    try:
+        _p = mapdata_path('tank_tables.json')
+        d = json.load(open(_p))
+        for c in d.get('car_classes') or []:
+            cid = c.get('class_id')
+            if cid is None:
+                continue
+            hd = c.get('head_dwords') or []
+            nm = CAR_NAME_BY_STR.get(hd[5]) if len(hd) > 5 else None
+            if not nm:
+                nm = next((s for s in (c.get('strings_in_info') or []) if len(s) > 3), '') or f'car class {cid}'
+            CAR_CLASSES[int(cid)] = nm
+        if CAR_CLASSES:
+            log('CAR', f'car classes from tank_tables.json: {CAR_CLASSES}')
+    except Exception as _e:
+        log('CAR', f'car classes not loaded ({_e}) - run fa_dump_tank_tables.py v10 in a TC arena')
+
+def car_class_lookup(tok):
+    """int id, alias (ammo/fuel/aa/flak/...) or full name -> class id, or None."""
+    try:
+        cid = int(tok)
+        return cid if cid in CAR_CLASSES else None
+    except ValueError:
+        pass
+    nm = CAR_ALIASES.get(tok.lower(), tok)
+    for cid, n in CAR_CLASSES.items():
+        if n.lower() == nm.lower():
+            return cid
+    return None
+
+def build_car_record(st, onumber, nation, class_id):
+    rec = bytearray(CAR_HEADER_SIZE + 13)
+    rec[0] = (CAR_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    rec[1] = class_id & 0xff
+    struct.pack_into('<H', rec, CAR_HEADER_SIZE, st & 0xffff)
+    struct.pack_into('<H', rec, CAR_HEADER_SIZE + 2, onumber & 0xffff)
+    return bytes(rec)
+
+def pack_car_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, aux=(0, 0, 0, 0, 0)):
+    """22-byte car update payload = the tank payload without the 4 turret bytes."""
+    if not tank_consts_ok():
+        raise RuntimeError('telemetry scale constants not loaded')
+    fx, fy, fz = fwd
+    n = math.sqrt(fx * fx + fy * fy + fz * fz) or 1.0
+    fx, fy, fz = fx / n, fy / n, fz / n
+    body = _s24(x / TANK_POS_XY_SCALE) + _s24(y / TANK_POS_XY_SCALE)
+    body += bytes([max(0, min(255, int(round((z + TANK_POS_Z_OFF) / TANK_POS_Z_SCALE))))])
+    comps = [fx, fy, fz]
+    k = max(range(3), key=lambda i: abs(comps[i]))
+    others = [comps[i] for i in range(3) if i != k]
+    w1 = _s14(others[0] / TANK_DIR_SCALE) | (k << 14)
+    w2 = _s14(others[1] / TANK_DIR_SCALE) | (0x4000 if comps[k] < 0 else 0)
+    body += struct.pack('<HH', w1, w2)
+    body += bytes([flags & 0xff])
+    body += struct.pack('<hhhhh', *[_s16c(a) for a in aux])
+    assert len(body) == CAR_UPDATE_SIZE, len(body)
+    return body
+
+def build_car_update(tick, onumber, payload22):
+    size = 1 + 2 + 2 + CAR_UPDATE_SIZE                     # 27
+    bc, t = size // 16, ((size % 16) << 4) | 0x02
+    return bytes([bc, t, 0, 0, 0x07]) + struct.pack('<HH', tick & 0xffff, onumber & 0xffff) + bytes(payload22)
+
+def room_active_camp_names(room_id):
+    """{camp: (code, abbrev, full)} of the arena's ACTIVE camps (from its GAME_DEF camps block),
+    or {} when unknown."""
+    try:
+        return CAMP_NAMES_BY_TERRAIN.get(_probe_terrain_for_room(room_id)) or {}
+    except Exception:
+        return {}
+
+def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
+    if room_id is None:
+        return None
+    if not tank_consts_ok():
+        log('CAR', 'spawn refused - telemetry constants missing (tank_tables.json)'); return None
+    if int(class_id) not in CAR_CLASSES:
+        log('CAR', f'spawn refused - class {class_id} is not in the dumped car class list {sorted(CAR_CLASSES)} '
+                   f'(an unknown id CTDs the client in FUN_0067fe30)'); return None
+    if CAR_CLASSES.get(int(class_id)) in CAR_TRAILER_NAMES:
+        log('CAR', f'spawn refused - {CAR_CLASSES.get(int(class_id))} is a trailer (roadcar.cpp:55 asserts without a towing car = CTD)'); return None
+    # v963f5d: the camp must be one of the ARENA'S active camps. A camp outside the arena's
+    # Camps= list (BOB is 'Camps=1-3': GB and GE only) is not hostile to anybody in the client's
+    # alliance table (GAME_DEF+0xc, FUN_0046bba0), so every round fired at the car is treated
+    # as FRIENDLY FIRE and reflected onto the shooter's own plane (FUN_00427b00: 'GBR 1Lt X
+    # sprayed your engine' - Alon 10-23 15:31 with a camp-2 car in BOB).
+    _names = room_active_camp_names(room_id)
+    if _names and int(camp) not in _names:
+        log('CAR', f'spawn refused - camp {camp} is not active in room {room_id}; active: '
+                   + ', '.join(f'{c}={n[0]}' for c, n in sorted(_names.items()) if c != 7)); return None
+    onum = next_obj_number()
+    h = math.radians(heading_deg)
+    CARS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id), 'pos': (float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) > 2 else 0.0),
+                  'fwd': (math.cos(h), math.sin(h), 0.0), 'peers': set(), 'created': time.time(), 'name': CAR_CLASSES.get(int(class_id), '?'),
+                  'aux': (0, 0, 0, 0, 0), 'flags': 0}
+    rec = build_car_record(AI_CLIENT_ST, onum, camp, class_id)
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
+        _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 CAR class={class_id} camp={camp} ONumber=0x{onum:04x} {reason}', to=3.0)
+        CARS[onum]['peers'].add(getattr(p, 'addr', None))
+        n += 1
+    log('CAR', f'room {room_id}: spawn car ONumber=0x{onum:04x} class={class_id} ({CARS[onum]["name"]}) camp={camp} '
+               f'at ({pos[0]:.0f},{pos[1]:.0f}) hdg {heading_deg:.0f} -> {n} session(s) {reason}')
+    threading.Timer(0.5, car_broadcast_state, args=(onum,)).start()
+    # v965f5: idle keep-alive is the car_tick's job (CAR_IDLE_S); no per-car timer chain
+    return onum
+
+def car_broadcast_state(onum):
+    c = CARS.get(onum)
+    if c is None:
+        return 0
+    x, y, z = c['pos']
+    if CAR_LOOKAHEAD_S > 0 and c.get('_speed_mps', 0.0) > 0.1 and c.get('goal') is not None:
+        _fx, _fy, _ = c.get('fwd', (1.0, 0.0, 0.0))
+        x, y = x + _fx * c['_speed_mps'] * CAR_LOOKAHEAD_S, y + _fy * c['_speed_mps'] * CAR_LOOKAHEAD_S
+    try:
+        pl = pack_car_state(x, y, z, c['fwd'], flags=c.get('flags', 0),
+                            aux=c['aux_override'] if c.get('aux_override') is not None else car_motion_aux(c))
+    except Exception as _e:
+        log('CAR', f'pack failed for 0x{onum:04x}: {_e}'); return 0
+    n = 0
+    for p in get_sessions_in_room(c['room']):
+        if getattr(p, 'addr', None) not in c['peers'] or getattr(p, 'last_telem_tick', None) is None:
+            continue
+        frame = build_car_update(_ai_stamp(p, onum), onum, pl)
+        seq = p.nundgram()
+        try:
+            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, p.addr); n += 1
+        except OSError:
+            pass
+    return n
+
+def _car_keepalive(onum):
+    if onum not in CARS:
+        return
+    if CARS[onum].get('drive_test') is None:
+        car_broadcast_state(onum)
+    threading.Timer(CAR_KEEPALIVE_S, _car_keepalive, args=(onum,)).start()
+
+def delete_car(onum, reason='', entry=None):
+    """msg-3 record; `entry` = 12-byte kill entry (see delete_tank) -> 'has destroyed' line."""
+    c = CARS.pop(onum, None)
+    ai_onum_released(onum)
+    if c is None:
+        return 0
+    if entry is not None:
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + bytes(entry)
+    else:
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    n = 0
+    for p in get_sessions_in_room(c['room']):
+        if getattr(p, 'addr', None) in c['peers']:
+            _submit_send(send_rel, p, build_msg13(raw), f'<- delete CAR 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0); n += 1
+    log('CAR', f'room {c["room"]}: delete car 0x{onum:04x}{" with kill entry" if entry else ""} -> {n} session(s) {reason}')
+    return n
+
+# v963f5c [CAR DAMAGE]: the shooter's client reports hits on a car with the same msg-51 (0x33)
+# records as tank hits (live 10-23 14:59: 'hit on 0x010e by 0x010a dmg=30/1/2/2/2/2/4/8' while the
+# client printed 'You have hit SU car'). A lorry is soft - raw damage applies, no armour bands.
+CAR_HP_BY_NAME = {'Ambulance': 60.0, 'Car for Ammo': 50.0, 'Car for Fuel': 40.0, 'AA Car': 80.0,
+                  'Flak Car': 90.0, 'Radar Car': 70.0, 'Furgon': 60.0, 'Cistern': 40.0, 'Fura': 50.0}
+CAR_FALLBACK_HP   = 60.0
+CAR_KILL_SCORE    = 100          # between a paratrooper (50) and a tank (250)
+# Cistern/Fura are TRAILERS: roadcar.cpp:55 asserts (pCar||pInfo->pCI) - no driving info of their
+# own, the client expects a towing car (messages17/18 10-23: CTD on each). Not spawnable alone.
+CAR_TRAILER_NAMES = {'Cistern', 'Fura'}
+_CAR_GONE = {}                   # onum -> (when, why) for hit diagnostics
+
+def car_hp_max(c):
+    return CAR_HP_BY_NAME.get(c.get('name'), CAR_FALLBACK_HP)
+
+def _handle_car_hit(s, victim, attacker, dmg):
+    c = CARS.get(victim)
+    if c is None or c.get('dead'):
+        return
+    c['hp'] = c.get('hp', car_hp_max(c)) - float(dmg)
+    log('CARHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit {c["name"]} 0x{victim:04x} camp {c["camp"]} '
+                  f'for {dmg} -> hp {c["hp"]:.0f}/{car_hp_max(c):.0f}')
+    if c['hp'] <= 0:
+        car_killed(victim, s, reason='(msg-51 damage)')
+
+def car_killed(onum, killer, reason=''):
+    """Book the kill and delete the car with a 12-byte KILL ENTRY (same shape as a tank kill:
+    [id][0x53][hunter tail]) so every client prints the cyan 'has destroyed' line."""
+    c = CARS.get(onum)
+    if c is None or c.get('dead'):
+        return
+    c['dead'] = True
+    kname = getattr(killer, 'current_pilot', None) if killer is not None else None
+    log('CAR', f'{c["name"]} 0x{onum:04x} camp {c["camp"]} DESTROYED by {kname or "?"} {reason}')
+    try:
+        convoy_on_car_lost(c, kname)                                       # v964f5
+    except Exception:
+        logx('CONVOY', 'convoy loss note failed')
+    if killer is not None and kname:
+        evs_on_object(c.get('room'), killer, 'car', f'destroyed a {c["name"]}')
+    if killer is not None and kname and GROUND_KILL_SCORE:
+        try:
+            _mode = scoring_mode_for_room(killer.current_room)
+            if _mode is not None:
+                _bomber = is_bomber_plane(getattr(killer, 'plane_type', None))
+                _sc, _rk, _old = db_apply_score_delta(kname, CAR_KILL_SCORE, bomber=_bomber, mode=_mode)
+                _ng = db_bump_pilot_counter(kname, 'ai_ground', 1)
+                log('SCORE', f'{kname} +{CAR_KILL_SCORE} = car kill (0x{onum:04x} {c["name"]}) -> '
+                             f'{"BOMBER" if _bomber else "FIGHTER"} score | total {_sc} rank {_old}->{_rk} ground={_ng}')
+                send_stat_block_25(killer, reason='(car kill)')
+        except Exception:
+            logx('CAR', 'car kill credit failed')
+    entry = None
+    if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
+        entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
+    delete_car(onum, reason=f'(killed by {kname or "?"})', entry=entry)
+    _CAR_GONE[onum] = (time.time(), f'killed {reason}')
+
+def car_recreate_for(s, reason='', near_xy=None, at_confirm=False):
+    """Create every live car of the room this session does not hold yet (joiner / re-fly). With
+    near_xy the tanks' range rule applies (_recreate_allowed: REJOIN radius + cull cooldown) - a
+    far create only feeds the client's distance cull (v965f5g)."""
+    rid = getattr(s, 'current_room', None)
+    addr = getattr(s, 'addr', None)
+    todo = [(on, c) for on, c in list(CARS.items()) if c['room'] == rid and addr not in c['peers'] and not c.get('dead')
+            and (near_xy is None or _recreate_allowed(s, on, 'car', c['pos'][0], c['pos'][1], near_xy, at_confirm=at_confirm))]
+    n = 0
+    for on, c in todo:
+        body = bytes([0x02]) + _ensure_ai_client_on(s) + build_car_record(AI_CLIENT_ST, on, c['camp'], c['class'])
+        c['peers'].add(addr)
+        _submit_send(send_rel, s, build_msg13(body), f'<- CreateObject 2 CAR 0x{on:04x} (re-create {reason})', to=3.0)
+        n += 1
+    if n:
+        log('CAR', f'{s.current_pilot}: re-created {n} car(s) {reason}')
+        threading.Timer(1.0, lambda: [car_broadcast_state(on) for on, _c in todo]).start()
+    return n
+
+# ======================================================================================
+# v965f5 [ROAD CONVOYS OVERLAND]: NetCars drive like the tanks do - no rails. The client runs the
+# car physics (FUN_00687a10: +0x2f8 throttle target, +0x2fc steer target, +0x300 speed, +0x304 turn
+# rate; trailers follow); the server mirrors the same motion, plans around obstacles with the tank
+# A* (tank_plan_path) and sends throttle/steer/speed-seed + a small position correction - exactly
+# the tank driver's contract (v566f5). Update words: [+0xc int][+0xe throttle/32767][+0x10 steer
+# /32767][+0x12 speed m/tick x16384][+0x14 turn]. Modelled on WWII road supply (Red Ball Express /
+# Wehrmacht Nachschub): serials of 3-ton lorries at 50-100 yd interval, 15-25 mph, self-propelled
+# AA at head and tail, unload at the depot and drive home empty - a target both ways.
+# ======================================================================================
+CAR_TICK_HZ            = 4.0       # driver cadence (same as the tanks)
+CAR_IDLE_S             = 2.0       # keep-alive when parked
+CAR_MAX_MPS            = 16.67     # throttle-1.0 speed = the class record's +0x54 (60 km/h), NOT +0x4c (100 km/h).
+                                   # CONFIRMED by the ruler test 10-23 19:58: throttle 0.66 from one packet carried the
+                                   # client's lorry exactly 220 m in 20 s = 11.0 m/s (marker 3). `car gain` / `car ruler`.
+CAR_TICK_MPS_UNIT      = 1.0 / 50.0  # speed word unit = m per 1/50 s tick (the tank's seed unit)
+CAR_CLIENT_INTEGRATE   = True      # throttle/steer/seed sent, client integrates; off = position only
+CAR_TURN_RATE_DPS      = 25.0      # server heading slew (the client's steer gain 0.436 rad/s = 25 deg/s)
+CAR_LOOKAHEAD_S        = 0.1       # v965f5h: position look-ahead per update. The car's Unpack SETS the position
+                                   # (no clock catch-up like the tank's v884), so each correction lands where the
+                                   # client's lorry was ~one latency ago. 0.1 s removed the last tick on the LAN
+                                   # (Alon 10-23 20:10 'did the job'); `car ahead <s>` live. Online this is per
+                                   # pilot in truth (half his RTT) - revisit if columns tick for far pilots.
+CAR_RACE               = {}        # v965f5b calibration: race id -> {'a': onum (server-driven), 'b': onum (client-driven), ...}
+CAR_STEER_GAIN         = 2.0
+CAR_WP_REACH           = 7.0
+CONVOY_MPS             = 11.0      # 40 km/h road speed (WWII convoy orders: 15-25 mph)
+CONVOY_GAP_M           = 60.0      # vehicle interval (daylight dispersion 50-100 yd)
+CONVOY_ARRIVE_M        = 150.0     # the lead halts this far from the scene centre (buildings)
+CONVOY_CARGO_KG        = {'Car for Fuel': ('fuel', 3000), 'Car for Ammo': ('ammo', 3000), 'Furgon': ('metal', 2500)}
+CONVOY_ESCORT_HEAD     = 'AA Car'
+CONVOY_ESCORT_TAIL     = 'Flak Car'
+CONVOY_UNLOAD_S        = 60.0      # halt at the depot before the empty run home
+CONVOY_INTERVAL_MIN    = 10        # scheduled convoys per camp (web: convoy_minutes)
+CONVOY_PER_CAMP_MAX    = 2
+CONVOY_REQUEST_COOLDOWN_S = 600.0  # on-demand: one request per scene per 10 min
+CONVOY_LOW_FRAC        = 0.35      # on-demand: a store below this fraction of capacity calls one
+CONVOY_LORRIES_MAX     = 6
+CONVOY_MAX_KM          = 120.0     # depot search radius
+CONVOYS                = {}        # cid -> dict
+_CONVOY_NEXT_AT        = {}        # (room, camp) -> monotonic
+_CONVOY_REQ_AT         = {}        # (room, sidx) -> time
+_CONVOY_SEQ            = [0]
+
+def supply_mode_for_room(rid):
+    """'train' (classic TC), 'car' or 'both' - web setting supply_mode."""
+    try:
+        m = str((db_get_room_settings(rid) or {}).get('supply_mode') or 'train').lower()
+    except Exception:
+        m = 'train'
+    return m if m in ('train', 'car', 'both') else 'train'
+
+def convoy_on_demand_for_room(rid):
+    try:
+        v = (db_get_room_settings(rid) or {}).get('convoy_on_demand')
+    except Exception:
+        v = None
+    return True if v in (None, '', 1, '1', 'on', True) else False
+
+def convoy_minutes_for_room(rid):
+    try:
+        return max(2, min(120, int((db_get_room_settings(rid) or {}).get('convoy_minutes') or CONVOY_INTERVAL_MIN)))
+    except (TypeError, ValueError):
+        return CONVOY_INTERVAL_MIN
+
+# --- the car driver (the tank driver's control law, FUN_00687a10 on the client) ---
+def car_motion_aux(c):
+    """[+0xc int][+0xe throttle][+0x10 steer][+0x12 speed seed][+0x14 turn]"""
+    if c.get('drive_test') is not None:
+        mps = float(c['drive_test'])
+        return (0, _s16c(mps / CAR_MAX_MPS * 32767), 0, _s16c(mps * CAR_TICK_MPS_UNIT * 16384), 0)
+    if not CAR_CLIENT_INTEGRATE or c.get('position_only'):
+        return (0, 0, 0, 0, 0)
+    thr = float(c.get('_throttle', 0.0)); steer = float(c.get('_steer', 0.0))
+    seed = float(c.get('_speed_mps', 0.0)) * CAR_TICK_MPS_UNIT
+    return (0, _s16c(thr * 32767), _s16c(steer * 32767), _s16c(seed * 16384), 0)
+
+def _car_drive_step(onum, c, dt, now):
+    """One driver tick for a car with a goal. Returns True when it moved."""
+    goal = c.get('goal')
+    if goal is None:
+        return False
+    x, y, z = c['pos']
+    ahead = CARS.get(c.get('ahead')) if c.get('ahead') is not None else None
+    follower = ahead is not None and not ahead.get('dead')
+    if follower:
+        afx, afy, _ = ahead.get('fwd', (1.0, 0.0, 0.0))
+        goal = (ahead['pos'][0] - afx * CONVOY_GAP_M, ahead['pos'][1] - afy * CONVOY_GAP_M)
+        c['goal'] = goal
+    gx, gy = goal
+    dx, dy = gx - x, gy - y
+    dist = math.hypot(dx, dy)
+    vmax = CAR_MAX_MPS
+    want = min(float(c.get('mps', CONVOY_MPS)), vmax)
+    if follower:
+        lv = float(ahead.get('_speed_mps', 0.0))
+        want = max(0.0, min(vmax, lv + 0.6 * (dist - 2.0)))
+        if dist < 2.0:
+            want = max(0.0, lv - 0.5)
+    elif dist < 30.0:
+        want = max(1.0, want * dist / 30.0)
+    fx, fy, _fz = c.get('fwd', (1.0, 0.0, 0.0))
+    reach = max(3.0, want * dt)
+    if dist < 0.5 or (not follower and dist <= reach):
+        if not follower:
+            c['pos'] = (gx, gy, z); c['goal'] = None; c['arrived'] = True
+        c['_throttle'] = 0.0; c['_steer'] = 0.0; c['_speed_mps'] = 0.0
+        return True
+    ux, uy = dx / dist, dy / dist
+    terr = c.get('terrain')
+    if terr is None:
+        terr = c['terrain'] = _probe_terrain_for_room(c['room'])
+    if terr is not None and dist > 8.0 and not follower:
+        wps = c.get('_wps'); pg = c.get('_wp_goal')
+        drift = math.hypot(goal[0] - pg[0], goal[1] - pg[1]) if pg else 1e9
+        need = (not wps or now - c.get('_planned_at', 0.0) > TANK_PATH_REPLAN_S or drift > TANK_REPLAN_DRIFT_M)
+        if need and not wps and now - c.get('_planned_at', 0.0) < TANK_PATH_RETRY_S:
+            need = False
+        if wps and not need:
+            nx, ny = wps[0]
+            passed = False
+            if len(wps) > 1:
+                lx, ly = wps[1][0] - nx, wps[1][1] - ny
+                passed = (nx - x) * lx + (ny - y) * ly < 0
+            if passed or math.hypot(nx - x, ny - y) <= CAR_WP_REACH:
+                wps.pop(0)
+                if not wps:
+                    need = True
+        if need:
+            wps = tank_plan_path(terr, x, y, gx, gy)
+            c['_wps'] = wps; c['_planned_at'] = now; c['_wp_goal'] = goal
+        if wps:
+            nx, ny = wps[0]
+            if len(wps) == 1:
+                nx, ny = goal
+            wd = math.hypot(nx - x, ny - y)
+            if wd > 1e-3:
+                ux, uy = (nx - x) / wd, (ny - y) / wd
+    cross = fx * uy - fy * ux
+    dot = max(-1.0, min(1.0, fx * ux + fy * uy))
+    err = math.atan2(cross, dot)
+    max_step = math.radians(CAR_TURN_RATE_DPS) * dt
+    step = max(-max_step, min(max_step, err))
+    ca, sa = math.cos(step), math.sin(step)
+    fx, fy = fx * ca - fy * sa, fx * sa + fy * ca
+    c['fwd'] = (fx, fy, 0.0)
+    c['_steer'] = -max(-1.0, min(1.0, CAR_STEER_GAIN * math.sin(err)))
+    turn_scale = max(0.3, 1.0 - abs(err) / math.pi)
+    v = want * turn_scale
+    c['_throttle'] = max(0.0, min(1.0, v / vmax))
+    c['_speed_mps'] = v
+    c['pos'] = (x + fx * v * dt, y + fy * v * dt, z)
+    return True
+
+def car_tick():
+    dt = 1.0 / CAR_TICK_HZ
+    while True:
+        time.sleep(dt)
+        try:
+            now = time.time()
+            for on, c in list(CARS.items()):
+                if c.get('dead') or c.get('drive_test') is not None:
+                    continue
+                moved = False
+                try:
+                    moved = _car_drive_step(on, c, dt, now)
+                except Exception:
+                    logx('CAR', f'drive step 0x{on:04x} failed')
+                if moved or now - c.get('last_sent', 0.0) >= CAR_IDLE_S:
+                    c['last_sent'] = now
+                    car_broadcast_state(on)
+            convoy_tick()
+        except Exception:
+            logx('CAR', 'car tick failed')
+
+# --- convoys ---
+def _convoy_say(cv, text):
+    try:
+        tc_say(cv['room'], f'AI: {text}', camp=cv['camp'])
+    except Exception:
+        pass
+
+def _scene_xy(terrain, sidx):
+    r = tc_scene_xy(terrain, sidx)
+    return (r[0], r[1], (r[2] or 'scene').strip()) if r else None
+
+def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=True):
+    """A column from scene src to scene dst overland: AA car in front, the lorries, Flak car at the
+    tail, CONVOY_GAP_M apart, each following the vehicle ahead; the lead plans the route."""
+    terrain = _probe_terrain_for_room(rid)
+    if not CAR_CLASSES or not tank_consts_ok():
+        return None
+    by_name = {v: k for k, v in CAR_CLASSES.items()}
+    s = _scene_xy(terrain, src_sidx); d = _scene_xy(terrain, dst_sidx)
+    if not s or not d:
+        return None
+    dx, dy = d[0] - s[0], d[1] - s[1]
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+    names = ([CONVOY_ESCORT_HEAD] if escort else []) + list(cargo_names) + ([CONVOY_ESCORT_TAIL] if escort else [])
+    names = [n for n in names if n in by_name]
+    if not names:
+        return None
+    _CONVOY_SEQ[0] += 1
+    cid = _CONVOY_SEQ[0]
+    cv = {'id': cid, 'room': rid, 'camp': int(camp), 'terrain': terrain, 'src': src_sidx, 'dst': dst_sidx,
+          'src_xy': (s[0], s[1]), 'dst_xy': (d[0], d[1]), 'vehicles': [], 'phase': 'out',
+          'started': time.time(), 'cargo': {}, 'lost': {}}
+    hdg = math.degrees(math.atan2(uy, ux))
+    lead_x, lead_y = s[0] + ux * CONVOY_ARRIVE_M, s[1] + uy * CONVOY_ARRIVE_M   # clear of the depot's buildings
+    prev = None
+    for i, name in enumerate(names):
+        px, py = lead_x - ux * i * CONVOY_GAP_M, lead_y - uy * i * CONVOY_GAP_M
+        try:
+            px, py = tank_clear_spot(terrain, px, py)
+        except Exception:
+            pass
+        on = spawn_car(rid, camp, by_name[name], (px, py, 0.0), hdg, reason=f'(convoy {cid} {reason})')
+        if on is None:
+            continue
+        c = CARS[on]
+        c.update({'terrain': terrain, 'convoy': cid, 'slot': i, 'mps': CONVOY_MPS, 'ahead': prev,
+                  'cargo': CONVOY_CARGO_KG.get(name), 'arrived': False})
+        if prev is None:
+            c['goal'] = (d[0] - ux * CONVOY_ARRIVE_M, d[1] - uy * CONVOY_ARRIVE_M)
+        else:
+            c['goal'] = (px, py)                      # the driver re-targets the slot behind `ahead`
+        cv['vehicles'].append(on)
+        if c['cargo']:
+            cv['cargo'][c['cargo'][0]] = cv['cargo'].get(c['cargo'][0], 0) + c['cargo'][1]
+        prev = on
+    if not cv['vehicles']:
+        return None
+    CONVOYS[cid] = cv
+    nl = sum(1 for on in cv['vehicles'] if CARS.get(on, {}).get('cargo'))
+    log('CONVOY', f'room {rid}: convoy {cid} camp {camp} ({len(cv["vehicles"])} vehicles, {nl} lorries, {cv["cargo"]}) '
+                  f'scene {src_sidx} "{s[2]}" -> {dst_sidx} "{d[2]}" {L / 1000:.0f} km {reason}')
+    _convoy_say(cv, f'{tc_camp_tag(camp)} supply convoy of {nl} lorries left {s[2]} {tc_grid(s[0], s[1])} '
+                    f'for {d[2]} {tc_grid(d[0], d[1])}')
+    return cid
+
+def _convoy_relink(cv, alive):
+    """Keep the follow chain intact when a vehicle dies: each survivor follows the previous survivor;
+    the first survivor leads with the convoy's current destination."""
+    goal_xy = cv['dst_xy'] if cv['phase'] == 'out' else cv['src_xy']
+    prev = None
+    for on in alive:
+        c = CARS[on]
+        if prev is None:
+            if c.get('ahead') is not None:
+                c['ahead'] = None; c['goal'] = goal_xy; c['_wps'] = None; c['arrived'] = False
+        elif c.get('ahead') != prev:
+            c['ahead'] = prev; c['arrived'] = False
+            if c.get('goal') is None:
+                c['goal'] = goal_xy
+        prev = on
+
+def _convoy_settled(alive):
+    """All vehicles stopped: the lead has arrived and every follower sits on its slot."""
+    for on in alive:
+        c = CARS[on]
+        if c.get('ahead') is None:
+            if not c.get('arrived'):
+                return False
+        elif c.get('_speed_mps', 0.0) > 0.3:
+            return False
+    return True
+
+def convoy_tick():
+    now = time.time()
+    for cid, cv in list(CONVOYS.items()):
+        order = cv['vehicles'] if cv['phase'] != 'back' else list(reversed(cv['vehicles']))
+        alive = [on for on in order if on in CARS and not CARS[on].get('dead')]
+        if not alive:
+            CONVOYS.pop(cid, None)
+            log('CONVOY', f'convoy {cid} camp {cv["camp"]}: wiped out ({cv["lost"]})')
+            _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} supply convoy wiped out on the road')
+            continue
+        _convoy_relink(cv, alive)
+        lead = CARS[alive[0]]
+        if lead.get('arrived') and 'lead_arrived_at' not in cv:
+            cv['lead_arrived_at'] = now
+        settled = lead.get('arrived') and (_convoy_settled(alive) or now - cv.get('lead_arrived_at', now) > 45.0)
+        if cv['phase'] == 'out' and settled:
+            cv['phase'] = 'unload'; cv['unload_until'] = now + CONVOY_UNLOAD_S
+            convoy_unload(cv, alive)
+        elif cv['phase'] == 'unload' and now >= cv.get('unload_until', 0):
+            cv['phase'] = 'back'
+            prev = None
+            for on in reversed(alive):                           # the tail car leads the way home
+                c = CARS[on]
+                c['ahead'] = prev; c['arrived'] = False; c['_wps'] = None; c['mps'] = CONVOY_MPS
+                c['goal'] = cv['src_xy'] if prev is None else tuple(c['pos'][:2])
+                prev = on
+            cv.pop('lead_arrived_at', None)
+            log('CONVOY', f'convoy {cid}: heading home ({len(alive)} vehicles)')
+        elif cv['phase'] == 'back' and settled:
+            for on in alive:
+                delete_car(on, reason=f'(convoy {cid} home)')
+            CONVOYS.pop(cid, None)
+            log('CONVOY', f'convoy {cid} camp {cv["camp"]}: back at the depot, {len(alive)} vehicle(s) - done')
+
+def convoy_unload(cv, alive):
+    rid, terrain, sidx = cv['room'], cv['terrain'], cv['dst']
+    got = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    for on in alive:
+        cg = CARS[on].get('cargo')
+        if not cg:
+            continue
+        kind, kg = cg
+        m, f, a = _scene_store_add(rid, terrain, sidx, kg if kind == 'metal' else 0, kg if kind == 'fuel' else 0, kg if kind == 'ammo' else 0)
+        got['metal'] += m; got['fuel'] += f; got['ammo'] += a
+        CARS[on]['cargo'] = None
+    if got['metal'] > 0:
+        try:
+            _rep, _sp = cargo_repair_scene(rid, sidx, got['metal'], reason=f'convoy {cv["id"]}')
+            if _rep:
+                log('CONVOY', f'convoy {cv["id"]}: {len(_rep)} object(s) at scene {sidx} repaired with {_sp} kg of delivered metal')
+        except Exception:
+            logx('CONVOY', 'convoy metal repair failed')
+    xy = _scene_xy(terrain, sidx) or (0, 0, 'scene')
+    parts = [f'{v}kg {k}' for k, v in got.items() if v]
+    log('CONVOY', f'convoy {cv["id"]} camp {cv["camp"]} at scene {sidx} "{xy[2]}": unloaded {got} (lost en route {cv["lost"]})')
+    _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} supply convoy at {xy[2]} {tc_grid(xy[0], xy[1])}: '
+                    + (f'unloaded {", ".join(parts)}' if parts else 'nothing left to unload'))
+
+def convoy_on_car_lost(c, killer_name):
+    cid = c.get('convoy')
+    cv = CONVOYS.get(cid) if cid else None
+    if cv is None:
+        return
+    cg = c.get('cargo')
+    if cg:
+        cv['lost'][cg[0]] = cv['lost'].get(cg[0], 0) + cg[1]
+        _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} {cg[0]} lorry destroyed by {killer_name or "enemy fire"} - {cg[1]} kg {cg[0]} lost')
+    else:
+        _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} convoy escort {c.get("name", "car")} destroyed by {killer_name or "enemy fire"}')
+
+def _station_fill(rid, terrain, sidx):
+    """(fraction of capacity stored, {kind: (have, cap, produces)})"""
+    st, p = supply_state(rid, terrain, sidx)
+    if not st or not p:
+        return None, {}
+    rates = p.get('rates') or {}
+    det = {}
+    tot_h = tot_c = 0
+    for k in ('fuel', 'ammo', 'metal'):
+        cap = int(p['caps'].get(k, 0) or 0)
+        if cap <= 0:
+            continue
+        have = int(st.get(k, 0)); det[k] = (have, cap, float(rates.get(k, 0)) > 0)
+        tot_h += have; tot_c += cap
+    return (tot_h / tot_c if tot_c else None), det
+
+def _convoy_cargo_for(need):
+    """need = {kind: kg} -> lorry names, CONVOY_LORRIES_MAX at most, biggest shortfall first."""
+    names = []
+    per = {'fuel': 'Car for Fuel', 'ammo': 'Car for Ammo', 'metal': 'Furgon'}
+    for kind, kg in sorted(need.items(), key=lambda kv: -kv[1]):
+        n = min(3, max(1, int(math.ceil(kg / float(CONVOY_CARGO_KG[per[kind]][1])))))
+        names += [per[kind]] * n
+    return names[:CONVOY_LORRIES_MAX]
+
+def _camp_scenes(terrain, camp):
+    return [s for s, c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).items() if c == camp and scene_has_supply(terrain, s)]
+
+def convoy_pick_source(rid, terrain, camp, dst_sidx, need):
+    """The camp's scene within CONVOY_MAX_KM holding the most of what is needed (producers x1.5),
+    nearer wins a tie."""
+    d = _scene_xy(terrain, dst_sidx)
+    if not d:
+        return None
+    best = None
+    for sidx in _camp_scenes(terrain, camp):
+        if sidx == dst_sidx:
+            continue
+        s = _scene_xy(terrain, sidx)
+        if not s:
+            continue
+        dist = math.hypot(s[0] - d[0], s[1] - d[1])
+        if dist > CONVOY_MAX_KM * 1000.0 or dist < 2 * CONVOY_ARRIVE_M + CONVOY_GAP_M * 8:
+            continue
+        _frac, det = _station_fill(rid, terrain, sidx)
+        score = 0.0
+        for k, kg in need.items():
+            have, cap, prod = det.get(k, (0, 0, False))
+            score += min(have, kg) * (1.5 if prod else 1.0)
+        if score <= 0:
+            continue
+        key = (score, -dist)
+        if best is None or key > best[0]:
+            best = (key, sidx)
+    return best[1] if best else None
+
+def scene_served_by_train(rid, terrain, sidx, camp):
+    """True when the scene is a rail station and its camp has a live supply train on that line."""
+    try:
+        for road_idx, stl in rail_stations(terrain).items():
+            if any(s_ == sidx for _n, s_ in stl):
+                if any(tr['room'] == rid and tr['camp'] == camp and tr.get('supply') and not tr.get('dead') and tr['road'] == road_idx
+                       for tr in TRAINS.values()):
+                    return True
+    except Exception:
+        pass
+    return False
+
+def convoy_request(rid, sidx, reason='', force=False):
+    """On-demand supply (v966f5b: INDEPENDENT of the supply_mode switch - the safety net under the
+    trains): a scene whose stores fell below CONVOY_LOW_FRAC calls a convoy from the best friendly
+    depot in reach, unless a supply train already serves it (trains-only arenas). One per scene per
+    CONVOY_REQUEST_COOLDOWN_S. User 10-23: 'the team only has the BBB and 2 factories near it, no
+    trains spawn, the BBB has been bombed out of supplies -> the convoy spawns and resupplies it'."""
+    if not room_has_economy(rid):
+        return None
+    if not force and not convoy_on_demand_for_room(rid):
+        return None
+    now = time.time()
+    if not force and now - _CONVOY_REQ_AT.get((rid, sidx), 0) < CONVOY_REQUEST_COOLDOWN_S:
+        return None
+    terrain = _probe_terrain_for_room(rid)
+    camp = scene_camp(terrain, sidx)
+    if camp is None or camp > 6:
+        return None
+    if not force and supply_mode_for_room(rid) == 'train' and scene_served_by_train(rid, terrain, sidx, camp):
+        return None                                   # the train on its line will bring it
+    frac, det = _station_fill(rid, terrain, sidx)
+    need = {k: int(cap * TRAIN_DROP_FILL) - have for k, (have, cap, prod) in det.items() if not prod and cap > 0 and have < cap * CONVOY_LOW_FRAC}
+    if not force and not need:
+        return None
+    if force and not need:
+        need = {k: max(1, int(cap * TRAIN_DROP_FILL) - have) for k, (have, cap, prod) in det.items() if cap > 0} or {'fuel': 3000}
+    if not force and sum(1 for cv in CONVOYS.values() if cv['room'] == rid and cv['camp'] == camp) >= CONVOY_PER_CAMP_MAX:
+        return None
+    src = convoy_pick_source(rid, terrain, camp, sidx, need)
+    if src is None:
+        log('CONVOY', f'room {rid}: scene {sidx} needs {need} but no friendly depot within {CONVOY_MAX_KM:.0f} km has it')
+        return None
+    _CONVOY_REQ_AT[(rid, sidx)] = now
+    cid = convoy_spawn(rid, camp, src, sidx, _convoy_cargo_for(need), reason=f'(requested: {reason})')
+    if cid is not None:
+        log('CONVOY', f'room {rid}: scene {sidx} (camp {camp}) requested supplies {need} -> convoy {cid} from scene {src}')
+    return cid
+
+def convoy_low_stock_scan(rid):
+    """v966f5b: once a minute, every non-producer supply scene below CONVOY_LOW_FRAC asks for a convoy
+    (convoy_request applies the cooldown, the train rule and the per-camp cap). Catches scenes
+    drained by refuelling / rearming, not only ones whose storage was bombed."""
+    if not CAR_CLASSES or not tank_consts_ok() or not convoy_on_demand_for_room(rid) or not room_has_economy(rid):
+        return
+    terrain = _probe_terrain_for_room(rid)
+    for sidx, camp in list((SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).items()):
+        if camp is None or camp > 6 or not scene_has_supply(terrain, sidx):
+            continue
+        frac, det = _station_fill(rid, terrain, sidx)
+        if frac is None or any(prod for _h, _c, prod in det.values()):
+            continue
+        if any(have < cap * CONVOY_LOW_FRAC for have, cap, prod in det.values() if cap > 0):
+            convoy_request(rid, sidx, reason=f'stock {frac:.0%}')
+
+def ensure_camp_convoys(rid):
+    """Scheduled convoys (every convoy_minutes per camp): to the camp's emptiest consumer scene
+    from its best-stocked depot in reach. Only in supply_mode car/both; the on-demand scan runs
+    in every mode."""
+    try:
+        convoy_low_stock_scan(rid)
+    except Exception:
+        logx('CONVOY', 'low-stock scan failed')
+    if supply_mode_for_room(rid) not in ('car', 'both') or not CAR_CLASSES or not tank_consts_ok():
+        return
+    terrain = _probe_terrain_for_room(rid)
+    now = time.monotonic()
+    camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(terrain) or {}).values() if c is not None and c <= 6})
+    for camp in camps:
+        if now < _CONVOY_NEXT_AT.get((rid, camp), 0):
+            continue
+        if sum(1 for cv in CONVOYS.values() if cv['room'] == rid and cv['camp'] == camp) >= CONVOY_PER_CAMP_MAX:
+            continue
+        _CONVOY_NEXT_AT[(rid, camp)] = now + 60.0 * convoy_minutes_for_room(rid)
+        cons = []
+        for sidx in _camp_scenes(terrain, camp):
+            frac, det = _station_fill(rid, terrain, sidx)
+            if frac is None or any(prod for _h, _c, prod in det.values()):
+                continue
+            cons.append((frac, sidx, det))
+        if not cons:
+            continue
+        cons.sort()
+        for frac, sidx, det in cons[:5]:
+            need = {k: max(0, int(cap * TRAIN_DROP_FILL) - have) for k, (have, cap, prod) in det.items() if cap > 0}
+            need = {k: v for k, v in need.items() if v > 0} or {'fuel': 3000, 'ammo': 3000}
+            src = convoy_pick_source(rid, terrain, camp, sidx, need)
+            if src is None:
+                continue
+            convoy_spawn(rid, camp, src, sidx, _convoy_cargo_for(need), reason=f'(scheduled: scene {sidx} at {frac:.0%})')
+            break
+
+def convoy_console(args, by='console'):
+    """convoy list | convoy run <room> <camp> [src_sidx dst_sidx] | convoy request <room> <sidx> | convoy stop <id|all>"""
+    if not args:
+        return ['usage: convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all>']
+    v = args[0].lower()
+    try:
+        if v == 'list':
+            return [f'convoy {cid}: room {cv["room"]} camp {cv["camp"]} {cv["phase"]} {cv["src"]}->{cv["dst"]} vehicles '
+                    + ' '.join(f'0x{on:04x}' + ('' if on in CARS else '(gone)') for on in cv['vehicles'])
+                    + f' cargo {cv["cargo"]} lost {cv["lost"]}' for cid, cv in CONVOYS.items()] or ['no convoys']
+        if v == 'run' and len(args) >= 3:
+            rid = int(args[1]); camp = int(args[2]); terrain = _probe_terrain_for_room(rid)
+            if len(args) >= 5:
+                src, dst = int(args[3]), int(args[4])
+            else:
+                scenes = _camp_scenes(terrain, camp)
+                if len(scenes) < 2:
+                    return [f'camp {camp} has fewer than 2 supply scenes']
+                prods = [s for s in scenes if any(p for _h, _c, p in _station_fill(rid, terrain, s)[1].values())]
+                src = prods[0] if prods else scenes[0]
+                dst = convoy_pick_source(rid, terrain, camp, src, {'fuel': 3000}) or next(s for s in scenes if s != src)
+            cid = convoy_spawn(rid, camp, src, dst, ['Car for Fuel', 'Car for Ammo', 'Furgon'], reason=f'({by})')
+            return [f'convoy {cid} launched: scene {src} -> {dst}' if cid else 'spawn failed (see CONVOY/CAR log)']
+        if v == 'request' and len(args) >= 3:
+            cid = convoy_request(int(args[1]), int(args[2]), reason=by, force=True)
+            return [f'convoy {cid} dispatched' if cid else 'no convoy (see CONVOY log)']
+        if v == 'stop' and len(args) >= 2:
+            ids = list(CONVOYS) if args[1].lower() == 'all' else [int(args[1])]
+            n = 0
+            for cid in ids:
+                cv = CONVOYS.pop(cid, None)
+                if cv:
+                    for on in cv['vehicles']:
+                        n += delete_car(on, reason=f'(convoy {cid} stopped by {by})')
+            return [f'stopped {len(ids)} convoy(s), {n} delete(s)']
+    except Exception as e:
+        return [f'convoy: {e}']
+    return ['convoy: unknown verb']
+
+def car_console(args, by='console'):
+    """car classes | car spawn <room> <class> <x> <y> [camp] [heading] | car list | car del <onum|all>
+       | car move <onum> <x> <y> | car aux <onum> a0 a1 a2 a3 a4 | car flags <onum> <n>"""
+    if not args:
+        return ['usage: car classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y> | aux <onum> a0..a4 | flags <onum> <n>',
+                '       car drive <onum> <mps> (calibration, no streaming) | integrate on|off | goto <onum> <x> <y> [mps]']
+    v = args[0].lower()
+    try:
+        if v == 'classes':
+            if not CAR_CLASSES:
+                return ['car classes: (none - run fa_dump_tank_tables.py v10 in a TC arena, then copy tank_tables.json to mapdata)']
+            return [f'car classes: ' + ', '.join(f'{k}={v}' for k, v in sorted(CAR_CLASSES.items())),
+                    'aliases: ' + ' '.join(sorted(CAR_ALIASES))]
+        if v == 'spawn' and len(args) >= 5:
+            rid = int(args[1], 0); x = float(args[3]); y = float(args[4])
+            cls = car_class_lookup(args[2])
+            if cls is None:
+                return [f'unknown car class {args[2]!r} - try `car classes`']
+            camp = int(args[5]) if len(args) > 5 else 0; hdg = float(args[6]) if len(args) > 6 else 0.0
+            on = spawn_car(rid, camp, cls, (x, y, 0.0), hdg, reason=f'({by})')
+            if on is None:
+                _nm = room_active_camp_names(rid)
+                return ['spawn refused (see CAR log)' + (' - active camps: ' + ', '.join(f'{c}={n[0]}' for c, n in sorted(_nm.items()) if c != 7) if _nm else '')]
+            return [f'car 0x{on:04x} spawned']
+        if v == 'gain' and len(args) >= 2:
+            global CAR_MAX_MPS
+            CAR_MAX_MPS = float(args[1])
+            return [f'car gain (throttle 1.0 speed) = {CAR_MAX_MPS:.2f} m/s']
+        if v == 'ahead' and len(args) >= 2:
+            global CAR_LOOKAHEAD_S
+            CAR_LOOKAHEAD_S = max(0.0, min(1.0, float(args[1])))
+            return [f'car position look-ahead = {CAR_LOOKAHEAD_S:.2f} s']
+        if v == 'ruler' and len(args) >= 4:
+            # v965f5e CALIBRATION RULER: 7 parked marker lorries of DIFFERENT classes every 55 m east of
+            # the start (110..440 m = 5.5..22 m/s over 20 s) in the north lane; B (fuel lorry) drives the
+            # south lane from one packet; at exactly 20 s the chat says NOW and B is deleted - the pilot
+            # reads which marker B vanished beside. speed = marker distance / 20 s.
+            rid = int(args[1], 0); x = float(args[2]); y = float(args[3])
+            camp = int(args[4]) if len(args) > 4 else 3; mps = float(args[5]) if len(args) > 5 else CONVOY_MPS
+            order = ['Ambulance', 'Car for Ammo', 'Car for Fuel', 'AA Car', 'Flak Car', 'Radar Car', 'Furgon']
+            marks = []
+            for k, name in enumerate(order):
+                cls = car_class_lookup(name)
+                on = spawn_car(rid, camp, cls, (x + 55.0 * (k + 2), y + 25.0, 0.0), 0.0, reason=f'(ruler #{k + 1} {name} {55 * (k + 2)} m)')
+                if on is not None:
+                    CARS[on]['position_only'] = True; marks.append(on)
+            b = spawn_car(rid, camp, car_class_lookup('fuel'), (x, y - 25.0, 0.0), 0.0, reason='(ruler B client-driven)')
+            if b is None:
+                return ['ruler spawn failed (see CAR log)']
+            def _go(_b=b, _mps=mps):
+                CARS[_b]['drive_test'] = _mps; car_broadcast_state(_b)
+            def _now(_rid=rid, _b=b):
+                try:
+                    tc_say(_rid, 'AI: RULER: NOW - B vanishes. Which marker was it beside? 1 Ambulance 110m, 2 Ammo 165m, 3 Fuel 220m, '
+                                 '4 AA 275m, 5 Flak 330m, 6 Radar 385m, 7 Furgon 440m')
+                except Exception:
+                    pass
+                delete_car(_b, reason='(ruler: 20 s up)')
+            def _clear(_m=marks):
+                for on in _m:
+                    delete_car(on, reason='(ruler cleared)')
+            threading.Timer(2.0, _go).start()
+            threading.Timer(22.0, _now).start()
+            threading.Timer(90.0, _clear).start()
+            log('CAR', f'RULER: B 0x{b:04x} throttle {mps / CAR_MAX_MPS:.3f} seed {mps * CAR_TICK_MPS_UNIT:.4f}; markers {[hex(m) for m in marks]}; '
+                       f'marker k at 55*(k+1) m -> speed = d/20; true gain = {CAR_MAX_MPS:.2f} x (d/20) / {mps:.0f}')
+            return [f'ruler: 7 markers north lane at 110..440 m east, B 0x{b:04x} south lane starts in 2 s, vanishes at 20 s - '
+                    f'read the marker it was beside (gain now {CAR_MAX_MPS:.2f}, throttle {mps / CAR_MAX_MPS:.2f})']
+        if v == 'race' and len(args) >= 4:
+            # v965f5b CALIBRATION RACE: two fuel lorries side by side heading east. A (left, server-driven
+            # with integration OFF for this car: position-only) and B (right, ONE packet of throttle/seed for
+            # <mps>, then nothing). After 60 s the log prints how far A went; the pilot reports where B is
+            # relative to A: gain = CAR_MAX_MPS x (B distance / A distance).
+            rid = int(args[1], 0); x = float(args[2]); y = float(args[3])
+            camp = int(args[4]) if len(args) > 4 else 3; mps = float(args[5]) if len(args) > 5 else CONVOY_MPS
+            cls = car_class_lookup('fuel')
+            a = spawn_car(rid, camp, cls, (x, y + 15.0, 0.0), 0.0, reason='(race A server-driven)')
+            b = spawn_car(rid, camp, cls, (x, y - 15.0, 0.0), 0.0, reason='(race B client-driven)')
+            if a is None or b is None:
+                return ['race spawn failed (see CAR log)']
+            CARS[a].update({'goal': (x + 5000.0, y + 15.0), 'mps': mps, 'ahead': None, 'position_only': True})
+            def _go_b(_b=b, _mps=mps):
+                CARS[_b]['drive_test'] = _mps; car_broadcast_state(_b)
+            def _report(_a=a, _b=b, _x=x, _mps=mps):
+                ca = CARS.get(_a)
+                if ca:
+                    log('CAR', f'RACE 20 s: A (server, 0x{_a:04x}) travelled {ca["pos"][0] - _x:.0f} m east at {_mps:.0f} m/s; '
+                               f'B (client, 0x{_b:04x}) got one packet: throttle {_mps / CAR_MAX_MPS:.3f}, seed {_mps * CAR_TICK_MPS_UNIT:.4f} m/tick. '
+                               f'Report where B is vs A: level = gain right; B ahead by d -> `car gain {CAR_MAX_MPS:.2f} x (1 + d/{ca["pos"][0] - _x:.0f})`')
+            def _stop_a(_a=a, _rid=rid, _x=x):
+                ca = CARS.get(_a)
+                if ca:
+                    ca['goal'] = None; ca['_speed_mps'] = 0.0; ca['_throttle'] = 0.0; ca['arrived'] = True
+                    car_broadcast_state(_a)
+                    try:    # v965f5d: prompt the pilot in-game at the moment that matters
+                        tc_say(_rid, f'AI: RACE: left lorry A stopped after {ca["pos"][0] - _x:.0f} m. Where is the right lorry B? '
+                                     f'level / ahead / behind - by how many lorry lengths (6 m)? It vanishes in 3 s, A stays 60 s')
+                    except Exception:
+                        pass
+            def _end_b(_b=b):
+                delete_car(_b, reason='(race over - before the 28 s cull)')
+            def _end_a(_a=a):
+                delete_car(_a, reason='(race over)')
+            threading.Timer(1.5, _go_b).start()
+            threading.Timer(21.5, _stop_a).start()
+            threading.Timer(21.5, _report).start()
+            threading.Timer(24.5, _end_b).start()     # v965f5c: the client culls a silent object at ~28 s
+            threading.Timer(84.0, _end_a).start()
+            return [f'race: A=0x{a:04x} (LEFT/north, server-driven, jumpy) B=0x{b:04x} (RIGHT/south, client-driven, smooth) at {mps:.0f} m/s heading east for 20 s; '
+                    f'A then stops and stays; B vanishes 3 s later - note B vs A (gain {CAR_MAX_MPS:.2f})']
+        if v == 'goto' and len(args) >= 4:
+            c = CARS[int(args[1], 0)]; c['goal'] = (float(args[2]), float(args[3])); c['_wps'] = None; c['arrived'] = False
+            c['mps'] = float(args[4]) if len(args) > 4 else CONVOY_MPS; c['ahead'] = None; c['drive_test'] = None
+            return [f'0x{int(args[1], 0):04x} driving to ({float(args[2]):.0f},{float(args[3]):.0f}) at {c["mps"]:.0f} m/s']
+        if v == 'drive' and len(args) >= 3:
+            # v964f5b calibration: ONE packet with throttle + speed words for <mps>, then no position
+            # updates at all (keep-alive muted) - the client drives the lorry alone. Watch it: still =
+            # the unit is far too small; walking pace / driving pace tells the scale.
+            c = CARS[int(args[1], 0)]; c['drive_test'] = float(args[2]) if float(args[2]) != 0 else None; c['goal'] = None; c['_speed_mps'] = 0.0
+            n = car_broadcast_state(int(args[1], 0))
+            if c['drive_test'] is not None:
+                threading.Timer(25.0, delete_car, args=(int(args[1], 0), '(drive test over - before the 28 s cull)')).start()
+            return [f'drive test: 0x{int(args[1], 0):04x} throttle {float(args[2]) / CAR_MAX_MPS:.2f} speed word {int(float(args[2]) * CAR_TICK_MPS_UNIT * 16384)} -> {n} session(s); car park = `car drive <onum> 0`']
+        if v == 'integrate' and len(args) >= 2:
+            global CAR_CLIENT_INTEGRATE
+            CAR_CLIENT_INTEGRATE = args[1].lower() in ('on', '1', 'true', 'yes')
+            return [f'car client integration {"ON" if CAR_CLIENT_INTEGRATE else "OFF (server-positioned)"}']
+        if v == 'list':
+            return [f'0x{o:04x} room {c["room"]} class {c["class"]} ({c["name"]}) camp {c["camp"]} at ({c["pos"][0]:.0f},{c["pos"][1]:.0f}) hp {c.get("hp", car_hp_max(c)):.0f}/{car_hp_max(c):.0f} peers {len(c["peers"])}' for o, c in CARS.items()] or ['no cars']
+        if v == 'del' and len(args) >= 2:
+            if args[1].lower() == 'all':
+                return [f'deleted {sum(1 for o in list(CARS) if delete_car(o, by))} car(s)']
+            return [f'deleted -> {delete_car(int(args[1], 0), by)} session(s)']
+        if v == 'move' and len(args) >= 4:
+            c = CARS[int(args[1], 0)]; c['pos'] = (float(args[2]), float(args[3]), c['pos'][2])
+            return [f'moved -> {car_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'aux' and len(args) >= 7:
+            c = CARS[int(args[1], 0)]; c['aux_override'] = tuple(int(a) for a in args[2:7])
+            return [f'aux set -> {car_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'flags' and len(args) >= 3:
+            c = CARS[int(args[1], 0)]; c['flags'] = int(args[2], 0)
+            return [f'flags set -> {car_broadcast_state(int(args[1], 0))} session(s)']
+    except (KeyError, ValueError, TypeError) as e:
+        return [f'car: bad arguments ({e})']
+    return ['car: unknown verb']
+
 def delete_tank(onum, reason='', entry=None):
     """Server-require-delete (msg-3 record) the tank on every client that has it. `entry` =
     a full 12-byte kill entry ([id][0x53][hunter tail]) makes every client run ExitDataArrive:
@@ -14675,7 +15931,7 @@ def _ai_cull_list(s, ids):
     addr = getattr(s, 'addr', None)
     n = 0
     for onum in ids:
-        coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else None))
+        coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else (CARS if onum in CARS else None)))   # v965f5g cars
         if coll is None:
             # a PEER plane in the same list (mixed cull) -> re-arm the relay create, like PEERDEL
             try:
@@ -14691,7 +15947,7 @@ def _ai_cull_list(s, ids):
         if addr not in coll[onum]['peers']:
             continue
         coll[onum]['peers'].discard(addr); n += 1
-        _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else 'train')
+        _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else ('train' if coll is TRAINS else 'car'))
         try:                                                     # v785f5: start the re-create cooldown
             if coll is TRAINS:
                 _rl = rails_for(coll[onum].get('terrain') or _probe_terrain_for_room(coll[onum]['room']))
@@ -14706,7 +15962,8 @@ def _ai_cull_list(s, ids):
         _rid = getattr(s, 'current_room', None)
         _still = (any(t['room'] == _rid and addr in t['peers'] for t in TANKS.values())
                   or any(sd['room'] == _rid and addr in sd['peers'] for sd in SOLDIERS.values())
-                  or any(tr['room'] == _rid and addr in tr['peers'] for tr in TRAINS.values()))
+                  or any(tr['room'] == _rid and addr in tr['peers'] for tr in TRAINS.values())
+                  or any(c['room'] == _rid and addr in c['peers'] for c in CARS.values()))         # v965f5g
         if not _still and s.__dict__.get('_ai_client_room') is not None:
             s.__dict__.pop('_ai_client_room', None)
             log('TANK', f'{s.current_pilot}: no AI object left on his client -> AI station will be re-registered with the next create')
@@ -14743,6 +16000,13 @@ def _tank_note_client_delete(s, pl):
             elif sd is not None:
                 sd['peers'].discard(getattr(s, 'addr', None))       # v590f5: soldiers are bare entries too
                 _note_client_cull(s, onum, sd['pos'][0], sd['pos'][1])              # v785f5
+                i += 2
+            elif onum in CARS:                                           # v965f5g: cars are bare entries too
+                _c = CARS[onum]
+                if getattr(s, 'addr', None) in _c['peers']:
+                    _c['peers'].discard(s.addr)
+                    _note_client_cull(s, onum, _c['pos'][0], _c['pos'][1])
+                    log('CAR', f'{s.current_pilot} dropped car 0x{onum:04x} (client delete notify) - re-created when back within range')
                 i += 2
             elif onum in TRAINS:
                 if getattr(s, 'addr', None) in TRAINS[onum]['peers']:
@@ -14849,6 +16113,9 @@ def _handle_tank_hit_51(s, pl):
                 continue
             if t is None and victim in TRAINS:
                 _handle_train_hit(s, victim, attacker, dmg, car=0)      # v617f5/v626f5: the loco
+                continue
+            if t is None and victim in CARS:
+                _handle_car_hit(s, victim, attacker, dmg)              # v963f5c
                 continue
             if t is None:
                 # v799f5 [HITS ON PLANES ARE EVIDENCE]: the shooter's client reports every hit here
@@ -16032,7 +17299,8 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
             train_check_territory(_on)
         # v834f5: and the new owner's train for the captured line comes now, not at the next
         # once-a-minute spawner tick
-        ensure_camp_trains(room_id)
+        if supply_mode_for_room(room_id) in ('train', 'both'):            # v964f5
+            ensure_camp_trains(room_id)
     except Exception:
         logx('TRAIN', 'territory check after capture failed')
     # v770f5: the scene's missions (attack / cover / destroy) are done - clear them on both sides
@@ -17723,7 +18991,7 @@ REJOIN_RADIUS_M = 30000.0   # v688f5: back to 30 km (see AI_TELEMETRY_FAR_M)
 # (online run 09-20: 9,645 culls / 15,660 re-creates; 66,018 'Get coord for missing object' on
 # one client). Per-kind re-create radii inside the client's own cull, and a per-(client, object)
 # COOLDOWN after a cull that is lifted only once the pilot has closed RECREATE_APPROACH_M.
-REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0}
+REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0, 'car': 18000.0}   # v965f5g
 
 def _spawn_in_range(p, kind, x, y):
     """v811f5: create a NEW AI object on this peer only if it is within the kind's re-create range of
@@ -17870,6 +19138,7 @@ def arena_reset_state(room_id):
         logx('CLOCK', 'clock re-base on reset failed')
     TOURNAMENTS.pop(room_id, None); _TN_CFG.pop(room_id, None)   # v952f5: the next spawn restarts the tournament clock
     GUNS_COLD.pop(room_id, None)                                 # v960f5: a rebuilt arena is guns hot
+    WEATHER.pop(room_id, None)                                   # v962f5: back to the arena's weather
     event_end_cancel(room_id)                                    # v956f5
     evs_stop(room_id)                                            # v958f5
     EVENTS.pop(room_id, None)                                    # v953f5: event back to 'not started'
@@ -17882,6 +19151,10 @@ def arena_reset_state(room_id):
         STICKS.pop(sid, None)
     for onum in [o for o, tr in list(TRAINS.items()) if tr['room'] == room_id]:
         delete_train(onum, reason='(arena reset)')
+    for cid in [k for k, cv in list(CONVOYS.items()) if cv['room'] == room_id]:
+        CONVOYS.pop(cid, None)
+    for onum in [o for o, c in list(CARS.items()) if c['room'] == room_id]:
+        delete_car(onum, reason='(arena reset)')
     for key in [k for k in list(TRIGGERS) if k[0] == room_id]:
         TRIGGERS.pop(key, None)
     for key in [k for k in list(_TRAIN_LOST_AT) if k[0] == room_id]:
@@ -18300,7 +19573,10 @@ GROUP_STRATEGY    = {'none': 0, 'goto': 1, 'attack': 2, 'defend': 3, 'defence': 
 # 6 submarine/carrier, 7 lorry. No train glyph exists - trains use the lorry (supply convoy).
 GROUP_KIND        = {'ship': 0, 'tank': 1, 'fighter': 2, 'bomber': 3, 'soldier': 5, 'sub': 6, 'lorry': 7, 'train': 7}
 GROUP_MISSION_NONE = 0xf
-TRAIN_GROUP_RECORDS = True     # v722f5: ON - the lorry box is the train's marker on both map scales (user)
+TRAIN_GROUP_RECORDS = False    # v966f5: OFF (user 10-23: 'lose the train lorry icon and box') - the lorry glyph
+                               # (kind 7) now marks the road convoys / cars; trains stay on the big map (msg 70)
+CAR_GROUP_RECORDS   = True     # v966f5: one lorry box per convoy (lead position, destination scene as objective,
+                               # vehicle count, Go to / Return) and one per loose car (a parked Flak car = Defend)
 BIGMAP_TRAINS       = True     # v946f5: live trains on the big map (msg 70) under their locomotive class - see the
                                #   msg-70 reply; set False if the client draws them wrong
 GROUP_STICK_MERGE_M = 1500.0   # v817f5: sticks with the same camp/purpose/objective closer than this share one map box
@@ -18418,6 +19694,38 @@ def room_group_records(room_id, viewer_camp=None):
                     'count': 1 + sum(int(c) for _cls, c in (tr.get('wagons') or [])),    # loco + every wagon
                     'x': txy[0] if txy else x, 'y': txy[1] if txy else y, 'tx': x, 'ty': y,
                     'w6': 1 if tr.get('mps', 0) > 0 else 0})
+    # v966f5: road convoys and loose cars under the lorry glyph (kind 7). A convoy is one record at
+    # its lead vehicle with the destination (out) / depot (back) as the objective the box names,
+    # count = vehicles alive, class = the lead's. A car outside a convoy (a parked Flak/AA car, a
+    # console lorry) is its own record: AA/Flak = 'Defend', anything else moving = 'Go to'.
+    if CAR_GROUP_RECORDS:
+        _in_convoy = set()
+        for cid, cv in list(CONVOYS.items()):
+            if cv.get('room') != room_id:
+                continue
+            alive = [o for o in (cv['vehicles'] if cv['phase'] != 'back' else reversed(cv['vehicles']))
+                     if o in CARS and not CARS[o].get('dead')]
+            _in_convoy.update(cv['vehicles'])
+            if not alive:
+                continue
+            lead = CARS[alive[0]]
+            dest = cv['dst'] if cv['phase'] == 'out' else cv['src']
+            txy = tc_scene_xy(terrain, dest) if isinstance(dest, int) and dest >= 0 else None
+            lx, ly = lead['pos'][0], lead['pos'][1]
+            out.append({'camp': cv.get('camp', 0), 'kind': GROUP_KIND['lorry'],
+                        'strategy': GROUP_STRATEGY['return'] if cv['phase'] == 'back' else (GROUP_STRATEGY['hold'] if cv['phase'] == 'unload' else GROUP_STRATEGY['goto']),
+                        'f3': 1, 'uc': int(lead.get('class', 181)), 'count': min(255, len(alive)),
+                        'x': txy[0] if txy else lx, 'y': txy[1] if txy else ly, 'tx': lx, 'ty': ly,
+                        'w6': int(cid) & 0x7fff})
+        for onum, c in list(CARS.items()):
+            if c.get('room') != room_id or c.get('dead') or onum in _in_convoy:
+                continue
+            _aa = c.get('name') in ('AA Car', 'Flak Car')
+            out.append({'camp': c.get('camp', 0), 'kind': GROUP_KIND['lorry'],
+                        'strategy': GROUP_STRATEGY['defend'] if _aa else (GROUP_STRATEGY['goto'] if c.get('goal') is not None else 0),
+                        'f3': 1, 'uc': int(c.get('class', 181)), 'count': 1,
+                        'x': c['pos'][0], 'y': c['pos'][1], 'tx': c['pos'][0], 'ty': c['pos'][1],
+                        'w6': 0})
     return out
 
 def send_group_info_26(s, reason=''):
@@ -19121,7 +20429,8 @@ def ai_objects_reset_for(s, reason=''):
     addr = getattr(s, 'addr', None)
     if addr is None:
         return 0
-    ids = [on for on, t in TANKS.items() if addr in t['peers']] + [on for on, sd in SOLDIERS.items() if addr in sd['peers']]
+    ids = [on for on, t in TANKS.items() if addr in t['peers']] + [on for on, sd in SOLDIERS.items() if addr in sd['peers']] \
+        + [on for on, c in CARS.items() if addr in c['peers']]                                  # v963f5c
     if not ids:
         return 0
     for on in ids:
@@ -19131,6 +20440,8 @@ def ai_objects_reset_for(s, reason=''):
             TANKS[on]['peers'].discard(addr)
         if on in SOLDIERS:
             SOLDIERS[on]['peers'].discard(addr)
+        if on in CARS:
+            CARS[on]['peers'].discard(addr)
     log('TC', f'{s.current_pilot}: {len(ids)} AI object(s) deleted on his client {reason} - re-created at his next ServerConfirm')
     return len(ids)
 
@@ -19708,7 +21019,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, a
     client record = 385 B is field-proven), leaving invisible tanks that went on capturing.
     v627f5: near_xy/radius restrict it to objects within reach of the pilot (the client culls
     beyond ~38 km, so creating far objects only feeds a create/cull loop)."""
-    if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS):
+    if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS or CARS):
         return 0
     rid = getattr(s, 'current_room', None)
     def _near(x, y, kind='tank', onum=None):
@@ -19785,7 +21096,8 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, a
         tn += 1
     if tn:
         log('TRAIN', f'{s.current_pilot}: re-created {tn} train(s) {reason}')
-    return n + sn + tn
+    cn = car_recreate_for(s, reason, near_xy=near_xy, at_confirm=at_confirm) if CARS else 0   # v963f5c/v965f5g
+    return n + sn + tn + cn
 
 def preload_squadron_list(s, reason=''):
     """Push the 0xce squadron list to a client so it has the list loaded in-session. Once per
@@ -22187,11 +23499,11 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     # 'shot down' (MEC 5) with the AI object as hunter - no player owns it, so it landed in
     # 'Planes Lost' instead of 'Planes Lost to AI' (user 09-13: GB tank kill not tallied).
     _ai_hunter = (hunter_obj is not None and hunter_obj not in (0, 0xffff)
-                  and (hunter_obj in TANKS or hunter_obj in SOLDIERS or hunter_obj in TRAINS))
+                  and (hunter_obj in TANKS or hunter_obj in SOLDIERS or hunter_obj in TRAINS or hunter_obj in CARS))   # v965f5g
     _lost_to_ai = (killer is None) and ((_mec in AI_KILL_MEC_NIBBLES) or _ai_hunter)
     if _ai_hunter and killer is None:
         try:
-            _ai_kind = 'tank' if hunter_obj in TANKS else ('soldier' if hunter_obj in SOLDIERS else 'train')
+            _ai_kind = 'tank' if hunter_obj in TANKS else ('soldier' if hunter_obj in SOLDIERS else ('train' if hunter_obj in TRAINS else f'car ({CARS[hunter_obj].get("name")})'))
             log('DEATH', f'{victim.current_pilot} shot down by AI {_ai_kind} 0x{hunter_obj:04x} -> Planes Lost to AI')
         except Exception:
             pass
@@ -24205,6 +25517,8 @@ def handle_leave_arena(s):
         _sd['peers'].discard(getattr(s, 'addr', None))
     for _tr in TRAINS.values():                    # v613f5
         _tr['peers'].discard(getattr(s, 'addr', None))
+    for _c in CARS.values():                       # v963f5c
+        _c['peers'].discard(getattr(s, 'addr', None))
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -26806,6 +28120,12 @@ def _fire_server_confirm(s, via='', ident=None):
         guns_on_spawn(s)           # v960f5: guns-cold notice to a joiner
     except Exception:
         logx('GUNS', 'spawn hook failed')
+    try:
+        weather_on_spawn(s)        # v962f5: the room's live weather (msg 137) to a joiner
+        if s.current_room not in _WEATHER_TIMERS:
+            weather_cycle_arm(s.current_room)
+    except Exception:
+        logx('WEATHER', 'spawn hook failed')
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -27198,14 +28518,14 @@ def _ingame_own_object_removed(s, tb, stored):
     try:
         _ids_pre = ([struct.unpack_from('<H', stored, i)[0] for i in range(5, len(stored) - 1, 2)]
                     if len(stored) >= 7 and (len(stored) - 5) % 2 == 0 else [])
-        if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS for i in _ids_pre):
+        if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS for i in _ids_pre):
             _ai_cull_list(s, _ids_pre)
             return
     except Exception:
         logx('TANK', 'AI cull-list parse (pre-gate) failed')
     try:
         _onum_pre = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
-        if _onum_pre is not None and (_onum_pre in TANKS or _onum_pre in SOLDIERS or _onum_pre in TRAINS):
+        if _onum_pre is not None and (_onum_pre in TANKS or _onum_pre in SOLDIERS or _onum_pre in TRAINS or _onum_pre in CARS):
             _tank_note_client_delete(s, stored)
             return
     except Exception:
@@ -27229,7 +28549,7 @@ def _ingame_own_object_removed(s, tb, stored):
         # the 'neither its own nor any peer's -> swallow' branch below and return, so the train's
         # peer entry was never cleared and the train was never re-created after a TAB
         # (server.log 10:08:35 PEERDEL 0x0107..0x0110 = trains 263-272).
-        if _onum is not None and (_onum in TANKS or _onum in SOLDIERS or _onum in TRAINS):
+        if _onum is not None and (_onum in TANKS or _onum in SOLDIERS or _onum in TRAINS or _onum in CARS):
             try:
                 _tank_note_client_delete(s, stored)
             except Exception:
@@ -27371,10 +28691,10 @@ def _ingame_own_object_removed(s, tb, stored):
             _tail0 = 5 + _esz0
             if len(stored) >= _tail0 + 2:
                 _tail_ids = [struct.unpack_from('<H', stored, i)[0] for i in range(_tail0, len(stored) - 1, 2)]
-                if any(i in TANKS or i in SOLDIERS or i in TRAINS for i in _tail_ids):
+                if any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS for i in _tail_ids):
                     _tank_note_client_delete(s, bytes(stored[:5]) + bytes(stored[_tail0:]))
                 for _tid in _tail_ids:
-                    if _tid in TANKS or _tid in SOLDIERS or _tid in TRAINS or _tid in (0, 0xffff):
+                    if _tid in TANKS or _tid in SOLDIERS or _tid in TRAINS or _tid in CARS or _tid in (0, 0xffff):
                         continue
                     _peer_t, _byc = _peer_owning_object(s, _tid)
                     if _peer_t is not None and _peer_t is not s:
@@ -28765,6 +30085,10 @@ def supply_on_building_destroyed(room_id, scene_id, obj_idx):
                     lost[ukind] = share
     if lost:
         log('SUPPLY', f'scene {scene_id}: {b.get("name")} (obj {obj_idx}) destroyed - lost {lost}')
+        try:
+            convoy_request(room_id, int(scene_id), reason=f'{b.get("name")} destroyed')   # v964f5 on-demand supply
+        except Exception:
+            logx('CONVOY', 'convoy request failed')
     return lost
 
 def seed_room_economy(room_id):
@@ -28850,10 +30174,16 @@ def _supply_chain_step(rid):
     delivered_total = 0
     # v617f5: visible supply trains replace the abstract deliveries for the camps that have them
     if room_has_economy(rid):                                           # v706f5
+        _smode = supply_mode_for_room(rid)                              # v964f5: train | car | both
+        if _smode in ('train', 'both'):
+            try:
+                ensure_camp_trains(rid)
+            except Exception:
+                logx('TRAIN', 'ensure_camp_trains failed')
         try:
-            ensure_camp_trains(rid)
+            ensure_camp_convoys(rid)                                    # v966f5b: self-gating (on-demand scan in every mode)
         except Exception:
-            logx('TRAIN', 'ensure_camp_trains failed')
+            logx('CONVOY', 'ensure_camp_convoys failed')
     try:
         tc_check_win(rid)                          # v640f5
     except Exception:
@@ -32438,7 +33768,7 @@ def handle_post_auth(s, cmd, pl):
                 _onum6 = struct.unpack_from('<H', stored, 5)[0]
                 if _onum6 in TRAINS and getattr(s, 'addr', None) in TRAINS[_onum6]['peers']:
                     train_broadcast_state(_onum6, only=s)
-                elif _onum6 in TANKS or _onum6 in SOLDIERS:
+                elif _onum6 in TANKS or _onum6 in SOLDIERS or _onum6 in CARS:
                     _o6 = TANKS.get(_onum6) or SOLDIERS.get(_onum6)
                     (_o6.get('hold_until') or {}).pop(getattr(s, 'addr', None), None)   # the create landed
             except Exception:
@@ -33718,6 +35048,8 @@ threading.Thread(target=_chute_keepalive_loop, daemon=True).start()   # v803f5: 
 threading.Thread(target=_stats_online_loop, daemon=True).start()      # v891f5: online-time sampler for the leaderboards
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
+car_classes_load()                                                  # v963f5: NetCar probe class list
+threading.Thread(target=car_tick, daemon=True, name='car_tick').start()   # v964f5: road movement + convoys
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive
 threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts
 

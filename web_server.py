@@ -2421,6 +2421,19 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + '> Reset the clock to the start time on every arena entry'
                 + ' <span style="color:#999;">(unticked = the arena clock runs on by itself; a joiner gets the current time of day. '
                   'The clock re-starts at an arena reset or the console\'s <code>clock &lt;room&gt; reset</code>.)</span></label></div>'
+                # v962f5 DYNAMIC WEATHER: the server changes clouds / rain live (msg 137) every N minutes,
+                # walking a clear -> scattered -> broken -> overcast -> rain -> storm ladder one rung at a time
+                + '<div style="margin:10px 0;"><label style="font-size:0.85em; color:#333;">Dynamic weather: change the clouds and rain every '
+                + '<input type="number" name="s_weather_cycle" min="0" max="240" value="' + hesc(str(overrides.get('weather_cycle', '') or ''), quote=True) + '" '
+                  'placeholder="0" style="width:70px; padding:4px;"> minutes'
+                + ' <span style="color:#999;">(0 = fixed weather as set above. The live change goes to everyone in the arena at once - no re-entry - '
+                  'and is announced as an AI line <code>WEATHER: ...</code>; it walks one step at a time between clear skies and a rain storm, '
+                  'starting from the setting above. Console: <code>weather &lt;room&gt; status|clear|scattered|broken|overcast|rain|storm|reset</code>.)</span></label>'
+                + '<label style="font-size:0.85em; color:#333; display:block; margin-top:6px;">Max wind for the dynamic weather: '
+                + '<input type="number" name="s_weather_max_wind" min="0" max="60" step="0.5" value="' + hesc(str(overrides.get('weather_max_wind', '') or ''), quote=True) + '" '
+                  'placeholder="8" style="width:70px; padding:4px;"> m/s'
+                + ' <span style="color:#999;">(the cycle blows harder as the weather worsens - 2 m/s clear to 12 m/s storm - but never above this, so nobody is '
+                  'blown off the runway; 8 m/s = 18 mph. 0 = the cycle leaves the wind as set above. The direction drifts up to 30&deg; per step.)</span></label></div>'
                 # per-type field enabling, mirroring the client's own dialog: Constant = speed + direction;
                 # Const. rotating = speed + rotation time; Oscill. rotating = min/max + oscillation + rotation
                 '<script>(function(){var f=document.forms[0];function u(){var t=f.s_rw_wind_type.value;'
@@ -2668,6 +2681,33 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 'yard nearest its bomber field), its front airfields and halfway between, on each line in turn. Stations are only '
                 'scenes that store or produce something - AA sites and villages are passed through. 0 = no supply trains in this arena. '
                 'Needs a rails file for the terrain (rails_trnNN.json).</p>')
+            # SUPPLY MODE (v964f5): trains (classic TC), road convoys of lorries, or both; convoy cadence
+            # and the on-demand rule (a scene whose stores are shot up calls a convoy).
+            _smode = str(overrides.get('supply_mode', 'train') or 'train').lower()
+            def _sm_opt(v, label):
+                return '<option value="' + v + '"' + (' selected' if _smode == v else '') + '>' + label + '</option>'
+            _cvm = overrides.get('convoy_minutes', '')
+            _cod = overrides.get('convoy_on_demand', 'on')
+            craters_html += (
+                '<label style="display:block; margin:10px 0;">Supply traffic<br>'
+                '<select name="s_supply_mode" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + _sm_opt('train', 'Trains only (classic Territorial Combat; lorries only as the on-demand safety net below)')
+                + _sm_opt('car',   'Road convoys only (lorry columns with AA escort, depot to scene overland)')
+                + _sm_opt('both',  'Trains and road convoys')
+                + '</select></label>'
+                '<label style="display:block; margin:10px 0;">Convoy every (minutes, per team)<br>'
+                '<input type="number" name="s_convoy_minutes" min="2" max="120" value="' + hesc(str(_cvm), quote=True) + '" '
+                'placeholder="10" style="width:120px; padding:6px;"></label>'
+                '<label style="display:block; margin:10px 0;"><input type="checkbox" name="s_convoy_on_demand" value="1"'
+                + (' checked' if str(_cod).lower() in ('1', 'on', 'true', 'yes') else '') + '> '
+                'On-demand convoys (works in every mode, trains-only included): a scene whose fuel/ammo/metal store falls '
+                'below 35% - bombed or drained by refuelling - calls a convoy from the best friendly depot within 120 km, '
+                'unless a supply train already serves it (one per scene per 10 min, 2 per team at once)</label>'
+                '<p class="muted" style="margin:4px 0 12px; max-width:640px;">A convoy is a WWII-style road serial: an AA lorry '
+                'in front, 2-6 cargo lorries (fuel tankers 3,000 kg, ammunition 3,000 kg, box lorry 2,500 kg metal) at 60 m '
+                'interval, a Flak lorry at the tail, 40 km/h overland from depot to scene (the tank driver: path-finding around obstacles). It unloads at the '
+                'depot, waits a minute and drives home empty - a target both ways; every lorry destroyed is cargo the front '
+                'does not get. Teams hear their own convoys on the AI channel. Needs the car classes in tank_tables.json.</p>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
@@ -4320,6 +4360,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     pass
             settings['rw_rain'] = 1 if qs.get('s_rw_rain', [''])[0].strip() else 0
             settings['clock_static'] = 1 if qs.get('s_clock_static', [''])[0].strip() else 0   # v949f5 arena world clock
+            _wc = qs.get('s_weather_cycle', [''])[0].strip()                                 # v962f5 dynamic weather
+            if _wc == '':
+                settings.pop('weather_cycle', None)
+            else:
+                try:
+                    settings['weather_cycle'] = max(0, min(240, int(_wc)))
+                except ValueError:
+                    pass
+            _wm = qs.get('s_weather_max_wind', [''])[0].strip()                              # v962f5c max wind for the cycle
+            if _wm == '':
+                settings.pop('weather_max_wind', None)
+            else:
+                try:
+                    settings['weather_max_wind'] = round(max(0.0, min(60.0, float(_wm))), 1)
+                except ValueError:
+                    pass
             # RADAR (v949f5): the server gate (radar_enabled ''/1/0, radar_visual_m, radar_friends ''/1/0) and the
             # GAME_DEF [Radar] override (rd_enabled + rd_* fields; the two checkboxes are stored as 1/0).
             for _gk in ('radar_enabled', 'radar_friends'):
@@ -4414,7 +4470,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
             if _wm in ('off', 'all', 'eliminated', 'wipeout'):
                 settings['tc_win_mode'] = 'eliminated' if _wm == 'wipeout' else _wm   # v933f5
-            for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000), ('trains_per_camp', 0, 12)):   # v686f5, v959f5
+            _smv = qs.get('s_supply_mode', [''])[0].strip().lower()        # v964f5
+            if _smv in ('car', 'both'):
+                settings['supply_mode'] = _smv
+            else:
+                settings.pop('supply_mode', None)
+            settings['convoy_on_demand'] = 'on' if qs.get('s_convoy_on_demand', [''])[0].strip() else 'off'
+            for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000), ('trains_per_camp', 0, 12),
+                                  ('convoy_minutes', 2, 120)):   # v686f5, v959f5, v964f5
                 _cv = qs.get('s_' + _ck, [''])[0].strip()
                 if _cv == '':
                     settings.pop(_ck, None)

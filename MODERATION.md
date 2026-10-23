@@ -216,6 +216,36 @@ he re-enters.
 "Fly button enabled from the start" is its initial state). Joiners get the current state at spawn;
 an arena reset returns to the arena's initial state.
 
+### The Chat tab's filter boxes - what each one really switches (v961f5, from the EXE)
+
+Flight_Chat has a HUD row and a LOG row of boxes: Chat (All, Team, Squad), Logins, Hits, AI, Score,
+Help, News, Events, Weather, Hints. Two mechanisms:
+
+- **Logins, Hits, AI** are decided by the line's PRINTER. Logins = the msg-62/63 join-leave lines,
+  Hits = the hit lines, **AI = the server's AI-text messages msg 66 (0x42) and msg 121 (0x79)**:
+  `[0x42][3 bytes][text]` -> the client prints `AI: <text>` (Texts.str 0x108) in the AI colour. The 2009
+  server pushed seven such lines (90-105 chars each) at every arena entry - the arena news. The TC AI
+  lines (`tc_say`) now use msg 66, so they read `AI: ...` natively and the AI box hides them (before
+  they rode chat channel 3 and showed as `AI (O):`). Console: `ai <room|all> <text>`.
+- **Score, Help, News, Events, Weather, Hints** are TEXT PREFIX filters: every printer searches the
+  finished line for `SCORE:`, `HELP:`, `NEWS:`, `EVENT:`, `WEATHER:`, `HINT:` and honours the matching
+  box. The prefix is the server's to write, on any transport (chat, AI line, yellow system line). Used
+  now: MOTD lines `NEWS: ...`; event-script score lines `SCORE: ...`; event start/update/final/win,
+  tournament, weapons lock and guns-cold lines `EVENT: ...`. Free for later: `WEATHER:` (wind/clouds/time
+  changes), `HINT:` (tips), `HELP:` (a `!!help` answer).
+- Chat All/Team/Squad follow the msg-20 channel byte (0/1/2; 3 Operator and 4 Broadcast are separate).
+
+### Live weather - `##Weather` (v962f5, field-verified 2026-10-23)
+
+FA msg 137 changes the clouds, rain and wind of everyone in the arena at once (the client rebuilds its
+wind and cloud objects; no re-entry). Sysop in game: `##Weather status`, `##Weather clear|scattered|
+broken|overcast|rain|storm`, `##Weather clouds <none|cumulus|stratus> <density%> <min m> <max m> [rain]`,
+`##Weather rain on|off` (rain only draws under Stratus), `##Weather wind <m/s> <deg>`, `##Weather reset`
+(back to the arena's forecast). Console: `weather <room> ...` with the same words. Every change is
+announced as an AI line `WEATHER: ...` (the Weather box). Per-arena *Dynamic weather every N min*
+(Reality/Weather tab) walks clear -> scattered -> broken -> overcast -> rain -> storm one rung at a time.
+Joiners receive the room's live weather at spawn; an arena reset returns to the forecast.
+
 ### Guns cold / guns hot - the weapons hold for ordinary arenas (v960f5)
 
 `##GunsCold` and `##GunsHot`, typed in the arena chat by a sysop, are SERVER-SIDE `##` commands: the
