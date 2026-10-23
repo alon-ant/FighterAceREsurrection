@@ -2605,6 +2605,22 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _sm_opt('events', 'Force Events board')
                 + _sm_opt('none', 'Force NO global scoring')
                 + '</select></label>')
+            # TC ECONOMY (v960f5c): production, supplies, trains, tank battalions - its own switch,
+            # independent of which ladder the arena scores on (a Battle of Britain event arena is a TC
+            # world scored on the Events board).
+            _eco = str(overrides.get('economy', '') or '').lower()
+            def _eco_opt(v, label):
+                return '<option value="' + v + '"' + (' selected' if _eco == v else '') + '>' + label + '</option>'
+            scoring_html += (
+                '<label style="display:block; margin:12px 0;">Territorial Combat economy<br>'
+                '<select name="s_economy" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + _eco_opt('',    'Auto - on when the arena scores on the TC board (currently: ' + ('ON' if (sm == 'tc' or (sm == '' and 'territorial' in _cl)) else 'off') + ')')
+                + _eco_opt('on',  'On - production, supplies, trains, tank battalions, country scores')
+                + _eco_opt('off', 'Off - arcade: full service at every field, no AI ground war')
+                + '</select></label>'
+                '<p class="muted" style="margin:-6px 0 12px; max-width:640px;">Needs the terrain\'s map data '
+                '(trn_tables / scene profiles, rails for trains - see ADDING_A_MAP.md). Pilots inside the arena '
+                'see the change at their next spawn; trains and production start within a minute.</p>')
             # TC WIN / RESET (v640f5): tc_win_mode + a Reset button (calls the game server's arena_reset)
             _wm = str(overrides.get('tc_win_mode', 'off') or 'off').lower()
             if _wm == 'wipeout':
@@ -4390,6 +4406,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _sm = qs.get('s_scoring_mode', [''])[0].strip().lower()
             if _sm in ('ffa', 'tc', 'none', 'events'):
                 settings['scoring_mode'] = _sm
+            _eco = qs.get('s_economy', [''])[0].strip().lower()              # v960f5c
+            if _eco in ('on', 'off'):
+                settings['economy'] = _eco
+            else:
+                settings.pop('economy', None)
             _wm = qs.get('s_tc_win_mode', [''])[0].strip().lower()          # v640f5
             if _wm in ('off', 'all', 'eliminated', 'wipeout'):
                 settings['tc_win_mode'] = 'eliminated' if _wm == 'wipeout' else _wm   # v933f5

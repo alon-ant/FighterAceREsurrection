@@ -1,3 +1,12 @@
+v960f5c [TC ECONOMY IS ITS OWN SWITCH] (10-23)
+      User: Battle of Britain arena (trn06) set to the events type - trains do not spawn. Live log
+      04:49: 'spawn-59 -> ARCADE full service (mode=events)', objs Tr0 - room_has_economy() was
+      scoring_mode == 'tc', so an events-scored arena had no production, trains or tank battalions
+      (the 'train arrived ... +metal' lines are the abstract repair deliveries, not trains). New
+      per-arena settings_json 'economy': on | off | '' auto (= TC-scored); room_has_economy and the
+      two resupply grants (spawn-59, ground-stop) honour it. Web: 'Territorial Combat economy'
+      selector under Scoring mode. VERSION v960f5c.
+
 v960f5b BANK (10-23) - user: "bank recent changes". Chapter v959f5..v960f5b banked on the local build:
       trains for new maps (supply-only stations, per-terrain radius, trains per team), TC win = most
       scenes on elimination, rights follow the pilot down (0xDA zero push, live unmod), re-fly roster

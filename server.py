@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v960f5b'
+VERSION = 'v960f5c'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -28613,6 +28613,18 @@ def room_has_economy(room_id):
     msg 40/43/71 pushes, Country Scores). Dogfight / FFA / Events arenas have none - the loops
     used to iterate every in-game room ('PROD40 room 53: no camp table for terrain 53005' every
     10 s in an FFA arena, user 09-15)."""
+    # v960f5c [ECONOMY IS ITS OWN SWITCH] (Alon 10-23): the Battle of Britain arena (trn06, scoring
+    # 'events') had no trains / production / tank battalions because the economy was tied to the TC
+    # SCORING mode. The 2009 event arenas (BoB, NAW) were TC worlds scored on the events board, so
+    # the two are separate axes: settings_json 'economy' = 'on' | 'off' | '' (auto = TC-scored arenas).
+    try:
+        _ov = str((db_get_room_settings(room_id) or {}).get('economy', '') or '').lower()
+    except Exception:
+        _ov = ''
+    if _ov in ('on', '1', 'yes', 'true'):
+        return True
+    if _ov in ('off', '0', 'no', 'false'):
+        return False
     try:
         return scoring_mode_for_room(room_id) == 'tc'
     except Exception:
@@ -29984,7 +29996,7 @@ def _grant_auto_resupply(s, pos, explicit=False):
         log('RESUPPLY', f'{s.current_pilot} poll ground-stop -> AIR-START arena '
                         f'(StartGround=no) - poll grant suppressed (explicit 119 still serviced)')
         return
-    if _mode != 'tc':
+    if not room_has_economy(s.current_room):                       # v960f5c: economy switch, not the scoring mode
         # ---- ARCADE: silent full service, no economy ----
         send_supply_grant_60(
             s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
@@ -30296,11 +30308,11 @@ def _grant_spawn_supply(s):
         _mode = scoring_mode_for_room(s.current_room)
     except Exception:
         pass
-    if _mode != 'tc':
+    if not room_has_economy(s.current_room):                       # v960f5c: economy switch, not the scoring mode
         send_supply_grant_60(
             s, flags=SUPPLY_ARCADE_FLAGS, amount=SUPPLY_ARCADE_AMT, amount2=SUPPLY_ARCADE_AMT2,
             reason=f'(spawn-59 ARCADE: {s.current_pilot})')
-        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> ARCADE full service (mode={_mode})')
+        log('RESUPPLY', f'{s.current_pilot} spawn-59 -> ARCADE full service (mode={_mode}, economy off)')
         return
     if getattr(s, 'nation', None) is None:
         log('RESUPPLY', f'{s.current_pilot} spawn-59: TC but no camp (nation unset) - no grant')
