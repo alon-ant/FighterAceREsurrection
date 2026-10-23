@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v959f5'
+VERSION = 'v960f5b'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -931,6 +931,14 @@ def sess_rights(s):
     if not MODERATORS_ENABLED: return 0
     return db_get_admin_rights(getattr(s, 'current_pilot', None))
 
+def _da_current(s):
+    """v959f5c: the 63-safe 0xDA for the session's CURRENT pilot, remembering what the client now holds
+    (push_myrights compares against it so a demotion is sent too)."""
+    r = sess_rights(s) if MODERATORS_ENABLED else 0
+    sqn = db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))
+    s._da_sent = (int(r), int(sqn or 0))
+    return build_da_session_safe(r, sqn)
+
 def push_myrights(s, reason=''):
     """Re-send msg 218 (0xDA) after pilot selection so MyRights AND the admin-squadron id reflect
     the CHOSEN pilot.
@@ -947,13 +955,24 @@ def push_myrights(s, reason=''):
     variant (a stray Size-17 0xDA can be misdispatched to the msg-63 handler and assert-crash)."""
     r = sess_rights(s) if MODERATORS_ENABLED else 0
     sqn = db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))
-    if not r and not sqn:
+    # v959f5c [RIGHTS FOLLOW THE PILOT DOWN AS WELL AS UP] (Alon 10-23): MyRights lives in ONE client
+    # global written only by this message, so a sysop who re-selects an ordinary pilot in the same
+    # session kept his rights on the client (Sysops roster entry, ## command group, O/B channels,
+    # free plane pick) - the zero was never sent because 'ordinary pilots get no traffic'. The
+    # server rejected the relayed ## actions all along (sess_rights is per selected pilot), but
+    # the client side stayed privileged. Now the 0xDA goes out whenever the value the client holds
+    # (the last one we sent on this session) differs from the pilot's, zero included - the Size=15
+    # 63-safe form every normal pilot already receives at each arena exit.
+    last = getattr(s, '_da_sent', None)
+    if not r and not sqn and (last is None or last == (0, 0)):
         return 0
     try:
         send_unrel(s, build_da_session_safe(r, sqn),
                    f'<- 0xDA MyRights={r} sqn-admin={sqn}{(" " + reason) if reason else ""}')
+        s._da_sent = (int(r), int(sqn or 0))
         log('MODERATOR', f'0xDA top-up: MyRights={r} admin-sqn={sqn} '
-                         f'pilot "{getattr(s, "current_pilot", None)}" {reason}')
+                         f'pilot "{getattr(s, "current_pilot", None)}" {reason}'
+                         + (f' (was MyRights={last[0]} admin-sqn={last[1]} - revoked on the client)' if last and last != s._da_sent and not r else ''))
     except Exception as e:
         log('MODERATOR', f'push_myrights failed: {e}')
     return r
@@ -1324,10 +1343,10 @@ def poll_start(target, duration_s, question, choices, by='console'):
             if not getattr(p, 'entered_game', False):
                 continue
             _submit_send(send_rel, p, rec, f'<- POLL {pid} open', to=3.0); n += 1
-        room_system_msg(rid, f'POLL: {question}'[:74])
+        room_system_msg(rid, f'POLL: {question}')
         for i, c in enumerate(choices):
-            room_system_msg(rid, f'  !!vote {i} = {c}'[:74])
-        room_system_msg(rid, f'!!vote <0-{len(choices) - 1}> to answer, !!poll to see it again ({duration_s} s)'[:74])
+            room_system_msg(rid, f'  !!vote {i} = {c}')
+        room_system_msg(rid, f'!!vote <0-{len(choices) - 1}> to answer, !!poll to see it again ({duration_s} s)')
         t = threading.Timer(duration_s + 1.0, poll_finish, args=(rid, pid))
         t.daemon = True; entry['timer'] = t; POLLS[rid] = entry; t.start()
     log('POLL', f'poll {pid} by {by} in room(s) {rooms} ({n} pilot(s), {duration_s} s): {question!r} / {choices}')
@@ -1367,7 +1386,7 @@ def handle_poll_vote(s, body):
         # the client blocks a second vote itself; a reconnect clears its flag, so the server decides
         send_system_msg(s, 'You have already voted on the current poll.'); return
     e['votes'][who] = choice
-    send_system_msg(s, f'Vote counted: {choice} - {e["choices"][choice]}'[:74])
+    send_system_msg(s, f'Vote counted: {choice} - {e["choices"][choice]}')
     # keep the clients' per-poll counters in step (FUN_004f3a50) - harmless if nothing reads them
     pkt = build_ingame_pkt(build_poll_vote_94(pid, choice))
     for p in get_sessions_in_room(rid):
@@ -1393,16 +1412,16 @@ def poll_finish(rid, pid=None, cancelled=False):
     POLLS.pop(rid, None)
     counts = poll_tally(e); total = sum(counts)
     if cancelled:
-        room_system_msg(rid, f'POLL cancelled: {e["question"]}'[:74])
+        room_system_msg(rid, f'POLL cancelled: {e["question"]}')
         log('POLL', f'poll {e["id"]} room {rid} CANCELLED after {total} vote(s)')
         return e
     if total == 0:
-        room_system_msg(rid, f'POLL closed, no votes: {e["question"]}'[:74])
+        room_system_msg(rid, f'POLL closed, no votes: {e["question"]}')
     else:
         best = max(counts); winners = [i for i, c in enumerate(counts) if c == best]
-        room_system_msg(rid, f'POLL result ({total} vote(s)): {e["question"]}'[:74])
+        room_system_msg(rid, f'POLL result ({total} vote(s)): {e["question"]}')
         for i, c in enumerate(e['choices']):
-            room_system_msg(rid, f'  {counts[i]:3d}  {i} = {c}'[:74])
+            room_system_msg(rid, f'  {counts[i]:3d}  {i} = {c}')
         if len(winners) == 1:
             room_banner(rid, f'POLL: {e["choices"][winners[0]]} ({best} of {total})')
         else:
@@ -1523,7 +1542,7 @@ def tournament_start(room_id, by='console', at=None, announce=True):
                                   f'{cfg["tn_shoot_delay"]} min later; lives: '
                                   f'{cfg["tn_lives"] or "unlimited"}'
                                   + (', ghosting' if cfg['tn_ghosting'] else '')
-                                  + (', last one flying wins' if cfg['tn_last_is_winner'] else ''))[:74])
+                                  + (', last one flying wins' if cfg['tn_last_is_winner'] else '')))
     log('TOURNAMENT', f'room {room_id}: START by {by} at {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC '
                       f'(net_ms {tournament_net_ms(e["start"])}) -> {n} pilot(s); cfg {cfg}')
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
@@ -1638,7 +1657,7 @@ def event_start(room_id, by='console', at=None, _delayed=False):
         evs_schedule_start(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)   # v958f5
     _mins = int(round(((e['start'] - time.time()) if _future else 0.0) / 60.0 + _d))
     if _mins > 0:
-        room_system_msg(room_id, f'EVENT: weapons free in {_mins} min.'[:74])
+        room_system_msg(room_id, f'EVENT: weapons free in {_mins} min.')
     else:
         room_system_msg(room_id, 'EVENT STARTED - weapons free!')
         try:
@@ -1869,7 +1888,7 @@ def evs_msg(sc, key, **kw):
 def evs_say(room_id, sc, key, camp=None, **kw):
     txt = evs_msg(sc, key, **kw)
     if txt:
-        room_system_msg(room_id, txt[:74], camp=camp) if camp is not None else room_system_msg(room_id, txt[:74])
+        room_system_msg(room_id, txt, camp=camp) if camp is not None else room_system_msg(room_id, txt)
     return txt
 
 def evs_tag(camp):
@@ -2306,7 +2325,7 @@ def evs_on_chute_landed(s, xy):
                 if e['script'].get('announce', True):
                     _m = evs_msg(e['script'], 'pps_miss', dist=f'{dist:.0f}', target=tgt.current_pilot,
                                  radius=f'{radius:.0f}', pilot=s.current_pilot)
-                    if _m: send_system_msg(s, _m[:74])
+                    if _m: send_system_msg(s, _m)
     except Exception:
         logx('EVS', 'chute hook failed')
 
@@ -2350,7 +2369,7 @@ def tournament_close_joining(room_id, by='console'):
             _submit_send(send_rel, p, pkt, '<- TOURNAMENT close-joining (0x5c)', to=3.0)
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
     evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
-    room_system_msg(room_id, (f'TOURNAMENT: joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.')[:74])
+    room_system_msg(room_id, (f'TOURNAMENT: joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.'))
     return e
 
 def tournament_go(room_id, by='console'):
@@ -2446,7 +2465,7 @@ def tournament_on_plane_exit(s, mec_nib, se):
     else:
         e['ghosts'].add(who) if cfg['tn_ghosting'] else None
         send_system_msg(s, 'Tournament: you are out of lives.' + (' You may fly on as a ghost.' if cfg['tn_ghosting'] else ''))
-        room_system_msg(rid, f'{who} is out of the tournament.'[:74])
+        room_system_msg(rid, f'{who} is out of the tournament.')
     tournament_check_winner(rid)
 
 def tournament_alive(rid, e, cfg):
@@ -2483,7 +2502,7 @@ def tournament_finish(rid, winner=None, by='console'):
     for p in get_sessions_in_room(rid):
         if getattr(p, 'entered_game', False):
             _submit_send(send_rel, p, pkt, f'<- TOURNAMENT result (0x30, PI {pi})', to=3.0); n += 1
-    room_system_msg(rid, (f'TOURNAMENT: {winner} has won!' if winner else 'TOURNAMENT finished - no winner.')[:74])
+    room_system_msg(rid, (f'TOURNAMENT: {winner} has won!' if winner else 'TOURNAMENT finished - no winner.'))
     try:
         room_banner(rid, f'TOURNAMENT: {winner} HAS WON' if winner else 'TOURNAMENT FINISHED')
     except Exception:
@@ -7303,11 +7322,13 @@ def console_handler():
                     _pilot = parts[1].strip()
                     if db_set_admin_rights(_pilot, 0):
                         log('CONSOLE', f'REVOKED moderator rights from "{_pilot}"')
-                        # The client caches MyRights in DAT_00c6e8b0 for the whole session and we
-                        # cannot clear it remotely (a 0 in msg 218 is only READ at attach time), so
-                        # an already-connected mod keeps powers until they reconnect. Say so plainly.
-                        if any(getattr(x,'current_pilot',None) == _pilot for x in get_all_sessions()):
-                            log('CONSOLE', f'WARNING: "{_pilot}" is ONLINE and keeps powers until reconnect')
+                        # v959f5c: the msg-218 handler (FUN_004edcf0) writes DAT_00c6e8b0 from +9 UNCONDITIONALLY
+                        # on every receipt (the old note 'a 0 is only read at attach time' was wrong - only the
+                        # '**** MyRights ****' log line is gated on non-zero), so a zero 0xDA revokes live.
+                        _live = [x for x in get_all_sessions() if getattr(x,'current_pilot',None) == _pilot]
+                        for _s in _live: push_myrights(_s, '(live revoke)')
+                        if _live:
+                            log('CONSOLE', f'Pushed the revocation live to {len(_live)} session(s)')
                     else:
                         log('CONSOLE', f'No such pilot "{_pilot}"')
             elif cmd == 'mods':
@@ -7376,6 +7397,18 @@ def console_handler():
                     log('CONSOLE', f'arena {_rid} settings changed on the web -> {_n} pilot(s) inside told to re-enter')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: arena_changed <room>')
+            elif cmd == 'guns':                                     # v960f5: guns <room> cold|hot|status | guns status
+                _ga = (parts[1].split() if len(parts) > 1 else [])          # console tokens: [cmd, rest]
+                if len(_ga) >= 1 and _ga[0].lower() == 'status':
+                    for _l in guns_status_text(): log('CONSOLE', _l)
+                elif len(_ga) >= 2 and _ga[1].lower() in ('cold', 'hot', 'status', 'hold', 'free'):
+                    _gr = int(_ga[0], 0); _gv = _ga[1].lower()
+                    if _gv == 'status':
+                        for _l in guns_status_text(_gr): log('CONSOLE', _l)
+                    else:
+                        log('CONSOLE', f'guns room {_gr}: ' + guns_set(_gr, _gv in ('cold', 'hold'), by='console'))
+                else:
+                    log('CONSOLE', 'usage: guns <room> cold|hot|status   |   guns status')
             elif cmd in ('event', 'tournament'):
                 # v955f5 ONE command family for the whole event toolbox (Alon 14:34: 'tournament and event do similar
                 # things ... confusing'). The room's two mechanisms (tournament clock/lives/winner, weapons lock)
@@ -7417,11 +7450,16 @@ def console_handler():
                             if tournament_go(_rid, by=_by): _done.append('competition now')
                         if event_mode(_rid):
                             if event_start(_rid, by=_by, at=_at): _done.append('weapons free' + (f' in {int(_at - time.time())} s' if _at else ''))
+                        elif guns_cold(_rid):
+                            _done.append(guns_set(_rid, False, by=_by))                  # v960f5
                         log('CONSOLE', f'event fight room {_rid}: ' + (', '.join(_done) if _done else 'nothing to do (no tournament / event mode in this arena)'))
                     elif _sub in ('hold', 'stop', 'lock'):
                         _rid = int(_a[1], 0)
                         _e = event_stop(_rid, by=_by)
-                        log('CONSOLE', f'event hold room {_rid}: ' + ('weapons locked' if _e else 'not an event-mode arena (web: Tournament -> Event mode)'))
+                        if _e:
+                            log('CONSOLE', f'event hold room {_rid}: weapons locked')
+                        else:
+                            log('CONSOLE', f'event hold room {_rid}: not an event-mode arena -> ' + guns_set(_rid, True, by=_by))   # v960f5
                     elif _sub in ('end', 'finish'):
                         _rid = int(_a[1], 0); _w = _a[2] if len(_a) > 2 else None
                         if EVS.get(_rid) and not EVS[_rid].get('finished'):
@@ -10276,6 +10314,119 @@ def chat_filter(text, who=''):
         log('CHATFILTER', f'{who}: {len(hits)} word(s) masked {hits!r} in {text!r}')
     return out, len(hits)
 
+
+# ---- v960f5 GUNS COLD / GUNS HOT (Alon 10-23): a weapons hold for arenas WITHOUT event mode ----
+# Event-mode arenas lock weapons on the client (the [Event] DelaysActive flag + msg 0x83) - the
+# real thing, enforced by every client. The user ruled that ordinary arenas carry NO event flag
+# (no 'Event not started yet!' on entry, no timer), so for them the hold is SERVER-SIDE: the
+# clients keep firing, but the server drops every damage report that leaves a cold room -
+# msg 28 plane hits, msg 29 canopy hits, msg 31 ground-object damage - so nothing registers,
+# nobody dies of gunfire or bombs and no kill is booked; the shooter is told why (rate-limited).
+# Collisions stay (client-side physics). In an event-mode arena the same commands drive the real
+# lock (event_stop / event_start), so moderators have ONE pair of words everywhere:
+#   in game (sysop):  ##GunsCold / ##GunsHot   (server-side chat commands - the client passes an
+#                     unknown ## word through as chat, FUN_0044d180, so no client change is needed)
+#   console:          guns <room> cold|hot|status      (also: event hold / event fight fall back to it)
+GUNS_COLD = {}            # room_id -> {'by': name, 'since': t}
+GUNS_NOTICE_S = 8.0       # per-shooter reminder interval while cold
+
+def guns_cold(room_id):
+    return room_id is not None and room_id in GUNS_COLD
+
+def guns_set(room_id, cold, by='console'):
+    """Returns a description of what was done. Event-mode arenas use the client-enforced lock."""
+    if room_id is None:
+        return 'no room'
+    if event_mode(room_id):
+        if cold:
+            event_stop(room_id, by=by); return 'event-mode arena: weapons locked on the clients (event hold)'
+        event_start(room_id, by=by);  return 'event-mode arena: weapons free (event fight)'
+    if cold:
+        if room_id in GUNS_COLD:
+            return 'already cold'
+        GUNS_COLD[room_id] = {'by': by, 'since': time.time()}
+        room_system_msg(room_id, f'GUNS COLD - weapons hold by {by}. Hits and bombs do not count.')
+        try: room_banner(room_id, 'GUNS COLD - WEAPONS HOLD')
+        except Exception: pass
+        log('GUNS', f'room {room_id}: GUNS COLD by {by} (server-side: damage reports dropped)')
+        return 'guns cold (server-side: damage reports from this room are dropped)'
+    if room_id not in GUNS_COLD:
+        return 'already hot'
+    GUNS_COLD.pop(room_id, None)
+    room_system_msg(room_id, f'GUNS HOT - weapons free ({by}).')
+    try: room_banner(room_id, 'GUNS HOT - WEAPONS FREE')
+    except Exception: pass
+    log('GUNS', f'room {room_id}: GUNS HOT by {by}')
+    return 'guns hot'
+
+def guns_drop(s, what):
+    """Called for a damage report from a cold room: swallow it, remind the shooter now and then.
+    True = dropped."""
+    rid = getattr(s, 'current_room', None)
+    if not guns_cold(rid):
+        return False
+    now = time.time()
+    if now - getattr(s, '_guns_notice_t', 0.0) >= GUNS_NOTICE_S:
+        s._guns_notice_t = now
+        try:
+            send_system_msg(s, 'GUNS COLD - weapons hold: your hits do not register.')
+        except Exception:
+            pass
+    n = s.__dict__.get('_guns_dropped', 0) + 1; s._guns_dropped = n
+    if n in (1, 10, 100) or n % 500 == 0:
+        log('GUNS', f'room {rid}: dropped {what} from {s.current_pilot} (guns cold, {n} so far this session)')
+    return True
+
+def guns_on_spawn(s):
+    rid = getattr(s, 'current_room', None)
+    if guns_cold(rid):
+        g = GUNS_COLD[rid]
+        send_system_msg(s, f'GUNS COLD in this arena (weapons hold by {g["by"]}) - hits do not register.')
+
+def guns_status_text(room_id=None):
+    rooms = [room_id] if room_id is not None else sorted(GUNS_COLD)
+    if not rooms:
+        return ['no arena is guns-cold']
+    out = []
+    for r in rooms:
+        g = GUNS_COLD.get(r)
+        if g:
+            out.append(f'room {r}: GUNS COLD since {time.strftime("%H:%M:%S", time.gmtime(g["since"]))} UTC by {g["by"]}')
+        else:
+            out.append(f'room {r}: guns hot' + (' (event-mode arena: see event status)' if event_mode(r) else ''))
+    return out
+
+# server-side '##' chat commands (sysops): name -> handler(s, args) -> reply text (sent to the sender)
+def _cmd_guns(s, args, cold):
+    if not sess_rights(s):
+        return 'Sysops only.'
+    return guns_set(getattr(s, 'current_room', None), cold, by=getattr(s, 'current_pilot', None) or 'sysop')
+CHAT_SERVER_COMMANDS = {
+    'gunscold': lambda s, a: _cmd_guns(s, a, True),
+    'gunshot':  lambda s, a: _cmd_guns(s, a, False),
+    'gunsstatus': lambda s, a: ' / '.join(guns_status_text(getattr(s, 'current_room', None))),
+}
+
+def chat_server_command(s, disp):
+    """A '##word' the CLIENT did not recognise (it passes those through as chat). True = consumed."""
+    t = (disp or '').strip()
+    if not t.startswith('##'):
+        return False
+    parts = t[2:].split()
+    if not parts:
+        return False
+    fn = CHAT_SERVER_COMMANDS.get(parts[0].lower())
+    if fn is None:
+        return False
+    try:
+        reply = fn(s, parts[1:])
+    except Exception as e:
+        logx('GUNS', 'chat command failed'); reply = f'command failed: {e}'
+    log('MODERATOR', f'server-side ## command {t!r} by "{s.current_pilot}" (rights {sess_rights(s)}) -> {reply}')
+    if reply:
+        send_system_msg(s, str(reply))
+    return True
+
 def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
     """Build the DISPLAY form of msg 20 so the client renders a chat line."""
     if isinstance(text, str):
@@ -10304,6 +10455,8 @@ def reflect_chat_20(s, channel, text, player_index=0):
     if _nh:
         disp = _fd; text = _fd
     room = s.current_room
+    if chat_server_command(s, disp):                       # v960f5: ##GunsCold / ##GunsHot ... never reflected
+        return
     # v304 GAG: a gagged sender's chat is dropped at the server (the authoritative reflect point).
     # We swallow silently rather than bouncing an error, matching how the retail server behaved -
     # the gagged player sees their own text vanish. Moderators (rights!=0) are never gagged.
@@ -11278,6 +11431,19 @@ def send_ace_rank_88(s, reason='', aces=None, rank=None, only_to=None):
 OBJ_SCORE_POINTS_DEFAULT = 100
 SCORE_DEFS_DEFAULT = [(0, [(t, 0, 0, OBJ_SCORE_POINTS_DEFAULT) for t in range(32)])]
 
+def _roster_note(dst, name, idx=None):
+    """v959f5d: what dst's client holds in its REMOTE_PLAYER roster (name -> PlayerIndex). idx None =
+    a 63 REMOVE went out for that name. The HQ exit keeps the roster on the client (only the NET
+    stations go), so this is what the re-fly rebuild must compare against - not _created_peers."""
+    try:
+        have = dst.__dict__.setdefault('_roster_have', {})
+        if idx is None:
+            have.pop(name, None)
+        else:
+            have[name] = int(idx)
+    except Exception:
+        pass
+
 def push_player_roster_62(s, reason=''):
     """Send msg 62 to s: the full set of OTHER players already in s's room, so the
     client builds a REMOTE_PLAYER object for each. Self is excluded (the local pilot
@@ -11293,6 +11459,8 @@ def push_player_roster_62(s, reason=''):
     except Exception:
         logx('SCENE42', 'entry snapshot failed')
     peers = [x for x in get_sessions_in_room(room_id) if x is not s]
+    s._rejoin_pending = False                     # v959f5d: see below - the entry IS the exchange
+    s.__dict__['_roster_have'] = {}
     if not peers:
         log('PLAYER62', f'no peers in room {room_id} to advertise to {s.current_pilot} {reason}')
         return
@@ -11300,6 +11468,13 @@ def push_player_roster_62(s, reason=''):
     pkt = build_msg13(build_add_player_62(records))   # WRAP in msg-13 batch (build_add_player_62
                                                       # returns a RAW sub-message; sending it
                                                       # unwrapped made the client read bc=0x3e=62)
+    s.__dict__['_roster_have'] = {(p.current_pilot or 'Player'): int(p.player_index) for p in peers}   # v959f5d
+    # v959f5d: a fresh room entry exchanges 62 both ways right here, so a _rejoin_pending left over from
+    # an HQ exit in the PREVIOUS arena must not fire at the first fly - live 10-22 22:25:38 Bigalon
+    # entered room 130 (Termanator there, roster sent silently), then his first fly re-ran the re-fly
+    # rebuild: 'Termanator102359 entering game' on his screen and a second 'Bigalon entering game' on
+    # Termanator's. That is the user's 'players already in the arena get announced' report.
+    s._rejoin_pending = False
     send_rel(s, pkt, f'<- AddPlayer 62 ({len(records)} peer(s)){(" " + reason) if reason else ""}', to=5.0)
 
 def broadcast_player_join_62(joiner, reason=''):
@@ -11342,6 +11517,7 @@ def broadcast_player_join_62(joiner, reason=''):
                      f'<- AddPlayer 62 (joiner {joiner.current_pilot}){_scrub_tag}'
                      f'{(" " + reason) if reason else ""}',
                      to=3.0)
+        _roster_note(sess, joiner.current_pilot, joiner.player_index)                      # v959f5d
         n += 1
     log('PLAYER62', f'broadcast join of {joiner.current_pilot} -> {n} peer(s) in room {room_id}{_scrub_tag}')
     # v355: peers now hold this player at their PlayerIndex. A later re-join MUST retract that
@@ -17635,6 +17811,7 @@ def arena_reset_state(room_id):
     except Exception:
         logx('CLOCK', 'clock re-base on reset failed')
     TOURNAMENTS.pop(room_id, None); _TN_CFG.pop(room_id, None)   # v952f5: the next spawn restarts the tournament clock
+    GUNS_COLD.pop(room_id, None)                                 # v960f5: a rebuilt arena is guns hot
     event_end_cancel(room_id)                                    # v956f5
     evs_stop(room_id)                                            # v958f5
     EVENTS.pop(room_id, None)                                    # v953f5: event back to 'not started'
@@ -17689,15 +17866,51 @@ def arena_reset_state(room_id):
             CAMP_STATS.pop(key, None)
     log('RESET', f'room {room_id}: world state rebuilt from the GAME_DEF')
 
+SYSMSG_WRAP_CHARS = 74     # v960f5b: the ESystemMsg packet is 80 bytes = 4 header + text + NUL, so 74 chars
+                           # per line is the wire ceiling; longer texts are word-wrapped into several lines
+                           # (the user saw lines cut mid-word). Lower it if the pane clips before 74.
+SYSMSG_WRAP_INDENT = '  '  # continuation lines start with this so a wrapped message reads as one
+
+def sysmsg_lines(text, width=None):
+    """Word-wrap a system message into <= width-char lines (a single over-long word is hard-split).
+    Explicit newlines in the text start a new line too."""
+    width = int(width or SYSMSG_WRAP_CHARS)
+    out = []
+    for para in str(text).replace('\r', '').split('\n'):
+        words = para.split(' ')
+        cur = ''
+        first = True
+        for w in words:
+            while len(w) > width - (0 if first else len(SYSMSG_WRAP_INDENT)):
+                room = width - (0 if first else len(SYSMSG_WRAP_INDENT)) - len(cur) - (1 if cur else 0)
+                if room <= 0:
+                    out.append(('' if first else SYSMSG_WRAP_INDENT) + cur); cur = ''; first = False
+                    continue
+                cur = (cur + ' ' if cur else '') + w[:room]; w = w[room:]
+                out.append(('' if first else SYSMSG_WRAP_INDENT) + cur); cur = ''; first = False
+            cand = (cur + ' ' + w) if cur else w
+            if len(cand) + (0 if first else len(SYSMSG_WRAP_INDENT)) <= width:
+                cur = cand
+            else:
+                out.append(('' if first else SYSMSG_WRAP_INDENT) + cur); first = False
+                cur = w
+        out.append(('' if first else SYSMSG_WRAP_INDENT) + cur)
+    return [l for l in out if l.strip()] or ['']
+
 def send_system_msg(s, text):
     """v646f5: vcnc ESystemMsg (class-0 command 0xc9, vcncNet OnPacketRecv -> FA notification
-    0x8032): the client prints the text in YELLOW on its server channel. Field-verified 09-11."""
+    0x8032): the client prints the text in YELLOW on its server channel. Field-verified 09-11.
+    v960f5b: texts longer than SYSMSG_WRAP_CHARS go out as several lines (word-wrapped)."""
+    ok = True
     try:
-        body = bytearray(80)
-        body[0] = 0x00; body[1] = 0x40; body[2] = 0x00; body[3] = 0xc9
-        tb = text.encode('latin1', 'replace')[:74] + b'\x00'
-        body[4:4 + len(tb)] = tb
-        return send_rel(s, bytes(body), f'<- SYSMSG: {text[:60]}', to=3.0)
+        for line in sysmsg_lines(text):
+            body = bytearray(80)
+            body[0] = 0x00; body[1] = 0x40; body[2] = 0x00; body[3] = 0xc9
+            tb = line.encode('latin1', 'replace')[:SYSMSG_WRAP_CHARS] + b'\x00'
+            body[4:4 + len(tb)] = tb
+            if not send_rel(s, bytes(body), f'<- SYSMSG: {line[:60]}', to=3.0):
+                ok = False
+        return ok
     except Exception:
         logx('SYSMSG', 'send failed'); return False
 
@@ -17863,8 +18076,24 @@ def tc_check_win(room_id):
                             nc = table.get(int(sidx))
                             if nc is not None and nc != eliminated and nc <= 7:
                                 takers[nc] = takers.get(nc, 0) + 1
-                if takers:
-                    winner = max(takers, key=lambda k: (takers[k], -k))
+                # v959f5b [MOST SCENES WINS] (user 10-23): when a country is wiped out the victor is the
+                # country holding the MOST scenes at that moment, not whoever took the last one. A tie
+                # on scene count goes to the tied country that took more of the eliminated side's
+                # scenes; still tied -> no winner announced (draw), the arena resets all the same.
+                _alive = {c: n for c, n in owned.items() if c <= 4 and c != eliminated and n > 0}
+                if _alive:
+                    _top = max(_alive.values())
+                    _lead = [c for c, n in _alive.items() if n == _top]
+                    if len(_lead) == 1:
+                        winner = _lead[0]
+                    else:
+                        _tk = {c: takers.get(c, 0) for c in _lead}
+                        _best = max(_tk.values())
+                        _tied = [c for c in _lead if _tk[c] == _best]
+                        winner = _tied[0] if len(_tied) == 1 else None
+                        log('TC', f'room {room_id}: scene count tied at {_top} between {_lead} - '
+                                  + (f'{tc_camp_full(winner)} took more of the eliminated side' if winner is not None else 'draw'))
+                globals()['_TC_WIN_STANDINGS'] = {room_id: sorted(_alive.items(), key=lambda kv: (-kv[1], kv[0]))}
                 if len(gone) > 1:
                     log('TC', f'room {room_id}: {len(gone)} countries have no scenes left {gone} - '
                               f'ending on {tc_camp_full(eliminated)}')
@@ -17877,8 +18106,14 @@ def tc_check_win(room_id):
                 room_system_msg(room_id, f'{tc_camp_full(eliminated)} has been eliminated!')
             except Exception:
                 pass
+            _stand = (globals().get('_TC_WIN_STANDINGS') or {}).pop(room_id, [])
+            if _stand:
+                try:
+                    room_system_msg(room_id, ('Scenes held: ' + '  '.join(f'{tc_camp_full(c)} {n}' for c, n in _stand)))
+                except Exception:
+                    pass
             log('TC', f'room {room_id}: {tc_camp_full(eliminated)} (camp {eliminated}) ELIMINATED - '
-                      f'winner camp {winner} (took its last scenes) [tc_win_mode={mode}]')
+                      f'winner camp {winner} (most scenes: {_stand}) [tc_win_mode={mode}]')
         arena_reset(room_id, winner_camp=winner, reason=f'(tc_win_mode={mode})', by='TC win check')
         threading.Timer(30.0, lambda: globals()['_RESET_IN_PROGRESS'].discard(room_id)).start()
 
@@ -23826,15 +24061,43 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
         # and neither spawned). The old use-after-free warning (messages97) was about re-adding
         # a LIVE remote player; we now guard on _created_peers so we only re-advertise peers
         # whose object we actually dropped - a clean re-create, never a duplicate of a live one.
-        _cp = s.__dict__.setdefault('_created_peers', set())
-        _missing = [p for p in get_sessions_in_room(s.current_room)
-                    if p is not s and p.addr not in _cp]
+        # v959f5d [RE-FLY ROSTER: COMPARE WITH WHAT THE CLIENT HOLDS]: _created_peers tracks on which
+        # PEERS our plane object exists (the other direction) and is wiped at the HQ exit, so every
+        # re-fly re-advertised the WHOLE room - the client answered 'ERROR: Add existing
+        # REMOTE_PLAYER X' and printed 'X entering game' for everybody who had been there all along
+        # (Alon 10-23; live 10-22 22:33:43 Bigalon: 6 of 6 peers re-advertised). The REMOTE_PLAYER
+        # roster SURVIVES the HQ exit on the client (those very errors prove it); what changes while
+        # we sit at the HQ screen (current_room None, so neither 62 nor 63 reaches us) is tracked
+        # in _roster_have: peers who entered meanwhile are missing, peers who left are stale, a peer
+        # who re-entered under a new index is both.
+        _have = dict(s.__dict__.get('_roster_have') or {})
+        _peers = [p for p in get_sessions_in_room(s.current_room) if p is not s]
+        _missing = [p for p in _peers if _have.get(p.current_pilot or 'Player') != int(p.player_index)]
+        _stale = [(n, i) for n, i in _have.items()
+                  if not any((p.current_pilot or 'Player') == n and int(p.player_index) == i for p in _peers)]
+        # (an index a live peer now holds under another name is REMOVEd first too - his join batch
+        #  with the slot scrub never reached us at the HQ screen - then re-added below: [63 REMOVE][62 add])
+        if _stale:
+            try:
+                _rm = build_change_player_63([(i, 0xff, CP_OP_REMOVE) for n, i in _stale])
+                send_rel(s, build_msg13(_rm), f'<- ChangePlayer 63 REMOVE x{len(_stale)} (re-fly: left while we were at the HQ)', to=5.0)
+                for n, i in _stale:
+                    _roster_note(s, n, None)
+                log('PLAYER62', f're-fly: {s.current_pilot} drops {len(_stale)} stale roster entr{"y" if len(_stale) == 1 else "ies"}: '
+                                f'{[n for n, i in _stale]}')
+            except Exception:
+                logx('PLAYER62', 're-fly stale REMOVE failed')
         if _missing:
             records = [(p.player_index, p.nation, p.current_pilot or 'Player', mod_wire_rights(sess_rights(p))) for p in _missing]
             _pkt = build_msg13(build_add_player_62(records))
             send_rel(s, _pkt, f'<- AddPlayer 62 ({len(records)} peer(s)) (re-fly roster rebuild)', to=5.0)
+            for p in _missing:
+                _roster_note(s, p.current_pilot or 'Player', p.player_index)
             log('PLAYER62', f're-fly: re-advertised {len(records)} missing peer(s) to '
-                            f'{s.current_pilot}: {[p.current_pilot for p in _missing]}')
+                            f'{s.current_pilot}: {[p.current_pilot for p in _missing]} '
+                            f'({len(_peers) - len(_missing)} already held)')
+        else:
+            log('PLAYER62', f're-fly: {s.current_pilot} already holds all {len(_peers)} peer(s) - nothing re-advertised')
     pkt = bytes([0x00, 0x42, 0x00, 0x00, reply_sub & 0xFF, af & 0xFF, mid & 0xFF, grant_n & 0xFF])
     # v343: remember this grant so a death landing inside SP_REGRANT_WINDOW_S can re-issue it.
     s._last_sp_grant = (time.time(), pkt, af, mid, grant_n)
@@ -23915,6 +24178,9 @@ def handle_leave_arena(s):
         # never spawned a NetPlane, there's nothing to dangle - just send the REMOVE.
         rem_pkt = build_change_player_63([(s.player_index, s.nation, CP_OP_REMOVE)])
         rem_label = f'<- ChangePlayer 63 REMOVE ({s.current_pilot})'
+        for _pr in get_sessions_in_room(room_id):                                           # v959f5d
+            if _pr is not s:
+                _roster_note(_pr, s.current_pilot, None)
         if s.my_obj_number is not None:
             broadcast_object_delete_3(s, reason='(back to lobby)',
                                       followup_pkt=rem_pkt, followup_label=rem_label,
@@ -23979,10 +24245,10 @@ def handle_leave_arena(s):
         # 0x43 and we resend it there (resend-on-poll). entered_game is now False, so the
         # resend/echo gates below are armed until the player re-enters a game.
         s._awaiting_reattach = True
-        send_unrel(s, build_da_session_safe(sess_rights(s), db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))),
+        send_unrel(s, _da_current(s),
                    '<- 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) - stops post-leave poll')
     else:
-        threading.Thread(target=lambda: send_rel(s, build_da_session_safe(sess_rights(s), db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))),
+        threading.Thread(target=lambda: send_rel(s, _da_current(s),
                          '<- 0xDA lobby re-attach (218, Size=15 63-safe) - stops post-leave 0x43 poll',
                          to=5.0), daemon=True).start()
 
@@ -24144,6 +24410,9 @@ def teardown_ingame_presence(s, why='(disconnected)'):
             return False
         rem_pkt = build_change_player_63([(s.player_index, s.nation, CP_OP_REMOVE)])
         rem_label = f'<- ChangePlayer 63 REMOVE ({s.current_pilot})'
+        for _pr in get_sessions_in_room(s.current_room):                                    # v959f5d
+            if _pr is not s:
+                _roster_note(_pr, s.current_pilot, None)
         if s.my_obj_number is not None:
             # v191 ordering: the NetPlane holds a pointer to the REMOTE_PLAYER, so the type-3
             # DELETE must reach a peer BEFORE the msg-63 REMOVE or a flying peer
@@ -24813,7 +25082,7 @@ def handle_compound(s, outer_cmd, pl):
         s.last_43_ts = now
         _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT (enters game)
         if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-            send_unrel(s, build_da_session_safe(sess_rights(s), db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
+            send_unrel(s, _da_current(s), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
         room_slot = getattr(s, 'room_slot', 0)
         rooms = db_get_open_rooms()
         if rooms and (s.current_room or room_slot):
@@ -25971,6 +26240,8 @@ def _handle_ground_damage_31(s, body, via=''):
     remain valid; weapon_map.json's eye anchor was gated ev==5 -> migrated 59 -> 1339.
     There is no event/type field; reconciliation-vs-weapon is CONTEXT (a probe window
     following our own msg-36 destroy)."""
+    if guns_drop(s, 'ground damage (31)'):                        # v960f5 guns cold
+        return
     n = len(body) // 6
     recs = []
     destroyed = []                 # [(obj, info)] objects whose HP crossed 0 this message
@@ -26473,6 +26744,10 @@ def _fire_server_confirm(s, via='', ident=None):
         event_on_spawn(s)          # v953f5: event start / fly-button state to a joiner
     except Exception:
         logx('EVENT', 'spawn hook failed')
+    try:
+        guns_on_spawn(s)           # v960f5: guns-cold notice to a joiner
+    except Exception:
+        logx('GUNS', 'spawn hook failed')
     # v326: remember every Number this session has worn, with the time it was issued. A peer's
     # delete-notify can arrive AFTER that peer has already respawned onto a new Number, and the
     # ownership lookup below only ever compared against the CURRENT my_obj_number - so the peer
@@ -30980,6 +31255,7 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xde:
                 def da_then_echo():
                     da=build_da_session(sess_rights(s), db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None)))
+                    s._da_sent = (int(sess_rights(s) or 0), int(db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None)) or 0))   # v959f5c
                     if not send_rel(s,da,'<- 0xDA',to=5.0): return
                     time.sleep(0.005); send_rel(s,stored,'<- echo 0xde',to=5.0)
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
@@ -31075,7 +31351,7 @@ def handle_post_auth(s, cmd, pl):
                     s.last_43_ts = now
                     _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                     if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
-                        send_unrel(s, build_da_session_safe(sess_rights(s), db_pilot_admin_squadron_id(getattr(s, 'current_pilot', None))), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
+                        send_unrel(s, _da_current(s), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
@@ -31261,6 +31537,8 @@ def handle_post_auth(s, cmd, pl):
         # Warrior's client logged zero "You have been hit" lines. The shooter saw his hits
         # land; the victim never heard about them.
         if s.entered_game and (sub == 0x1c or (len(pl) > 8 and pl[8] == 0x1c)):
+            if guns_drop(s, 'plane damage (28)'):                  # v960f5 guns cold
+                return
             s.last_fired_at = time.time()   # stamp shooter for kill attribution on a peer's death
             # v232/v244: DAMAGE TRACKING. The msg-28 record is [VictimNumber i16][HunterNumber i16]
             # [count u8] + count*9B (HitToPlaneCB, FUN_004f3820). Two things come out of it:
@@ -31440,6 +31718,8 @@ def handle_post_auth(s, cmd, pl):
         # header [bc][T][00][00][1d] then N x 8-byte records [victim u16][hunter u16][..][..];
         # 37B=4 recs, 29B=3 recs. Prefixed form carries the 4-byte VNET prefix (sub at pl[8]).
         if s.entered_game and (sub == 0x1d or (len(pl) > 8 and pl[8] == 0x1d)):
+            if guns_drop(s, 'canopy hit (29)'):                    # v960f5 guns cold
+                return
             s.last_fired_at = time.time()
             _p29 = bytes(stored)
             def _para_ok(b):

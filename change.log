@@ -1,3 +1,72 @@
+v960f5b BANK (10-23) - user: "bank recent changes". Chapter v959f5..v960f5b banked on the local build:
+      trains for new maps (supply-only stations, per-terrain radius, trains per team), TC win = most
+      scenes on elimination, rights follow the pilot down (0xDA zero push, live unmod), re-fly roster
+      rebuild compares with what the client holds + room entry clears _rejoin_pending, ##GunsCold /
+      ##GunsHot server-side weapons hold, yellow system lines word-wrap. All need field test; live
+      server last seen on v958f5f (10-22 13:25 UTC). Deploy server.py + web_server.py + fa_logging.py,
+      fa_make_rails.py, fa_build_scene_profiles.py, fa_dump_trn_tables.py, mapdata\rails_trn06.json,
+      mapdata\trn_tables_trn06.json, mapdata\fa_scene_profiles_trn06.json, event_scripts\.
+
+v960f5b [YELLOW SYSTEM LINES WRAP INSTEAD OF TRUNCATING] (10-23)
+      User: server yellow text gets truncated. The vcnc ESystemMsg packet is 80 bytes = 4 header + text
+      + NUL, so 74 chars is the wire ceiling per line and send_system_msg cut there (mid-word), and 20
+      call sites pre-cut with [:74]. Now sysmsg_lines() word-wraps any text into <=74-char lines
+      (continuations indented 2, explicit newlines honoured, over-long words hard-split) and
+      send_system_msg sends one ESystemMsg per line; the [:74] pre-cuts are gone. Knob
+      SYSMSG_WRAP_CHARS (lower it if the pane clips before 74). Banners (one line by nature) and the
+      MOTD file (8 x 74) unchanged. VERSION v960f5b.
+
+v960f5 [GUNS COLD / GUNS HOT] (10-23)
+      User: a ##gunscold/##gunshot command for rooms that are not events. Server-side '##' chat commands
+      (chat_server_command, table CHAT_SERVER_COMMANDS; the client forwards unknown ## words as chat -
+      the live log shows '##eventstart' etc. arriving as team chat): ##GunsCold / ##GunsHot /
+      ##GunsStatus, sysops only, consumed, reply to the sender. Event-mode arena -> event_stop /
+      event_start (client lock). Other arenas -> GUNS_COLD[room]: guns_drop() swallows msg 28, 29 and
+      31 damage reports from the room (no relay, no DAMAGED bookkeeping, no kill), reminder to the
+      shooter every GUNS_NOTICE_S 8 s, room line + banner on change, guns_on_spawn notice, cleared by
+      arena reset. Console `guns <room> cold|hot|status`; `event hold` / `event fight` fall back to it on
+      a non-event arena (hold used to say 'not an event-mode arena' and do nothing). EVENTS.md s4,
+      MODERATION.md. VERSION v960f5.
+
+v959f5d [RE-FLY ROSTER: NO MORE 'X ENTERING GAME' FOR EVERYONE] (10-23)
+      User: entering an arena with players in it, every one of them is announced 'entering game'.
+      Client log (DebugLogs\messages07.log 22:33:43): 'in 62'100' with 6 records right after the
+      HQ re-fly -> 'ERROR: Add existing REMOTE_PLAYER <X>' + 'EVENT <X> entering game' x6; server:
+      're-fly: re-advertised 6 missing peer(s) to Bigalon'. Cause: the re-fly rebuild tested
+      _created_peers (on which PEERS our plane exists - the other direction), wiped at every HQ
+      exit, so the whole room was re-sent each time. The client KEEPS its REMOTE_PLAYER roster
+      across the HQ exit; only changes while at the HQ screen (current_room None: no 62/63 reach
+      it) are gaps. Now _roster_have (name -> PlayerIndex, kept by push_player_roster_62,
+      broadcast_player_join_62 and the two 63 REMOVE sites via _roster_note) is compared: peers
+      who entered meanwhile -> 62 add; who left / changed index -> 63 REMOVE first (no station
+      delete needed, the client dropped every peer station at its own exit). Log: 'already holds
+      all N peer(s)' / 're-advertised K ... (M already held)'. AND the user's exact case (live 22:25:38,
+      room 130): _rejoin_pending set by an HQ exit in the PREVIOUS arena survived the fresh entry into
+      the next one, so the first fly there re-ran the rebuild - the pilot already present was
+      announced to the newcomer and the newcomer a second time to him. push_player_roster_62 (the
+      room entry, which exchanges 62 both ways) now clears the flag. VERSION v959f5d.
+
+v959f5c [RIGHTS FOLLOW THE PILOT DOWN] (10-23)
+      User: switching from a sysop pilot to an ordinary one in the same session kept admin
+      privileges. Live 10-22 22:08-22:20 (bigalon sid 23): Alon@HQ got '0xDA MyRights=3', then the
+      pilot select of Bigalon pushed nothing because push_myrights skipped zero values - the client's
+      single MyRights global (written only by msg 0xDA) stayed 3: Sysops roster entry, ## command
+      group, O/B channels and free plane pick stayed enabled client-side (the server itself rejected
+      relayed ## actions - sess_rights is per selected pilot - so no action got through). Now every
+      0xDA sent on a session is remembered (s._da_sent, via _da_current) and push_myrights sends
+      the 63-safe 0xDA whenever the pilot's value differs from it, zero included; the log says
+      '(was MyRights=3 ... - revoked on the client)'. RE check: the msg-218 handler FUN_004edcf0 writes
+      DAT_00c6e8b0 from +9 unconditionally on every receipt, so a zero revokes at once - console `unmod`
+      now pushes it live too (the old 'keeps powers until reconnect' warning was wrong). VERSION v959f5c.
+
+v959f5b [TC WIN: MOST SCENES] (10-23)
+      User: when a team is wiped out, the victor is the team holding the most scenes. tc_win_mode
+      'eliminated' now crowns the country with the most scenes at the moment of elimination (was:
+      whoever took the eliminated side's last scenes). Tie on scene count -> the tied country that
+      took more of the eliminated side's scenes; still tied -> no winner announced, arena resets.
+      New arena line 'Scenes held: GER 20  SOV 15 ...' before the win/reset. Web text updated.
+      VERSION v959f5b.
+
 v959f5 [TRAINS: SUPPLY-ONLY STATIONS, PER-TERRAIN RADIUS, TRAINS PER TEAM] (10-22)
       User (trn06): more trains needed and some started on scenes without supplies/production.
       Cause: a station was ANY scene within 900 m of a rail node - on English Channel 34 of the 58

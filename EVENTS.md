@@ -71,6 +71,18 @@ locks again. A pilot already airborne keeps his running engine when the lock lan
 pilot who entered before the setting was ticked keeps his old arena data until he re-enters (the
 server tells everyone inside when a setting is saved).
 
+**Arenas without event mode - `##GunsCold` / `##GunsHot`** (v960f5). Ordinary arenas carry no event
+flag, so the client cannot lock their weapons; instead the server holds fire for them: after a
+sysop types `##GunsCold` in the arena chat (or the console runs `guns <room> cold`, or `event hold`
+on such an arena), the clients keep firing but every damage report leaving the room is dropped -
+plane hits, canopy hits, bombs and rockets on ground targets - so nothing registers, nobody dies of
+fire and no kill is booked; collisions still happen. The arena hears `GUNS COLD - weapons hold by
+<sysop>` plus a cockpit banner, joiners are told on spawn, and a pilot who shoots gets a reminder
+every 8 s. `##GunsHot` (console `guns <room> hot`, or `event fight`) frees them; `##GunsStatus`
+shows the state. In an event-mode arena the same two words drive the real client-side lock. These
+`##` words are the server's own: the client passes an unknown `##` word through as chat, the server
+consumes it and answers the sender only - nothing is reflected to the room.
+
 ## 5. Discipline during the event
 
 | Command | Effect |

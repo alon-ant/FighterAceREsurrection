@@ -152,8 +152,8 @@ earns the ordinary kill points if the table has them. A running "fox down xN" co
 
 Every line the engine sends to the arena is a template you may rewrite under **Message templates**
 (fold-out at the bottom of the builder). Leave a field blank for the default text; type a single `-`
-to silence that message. Words in braces are filled in at run time; the game cuts chat lines at 74
-characters, so keep them short.
+to silence that message. Words in braces are filled in at run time; a line longer than 74 characters is word-wrapped
+onto a second yellow line, so keep them short.
 
 | Key | Default | When | Placeholders |
 | --- | --- | --- | --- |

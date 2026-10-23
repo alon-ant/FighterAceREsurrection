@@ -187,31 +187,47 @@ The step-by-step event command chain (prepare, gather, clock, weapons lock, disc
 The arena-creation dialog's Tournament group (enabled / number of lives / ghosting) plus the hidden
 template values (joining window 5 min, shooting 2 min later, allow tabbing off, last one flying wins
 on) are editable per arena on the web (Tournament section) and are served in the GAME_DEF. The server
-runs the clock: it starts at the first spawn or with `tournament start <room> [in <seconds>]`, every
+runs the clock: it starts at the first spawn or with `event open <room> [in <seconds>]`, every
 pilot receives the same start (msg 0x5c, late joiners at ServerConfirm), the cockpit counts down the
 joining window and then the shooting delay (no guns, no collisions until then). Pilots who ask to fly
 after the joining window closed are refused unless they were already in; a pilot out of lives is
 refused too, or, with ghosting, flies on as a ghost (the server ghosts his new plane). With "last one
 flying wins" the server declares the winner (msg 0x30: "<name> has won") and flashes the banner.
-`tournament close <room>` closes joining now (the shooting countdown then runs);
-`tournament go <room>` skips both countdowns (joining closes, the competition starts now - "FIGHT!");
-`tournament status [room]` shows phase, deaths and ghosts; `tournament end <room> [winner]` closes
-it by hand; `tournament reset <room>` (and an arena reset) clears it so the next spawn restarts.
+`event close <room>` closes joining now (the shooting countdown then runs); `event fight <room>`
+skips both countdowns (joining closes, the competition starts now - "FIGHT!"); `event status [room]`
+shows phase, deaths and ghosts; `event end <room> [winner]` closes it by hand; `event reset <room>`
+(and an arena reset) clears it so the next spawn restarts. v955f5: one `event` command family drives
+both the tournament clock and the weapons lock - see EVENTS.md.
 Moderators never count as participants and are never refused.
 
 ### Event mode - the weapons lock (v953f5)
 
-The game's [Event] section. Every served arena carries its DelaysActive flag and each joiner is told
-the room's event state at spawn (normally "started" = free), so any arena can be locked at any time:
-while locked a pilot can take off but cannot start engines, fire guns, launch rockets, drop bombs or
-torpedoes, deploy paratroopers or drop supplies - the client says "You'll be able to open fire after
-Event starts". The web checkbox "Start with weapons and engines locked" makes an arena begin locked. `##StartEvent` in game (sysop) or `event start <room> [in <seconds>]` on the console
+The game's [Event] section, served only to arenas with **event mode** ticked on the web (Tournament
+section); all other arenas carry no event flag, no timers and no entry message. An event arena starts
+locked ("Event not started yet!" on entry): a pilot can take off but cannot start engines, fire guns,
+launch rockets, drop bombs or torpedoes, deploy paratroopers or drop supplies - the client says "You'll
+be able to open fire after Event starts". The server sends the state before the entry grant (as the
+2009 server did) and again at spawn. `##StartEvent` in game (sysop) or `event fight <room> [in <seconds>]` on the console
 starts the event: "EVENT STARTED" banner, everything unlocks (after the "unlock N min" delay if set,
-with an "in MM:SS" countdown on the client). `event stop <room>` locks at once ("HOLD FIRE") - in any arena. Pilots who were already in the arena
-before this build keep their old GAME_DEF and ignore the lock until they re-enter.
+with an "in MM:SS" countdown on the client). `event hold <room>` locks at once ("HOLD FIRE"). Both work only in event-mode arenas (the console
+says so otherwise); a pilot who entered before the setting was ticked keeps his old arena data until
+he re-enters.
 `##EnableFlyButton` / `event fly <room> on|off` drive the HQ Fly button separately (the arena setting
 "Fly button enabled from the start" is its initial state). Joiners get the current state at spawn;
 an arena reset returns to the arena's initial state.
+
+### Guns cold / guns hot - the weapons hold for ordinary arenas (v960f5)
+
+`##GunsCold` and `##GunsHot`, typed in the arena chat by a sysop, are SERVER-SIDE `##` commands: the
+client passes a `##` word it does not know through as plain chat (its own table is fixed, FUN_0044d180),
+the server recognises the word, acts and answers the sender only - the line is never reflected to the
+room, and a non-sysop gets `Sysops only.` In an event-mode arena they are `event hold` / `event fight`
+(the client-enforced lock). In any other arena the hold is server-side: the clients keep firing but the
+server drops every damage report that leaves the room (msg 28 plane hits, msg 29 canopy hits, msg 31
+ground damage - bombs and rockets included), so nothing registers and no kill is booked; collisions
+remain. Broadcast + cockpit banner on each change, a spawn notice for joiners, a reminder to a shooter
+every 8 s, `##GunsStatus` for the state. Console: `guns <room> cold|hot|status`, `guns status`; an arena
+reset returns the room to guns hot. More server-side `##` words can be added to CHAT_SERVER_COMMANDS.
 
 ### Relayed pilot effects (field-verified 2026-10-21)
 
@@ -280,7 +296,11 @@ in-game:  ##Ban/##BanAll <player> <hours>   ##UnBan/##UnBanAll <player>
 - **Lobby "for all games" dialogs**: the client reads GagAll/BanAll minutes from a 25-byte 0xDA
   lobby attach (offsets +0xd / +0x11); we send the 15-byte safe form, so a globally banned pilot
   is kicked at pilot select instead of seeing that dialog.
-- **Sysop roster section** (camp -2 for moderators) — unchanged, see the code TODO.
+- ~~Sysop roster section~~ — done in v954f5: moderators are listed under **Sysops** in the chat/arena
+  roster. The client derives that group from the player's rights (bit 0x02 set, bit 0x01 = incognito
+  clear), which the server now sends in msg 218 (own) and in the msg-62 roster record byte +5 (peers).
+  `mod <pilot> hidden` makes a sysop incognito (listed under his nation), `mod <pilot> visible` undoes it;
+  peers see a change at their next arena entry.
 
 ---
 
