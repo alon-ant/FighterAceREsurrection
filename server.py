@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f5j'
+VERSION = 'v968f5q'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5304,6 +5304,34 @@ def weather_cycle_tick(room_id):
                     by='weather cycle', announce=txt, step=new)
     weather_cycle_arm(room_id, mins)
 
+def weather_on_settings_changed(room_id):
+    """v968f5k (Alon 21:00: 'turning off dynamic weather does not return the arena to normal fixed
+    weather ... stuck on Stratus 100% at 3100 ft'): the web save only re-armed the cycle timer; the
+    room's LIVE weather (WEATHER[room], the cycle's last rung) stayed as it was, was re-sent to every
+    joiner at spawn, and nobody in the world got a msg 137 with the new forecast. Now a save pushes
+    the arena's forecast (GAME_DEF + the rw_* override if ticked) to everyone in the world, resets
+    the live state to it (cycle on: the ladder restarts from the new forecast; cycle off: no live
+    state, joiners take the GAME_DEF) and re-arms or cancels the timer."""
+    try:
+        mins = weather_cycle_minutes(room_id)
+        b = weather_base_for_room(room_id)
+        had_live = room_id in WEATHER
+        if b:
+            n = weather_push(room_id, b, reason='(arena settings saved)')
+            if mins > 0:
+                WEATHER[room_id] = dict(b, by='web:settings', since=time.time(), step=weather_step_for(b))
+            else:
+                WEATHER.pop(room_id, None)
+            if n and had_live:
+                tc_say(room_id, msg_prefixed('WEATHER', 'Weather back to the arena forecast'))
+            log('WEATHER', f'room {room_id}: settings saved -> forecast {weather_text(b)} pushed to {n} client(s); '
+                           f'cycle {"every %d min from this forecast" % mins if mins > 0 else "OFF (live state cleared)"}')
+        elif mins <= 0:
+            WEATHER.pop(room_id, None)
+    except Exception:
+        logx('WEATHER', 'settings-change handling failed')
+    weather_cycle_arm(room_id)
+
 def weather_cycle_arm(room_id, mins=None):
     t_old = _WEATHER_TIMERS.pop(room_id, None)
     if t_old:
@@ -6984,9 +7012,77 @@ def _run_cmd(argv, timeout, cwd=None):
     except Exception as e:
         return 1, repr(e)
 
-def perform_update(actor='console'):
+GRACEFUL_COUNTDOWN_S = 10      # v968f5n: seconds of warning before a graceful update/restart boots the pilots
+GRACEFUL_DRAIN_WAIT_S = 8.0    # how long to wait for the clients' own disconnects after the close frames
+
+def drain_players(tag='UPDATE', countdown=None):
+    """v968f5n [GRACEFUL UPDATE] (Alon 21:49): soft-boot everyone before an update/restart - a
+    countdown in the arena and the lobby (in-game: the yellow banner line), then a clean close of
+    every session: the transport FIN frame the client's WaitForClose state machine accepts (the
+    v490f5 RE: a FIN-flagged frame TO a connected client makes it FIN back and close cleanly -
+    'Network connection closed.' on his screen, back to the launcher, no 10 s dirty-close hang),
+    then the session is unregistered. Waits up to GRACEFUL_DRAIN_WAIT_S for the clients' own
+    disconnects. Returns the number of sessions closed."""
+    n0 = len(get_all_sessions())
+    if n0 == 0:
+        log(tag, 'graceful: nobody connected - nothing to drain')
+        return 0
+    cd = GRACEFUL_COUNTDOWN_S if countdown is None else int(countdown)
+    what = 'update' if tag == 'UPDATE' else 'restart'
+    log(tag, f'graceful: {n0} session(s) connected - {cd} s countdown, then a clean close for everyone')
+    try:
+        broadcast_everyone(f'SERVER {what.upper()} in {cd} seconds - you will be disconnected. Land if you can; '
+                           f'rejoin in about a minute.', src='graceful')
+        for left in range(cd - 1, 0, -1):
+            time.sleep(1.0)
+            if left <= 5 or left % 5 == 0:
+                broadcast_everyone(f'SERVER {what.upper()} in {left}...', src='graceful')
+        time.sleep(1.0)
+        broadcast_everyone(f'SERVER {what.upper()} NOW - disconnecting. See you in a minute.', src='graceful')
+        time.sleep(0.8)                                  # let the last line render
+    except Exception as _e:
+        log(tag, f'graceful: countdown announce failed ({_e!r}) - closing anyway')
+    closed = 0
+    for x in get_all_sessions():
+        # v968f5q: nobody loses anything to a soft boot - the airborne-disconnect rule (teardown) and
+        # the exit-code bookkeeping (the client's own delete as the link closes) both stand down
+        x._soft_boot = True
+        x._death_booked = True
+    log(tag, f'graceful: {len(get_all_sessions())} session(s) flagged soft-boot - no plane / pilot / streak loss will be booked')
+    for x in get_all_sessions():
+        try:
+            cid = getattr(x, '_status_connid', None)
+            if cid is None:
+                try:
+                    cid = struct.unpack_from('>H', bytes(x.session_id), 0)[0]
+                except Exception:
+                    cid = 0
+            fin = struct.pack('>H', cid & 0xffff) + b'\x08\x00\x00\x00\x00\x00'
+            for _ in range(2):
+                sock.sendto(fin, x.addr)
+            closed += 1
+        except Exception as _e:
+            log(tag, f'graceful: close frame to {getattr(x, "current_pilot", "?")} failed ({_e!r})')
+    log(tag, f'graceful: close frames sent to {closed} session(s) - waiting up to {GRACEFUL_DRAIN_WAIT_S:.0f} s for their disconnects')
+    t0 = time.time()
+    while time.time() - t0 < GRACEFUL_DRAIN_WAIT_S and get_all_sessions():
+        time.sleep(0.25)
+    left = get_all_sessions()
+    for x in left:
+        try:
+            _teardown_session(x, why=f'(graceful {what})', tag=tag)
+        except Exception:
+            try:
+                x.closing = True
+            except Exception:
+                pass
+    log(tag, f'graceful: drained - {n0 - len(left)} client(s) disconnected on their own, {len(left)} torn down here; proceeding')
+    return closed
+
+def perform_update(actor='console', graceful=False):
     """git pull the server directory, then restart. Returns True if a restart was scheduled.
-    Every step is logged to the UPDATE tag, which the web console streams live."""
+    Every step is logged to the UPDATE tag, which the web console streams live.
+    graceful=True (v968f5n): countdown + clean close of every session first."""
     if not UPDATE_ENABLED:
         log('UPDATE', 'update is disabled (UPDATE_ENABLED=False)')
         return False
@@ -6994,7 +7090,9 @@ def perform_update(actor='console'):
         log('UPDATE', 'an update is already running - ignoring this request')
         return False
     try:
-        log('UPDATE', f'--- update requested by {actor} --- dir={UPDATE_DIR}')
+        log('UPDATE', f'--- update requested by {actor} --- dir={UPDATE_DIR}{" (graceful)" if graceful else ""}')
+        if graceful:
+            drain_players('UPDATE')
 
         # 1. Is this actually a git working tree? Fail loudly rather than pulling somewhere odd.
         rc, out = _run_cmd(['git', 'rev-parse', '--is-inside-work-tree'], 15.0)
@@ -7090,7 +7188,7 @@ def _schedule_restart(tag='RESTART', reason=''):
     threading.Thread(target=_bye, daemon=True).start()
     return True
 
-def perform_restart(actor='console'):
+def perform_restart(actor='console', graceful=False):
     """v421f5: manual restart with NO git pull - reboot the current build in place. Guarded
     by the same lock as perform_update so the two can never race (a restart mid-update, or
     two restarts, are refused). Announces to any players first so a populated arena is not
@@ -7099,7 +7197,10 @@ def perform_restart(actor='console'):
         log('RESTART', 'an update or restart is already running - ignoring this request')
         return False
     try:
-        log('RESTART', f'--- manual restart requested by {actor} (no git pull) ---')
+        log('RESTART', f'--- manual restart requested by {actor} (no git pull){" (graceful)" if graceful else ""} ---')
+        if graceful:
+            drain_players('RESTART')
+            return _schedule_restart(tag='RESTART', reason='manual graceful restart, build unchanged')
         try:
             _n = broadcast_everyone('Server is restarting - you will be disconnected briefly. '
                                     'Please rejoin in about 15 seconds.', src='restart')
@@ -7706,7 +7807,7 @@ def console_handler():
                 try:
                     _rid = int(parts[1].split()[0], 0)
                     _TN_CFG.pop(_rid, None); _RADAR_CFG.pop(_rid, None)
-                    weather_cycle_arm(_rid)                                  # v962f5: new cycle interval (or off)
+                    weather_on_settings_changed(_rid)                        # v968f5k: live weather follows the editor (was: re-arm only)
                     _n = sum(1 for p in get_sessions_in_room(_rid) if getattr(p, 'entered_game', False))
                     if _n:
                         room_system_msg(_rid, 'The host changed this arena\'s settings - leave to the lobby and re-enter to get them.')
@@ -8898,12 +8999,17 @@ def console_handler():
             elif cmd == 'update':
                 # v329: git pull + restart. Also reachable from the web admin button, which
                 # simply queues this same command, so there is one code path.
-                perform_update(actor=line if _src == 'terminal' else _src)
+                # v968f5n: `update graceful` = countdown + clean close of every pilot first.
+                _grace = len(parts) > 1 and parts[1].strip().lower().startswith('grace')
+                threading.Thread(target=perform_update, kwargs={'actor': line if _src == 'terminal' else _src, 'graceful': _grace},
+                                 name='update', daemon=True).start()
             elif cmd == 'restart':
                 # v421f5: restart the CURRENT build with no git pull - e.g. to clear state or
                 # recover from a wedged condition without touching code. Same restart mechanism
                 # and same lock as `update`, so the two can't race.
-                perform_restart(actor=line if _src == 'terminal' else _src)
+                _grace = len(parts) > 1 and parts[1].strip().lower().startswith('grace')
+                threading.Thread(target=perform_restart, kwargs={'actor': line if _src == 'terminal' else _src, 'graceful': _grace},
+                                 name='restart', daemon=True).start()
             elif cmd == 'loglevel':
                 a = parts[1].split() if len(parts) > 1 else []
                 if len(a) == 2 and a[0] == 'console':
@@ -14895,8 +15001,11 @@ def spawn_tank(room_id, camp, class_id, group_id=0, pos=None, reason='', send=Tr
     n = 0
     if not send:
         return onum
+    _sx, _sy = (TANKS[onum]['pos'][0], TANKS[onum]['pos'][1]) if pos else (None, None)   # no position yet: world test only
     for p in get_sessions_in_room(room_id):
         if not getattr(p, 'entered_game', False):
+            continue
+        if not _spawn_in_range(p, 'tank', _sx, _sy):     # v968f5l: in the world and in range only
             continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
         pkt = build_msg13(body)
@@ -15045,8 +15154,11 @@ def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
                   'aux': (0, 0, 0, 0, 0), 'flags': 0}
     rec = build_car_record(AI_CLIENT_ST, onum, camp, class_id)
     n = 0
+    _sx, _sy = CARS[onum]['pos'][0], CARS[onum]['pos'][1]
     for p in get_sessions_in_room(room_id):
         if not getattr(p, 'entered_game', False):
+            continue
+        if not _spawn_in_range(p, 'car', _sx, _sy):     # v968f5l: in the world and in range only
             continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
         _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 CAR class={class_id} camp={camp} ONumber=0x{onum:04x} {reason}', to=3.0)
@@ -15125,15 +15237,61 @@ _CAR_GONE = {}                   # onum -> (when, why) for hit diagnostics
 def car_hp_max(c):
     return CAR_HP_BY_NAME.get(c.get('name'), CAR_FALLBACK_HP)
 
-def _handle_car_hit(s, victim, attacker, dmg):
+def _handle_car_hit(s, victim, attacker, dmg, how='msg-51'):
     c = CARS.get(victim)
     if c is None or c.get('dead'):
         return
     c['hp'] = c.get('hp', car_hp_max(c)) - float(dmg)
     log('CARHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit {c["name"]} 0x{victim:04x} camp {c["camp"]} '
-                  f'for {dmg} -> hp {c["hp"]:.0f}/{car_hp_max(c):.0f}')
+                  f'for {dmg} ({how}) -> hp {c["hp"]:.0f}/{car_hp_max(c):.0f}')
     if c['hp'] <= 0:
-        car_killed(victim, s, reason='(msg-51 damage)')
+        car_killed(victim, s, reason=f'({how} damage)')
+
+# --- v968f5o BOMB SPLASH ON CARS from the bomber's own crater records -----------------------------
+# Field (Sinistarr 10-24): lorries take no damage from bombs/rockets. The client's splash code hits
+# NetTanks (their msg-51 reports arrive in a burst with the crater) but not NetCars. The crater record
+# (msg 52) the bomber sends carries every impact: [0x34][square u16][time i32][dword per crater],
+# decoded by the client's Crater3D (FUN_00628e80): x = ((sq & 0x3f) - 32) * 4096 + (d >> 17) * 0.125,
+# y = ((sq >> 6) - 32) * 4096 + ((d >> 2) & 0x7fff) * 0.125, size = (d & 3) + 1. So the server
+# applies the splash itself to every car in range (cars only - tanks already get the client's own
+# hits). Rockets leave no crater and still rely on the client.
+CAR_BOMB_SPLASH = True
+CAR_BOMB_SPLASH_BY_SIZE = {1: (25.0, 70.0), 2: (35.0, 110.0), 3: (50.0, 170.0), 4: (70.0, 260.0)}   # size -> (radius m, damage at the centre)
+
+def crater_positions(body):
+    """[(x, y, size)] from a msg-52 body ([0x34][sq u16][time i32][dword ..])."""
+    out = []
+    try:
+        b = bytes(body)
+        if len(b) < 11 or b[0] != 0x34:
+            return out
+        sq = struct.unpack_from('<H', b, 1)[0]
+        bx = ((sq & 0x3f) - 32) * 4096.0; by = ((sq >> 6) - 32) * 4096.0
+        for i in range(7, len(b) - 3, 4):
+            d = struct.unpack_from('<I', b, i)[0]
+            out.append((bx + (d >> 17) * 0.125, by + ((d >> 2) & 0x7fff) * 0.125, (d & 3) + 1))
+    except Exception:
+        pass
+    return out
+
+def bomb_splash_on_cars(s, body):
+    if not CAR_BOMB_SPLASH or not CARS:
+        return 0
+    rid = getattr(s, 'current_room', None)
+    hits = 0
+    for x, y, size in crater_positions(body):
+        r, dmg0 = CAR_BOMB_SPLASH_BY_SIZE.get(size, CAR_BOMB_SPLASH_BY_SIZE[2])
+        for onum, c in list(CARS.items()):
+            if c.get('room') != rid or c.get('dead'):
+                continue
+            d = math.hypot(c['pos'][0] - x, c['pos'][1] - y)
+            if d <= r:
+                dmg = dmg0 * (1.0 - 0.7 * d / r)
+                _handle_car_hit(s, onum, getattr(s, 'my_obj_number', 0) or 0, int(round(dmg)), how=f'bomb splash {d:.0f} m (size {size})')
+                hits += 1
+    if hits:
+        log('CARHIT', f'{s.current_pilot}: crater record -> {hits} car(s) in the blast')
+    return hits
 
 def car_killed(onum, killer, reason=''):
     """Book the kill and delete the car with a 12-byte KILL ENTRY (same shape as a tank kill:
@@ -15890,8 +16048,11 @@ def spawn_ship(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
                    'name': SHIP_CLASSES.get(int(class_id), '?'), 'aux': (0, 0, 0, 0), 'flags': 0, 'pitch': 0.0, 'roll': 0.0}
     rec = build_ship_record(AI_CLIENT_ST, onum, camp, class_id, w2=faf)
     n = 0
+    _sx, _sy = SHIPS[onum]['pos'][0], SHIPS[onum]['pos'][1]
     for p in get_sessions_in_room(room_id):
         if not getattr(p, 'entered_game', False):
+            continue
+        if not _spawn_in_range(p, 'ship', _sx, _sy):     # v968f5l: in the world and in range only
             continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
         _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 SHIP class={class_id} camp={camp} ONumber=0x{onum:04x}{" FAF=%d" % faf if faf else ""} {reason}', to=3.0)
@@ -20117,8 +20278,22 @@ def _spawn_in_range(p, kind, x, y):
     him and silence-culled 27 s later - 164 such creates on Flakmagic's client in one session
     (09-22), 8 reliable packets per trigger for nothing on a laggy link; the 1 Hz back-in-range
     path creates it when he actually closes in."""
+    # v968f5l [CREATE SENT TO A CLIENT IN THE HQ = A STUCK RECORD = CTD ON HIS RETURN] (Taurus
+    # messages961, 18:15:54 '!Objects[no->Number()]' on car 771): he sat in the HQ screen for 82 min
+    # (plane gone, world kept). A convoy car raised at 17:16 was created on him there: his client
+    # logged 'Receive create object 771' but never 'Create NetCar' - out of the world the record
+    # only books the slot in Objects[] and waits for a first state frame that the tiers never
+    # sent; the silence cull does not run in the HQ either (his own cull list on return covered
+    # only the 28 cars he had actually instantiated earlier, dif=4958 s). At his ServerConfirm the
+    # server (which had him as a peer of nothing it could see) re-created 771 -> second record on
+    # the booked slot -> assert. Moira's 17:24 TrnWorld.cpp:325 'IsPresentObject' assert is the
+    # same stuck record landing twice in the terrain object scene. So a NEW AI object is created
+    # only on a client that is IN THE WORLD (a confirmed plane, not left); everyone else gets it
+    # from the ServerConfirm re-create of his next life, in range.
+    if not getattr(p, 'obj_confirmed', False) or getattr(p, '_left_world', False):
+        return False
     pos = p.__dict__.get('_pos_xy')
-    if pos is None:
+    if pos is None or x is None:
         return True
     return math.hypot(x - pos[0], y - pos[1]) <= REJOIN_RADIUS_BY_KIND.get(kind, REJOIN_RADIUS_M)
 RECREATE_COOLDOWN_S   = 45.0
@@ -20695,6 +20870,7 @@ GROUP_KIND        = {'ship': 0, 'tank': 1, 'fighter': 2, 'bomber': 3, 'soldier':
 GROUP_MISSION_NONE = 0xf
 TRAIN_GROUP_RECORDS = False    # v966f5: OFF (user 10-23: 'lose the train lorry icon and box') - the lorry glyph
                                # (kind 7) now marks the road convoys / cars; trains stay on the big map (msg 70)
+CAR_RECORD_UC_ICON_ONLY = 185  # v968f5p: Radar Car - a class convoys never spawn, so a record carrying it binds no object (icon, no box)
 CAR_GROUP_RECORDS   = True     # v966f5: one lorry box per convoy (lead position, destination scene as objective,
                                # vehicle count, Go to / Return) and one per loose car (a parked Flak car = Defend)
 BIGMAP_TRAINS       = True     # v946f5: live trains on the big map (msg 70) under their locomotive class - see the
@@ -20820,6 +20996,17 @@ def room_group_records(room_id, viewer_camp=None):
     # console lorry) is its own record: AA/Flak = 'Defend', anything else moving = 'Go to'.
     if CAR_GROUP_RECORDS:
         _in_convoy = set()
+        # v968f5p [ONE BOX ROUND TWO CONVOYS] (Sinistarr 10-24): the map binder FUN_004f0e50 attaches
+        # to a kind-7 record every live object of the record's camp whose CLASS == uc; the group-id
+        # test exists only for tanks (+0x2f4), soldiers and one more type - a car binds unconditionally.
+        # So two convoys of one camp, both led by an AA Car, were both bound to each record and the
+        # box spanned the pair (and swallowed the scene markers inside it). A camp with ONE convoy
+        # keeps its box (uc = the lead's class); with several, every convoy record carries a class no
+        # convoy vehicle has (CAR_RECORD_UC_ICON_ONLY) -> nothing binds -> an icon at the lead, no box.
+        _cv_per_camp = {}
+        for cv0 in CONVOYS.values():
+            if cv0.get('room') == room_id and any(o in CARS and not CARS[o].get('dead') for o in cv0['vehicles']):
+                _cv_per_camp[cv0.get('camp', 0)] = _cv_per_camp.get(cv0.get('camp', 0), 0) + 1
         for cid, cv in list(CONVOYS.items()):
             if cv.get('room') != room_id:
                 continue
@@ -20829,12 +21016,13 @@ def room_group_records(room_id, viewer_camp=None):
             if not alive:
                 continue
             lead = CARS[alive[0]]
+            _uc_cv = int(lead.get('class', 181)) if _cv_per_camp.get(cv.get('camp', 0), 0) <= 1 else CAR_RECORD_UC_ICON_ONLY
             dest = cv['dst'] if cv['phase'] == 'out' else cv['src']
             txy = tc_scene_xy(terrain, dest) if isinstance(dest, int) and dest >= 0 else None
             lx, ly = lead['pos'][0], lead['pos'][1]
             out.append({'camp': cv.get('camp', 0), 'kind': GROUP_KIND['lorry'],
                         'strategy': GROUP_STRATEGY['return'] if cv['phase'] == 'back' else (GROUP_STRATEGY['hold'] if cv['phase'] == 'unload' else GROUP_STRATEGY['goto']),
-                        'f3': 1, 'uc': int(lead.get('class', 181)), 'count': min(255, len(alive)),
+                        'f3': 1, 'uc': _uc_cv, 'count': min(255, len(alive)),
                         'x': txy[0] if txy else lx, 'y': txy[1] if txy else ly, 'tx': lx, 'ty': ly,
                         # v967f5b: w6 is the GROUP ID the client binds a frame to (v941f5 note). Convoy id 1
                         # bound the box to tank column 1 - a frame across 10 x 7 km of map (Alon 10-24
@@ -20861,7 +21049,7 @@ def room_group_records(room_id, viewer_camp=None):
             _aa = c.get('name') in ('AA Car', 'Flak Car')
             out.append({'camp': c.get('camp', 0), 'kind': GROUP_KIND['lorry'],
                         'strategy': GROUP_STRATEGY['defend'] if _aa else (GROUP_STRATEGY['goto'] if c.get('goal') is not None else 0),
-                        'f3': 1, 'uc': int(c.get('class', 181)), 'count': 1,
+                        'f3': 1, 'uc': CAR_RECORD_UC_ICON_ONLY, 'count': 1,      # v968f5p: a loose car's record bound every same-class car of the camp
                         'x': c['pos'][0], 'y': c['pos'][1], 'tx': c['pos'][0], 'ty': c['pos'][1],
                         'w6': 0x4000 | (int(onum) & 0x3fff)})       # v967f5b: never a column id
     return out
@@ -22104,6 +22292,10 @@ def crater_record_in(s, body, echo=False):
     it to the sender, as the plain-form generic echo always did. v831f5: tagged with the scene it
     fell nearest to (the bomber's own position), so metal delivered there can repair it."""
     _tank_bomb_crater_link(s)                 # v947f5: the tank hits of the last few seconds were a bomb's
+    try:
+        bomb_splash_on_cars(s, body)          # v968f5o: lorries in the blast radius
+    except Exception:
+        logx('CARHIT', 'bomb splash failed')
     try:
         _crpkt = build_appspace_pkt(body)
         _hist = ROOM_CRATERS.setdefault(s.current_room, [])
@@ -23482,6 +23674,7 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   client culls the canopy as a stale/disconnected object (bsr=0) at
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
+CRASHLAND_ENEMY_CAPTURE = True   # v968f5l: a MEC 2 crash-landing whose nearest scene is another camp's = captured
 COLLISION_DEATH_S   = 20.0   # v945f5: a MEC 2 exit this soon after a msg-125 collision on the plane is a collision death
 SELF_DEATH_S        = 30.0   # v945f5: ... or after a msg-28 that names the plane's OWN object as the hunter (own bomb)
 BAIL_CREW_BACK_S    = 3.0    # v943f5: human-bit-clear chutes released this long BEFORE the pilot's own chute are
@@ -24429,6 +24622,7 @@ def _vs_victim_rank(victim):
 
 GROUND_DEATH_WINDOW_S = 180.0   # v694f5: a kill within this long after a repair grant, with no climb since, is a ground death
 GROUND_DEATH_CLIMB_M  = 40.0
+GROUND_DEATH_FRESH_HIT_S = 15.0  # v968f5m: a hit by the named killer this recent makes a ground death a vulch, not a blast
 STALE_EXIT_S          = 10.0    # v701f5: a hunter-named death within this of the plane's ServerConfirm, with no hit held, is the client's stale record
 KILL_FALLBACK_CREDIT  = False   # v695f5: OFF - 'most recent shooter in the window' handed Skyyr a kill on
                                 # MightyMax he never hit. The EXACT (hunter named) and LATCH (msg-28 hit
@@ -24598,12 +24792,33 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
             # altitude, 'no climb since' came out false for an airborne pilot, and Taurus's
             # collision kill on SpUn (online 09-15 18:36:54) was refused. A grant with no
             # altitude on record, or a plane that has since climbed, is not a ground death.
+            # v968f5m [VULCHING IS A KILL] (Gary/WPG_Chuckdiver messages25, 17:37:38: strafed MILLHOUSE13
+            # parked at his field, the blue 'destroyed' line on his screen, 'gets NO kill' here). v694f5
+            # was written for a parked damaged plane dying from a BUILDING BLAST and crediting the last
+            # hitter of the fight before the landing - a stale hit. A hit on this plane by the named
+            # killer inside GROUND_DEATH_FRESH_HIT_S (msg-33 hit record or the msg-28 damage latch) is
+            # not stale: he shot it on the ground, the kill is his.
+            _fresh_hit = False
+            try:
+                _vo2 = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
+                _lh2 = PLANE_LAST_HIT.get(_vo2) if _vo2 is not None else None
+                _kobj = getattr(killer, 'my_obj_number', None)
+                if _lh2 and _lh2[0] == _kobj and time.time() - _lh2[1] <= GROUND_DEATH_FRESH_HIT_S:
+                    _fresh_hit = True
+                elif time.time() - float(getattr(victim, 'last_damaged_at', 0.0) or 0.0) <= GROUND_DEATH_FRESH_HIT_S \
+                        and (hunter_obj is None or hunter_obj == _kobj):
+                    _fresh_hit = True
+            except Exception:
+                pass
             if _ga is not None and _gz is not None and _cz is not None \
-                    and time.time() - _ga < GROUND_DEATH_WINDOW_S and (_cz - _gz) <= GROUND_DEATH_CLIMB_M:
+                    and time.time() - _ga < GROUND_DEATH_WINDOW_S and (_cz - _gz) <= GROUND_DEATH_CLIMB_M and not _fresh_hit:
                 log('DEATH', f'{victim.current_pilot} destroyed ON THE GROUND during repair '
                              f'({time.time() - _ga:.0f}s after the grant, climb {_cz - _gz:.0f} m) - '
                              f'{killer.current_pilot} was the last hitter but gets NO kill; booked as a crash')
                 killer = None
+            elif _fresh_hit and _ga is not None and time.time() - _ga < GROUND_DEATH_WINDOW_S:
+                log('DEATH', f'{victim.current_pilot} destroyed on the ground {time.time() - _ga:.0f}s after a repair grant, but '
+                             f'{killer.current_pilot} hit it within {GROUND_DEATH_FRESH_HIT_S:.0f}s -> strafed on the ground, kill stands [v968f5m]')
         except Exception:
             logx('DEATH', 'ground-death check failed')
 
@@ -29686,6 +29901,14 @@ def _ingame_own_object_removed(s, tb, stored):
     try:
         _ids_pre = ([struct.unpack_from('<H', stored, i)[0] for i in range(5, len(stored) - 1, 2)]
                     if len(stored) >= 7 and (len(stored) - 5) % 2 == 0 else [])
+        # v968f5l [A DEATH SWALLOWED AS A CULL LIST] (Bama 10-24 14:13:30, forced to crash-land by
+        # BoogDog's bomber: no loss, no kill): his 15-byte exit notify [0x0113 own plane][0x2d]
+        # [01 01 00 01 ..] read as ids 0x0113, 0x142d, 0x0101, 0x0100 .. and 0x0100/0x0101 happened
+        # to be live TRAIN numbers, so v712f5's 'any known AI id anywhere' rule took the whole
+        # notify for a cull list. A notify that STARTS with the session's own plane is its exit,
+        # never a cull list (the TAB cull list of v692f5 comes as its own message after it).
+        if _ids_pre and _ids_pre[0] == getattr(s, 'my_obj_number', None):
+            _ids_pre = []
         if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS or i in SHIPS for i in _ids_pre):
             _ai_cull_list(s, _ids_pre)
             return
@@ -29850,6 +30073,14 @@ def _ingame_own_object_removed(s, tb, stored):
             # the peers must not draw a kill line for it either: relay a clean 3-byte exit
             exitb = 0x90; mec_nib = 9; se = 0
             stored = bytearray(stored); stored[7] = 0x90; stored = bytes(stored)
+        if getattr(s, '_soft_boot', False) and (scored or is_death):
+            # v968f5q [SOFT BOOT = NO LOSS] (Alon 22:04): a graceful update/restart must cost nobody a
+            # plane, a pilot or a streak - whatever exit code the client sends as the link closes
+            # under it is the SERVER's doing, booked as a clean exit; peers get a clean 3-byte exit.
+            log('DEATH', f'{s.current_pilot}: exit 0x{exitb:02x} (MEC {mec_nib}) during a soft boot -> clean exit, no loss')
+            scored = False; is_death = False
+            exitb = 0x90; mec_nib = 9; se = 0
+            stored = bytearray(stored); stored[7] = 0x90; stored = bytes(stored)
         # the cull list riding behind the own-plane entry: AI objects (tank / soldier / train, v697f5)
         # AND PEER PLANES (v700f5: online run 02:02:29, tail = 0x03e9 BoogDog, 0x045b SilverFox ...
         # - the client's far-peer cull at a TAB; unprocessed, those peers were not re-created for
@@ -29957,6 +30188,24 @@ def _ingame_own_object_removed(s, tb, stored):
                              + ' [PILOT_FATE/v532f5]')
             elif mec_nib in (5, 2):
                 _cap = (se == 12)
+                # v968f5l [CRASH-LANDING IN ENEMY TERRITORY = CAPTURED] (Alon 21:20: SeanTB1 15:41:36
+                # crash-landed on an enemy base, MEC 2 SE 13, booked 'pilot safe'). The client's SE 12
+                # is the only capture code it sends and it did not send it here; the server knows the
+                # ground - the nearest scene's owner (the TC territory rule) - so a MEC 2 down whose
+                # nearest scene belongs to another camp is a capture: plane and pilot lost.
+                _cap_where = ''
+                if mec_nib == 2 and not _cap and CRASHLAND_ENEMY_CAPTURE and room_has_economy(s.current_room):   # TC arenas: territory rule
+                    try:
+                        _cpos = s.__dict__.get('_pos_xy'); _cnat = getattr(s, 'nation', None)
+                        _cterr = _probe_terrain_for_room(s.current_room)
+                        _near = tc_nearest_scene_any(_cterr, _cpos[0], _cpos[1]) if (_cpos and _cnat is not None) else None
+                        if _near is not None:
+                            _ccamp = scene_camp(_cterr, _near[0])
+                            if _ccamp is not None and _ccamp <= 6 and _ccamp != _cnat:
+                                _cap = True
+                                _cap_where = f' in ENEMY territory (nearest scene {_near[0]} {tc_scene_xy(_cterr, _near[0])[2]} {_near[1] / 1000:.1f} km, camp {_ccamp})'
+                    except Exception:
+                        logx('DEATH', 'crash-land territory check failed')
                 # v945f5 [COLLISIONS AND SELF-INFLICTED DEATHS ARE DEATHS] (user 10-20): MEC 2 is the
                 # client's collision/crash-land exit and was booked 'pilot safe (crash-land)' - so a
                 # mid-air with a teammate, or your own bomb blast (msg-28 names your own plane as the
@@ -29976,8 +30225,13 @@ def _ingame_own_object_removed(s, tb, stored):
                 else:
                     log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) -> plane '
                                  f'counted + shooter credited; pilot '
-                                 f'{"CAPTURED" if _cap else "pending (bail) / safe (crash-land)"} '
+                                 f'{"CAPTURED" + _cap_where if _cap else "pending (bail) / safe (crash-land)"} '
                                  f'[PILOT_FATE]')
+                    if _cap_where:
+                        try:
+                            tc_say(s.current_room, msg_prefixed('EVENT', f'{s.current_pilot} crash-landed in enemy territory and was captured'))
+                        except Exception:
+                            pass
             else:
                 log('DEATH', f'{s.current_pilot} clean exit (MEC&0xf={mec_nib} SE={se}) -> no loss '
                              f'[PILOT_FATE]')
@@ -32321,6 +32575,21 @@ def _auto_resupply_check(s, sub, pl):
                                   # position-based field resolution may want a last-known field
                                   # as a tie-breaker. Nothing depends on it today.
 
+def _landed_at_field_recently(s, now=None):
+    """v968f5m: the pilot asked for (and got) a start place while his plane stayed alive = he landed
+    at a field and was 'accepted to this airfield' (the TAB teleport sends an exit right after its
+    grant, so an alive plane LANDED_ACCEPT_S after a grant is on a runway). Used to lift the
+    special-telemetry holdoff, which exists for the bombsight run - a plane on a field is not on
+    a bomb run, whatever view its pilot has open."""
+    try:
+        now = now or time.time()
+        g = s.__dict__.get('_last_sp_grant')
+        return bool(g) and (now - g[0]) <= LANDED_ACCEPT_S and getattr(s, 'my_obj_number', None) is not None \
+            and not getattr(s, '_left_world', False) and g[0] > float(s.__dict__.get('_obj_confirmed_at', 0.0)) + 5.0   # the grant came AFTER this plane's confirm = a landing, not its spawn
+    except Exception:
+        return False
+LANDED_ACCEPT_S = 90.0
+
 def ground_stop_eligible(s, now):
     """v422f5: THE single ground-stop judgement, FAIL-CLOSED. Replaces the v277 gate stack.
 
@@ -32360,7 +32629,7 @@ def ground_stop_eligible(s, now):
     # frame) means the normal-form position stream is untrustworthy for this window: the field
     # case showed it FROZEN at one value with a live tick while the plane flew its bomb run.
     _odd = getattr(s, '_odd_telem_time', 0.0)
-    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S:
+    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S and not _landed_at_field_recently(s, now):   # v968f5m
         return False, 'special-form', None
     newest = hist[-1]
     t_new, p_new = newest[0], newest[1]
@@ -32737,7 +33006,12 @@ def _handle_repair_request_119(s, pl):
     # v446f5: the special-form holdoff applies here too - during a bombsight run the normal-
     # form position stream freezes (movement reads 0) while the plane is very much airborne.
     _odd = getattr(s, '_odd_telem_time', 0.0)
-    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S:
+    if _odd and (now - _odd) < ODD_TELEM_HOLDOFF_S and not _landed_at_field_recently(s, now):
+        # v968f5m [RE-ARM 'TAKING AN AGE'] (Gary/WPG_Chuckdiver 17:55:02 and 18:20:10): landed, was
+        # 'accepted to this airfield', sent 119 - and sat for 20-36 s because his client was sending
+        # the special-form frames (map / panel view open on the ground, the TC panel polls 69/71 at
+        # 3 Hz in his log) which re-armed the 20 s bombsight holdoff every time. A plane that got a
+        # start place while alive is on a field: the holdoff is lifted for it (settle test stays).
         # v865f5: DEFER instead of refusing. A bomber that has just landed can still be sending
         # the special form (bombsight / autopilot view left open on the ground), and the refusal
         # dropped the request on the floor - the pilot sat on the runway un-serviced until he

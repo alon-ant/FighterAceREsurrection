@@ -1,3 +1,113 @@
+v968f5q (2026-10-24) - soft boot costs nobody anything (Alon 22:04)
+- The graceful drain closed the sessions through the ordinary teardown, whose anti-quit rule books
+  an AIRBORNE disconnect as a death (plane + pilot lost, aces reset) - so a graceful update cost
+  every flying pilot a life. Now every session is flagged soft-boot before the close frames go
+  out: the teardown books nothing, and any exit code the client sends as the link closes under it
+  is rewritten to a clean exit (peers get the clean 3-byte form, no kill line, no tournament life).
+  Log: 'graceful: N session(s) flagged soft-boot - no plane / pilot / streak loss will be booked'.
+
+v968f5o / v968f5p (2026-10-24) - convoy field reports (Sinistarr, messages94)
+- BOMBS ON LORRIES (v968f5o): 'none are taking damage from bombs/rockets'. The client's splash code
+  reports hits on NetTanks (msg-51 bursts with the crater) but not on NetCars. The bomber's own
+  crater record (msg 52) carries every impact - decoded from the client's Crater3D (FUN_00628e80):
+  square u16 -> 4096 m cell (((sq & 0x3f) - 32), ((sq >> 6) - 32)), dword -> offsets x = (d >> 17)
+  x 0.125 m, y = ((d >> 2) & 0x7fff) x 0.125 m, size = (d & 3) + 1. The server now applies the
+  blast to every car within the size's radius (25/35/50/70 m, 70/110/170/260 damage at the centre,
+  30% at the edge; lorries have 40-90 hp) with the bomber credited (CARHIT '.. (bomb splash 12 m
+  (size 2))', the usual kill entry). Tanks keep the client's own hits. ROCKETS leave no crater
+  and still depend on the client - open.
+- GUNS ON LORRIES: 'only the lead and trailing vehicle take gun damage'. roadhit.cpp (FUN_00689380)
+  reports a hit on ANY car whose armour threshold (class info +0x20 = 5.0 for all nine classes)
+  the round beats, so the server side is not the gate; and the one CARHIT of the whole afternoon
+  came from Taurus while Sinistarr's six 'You have hit GER car' lines at 14:45:07 produced none -
+  his msg-51s never arrived. Not understood yet; needs a `reltrace` on a pilot strafing a lorry
+  (whether the reports leave his client reliable or not at all).
+- MAP BOX ROUND TWO CONVOYS (v968f5p): the binder FUN_004f0e50 attaches to a kind-7 record every
+  live object of the camp whose class == uc; the group-id test exists for tanks/soldiers only, a
+  car binds unconditionally - two convoys led by AA Cars were both bound to each record, the box
+  spanned the pair and hid the scene markers inside. A camp with one convoy keeps its box; with
+  several, the records carry a class no convoy vehicle has (Radar Car) so nothing binds - icon at
+  the lead, no box. Loose cars: icon only.
+- CRASH IN ENEMY TERRITORY, pilot kept: v968f5l (crash-landing = captured by territory). A flying
+  crash (MEC 1) always costs the pilot already.
+- Convoy AA 'sniper 30 mm' (5-8 hits kill an F4U-4C, pilot hits at some angles; tied to the AA
+  slider, which is at 1): the escorts' guns run on each pilot's own client with the arena's AA /
+  Flak quality - the server does not aim them. Pending discussion: options are the AA quality
+  slider, fewer escorts (convoy_escort web knob: aa / flak / none), or a lorry class without the
+  gun as the escort.
+
+v968f5n (2026-10-24) - GRACEFUL update / restart (Alon 21:49)
+- Web admin: a 'Graceful (10 s countdown, drain pilots first)' box next to Update & Restart and
+  Restart, ticked by default; untick for the old hard way. Console: `update graceful`,
+  `restart graceful` (plain `update` / `restart` unchanged).
+- drain_players: 'SERVER UPDATE in 10 seconds - you will be disconnected. Land if you can; rejoin
+  in about a minute.' to everyone (in-game: the yellow banner line, lobby: a Server chat line),
+  then 5..1 each second, 'NOW - disconnecting', then every session gets the transport FIN frame
+  twice (the v490f5 RE: a FIN-flagged frame to a connected client makes it FIN back and close
+  cleanly - 'Network connection closed.', back to the launcher, no dirty-close hang); the server
+  waits up to 8 s for the clients' own disconnects, tears down whatever is left, then pulls /
+  restarts. Nobody connected: straight to the pull. The update/restart now runs on its own
+  thread so the console keeps answering during the countdown.
+- VERIFY: with a pilot in the arena tick the box, press Update & Restart: he sees the countdown
+  lines, the banner, and at zero drops to the launcher with 'Network connection closed'; the log
+  shows 'graceful: close frames sent to N session(s)' and 'drained - N disconnected on their own'.
+
+v968f5m (2026-10-24) - Gary/WPG_Chuckdiver (messages25): 'not credited kills', 'an age to re-arm'
+- KILL: 17:37:38 he strafed MILLHOUSE13 parked at his field - the client drew his blue 'destroyed'
+  line (the victim's exit named him), the server said 'destroyed ON THE GROUND during repair (111s
+  after the grant, climb 37 m) - WPG_Chuckdiver was the last hitter but gets NO kill'. v694f5 was
+  written for a parked damaged plane dying from a BUILDING BLAST and crediting the stale last
+  hitter of the fight before. A hit on this plane by the named killer inside
+  GROUND_DEATH_FRESH_HIT_S (15 s; msg-33 hit record or the msg-28 damage latch) is not stale:
+  he shot it on the ground, the kill stands ('strafed on the ground, kill stands'). His 17:49 and
+  17:52 kills were booked normally.
+- RE-ARM: 17:45:24 the field he landed at had NO AMMO ('ammo SHORT +0kg, pool now ammo 0') - the
+  front-line supply starvation of v968f5j (convoys now come). 17:55:02 and 18:20:10: landed,
+  'accepted to this airfield', 119 sent - and serviced 20 s / 36 s later: his client was sending
+  the special-form telemetry (a map / panel view open on the ground; the TC panel polls 69/71 at
+  3 Hz in his log) which re-armed the 20 s bombsight holdoff on every frame. A plane that got a
+  start place while alive (the landing accept; a TAB sends its exit right after) is on a field:
+  the holdoff is lifted for it for LANDED_ACCEPT_S (the settle test stays). Normal landings were
+  being serviced within ~1 s all day (24 deferred requests, 2 of them his).
+
+v968f5l (2026-10-24 evening) - four field reports (Alon 21:20)
+1. TAURUS CTD 18:15:54 (messages961, '!Objects[no->Number()]' on car 771) and MOIRA CTD 18:16:51
+   (messages80, TrnWorld.cpp:325 'IsPresentObject' on the first NetTank frame after her spawn):
+   both sat in the HQ screen for 50-80 minutes with the world kept. AI objects raised meanwhile were
+   CREATED ON THEM there - Taurus's client logged 'Receive create object 771' at 17:16 but never
+   'Create NetCar': out of the world the record only books the slot and waits for a first state
+   frame the tiers never sent; the silence cull does not run in the HQ either (his own cull list on
+   return, dif=4958 s, covered only the 28 cars he had instantiated before). At his ServerConfirm
+   the server (which by then held him as a peer of nothing) re-created 771 -> second record on the
+   booked slot -> assert; Moira's was the same stuck record meeting its frame. FIX: a NEW AI object
+   (tank/car/ship/soldier/train/column) is created only on a client that is IN THE WORLD (confirmed
+   plane, not left) - _spawn_in_range now checks that first, and spawn_tank/car/ship use it too.
+   Everyone else gets the objects from the ServerConfirm re-create of his next life, in range.
+2. BAMA 14:13:30 (messages09): forced to crash-land by BoogDog's bomber, no loss booked, no kill.
+   His 15-byte exit notify [0x0113 own plane][0x2d][01 01 00 01 ..] parsed as ids 0x0113, 0x142d,
+   0x0101, 0x0100 .. and 0x0100/0x0101 were live TRAIN numbers -> v712f5's 'any known AI id anywhere'
+   rule took the notify for a cull list and swallowed it (CULLRX line, nothing after). A notify
+   that starts with the session's own plane is its exit, never a cull list.
+3. SEANTB1 15:41:36: crash-landed on an enemy base, MEC 2 SE 13 -> 'pilot safe'. The client sends
+   SE 12 (captured) only for its own CrashOnEnemyRunway rule; the TC territory rule is the
+   server's: in an economy arena a MEC 2 crash-landing whose NEAREST scene belongs to another camp
+   is a capture - plane and pilot lost, 'EVENT: <pilot> crash-landed in enemy territory and was
+   captured' to the room (CRASHLAND_ENEMY_CAPTURE). Friendly ground (Bama's case) stays safe.
+4. messages97/98 (Taurus): not crashes - 'vcncConnect fails / User has cancelled' and a clean
+   client exit from the lobby ('End of log file'); nothing to fix.
+
+v968f5k (2026-10-24) - arena weather stuck on the cycle's last rung after the editor turned it off
+- Alon 21:00: cycle set to 0, clouds back to Cumulus, rain off, even the override unticked - still
+  Stratus 100% from 3,100 ft. The web save (`arena_changed`) only re-armed the cycle timer: the
+  room's LIVE weather state (the ladder's last rung) was left in WEATHER[room], re-sent to every
+  joiner at spawn ('the room's live weather'), and pilots in the world never received a msg 137
+  with the new forecast - the client keeps whatever weather it last built.
+- weather_on_settings_changed: a save pushes the arena's forecast (GAME_DEF, plus the rw_* override
+  when ticked) to everyone in the world, resets the live state to it (cycle on: the ladder restarts
+  from the new forecast; cycle off: live state cleared, joiners take the GAME_DEF) and re-arms or
+  cancels the timer; the room hears 'WEATHER: Weather back to the arena forecast' when a live
+  state was replaced. Console `weather <room> reset` did the same by hand already.
+
 v968f5j (2026-10-24) - on-demand convoys never came after the restart; bombed-out fields never asked
 - Alon 16:50 (online TC): front line fields bombed out of supplies, no convoys. Live v967f5c had run
   78 convoys ('requested: stock 27%'); after the 13:16 restart (v968f5g) not one in 40 minutes -

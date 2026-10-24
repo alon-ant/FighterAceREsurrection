@@ -347,6 +347,8 @@ LOG_CONSOLE_PAGE = """
                             onclick="doUpdate();">&#8635; Update &amp; Restart</button>
                     <button style="width:auto; padding:9px 20px; margin:0; background:#6c757d;"
                             onclick="doRestart();">&#8635; Restart (no update)</button>
+                    <label style="margin:0; white-space:nowrap;" title="10 s countdown in the arena and lobby, then every pilot is disconnected cleanly before the pull/restart. Untick for the hard way: no warning, everyone dropped by the restart.">
+                      <input type="checkbox" id="grace" checked style="width:auto; margin:0 4px 0 0;"> Graceful (10 s countdown, drain pilots first)</label>
                     <small style="color:#666; flex:1; min-width:280px;">
                       <strong>Update &amp; Restart</strong> runs <code>git pull --ff-only</code> then
                       restarts (tagged <code>UPDATE</code>). <strong>Restart</strong> reboots the
@@ -410,30 +412,35 @@ LOG_CONSOLE_PAGE = """
                   else if(e.key==='ArrowDown'){ if(HI<HIST.length-1){HI++; this.value=HIST[HI];}
                     else {HI=HIST.length; this.value='';} e.preventDefault(); }
                 });
+                function graceArg(){ var g=document.getElementById('grace'); return (g && g.checked) ? ' graceful' : ''; }
                 function doUpdate(){
+                  var g = graceArg();
                   if(!confirm('Update and restart the server?\\n\\n'
                     + '\\u2022 git pull --ff-only in the server directory\\n'
                     + '\\u2022 the server process restarts\\n'
-                    + '\\u2022 ALL CONNECTED PLAYERS ARE DISCONNECTED\\n\\n'
+                    + (g ? '\\u2022 GRACEFUL: 10 s countdown to every pilot, then a clean disconnect for all, then the pull\\n\\n'
+                         : '\\u2022 HARD: ALL CONNECTED PLAYERS ARE DISCONNECTED without warning\\n\\n')
                     + 'The pull is aborted (and nothing restarts) if the working tree has\\n'
                     + 'local edits or the branches have diverged.')) return;
                   document.getElementById('auto').checked = true; toggle();
                   fetch('/admin/console_cmd',{method:'POST',
                     headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                    body:'cmd=update'})
+                    body:'cmd=update' + encodeURIComponent(g)})
                     .then(function(){setTimeout(reload,300);})
                     .catch(function(){});
                 }
                 function doRestart(){
+                  var g = graceArg();
                   if(!confirm('Restart the CURRENT server build now?\\n\\n'
                     + '\\u2022 NO git pull - the running code is unchanged\\n'
                     + '\\u2022 the server process restarts\\n'
-                    + '\\u2022 ALL CONNECTED PLAYERS ARE DISCONNECTED (they are warned first)\\n\\n'
+                    + (g ? '\\u2022 GRACEFUL: 10 s countdown to every pilot, then a clean disconnect for all\\n\\n'
+                         : '\\u2022 HARD: ALL CONNECTED PLAYERS ARE DISCONNECTED (one warning line, 1.5 s)\\n\\n')
                     + 'Use this to clear state or recover a wedged server.')) return;
                   document.getElementById('auto').checked = true; toggle();
                   fetch('/admin/console_cmd',{method:'POST',
                     headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                    body:'cmd=restart'})
+                    body:'cmd=restart' + encodeURIComponent(g)})
                     .then(function(){setTimeout(reload,300);})
                     .catch(function(){});
                 }
