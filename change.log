@@ -1,3 +1,37 @@
+v968f5j (2026-10-24) - on-demand convoys never came after the restart; bombed-out fields never asked
+- Alon 16:50 (online TC): front line fields bombed out of supplies, no convoys. Live v967f5c had run
+  78 convoys ('requested: stock 27%'); after the 13:16 restart (v968f5g) not one in 40 minutes -
+  nothing in the code path changed, the STATE did. Two silent gates in convoy_request: (1) in
+  trains-only mode a scene 'served by a live train' was skipped - after a restart every rail line
+  has a fresh train, so every station was skipped (before the restart those trains had been shot
+  up, which is the only reason the convoys ran); a train's fuel/ammo drop is a few hundred kg
+  against a 744 kg per-spawn draw, so 'served' never meant 'supplied'. (2) a field whose storage
+  is bombed out has an EFFECTIVE capacity of 0 (v677f5 capacity loss) - _station_fill returns no
+  entry for it, so it was neither 'low' nor in 'need' - the very field the user's rule was for.
+- Now a critically low OR bombed-out scene calls a convoy whatever the trains do (cooldown 10 min
+  per scene, 2 per camp still apply; the supply mode only governs SCHEDULED traffic). A scene with
+  destroyed storage asks for the fuel/ammo its lost tanks held plus metal to rebuild them (2,500 kg
+  per lost building, up to 3 box lorries) - the convoy repairs on unload (existing v964f5 path) and
+  the fuel/ammo then fits. The web text on the TC tab says so.
+- VERIFY on live after deploy: within a minute of a bombed field's stock dropping below 35% (or its
+  tanks being destroyed) a CONVOY line 'scene N (camp c) requested supplies {...} -> convoy k from
+  scene m' with reason 'stock x% + storage destroyed' / 'storage bombed out'.
+
+v968f5i (2026-10-24) - forced landing with a named shooter cost the pilot
+- Alon 13:45 live: engine shot out by Bama, made it back to his own field, crash-landed - exit
+  MEC=2 EEC=13 carrying the hunter. The 13-byte entry made the exit 'scored' and the shot-down
+  branch booked plane AND pilot lost (-460, kills-in-a-row broken). A crash-landing (MEC 2) or a
+  bail (MEC 5) with a named shooter is the plane lost + the shooter credited; the pilot's fate is the
+  (5, 2) branch's: captured on SE=12, dead on a collision / own blast, otherwise safe - so those two
+  codes now skip the shot-down branch whatever the entry size. Taurus's bail at 13:43 was booked
+  right (kill to Alon at the bail, Taurus captured under the canopy).
+
+v968f5h (2026-10-24) - English Channel sails direct port to port
+- Alon: the Channel map is small with no islands in the game, so no lanes are needed there.
+  sealanes_trn06.json carries "direct": true; ship_lane_route then reports 'direct sailing' for the
+  straight anchor-to-anchor line (other terrains still get the 'NO lane mapped' warning). Lanes stay
+  optional on a direct map; the anchors still want to be on water (##mark + ship port .. anchor).
+
 v968f5g (2026-10-24) - every TAB field switch was being booked as a 'refused start place'
 - Alon asked to look at the 'place marked refused' line in Bama's episode. Client log: the normal
   TAB airfield switch is 'TAB. Asking SP on AF 14' -> grant -> 'ExitEvent MissExitCode=9' ->

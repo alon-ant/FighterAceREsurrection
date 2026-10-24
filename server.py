@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f5g'
+VERSION = 'v968f5j'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15641,10 +15641,26 @@ def convoy_request(rid, sidx, reason='', force=False):
     camp = scene_camp(terrain, sidx)
     if camp is None or camp > 6:
         return None
-    if not force and supply_mode_for_room(rid) == 'train' and scene_served_by_train(rid, terrain, sidx, camp):
-        return None                                   # the train on its line will bring it
+    # v968f5j [NO CONVOYS AFTER THE RESTART] (Alon 10-24 16:50: 'front line fields being bombed out of
+    # supplies, no supply convoys spawn'). Live v967f5c ran 78 convoys; after the 13:16 restart not
+    # one in 40 min. Two gates did it, both silent: (1) trains-only mode skipped any scene 'served by
+    # a train' - after a restart every line has a fresh train, so every station was skipped, while
+    # the train's fuel/ammo drops are a few hundred kg against a 744 kg per-spawn draw (the pre-restart
+    # convoys only ran because those trains had been destroyed); (2) a field whose storage is BOMBED
+    # OUT has an effective capacity of 0, so it never counted as 'low' and had no 'need' - exactly
+    # the field the user's rule was written for. Now: a critically low or bombed-out scene calls a
+    # convoy whatever the trains do (the 10 min cooldown and the 2-per-camp cap still apply; the
+    # supply mode only decides the SCHEDULED traffic); a scene with destroyed storage asks for the
+    # fuel/ammo its lost tanks held plus metal to rebuild them (the convoy repairs on unload).
     frac, det = _station_fill(rid, terrain, sidx)
     need = {k: int(cap * TRAIN_DROP_FILL) - have for k, (have, cap, prod) in det.items() if not prod and cap > 0 and have < cap * CONVOY_LOW_FRAC}
+    _lost_objs = _SCENE_CAP_LOSS_OBJ.get((rid, sidx)) or {}
+    if _lost_objs:
+        for _r, _vol in _lost_objs.values():
+            if _r in ('fuel', 'ammo'):
+                need[_r] = need.get(_r, 0) + int(_vol * TRAIN_DROP_FILL)
+        need['metal'] = max(need.get('metal', 0), min(3, len(_lost_objs)) * int(CONVOY_CARGO_KG['Furgon'][1]))
+    need = {k: v for k, v in need.items() if v > 0}
     if not force and not need:
         return None
     if force and not need:
@@ -15672,10 +15688,13 @@ def convoy_low_stock_scan(rid):
         if camp is None or camp > 6 or not scene_has_supply(terrain, sidx):
             continue
         frac, det = _station_fill(rid, terrain, sidx)
-        if frac is None or any(prod for _h, _c, prod in det.values()):
+        if any(prod for _h, _c, prod in det.values()):
             continue
-        if any(have < cap * CONVOY_LOW_FRAC for have, cap, prod in det.values() if cap > 0):
-            convoy_request(rid, sidx, reason=f'stock {frac:.0%}')
+        _bombed = bool(_SCENE_CAP_LOSS_OBJ.get((rid, sidx)))            # v968f5j: storage destroyed -> cap 0 is not 'full'
+        if frac is None and not _bombed:
+            continue
+        if _bombed or any(have < cap * CONVOY_LOW_FRAC for have, cap, prod in det.values() if cap > 0):
+            convoy_request(rid, sidx, reason=(f'stock {frac:.0%}' if frac is not None else 'storage bombed out') + (' + storage destroyed' if _bombed and frac is not None else ''))
 
 def ensure_camp_convoys(rid):
     """Scheduled convoys (every convoy_minutes per camp): to the camp's emptiest consumer scene
@@ -16042,7 +16061,9 @@ def ship_lane_route(terrain, a, b):
             lane = [tuple(p) for p in ln.get('points') or []]; break
         if int(ln.get('from', -1)) == b and int(ln.get('to', -1)) == a:
             lane = [tuple(p) for p in reversed(ln.get('points') or [])]; break
-    note = 'mapped lane' if lane is not None else 'NO lane mapped - straight line'
+    # v968f5h: a terrain flagged "direct" (English Channel: small, no islands in the game - Alon 16:36)
+    # sails port to port in a straight line by design; only the anchors need to be on water
+    note = 'mapped lane' if lane is not None else ('direct sailing' if sl.get('direct') else 'NO lane mapped - straight line')
     pts += lane or []
     pts += [tuple(p) for p in reversed(pb.get('approach') or [])]
     pts.append(anc_b)
@@ -29901,7 +29922,14 @@ def _ingame_own_object_removed(s, tb, stored):
                              f'counted + shooter credited; '
                              + ('pilot was ALREADY KILLED in the cockpit -> pilot lost [v918f5]' if _ck_on_chute
                                 else 'pilot on chute, fate pending [PILOT_FATE]'))
-            elif scored or mec_nib == 1:
+            elif (scored or mec_nib == 1) and mec_nib not in (5, 2):
+                # v968f5i [FORCED LANDING IS NOT A DEATH] (Alon 10-24 13:45: engine shot out by Bama,
+                # made it back to his own field, crash-landed - exit MEC=2 EEC=13 with the hunter in
+                # the entry): the 13-byte entry made it 'scored' and this branch booked plane AND
+                # pilot lost (-460, streak broken). A crash-landing (MEC 2) or a bail (MEC 5) with a
+                # named shooter is the plane lost and the shooter credited; the PILOT's fate is the
+                # (5, 2) branch's business (captured on SE=12, dead on a collision / own blast, safe
+                # otherwise) - so those two codes skip this branch whatever the entry size.
                 # v909f5 [KILLED YOURSELF = A DEATH] (Skyyr 10-02): MEC 1 is the client's crash /
                 # explosion exit. It was a death only while FLYING (movement >= CRASH_MOVEMENT_MIN);
                 # parked it fell through to 'clean exit' - so blowing yourself up on the ground (own
