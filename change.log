@@ -1,3 +1,24 @@
+v968f5s (2026-10-24) - the REAP flood (SneekyPete): a SYN retransmit is not a reconnect
+- Live 19:19:06-48: 'reaped stale session for account="SneekyPete" (reconnect)' 28 times in 42 s.
+  His client re-sent its SYN every 1.5 s (it never saw our SYNACK - or saw it too late); each SYN
+  created a NEW session and the reconnect reaper tore the previous one down, so the very session
+  that could have answered his retry was killed by the retry. Same loop on 10-23 22:29 (14 x).
+- handle_syn: a SYN from the same ip:port with the same connection id while that session is still
+  logging in (no auth yet, within SYN_DUP_WINDOW_S of its last packet) is a retransmit: the
+  handshake is re-sent on the EXISTING session (SYNACK with the same time base, beacon, cmd=100),
+  nothing new, nothing reaped - logged 'duplicate SYN #n from ip:port .. handshake re-sent'. The
+  Ready line now shows the source ip:port. If his login still never completes after this, our
+  SYNACK is not reaching his client (firewall / NAT on his side) - ask for his messages log.
+
+v968f5r (2026-10-24) - the door closes while the server drains (Alon 22:14)
+- From the first countdown line until the restart, DRAINING_SINCE is set and handle_syn answers no
+  SYN: a newcomer's connect times out and the launcher reports the server unreachable, instead of
+  a login finishing mid-countdown and being booted, or slipping in after the drain and being
+  dropped hard by the restart. Logged once per address per 5 s: 'connection from a.b.c.d REFUSED -
+  server is draining for a restart (Ns)'. If no restart follows (git pull aborted / nothing to pull
+  / restart mode none) the door reopens at once ('no restart followed the drain -> the door is
+  open again').
+
 v968f5q (2026-10-24) - soft boot costs nobody anything (Alon 22:04)
 - The graceful drain closed the sessions through the ordinary teardown, whose anti-quit rule books
   an AIRBORNE disconnect as a death (plane + pilot lost, aces reset) - so a graceful update cost

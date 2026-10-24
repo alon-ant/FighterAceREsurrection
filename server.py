@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f5q'
+VERSION = 'v968f5s'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7012,6 +7012,7 @@ def _run_cmd(argv, timeout, cwd=None):
     except Exception as e:
         return 1, repr(e)
 
+DRAINING_SINCE = None          # v968f5r: set while a graceful update/restart drains the server - new connections are refused
 GRACEFUL_COUNTDOWN_S = 10      # v968f5n: seconds of warning before a graceful update/restart boots the pilots
 GRACEFUL_DRAIN_WAIT_S = 8.0    # how long to wait for the clients' own disconnects after the close frames
 
@@ -7023,9 +7024,11 @@ def drain_players(tag='UPDATE', countdown=None):
     'Network connection closed.' on his screen, back to the launcher, no 10 s dirty-close hang),
     then the session is unregistered. Waits up to GRACEFUL_DRAIN_WAIT_S for the clients' own
     disconnects. Returns the number of sessions closed."""
+    global DRAINING_SINCE
+    DRAINING_SINCE = time.time()                        # v968f5r: the door is closed from here until the restart
     n0 = len(get_all_sessions())
     if n0 == 0:
-        log(tag, 'graceful: nobody connected - nothing to drain')
+        log(tag, 'graceful: nobody connected - nothing to drain (new connections refused until the restart)')
         return 0
     cd = GRACEFUL_COUNTDOWN_S if countdown is None else int(countdown)
     what = 'update' if tag == 'UPDATE' else 'restart'
@@ -7079,6 +7082,12 @@ def drain_players(tag='UPDATE', countdown=None):
     log(tag, f'graceful: drained - {n0 - len(left)} client(s) disconnected on their own, {len(left)} torn down here; proceeding')
     return closed
 
+def drain_reopen(tag='UPDATE'):
+    global DRAINING_SINCE
+    if DRAINING_SINCE is not None:
+        DRAINING_SINCE = None
+        log(tag, 'graceful: no restart followed the drain -> the door is open again (new connections accepted)')
+
 def perform_update(actor='console', graceful=False):
     """git pull the server directory, then restart. Returns True if a restart was scheduled.
     Every step is logged to the UPDATE tag, which the web console streams live.
@@ -7089,6 +7098,7 @@ def perform_update(actor='console', graceful=False):
     if not _update_lock.acquire(blocking=False):
         log('UPDATE', 'an update is already running - ignoring this request')
         return False
+    _ok = False
     try:
         log('UPDATE', f'--- update requested by {actor} --- dir={UPDATE_DIR}{" (graceful)" if graceful else ""}')
         if graceful:
@@ -7145,8 +7155,11 @@ def perform_update(actor='console', graceful=False):
         log('UPDATE', f'updated {before} -> {after}')
 
         # 4. Restart.
-        return _schedule_restart(tag='UPDATE', reason=f'updated {before} -> {after}')
+        _ok = _schedule_restart(tag='UPDATE', reason=f'updated {before} -> {after}')
+        return _ok
     finally:
+        if not _ok and DRAINING_SINCE is not None:
+            drain_reopen('UPDATE')
         _update_lock.release()
 
 def _schedule_restart(tag='RESTART', reason=''):
@@ -7200,7 +7213,10 @@ def perform_restart(actor='console', graceful=False):
         log('RESTART', f'--- manual restart requested by {actor} (no git pull){" (graceful)" if graceful else ""} ---')
         if graceful:
             drain_players('RESTART')
-            return _schedule_restart(tag='RESTART', reason='manual graceful restart, build unchanged')
+            _ok = _schedule_restart(tag='RESTART', reason='manual graceful restart, build unchanged')
+            if not _ok:
+                drain_reopen('RESTART')
+            return _ok
         try:
             _n = broadcast_everyone('Server is restarting - you will be disconnected briefly. '
                                     'Please rejoin in about 15 seconds.', src='restart')
@@ -27302,9 +27318,52 @@ def _reap_stale_sessions(acct, new_sess):
         _teardown_session(x, why='(session ended)', tag='REAP',
                           msg=f'reaped stale session for account="{acct}" (reconnect) - ghost cleared')
 
+_DRAIN_SYN_LOG = {}
+SYN_DUP_WINDOW_S = 20.0        # v968f5s: a SYN from the same address+cid inside this window of a session still logging in is a retransmit
+
 def handle_syn(data, addr):
+    if DRAINING_SINCE is not None:
+        # v968f5r (Alon 22:14): while a graceful update/restart drains the server nobody may come
+        # in - a login finishing in the middle of the countdown would be booted seconds later, or
+        # slip in after the drain and be dropped hard by the restart. The SYN is not answered: the
+        # client's connect times out and the launcher says the server could not be reached.
+        _t = time.time()
+        if _t - _DRAIN_SYN_LOG.get(addr[0], 0.0) > 5.0:
+            _DRAIN_SYN_LOG[addr[0]] = _t
+            log('SYN', f'connection from {addr[0]} REFUSED - server is draining for a restart ({_t - DRAINING_SINCE:.0f}s)')
+        return
     acct_row = identify_account_from_syn(data)
-    cid=data[1:5]; s=S(cid,addr)
+    cid=data[1:5]
+    # v968f5s [SYN RETRANSMIT LOOP] (SneekyPete, live 19:19:06-19:19:48 and 10-23 22:29): his client
+    # re-sent the SYN every 1.5 s; each one made a NEW session and the reconnect reaper tore the
+    # previous one down ('reaped stale session .. (reconnect)' 28 times in 42 s), so the handshake
+    # could never finish - the session answering his retries was killed by the next retry. A SYN
+    # from the SAME address and connection id while that session is still being set up (no login
+    # yet, last packet within SYN_DUP_WINDOW_S) is the client's retransmit: answer it AGAIN on the
+    # existing session (same SYNACK base, beacon, cmd=100) and keep everything else as it was.
+    _dup = None
+    with sl:
+        _dup = sadrs.get(addr)
+    if (_dup is not None and getattr(_dup, 'cid', None) == cid and not getattr(_dup, 'auth_done', False)
+            and not getattr(_dup, 'closing', False)
+            and time.time() - float(getattr(_dup, 'last_rx', 0.0) or getattr(_dup, '_ntp_epoch', 0.0) or 0.0) <= SYN_DUP_WINDOW_S):
+        _dup._syn_dups = getattr(_dup, '_syn_dups', 0) + 1
+        _dup.last_rx = time.time()
+        try:
+            synack2, _f1, _f2 = build_synack(fixed_fa=getattr(_dup, 'synack_base', None))
+            sock.sendto(synack2, addr)
+            time.sleep(0.025)
+            sock.sendto(build_beacon(_dup.nts(), 0, sess=_dup), addr)
+            time.sleep(0.05)
+            if not _dup.closing:
+                sock.sendto(build_data(100, _dup.nsq()), _dup.addr)
+        except Exception as _e:
+            log('SYN', f'duplicate SYN re-answer failed ({_e!r})')
+        if _dup._syn_dups <= 3 or _dup._syn_dups % 10 == 0:
+            log('SYN', f'duplicate SYN #{_dup._syn_dups} from {addr[0]}:{addr[1]} (account="{getattr(_dup, "account", "?")}", sid={_dup.sid}) '
+                       f'-> handshake re-sent on the existing session (no new session, nothing reaped)')
+        return
+    s=S(cid,addr)
     if acct_row:
         acct, pid_hex, f45_hex, ab_hex = acct_row
         s.account=acct; s.auth64=build_auth64(pid_hex, f45_hex, ab_hex, acct)
@@ -27312,7 +27371,7 @@ def handle_syn(data, addr):
         s.auth_payload=build_auth_response(s.auth64)
         pilots=db_get_pilots(acct)
         with sl: active = len([x for x in sids.values() if x.auth_done and not x.closing])
-        log('SYN',f'Ready: account="{acct}" {len(pilots)} pilot(s) [sid={s.sid}, active_sessions={active}]')
+        log('SYN',f'Ready: account="{acct}" {len(pilots)} pilot(s) from {addr[0]}:{addr[1]} [sid={s.sid}, active_sessions={active}]')
     else: log('SYN','WARNING: unknown account')
     try:
         ai_peers_forget_addr(addr, '(new SYN)')          # v904f5: a fresh connection holds nothing
