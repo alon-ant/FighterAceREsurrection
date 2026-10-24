@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v967f5c'
+VERSION = 'v968f5g'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -480,6 +480,7 @@ REL_RX_BUF_MAX = 48        # v812f5: or when this many later packets are held be
 # server otherwise drops. Rate-limited hex sample per session, so one flight reveals the
 # entity/position format we need to relay between players. Set False to silence.
 CAPTURE_UNREL = True
+DIAG55_ON = False           # v967f5i (off since v967f5j): raw dump of small datagrams containing 0x37 (carrier take-off hunt)
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'fa_server.db')
 
 TICKET_SIZE     = 2172
@@ -7322,6 +7323,21 @@ def console_handler():
                         log('CONSOLE', f'rxtrace: inbound packets from {_t.addr[0]} logged for {_secs:.0f}s (RX/TRACE)')
                 else:
                     log('CONSOLE', 'usage: rxtrace <pilot> [seconds]')
+            elif cmd == 'reltrace':
+                # v968f5f: reltrace <pilot> [seconds] - the RELIABLE channel of one session at INFO: every
+                # reliable send (seq, label), its ACK delay and retransmits, every reliable packet received
+                # (seq, cmd, duplicate, held behind a hole). Bama 10-24 12:52 (messages03): the server
+                # answered his requests within 100 ms and every send was ACKed inside 3 s (no RELKEEP),
+                # yet his client logged the replies 3-18 s later - this trace separates 'our side slow'
+                # from 'his link / his client slow' the next time.
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _t = next((x for x in get_all_sessions() if _a and getattr(x, 'current_pilot', None) == _a[0]), None)
+                if _t is None:
+                    log('CONSOLE', 'usage: reltrace <pilot> [seconds]  (pilot must be logged in)')
+                else:
+                    _secs = float(_a[1]) if len(_a) > 1 else 120.0
+                    _t._rel_trace_until = time.time() + _secs
+                    log('CONSOLE', f'reltrace: reliable channel of {_a[0]} logged for {_secs:.0f}s (RELTRACE)')
             elif cmd == 'clocks':
                 # v935f5: every in-game session's measured conductor rate (ticks/s against the
                 # server's wall clock), not just the >2% outliers the CLOCK line reports. The
@@ -8199,6 +8215,9 @@ def console_handler():
                     log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc paradrop <scene> [n] [camp] | tc reset')
             elif cmd == 'ship':                                     # v967f5 NetShip probe
                 for _l in ship_console(parts[1].split() if len(parts) > 1 else [], by='console'):
+                    log('CONSOLE', _l)
+            elif cmd == 'navy':                                     # v968f5b scripted task groups
+                for _l in navy_console(parts[1].split() if len(parts) > 1 else [], by='console'):
                     log('CONSOLE', _l)
             elif cmd == 'convoy':                                   # v964f5 road convoys
                 for _l in convoy_console(parts[1].split() if len(parts) > 1 else [], by='console'):
@@ -10720,6 +10739,8 @@ def _cmd_weather(s, args):
         return 'Sysops only.'
     return weather_command(getattr(s, 'current_room', None), args or ['status'], by=getattr(s, 'current_pilot', None) or 'sysop')
 CHAT_SERVER_COMMANDS = {
+    'mark':     lambda s, a: _cmd_mark(s, a),            # v968f5d: ##mark <label> - named mark at the plane's spot
+    'pos':      lambda s, a: _cmd_mark(s, []),           # v968f5d: ##pos - where am I
     'weather':  _cmd_weather,                       # v962f5b: ##Weather storm / ##Weather rain off / ##Weather status ...
     'gunscold': lambda s, a: _cmd_guns(s, a, True),
     'gunshot':  lambda s, a: _cmd_guns(s, a, False),
@@ -12990,6 +13011,10 @@ def send_rel(s, payload, label='', to=5.0):
     # the overrun was fixed at the source long ago and the counter only cost log lines per send.
     _txseq(s, 'REL', payload, label)   # v487f5: join-seq transcript
     bc=payload[0]
+    _trace = time.time() < s.__dict__.get('_rel_trace_until', 0.0)          # v968f5f reltrace
+    _t_tx = time.time()
+    if _trace:
+        log('RELTRACE', f'{getattr(s, "current_pilot", "?")} TX seq={seq} {len(pkt)}B type=0x{payload[1]:02x} {label[:70]}')
     log('TX/RELIABLE',f'seq={seq} bc={bc}(p3={bc*16+1}) type=0x{payload[1]:02x} {label}')
     _rec(s, 'S->C', 'RELTX',
          f'seq={seq} type=0x{payload[1]:02x} bc={bc} {label} pl={binascii.hexlify(bytes(payload[:24])).decode()}')
@@ -13023,8 +13048,12 @@ def send_rel(s, payload, label='', to=5.0):
         log('TX/RELIABLE', f'seq={seq} RETX#{retx} type=0x{payload[1]:02x} {label}')
     if ok:
         s.rme(seq)
+        if _trace:
+            log('RELTRACE', f'{getattr(s, "current_pilot", "?")} ACK seq={seq} after {time.time() - _t_tx:.2f}s ({retx} retx) {label[:40]}')
         log('TX/RELIABLE',f'seq={seq} ACKed OK' + (f' after {retx} retx' if retx else ''))
         return True
+    if _trace:
+        log('RELTRACE', f'{getattr(s, "current_pilot", "?")} NOACK seq={seq} after {to:.0f}s ({retx} retx) -> keeper {label[:40]}')
     # v417f5: the window expired WITHOUT an ACK. Do NOT rme+abandon - that is the permanent
     # downlink wedge (see _rel_keeper). The event stays registered; the keeper re-sends until
     # the ACK lands, the session closes, or REL_KEEPER_MAX_S expires.
@@ -15043,8 +15072,11 @@ def car_broadcast_state(onum):
     except Exception as _e:
         log('CAR', f'pack failed for 0x{onum:04x}: {_e}'); return 0
     n = 0
+    _now = time.time()
     for p in get_sessions_in_room(c['room']):
         if getattr(p, 'addr', None) not in c['peers'] or getattr(p, 'last_telem_tick', None) is None:
+            continue
+        if not _ai_peer_send_ok(c, p, x, y, _now, kind='tank', onum=onum):      # v967f5g: same tiers as tanks
             continue
         frame = build_car_update(_ai_stamp(p, onum), onum, pl)
         seq = p.nundgram()
@@ -15327,6 +15359,12 @@ def car_tick():
                     c['last_sent'] = now
                     car_broadcast_state(on)
             convoy_tick()
+            try:
+                ship_tick_step(dt, now)                  # v968f5: ships sail on the same 4 Hz clock
+            except Exception:
+                logx('SHIP', 'ship tick failed')
+            if CARRIER_QUEUES:
+                carrier_queue_tick()
         except Exception:
             logx('CAR', 'car tick failed')
 
@@ -15736,6 +15774,18 @@ SHIP_KEEPALIVE_S  = 2.0
 SHIP_HEADING_OFFSET_DEG = 0.0                    # probe knob: the word's zero direction vs world +X (`ship hdgoff`)
 SHIP_CLASSES      = {}        # class id -> name (from tank_tables.json 'ship_classes')
 SHIPS             = {}        # onum -> {'room','camp','class','pos','hdg','peers','created','name','aux','flags'}
+# ai0.str name ids in head dword[0] of each ship class record (the dump sees no strings inline)
+SHIP_NAME_BY_STR  = {}
+for _i, _n in enumerate(('us', 'gb', 'su', 'ge', 'jp')):
+    SHIP_NAME_BY_STR[1041 + _i] = f'cargo-{_n}'; SHIP_NAME_BY_STR[1056 + _i] = f'cruiser-{_n}'
+    SHIP_NAME_BY_STR[1061 + _i] = f'carrier-{_n}'; SHIP_NAME_BY_STR[1092 + _i] = f'battle-{_n}'
+SHIP_NAME_BY_STR[1161] = 'uboat'
+# v967f5d [CARRIER = FLOATING AIRFIELD IDENT]: the record word @+2 (-> ship +0x32c / NET +0x284) is the
+# carrier's FAFIdent. shipnet.cpp:86 asserts FAFIdent >= AF_MANAGER::GetStaticFields() (the terrain's
+# own airfield count) and then creates a NetFloatAF with that ident (FUN_00565950, Trn_AF.cpp) -
+# 0 CTD'd the client (Alon 10-24 04:02, class 160 carrier-us). Idents are allocated from
+# SHIP_FAF_BASE upward (u8 on the msg-78 wire, so < 256); non-carriers send 0 (unused).
+SHIP_FAF_BASE     = 200
 SHIP_ALIASES      = {'cargo': 'cargo', 'transport': 'cargo', 'liberty': 'cargo', 'cruiser': 'cruiser',
                      'carrier': 'carrier', 'cv': 'carrier', 'battle': 'battle', 'battleship': 'battle',
                      'bb': 'battle', 'uboat': 'uboat', 'sub': 'uboat', 'submarine': 'uboat'}
@@ -15747,9 +15797,12 @@ def ship_classes_load():
             cid = c.get('class_id')
             if cid is None:
                 continue
-            strs = [s_ for s_ in (c.get('strings_in_info') or []) + (c.get('strings_in_base') or []) if len(s_) > 3]
-            nm = next((s_ for s_ in strs if re.match(r'^(cargo|cruiser|carrier|battle|uboat)(-[a-z]{2})?$', s_)), None) \
-                 or (strs[0] if strs else f'ship class {cid}')
+            hd = c.get('head_dwords') or []
+            nm = SHIP_NAME_BY_STR.get(hd[0]) if hd else None
+            if not nm:
+                strs = [s_ for s_ in (c.get('strings_in_info') or []) + (c.get('strings_in_base') or []) if len(s_) > 3]
+                nm = next((s_ for s_ in strs if re.match(r'^(cargo|cruiser|carrier|battle|uboat)(-[a-z]{2})?$', s_)), None) \
+                     or f'ship class {cid}'
             SHIP_CLASSES[int(cid)] = nm
         if SHIP_CLASSES:
             log('SHIP', f'ship classes from tank_tables.json: {SHIP_CLASSES}')
@@ -15808,19 +15861,23 @@ def spawn_ship(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
     if _names and int(camp) not in _names:
         log('SHIP', f'spawn refused - camp {camp} is not active in room {room_id} (friendly-fire reflection, see cars)'); return None
     onum = next_obj_number()
-    SHIPS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
+    faf = 0
+    if str(SHIP_CLASSES.get(int(class_id), '')).startswith('carrier'):
+        used = {sh_.get('faf') for sh_ in SHIPS.values() if sh_.get('faf')}
+        faf = next(i for i in range(SHIP_FAF_BASE, 256) if i not in used)
+    SHIPS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id), 'faf': faf,
                    'pos': (float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) > 2 else 0.0),
                    'hdg': math.radians(heading_deg), 'peers': set(), 'created': time.time(),
                    'name': SHIP_CLASSES.get(int(class_id), '?'), 'aux': (0, 0, 0, 0), 'flags': 0, 'pitch': 0.0, 'roll': 0.0}
-    rec = build_ship_record(AI_CLIENT_ST, onum, camp, class_id)
+    rec = build_ship_record(AI_CLIENT_ST, onum, camp, class_id, w2=faf)
     n = 0
     for p in get_sessions_in_room(room_id):
         if not getattr(p, 'entered_game', False):
             continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
-        _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 SHIP class={class_id} camp={camp} ONumber=0x{onum:04x} {reason}', to=3.0)
+        _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 SHIP class={class_id} camp={camp} ONumber=0x{onum:04x}{" FAF=%d" % faf if faf else ""} {reason}', to=3.0)
         SHIPS[onum]['peers'].add(getattr(p, 'addr', None)); n += 1
-    log('SHIP', f'room {room_id}: spawn ship ONumber=0x{onum:04x} class={class_id} ({SHIPS[onum]["name"]}) camp={camp} '
+    log('SHIP', f'room {room_id}: spawn ship ONumber=0x{onum:04x} class={class_id} ({SHIPS[onum]["name"]}){" floating airfield %d" % faf if faf else ""} camp={camp} '
                 f'at ({pos[0]:.0f},{pos[1]:.0f}) hdg {heading_deg:.0f} -> {n} session(s) {reason}')
     threading.Timer(0.5, ship_broadcast_state, args=(onum,)).start()
     threading.Timer(SHIP_KEEPALIVE_S, _ship_keepalive, args=(onum,)).start()
@@ -15831,13 +15888,19 @@ def ship_broadcast_state(onum):
     if sh is None:
         return 0
     x, y, z = sh['pos']
+    _v = sh.get('_v', 0.0)
+    if _v > 0.0 and sh.get('drive') is not None and SHIP_LOOKAHEAD_S > 0.0:       # v968f5
+        x += math.sin(sh['hdg']) * _v * SHIP_LOOKAHEAD_S; y += math.cos(sh['hdg']) * _v * SHIP_LOOKAHEAD_S
     try:
         pl = pack_ship_state(x, y, z, sh['hdg'], flags=sh.get('flags', 0), pitch=sh.get('pitch', 0.0), roll=sh.get('roll', 0.0), aux=sh.get('aux', (0, 0, 0, 0)))
     except Exception as _e:
         log('SHIP', f'pack failed for 0x{onum:04x}: {_e}'); return 0
     n = 0
+    _now = time.time()
     for p in get_sessions_in_room(sh['room']):
         if getattr(p, 'addr', None) not in sh['peers'] or getattr(p, 'last_telem_tick', None) is None:
+            continue
+        if not _ai_peer_send_ok(sh, p, x, y, _now, kind='tank', onum=onum):     # v967f5g
             continue
         frame = build_ship_update(_ai_stamp(p, onum), onum, pl)
         seq = p.nundgram()
@@ -15850,7 +15913,8 @@ def ship_broadcast_state(onum):
 def _ship_keepalive(onum):
     if onum not in SHIPS:
         return
-    ship_broadcast_state(onum)
+    if SHIPS[onum].get('drive') is None:
+        ship_broadcast_state(onum)
     threading.Timer(SHIP_KEEPALIVE_S, _ship_keepalive, args=(onum,)).start()
 
 def delete_ship(onum, reason='', entry=None):
@@ -15866,11 +15930,631 @@ def delete_ship(onum, reason='', entry=None):
     log('SHIP', f'room {sh["room"]}: delete ship 0x{onum:04x} -> {n} session(s) {reason}')
     return n
 
+# --- v968f5 SHIP MOVEMENT (Ship::Move FUN_00649a00 mirrored) -----------------------------------------
+# The client integrates a ship from the 24-byte update's four aux words exactly as it does a car:
+#   @0x10 rudder  (x1/32768 -> obj+0x370)   @0x12 throttle (x1/32768 -> obj+0x36c)
+#   @0x14 speed   (x1/512 m/s -> obj+0x350) @0x16 yaw rate (x pi/655360 rad/s -> obj+0x354)
+# Every frame (dt s): speed += clamp(vmax*throttle - speed, +-dt*acc); yaw += clamp(cap*rudder - yaw,
+# +-dt*yaw_acc) with cap = min(|speed|*yaw_per_mps + 0.0698, yaw_max); heading += yaw*dt;
+# pos += forward*speed*dt with forward = (sin hdg, cos hdg) (FUN_00647ef0: compass heading, 0 = +Y
+# north, 90 = +X east, positive yaw = clockwise). The per-class numbers live in the record at
+# class-base+0x54 (+0x24 vmax, +0x28 reverse, +0x2c yaw_max, +0x30 yaw_acc, +0x34 acc, +0x38 yaw per
+# m/s) - fa_dump_tank_tables.py v12 dumps them as 'phys'; until a dump is in, SHIP_PHYS_DEFAULT by
+# family. The server runs the same law at SHIP_TICK_HZ and re-sends speed/yaw every tick, so a
+# wrong vmax guess only costs acc*tick of drift between updates (the words reset the client's state).
+SHIP_TICK_HZ        = 4
+SHIP_LOOKAHEAD_S    = 0.1                 # position sent one look-ahead ahead (cars: 'did the job')
+SHIP_WP_REACH_M     = 40.0
+SHIP_YAW_GAIN       = 0.35                # rad/s of desired yaw per rad of heading error
+SHIP_SPEED_UNIT     = 1.0 / 512.0         # wire word = m/s / unit  (0xc14160)
+SHIP_YAW_UNIT       = 4.793689e-06        # wire word = rad/s / unit (0xc89dcc = pi/655360)
+SHIP_PHYS_DEFAULT   = {   # vmax m/s, acc m/s^2, yaw_max rad/s, yaw_acc rad/s^2, yaw_per_mps
+    'battle':  dict(vmax=13.9, acc=0.15, yaw_max=0.035, yaw_acc=0.005, yaw_per_mps=0.004),
+    'cruiser': dict(vmax=16.5, acc=0.20, yaw_max=0.050, yaw_acc=0.008, yaw_per_mps=0.005),
+    'carrier': dict(vmax=16.0, acc=0.15, yaw_max=0.040, yaw_acc=0.006, yaw_per_mps=0.004),
+    'cargo':   dict(vmax=5.7,  acc=0.10, yaw_max=0.030, yaw_acc=0.005, yaw_per_mps=0.006),
+    'uboat':   dict(vmax=8.3,  acc=0.30, yaw_max=0.070, yaw_acc=0.010, yaw_per_mps=0.010),
+}
+SHIP_PHYS_BY_CLASS  = {}                  # class id -> dict (dump 'phys' or `ship phys` override)
+SEALANES            = {}                  # terrain -> sealanes_trnNN.json contents (ports + lanes)
+
+def ship_family(class_id):
+    n = str(SHIP_CLASSES.get(int(class_id), '')).lower()
+    for f in SHIP_PHYS_DEFAULT:
+        if n.startswith(f):
+            return f
+    return 'cargo'
+
+def ship_phys(class_id):
+    p = SHIP_PHYS_BY_CLASS.get(int(class_id))
+    if p:
+        return p
+    return SHIP_PHYS_DEFAULT[ship_family(class_id)]
+
+def ship_phys_load():
+    """Per-class physics from tank_tables.json 'ship_classes'[].phys (dumper v12); sane values only."""
+    try:
+        d = json.load(open(mapdata_path('tank_tables.json')))
+        n = 0
+        for c in d.get('ship_classes') or []:
+            ph = c.get('phys') or {}
+            cid = c.get('class_id')
+            vmax, acc, ymax, yacc, yper = (ph.get('vmax'), ph.get('acc'), ph.get('yaw_max'), ph.get('yaw_acc'), ph.get('yaw_per_mps'))
+            if cid is None or not all(isinstance(v, (int, float)) for v in (vmax, acc, ymax, yacc, yper)):
+                continue
+            if not (0.5 < vmax < 60.0 and 0.0 < acc < 20.0 and 0.0 < ymax < 1.0 and 0.0 < yacc < 1.0 and 0.0 <= yper < 1.0):
+                continue
+            sc = ph.get('scale')
+            if isinstance(sc, (int, float)) and 0.1 < sc < 10.0:
+                vmax = vmax * sc
+            SHIP_PHYS_BY_CLASS[int(cid)] = dict(vmax=float(vmax), acc=float(acc), yaw_max=float(ymax), yaw_acc=float(yacc), yaw_per_mps=float(yper))
+            n += 1
+        if n:
+            log('SHIP', f'ship physics from the dump for {n} class(es): ' + ', '.join(f'{k}:{v["vmax"]:.1f}m/s' for k, v in sorted(SHIP_PHYS_BY_CLASS.items())))
+    except Exception as _e:
+        log('SHIP', f'ship physics not loaded ({_e}) - family defaults in use')
+
+def sealanes(terrain):
+    """mapdata/sealanes_trnNN.json: {'ports': {'<scene idx>': {'anchor': [x, y], 'approach': [[x, y], ...]}},
+    'lanes': [{'from': idx, 'to': idx, 'points': [[x, y], ...]}]} - the user maps these per terrain
+    (the server has no water map). approach = the way OUT of the port, anchor = where a ship waits."""
+    t = int(_tbase(terrain)) if terrain is not None else None
+    if t in SEALANES:
+        return SEALANES[t]
+    d = {'ports': {}, 'lanes': []}
+    try:
+        p = mapdata_path(f'sealanes_trn{t:02d}.json')
+        if os.path.exists(p):
+            d = json.load(open(p))
+            d.setdefault('ports', {}); d.setdefault('lanes', [])
+            log('SHIP', f'sea lanes for terrain {t}: {len(d["ports"])} port(s), {len(d["lanes"])} lane(s)')
+    except Exception as _e:
+        log('SHIP', f'sea lanes for terrain {t} not loaded ({_e})')
+    SEALANES[t] = d
+    return d
+
+def ship_ports(terrain):
+    """[(sidx, x, y, camp)] of the terrain's Port scenes (gsi type_name 'Port')."""
+    tt = trn_tables(terrain) or {}
+    out = []
+    for i, g in enumerate(tt.get('gsi') or []):
+        if str(g.get('type_name') or '').strip().lower() == 'port':
+            try:
+                camp = scene_camp(terrain, i)
+            except Exception:
+                camp = g.get('camp')
+            out.append((i, float(g['x']), float(g['y']), camp))
+    return out
+
+def ship_lane_route(terrain, a, b):
+    """Waypoints from port scene a to port scene b: a's approach out, the mapped lane (either direction),
+    b's approach in reverse, b's anchor. Without a mapped lane: a straight line anchor to anchor."""
+    sl = sealanes(terrain)
+    pa, pb = sl['ports'].get(str(a)) or {}, sl['ports'].get(str(b)) or {}
+    xa = tc_scene_xy(terrain, a); xb = tc_scene_xy(terrain, b)
+    if xa is None or xb is None:
+        return None, 'unknown port scene'
+    anc_a = tuple(pa.get('anchor') or xa[:2]); anc_b = tuple(pb.get('anchor') or xb[:2])
+    pts = [tuple(p) for p in (pa.get('approach') or [])]
+    lane = None
+    for ln in sl['lanes']:
+        if int(ln.get('from', -1)) == a and int(ln.get('to', -1)) == b:
+            lane = [tuple(p) for p in ln.get('points') or []]; break
+        if int(ln.get('from', -1)) == b and int(ln.get('to', -1)) == a:
+            lane = [tuple(p) for p in reversed(ln.get('points') or [])]; break
+    note = 'mapped lane' if lane is not None else 'NO lane mapped - straight line'
+    pts += lane or []
+    pts += [tuple(p) for p in reversed(pb.get('approach') or [])]
+    pts.append(anc_b)
+    return pts, note
+
+def ship_set_route(onum, points, mps=None, reason='', on_arrive=None):
+    sh = SHIPS.get(onum)
+    if sh is None or not points:
+        return False
+    ph = ship_phys(sh['class'])
+    want = float(mps) if mps else ph['vmax'] * 0.8
+    sh['drive'] = {'route': [(float(p[0]), float(p[1])) for p in points], 'mps': max(0.5, min(want, ph['vmax'])),
+                   'started': time.time(), 'reason': reason, 'on_arrive': on_arrive}
+    sh.setdefault('_v', 0.0); sh.setdefault('_w', 0.0)
+    log('SHIP', f'room {sh["room"]}: 0x{onum:04x} ({sh["name"]}) under way, {len(points)} waypoint(s) to '
+                f'({points[-1][0]:.0f},{points[-1][1]:.0f}) at {sh["drive"]["mps"]:.1f} m/s {reason}')
+    return True
+
+def ship_stop(onum, reason=''):
+    sh = SHIPS.get(onum)
+    if sh is None:
+        return False
+    dr = sh.get('drive')
+    if dr is not None:
+        dr['route'] = []            # keep driving until the way is off, then settle
+        dr['stopping'] = True
+    return True
+
+def _wrap_pi(a):
+    return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+def _ship_drive_step(onum, sh, dt, now):
+    dr = sh.get('drive')
+    if dr is None:
+        return False
+    ph = ship_phys(sh['class'])
+    x, y, z = sh['pos']; h = sh['hdg']; v = sh.get('_v', 0.0); w = sh.get('_w', 0.0)
+    route = dr['route']
+    want = 0.0; err = 0.0
+    st = dr.get('station')
+    if st is not None:
+        # v968f5b station keeping: hold a slot (dx right, dy forward) in the leader's frame
+        L = SHIPS.get(st['leader'])
+        if L is None or L.get('dead'):
+            dr['station'] = None; dr['route'] = []; dr['stopping'] = True
+            log('SHIP', f'room {sh["room"]}: 0x{onum:04x} ({sh["name"]}) lost its leader 0x{st["leader"]:04x} - heaving to')
+        else:
+            lh = L['hdg']; lv = L.get('_v', 0.0)
+            # the FORMATION axis follows the flagship's heading slowly (FLEET_FORM_SLEW): a 700 m slot
+            # swinging with a 2 deg/s carrier turn would move at 28 m/s - no escort can hold that
+            fh = L.get('_form_h')
+            if fh is None:
+                fh = L['_form_h'] = lh
+            if L.get('_form_t') != now:
+                L['_form_t'] = now
+                fh = L['_form_h'] = (fh + max(-FLEET_FORM_SLEW * dt, min(FLEET_FORM_SLEW * dt, _wrap_pi(lh - fh)))) % (2.0 * math.pi)
+            fx, fy = math.sin(fh), math.cos(fh); rx, ry = math.cos(fh), -math.sin(fh)
+            sx = L['pos'][0] + fx * st['dy'] + rx * st['dx']; sy = L['pos'][1] + fy * st['dy'] + ry * st['dx']
+            dx, dy = sx - x, sy - y; dist = math.hypot(dx, dy)
+            lfx, lfy = math.sin(lh), math.cos(lh)
+            along = dx * lfx + dy * lfy                                                  # along the flagship's track
+            if dist > FLEET_STATION_NEAR:
+                hd = math.atan2(dx, dy)
+            else:
+                hd = lh + math.atan2(dx * math.cos(lh) - dy * math.sin(lh), FLEET_STATION_NEAR) * 0.5   # gentle slide into the slot
+            err = _wrap_pi(hd - h)
+            want = lv + FLEET_STATION_GAIN * along
+            lo = 0.0 if along < -300.0 else max(0.0, lv * 0.5)                          # never stop dead for a slot a little astern
+            want = max(lo, min(ph['vmax'], want))
+            if dist > FLEET_STATION_NEAR and lv < 1.0:
+                want = min(ph['vmax'], max(want, 3.0))                                 # leader stopped: still close up
+            if abs(err) > 0.5 and want > 0.0:
+                want = min(want, max(1.0, ph['vmax'] * 0.5))
+            route = None                                                               # skip the waypoint logic
+    while route:
+        tx, ty = route[0]
+        dx, dy = tx - x, ty - y
+        dist = math.hypot(dx, dy)
+        reach = max(SHIP_WP_REACH_M, v * 4.0)
+        if len(route) > 1 and dist <= reach:
+            route.pop(0); continue
+        if len(route) == 1 and dr.get('loop'):
+            if dist <= reach:
+                route.extend(dr['loop']); continue                                     # patrol loop: never brake
+            want = dr['mps']
+        elif len(route) == 1:
+            stop_d = v * v / (2.0 * max(0.02, ph['acc'])) + v * 2.0
+            if dist <= max(SHIP_WP_REACH_M, stop_d):
+                want = 0.0
+                if dist <= SHIP_WP_REACH_M and v < 0.4:
+                    route.pop(0)
+                    break
+            else:
+                want = dr['mps']
+        else:
+            want = dr['mps']
+        hd = math.atan2(dx, dy)                        # compass: 0 = +Y, 90 = +X
+        err = _wrap_pi(hd - h)
+        if abs(err) > 0.5 and want > 0.0:
+            want = min(want, max(1.0, ph['vmax'] * 0.5))
+        break
+    if route is not None and not route:
+        # settle: no rudder, throttle off; done when stopped
+        want = 0.0
+        if v < 0.1 and abs(w) < 0.002:
+            sh['_v'] = 0.0; sh['_w'] = 0.0; sh['aux'] = (0, 0, 0, 0); sh['drive'] = None
+            log('SHIP', f'room {sh["room"]}: 0x{onum:04x} ({sh["name"]}) {"stopped" if dr.get("stopping") else "arrived"} at ({x:.0f},{y:.0f}) {dr.get("reason", "")}')
+            cb = dr.get('on_arrive')
+            if cb and not dr.get('stopping'):
+                try:
+                    cb(onum)
+                except Exception:
+                    logx('SHIP', 'arrival callback failed')
+            return True
+        err = 0.0
+    cap = min(abs(v) * ph['yaw_per_mps'] + 0.0698, ph['yaw_max'])
+    w_des = max(-cap, min(cap, err * SHIP_YAW_GAIN))
+    rud = w_des / cap if cap > 1e-6 else 0.0
+    w += max(-dt * ph['yaw_acc'], min(dt * ph['yaw_acc'], w_des - w))
+    h = (h + w * dt) % (2.0 * math.pi)
+    thr = max(0.0, min(1.0, want / ph['vmax']))
+    v += max(-dt * ph['acc'], min(dt * ph['acc'], ph['vmax'] * thr - v))
+    v = max(0.0, v)
+    x += math.sin(h) * v * dt; y += math.cos(h) * v * dt
+    sh['pos'] = (x, y, z); sh['hdg'] = h; sh['_v'] = v; sh['_w'] = w; sh['_thr'] = thr; sh['_rud'] = rud
+    sh['aux'] = (int(round(rud * 32767)), int(round(thr * 32767)), int(round(v / SHIP_SPEED_UNIT)), int(round(w / SHIP_YAW_UNIT)))
+    return True
+
+def ship_tick_step(dt, now):
+    for on, sh in list(SHIPS.items()):
+        if sh.get('dead'):
+            continue
+        try:
+            if _ship_drive_step(on, sh, dt, now):
+                sh['last_sent'] = now
+                ship_broadcast_state(on)
+        except Exception:
+            logx('SHIP', f'drive step 0x{on:04x} failed')
+
+# --- v968f5d SEA MARKS: coordinates from the cockpit ---------------------------------------------------
+# Alon 15:46: "I cannot get the coordinates without landing somewhere". The server already holds every
+# pilot's position (telemetry, s._pos_hist). `##mark <label>` in the arena chat drops a named mark at
+# the plane's spot (overfly the water point, type it); marks persist in mapdata/marks_trnNN.json and
+# feed the sea-lane editor: `ship port <room> <scene> anchor <mark>` / `approach <mark> ..`,
+# `ship lane <room> <from> <to> <mark> ..` write sealanes_trnNN.json straight away (no JSON editing).
+SEA_MARKS = {}        # terrain -> {label: [x, y]}
+
+def _marks_path(terrain):
+    return mapdata_path(f'marks_trn{int(_tbase(terrain)):02d}.json', for_write=True)
+
+def sea_marks(terrain):
+    t = int(_tbase(terrain))
+    if t not in SEA_MARKS:
+        d = {}
+        try:
+            p = _marks_path(t)
+            if os.path.exists(p):
+                d = json.load(open(p))
+        except Exception as _e:
+            log('SHIP', f'marks for terrain {t} not loaded ({_e})')
+        SEA_MARKS[t] = d
+    return SEA_MARKS[t]
+
+def sea_mark_set(terrain, label, x, y):
+    m = sea_marks(terrain); m[str(label)] = [round(float(x), 1), round(float(y), 1)]
+    try:
+        json.dump(m, open(_marks_path(terrain), 'w'), indent=1)
+    except Exception:
+        logx('SHIP', 'marks save failed')
+    return m[str(label)]
+
+def _mark_xy(terrain, tok, tok2=None):
+    """A mark label, or a bare 'x y' pair -> (x, y) or None."""
+    m = sea_marks(terrain)
+    if tok in m:
+        return tuple(m[tok])
+    try:
+        return (float(tok), float(tok2)) if tok2 is not None else None
+    except (TypeError, ValueError):
+        return None
+
+def sealanes_save(terrain):
+    t = int(_tbase(terrain)); d = sealanes(t)
+    try:
+        json.dump(d, open(mapdata_path(f'sealanes_trn{t:02d}.json', for_write=True), 'w'), indent=1)
+        return True
+    except Exception:
+        logx('SHIP', 'sea lanes save failed'); return False
+
+def _cmd_mark(s, args):
+    """##mark <label> - drop a named mark at the plane's position (sysops); ##pos - just show it."""
+    if not sess_rights(s):
+        return 'Sysops only.'
+    pos = None
+    try:
+        hist = getattr(s, '_pos_hist', None)
+        if hist:
+            pos = hist[-1][1]
+    except Exception:
+        pos = None
+    if not pos:
+        return 'No position for you yet - fly a few seconds first.'
+    x, y = float(pos[0]), float(pos[1]); z = float(pos[2]) if len(pos) > 2 else 0.0
+    rid = getattr(s, 'current_room', None)
+    terr = _probe_terrain_for_room(rid)
+    if not args:
+        return f'You are at {x:.0f},{y:.0f} alt {z:.0f} m (grid {tc_grid(x, y)}).'
+    label = '_'.join(args)
+    sea_mark_set(terr, label, x, y)
+    log('MARK', f'{s.current_pilot} room {rid} terrain {_tbase(terr)}: mark {label!r} at ({x:.0f},{y:.0f}) alt {z:.0f} grid {tc_grid(x, y)}')
+    return f'Mark {label!r} set at {x:.0f},{y:.0f} (grid {tc_grid(x, y)}) - terrain {_tbase(terr)}, {len(sea_marks(terr))} mark(s).'
+
+def grid_to_xy(row, letters):
+    """Inverse of tc_grid: the CENTRE of map square (row, letters) in world metres."""
+    letters = letters.upper()
+    col = (ord(letters[0]) - 65) if len(letters) == 1 else (ord(letters[0]) - 65) * 26 + (ord(letters[1]) - 65) + 26
+    x = col * 2048.0 - TC_MAP_HALF + 1024.0
+    y = TC_MAP_HALF - (int(row) - 1) * 2048.0 - 1024.0
+    return x, y
+
+# --- v968f5b TASK GROUPS (fleet scripts) ---------------------------------------------------------------
+# Open-water maps have no ports to hang routes on (Alon 14:54: "other open water maps ... another
+# mechanism for scripting carrier groups"), so a FLEET SCRIPT describes task groups directly: a
+# flagship (the carrier) steaming a patrol (a closed loop of sea points, or there-and-back), with
+# escorts keeping station on it in a formation. Per terrain: mapdata/fleets_trnNN.json; per arena:
+# the room setting 'fleet_script' (same JSON) overrides the terrain file. Groups are raised by the
+# room scheduler (ensure_fleets, self-gating: economy room, ship classes loaded, pilots in the
+# world) and re-raised respawn_min after the whole group is gone. Console `navy`.
+#   {"groups": [{"name": "TF-58", "camp": 0, "flagship": "carrier", "escorts": ["cruiser", "cruiser",
+#                "battle"], "formation": "ring|column|line", "spacing": 700, "spawn": [x, y],
+#                "heading": 270, "speed": 12, "patrol": [[x, y], ...], "loop": true,
+#                "respawn_min": 30, "enabled": true}]}
+FLEETS            = {}        # gid -> {'room','camp','name','flag','escorts',[onums],'spawned','script','key'}
+FLEET_SCRIPTS     = {}        # terrain -> parsed fleets_trnNN.json
+FLEET_NEXT_GID    = [1]
+FLEET_STATION_GAIN = 0.12     # m/s of speed per m of along-track station error
+FLEET_STATION_NEAR = 60.0     # inside this the escort steers the leader's heading, not the slot
+FLEET_FORM_SLEW    = 0.006    # rad/s the formation axis may rotate (~0.35 deg/s: a 90 deg turn re-forms in ~4 min)
+
+def fleet_script_for_room(rid):
+    """The arena's own 'fleet_script' setting (JSON text) if valid, else the terrain file."""
+    try:
+        txt = (db_get_room_settings(rid) or {}).get('fleet_script')
+        if txt and str(txt).strip():
+            d = json.loads(txt) if isinstance(txt, str) else txt
+            if isinstance(d, dict) and isinstance(d.get('groups'), list):
+                return d, 'arena setting'
+    except Exception as _e:
+        log('FLEET', f'room {rid}: fleet_script setting unreadable ({_e}) - terrain file used')
+    t = int(_tbase(_probe_terrain_for_room(rid)))
+    if t not in FLEET_SCRIPTS:
+        d = {'groups': []}
+        try:
+            p = mapdata_path(f'fleets_trn{t:02d}.json')
+            if os.path.exists(p):
+                d = json.load(open(p)); d.setdefault('groups', [])
+                log('FLEET', f'fleet script for terrain {t}: {len(d["groups"])} group(s)')
+        except Exception as _e:
+            log('FLEET', f'fleet script for terrain {t} not loaded ({_e})')
+        FLEET_SCRIPTS[t] = d
+    return FLEET_SCRIPTS[t], f'mapdata/fleets_trn{t:02d}.json'
+
+def fleet_formation_slots(kind, n, spacing):
+    """(dx right, dy forward) per escort in the flagship's frame."""
+    kind = (kind or 'ring').lower(); out = []
+    for i in range(n):
+        if kind == 'column':
+            out.append((0.0, -spacing * (i + 1)))
+        elif kind == 'line':
+            k = (i // 2 + 1) * (1 if i % 2 == 0 else -1)
+            out.append((spacing * k, 0.0))
+        else:
+            a = math.radians(360.0 * (i + 0.5) / max(1, n))
+            out.append((spacing * math.sin(a), spacing * math.cos(a)))
+    return out
+
+def fleet_spawn(rid, g, reason=''):
+    """Raise one scripted task group. Returns the gid or None."""
+    camp = int(g.get('camp', 0))
+    sx, sy = (float(g['spawn'][0]), float(g['spawn'][1])) if g.get('spawn') else (None, None)
+    if sx is None:
+        pts = g.get('patrol') or []
+        if not pts:
+            log('FLEET', f'room {rid}: group {g.get("name")!r} has neither spawn nor patrol - skipped'); return None
+        sx, sy = float(pts[0][0]), float(pts[0][1])
+    hdg = float(g.get('heading', 0.0))
+    flag_cls = ship_class_lookup(str(g.get('flagship', 'carrier')), camp)
+    if flag_cls is None:
+        log('FLEET', f'room {rid}: group {g.get("name")!r} flagship class {g.get("flagship")!r} unknown - skipped'); return None
+    flag = spawn_ship(rid, camp, flag_cls, (sx, sy, 0.0), hdg, reason=f'(fleet {g.get("name")} flagship {reason})')
+    if flag is None:
+        return None
+    gid = FLEET_NEXT_GID[0]; FLEET_NEXT_GID[0] += 1
+    esc_names = list(g.get('escorts') or [])
+    slots = fleet_formation_slots(g.get('formation'), len(esc_names), float(g.get('spacing', 700.0)))
+    escorts = []
+    hr = math.radians(hdg); fx, fy = math.sin(hr), math.cos(hr); rx, ry = math.cos(hr), -math.sin(hr)
+    for name, (dx, dy) in zip(esc_names, slots):
+        cls = ship_class_lookup(str(name), camp)
+        if cls is None:
+            log('FLEET', f'room {rid}: group {g.get("name")!r} escort class {name!r} unknown - skipped'); continue
+        ex, ey = sx + fx * dy + rx * dx, sy + fy * dy + ry * dx
+        on = spawn_ship(rid, camp, cls, (ex, ey, 0.0), hdg, reason=f'(fleet {g.get("name")} escort {reason})')
+        if on is None:
+            continue
+        SHIPS[on]['drive'] = {'route': [], 'mps': ship_phys(cls)['vmax'], 'started': time.time(), 'reason': f'(station on 0x{flag:04x})',
+                              'on_arrive': None, 'station': {'leader': flag, 'dx': dx, 'dy': dy}}
+        SHIPS[on]['_v'] = 0.0; SHIPS[on]['_w'] = 0.0
+        SHIPS[on]['fleet'] = gid
+        escorts.append(on)
+    SHIPS[flag]['fleet'] = gid
+    pts = [(float(p[0]), float(p[1])) for p in (g.get('patrol') or [])]
+    if pts:
+        loop = bool(g.get('loop', True))
+        ship_set_route(flag, pts, float(g.get('speed', 10.0)), reason=f'(fleet {g.get("name")} patrol{" loop" if loop else ""})')
+        if loop:
+            SHIPS[flag]['drive']['loop'] = list(pts)
+    FLEETS[gid] = {'room': rid, 'camp': camp, 'name': str(g.get('name') or f'TG-{gid}'), 'flag': flag, 'escorts': escorts,
+                   'spawned': time.time(), 'script': g, 'key': (rid, str(g.get('name') or gid))}
+    log('FLEET', f'room {rid}: task group {FLEETS[gid]["name"]} (gid {gid}, camp {camp}) raised: flagship 0x{flag:04x} + {len(escorts)} escort(s), '
+                 f'{len(pts)} patrol point(s) {reason}')
+    try:
+        tc_say(rid, f'AI: {FLEETS[gid]["name"]} has put to sea.', camp=camp)
+    except Exception:
+        pass
+    return gid
+
+def fleet_delete(gid, reason=''):
+    f = FLEETS.pop(gid, None)
+    if f is None:
+        return 0
+    n = 0
+    for on in [f['flag']] + list(f['escorts']):
+        if on in SHIPS:
+            n += 1; delete_ship(on, reason=f'(fleet {f["name"]} {reason})')
+    return n
+
+_FLEET_GONE_AT = {}
+
+def ensure_fleets(rid):
+    """Room scheduler hook: raise every enabled scripted group not alive; re-raise respawn_min after
+    a group is wholly gone."""
+    if not SHIP_CLASSES or not tank_consts_ok():
+        return
+    if not any(getattr(p, 'entered_game', False) for p in get_sessions_in_room(rid)):
+        return
+    try:
+        script, src = fleet_script_for_room(rid)
+    except Exception:
+        return
+    now = time.time()
+    for g in script.get('groups') or []:
+        if not isinstance(g, dict) or not g.get('enabled', True):
+            continue
+        key = (rid, str(g.get('name') or ''))
+        alive = [f for f in FLEETS.values() if f['key'] == key]
+        if alive:
+            f = alive[0]
+            if any(on in SHIPS for on in [f['flag']] + f['escorts']):
+                continue
+            FLEETS.pop(next(k for k, v in FLEETS.items() if v is f), None)
+            _FLEET_GONE_AT[key] = now
+            log('FLEET', f'room {rid}: task group {f["name"]} is gone - respawn in {g.get("respawn_min", 30)} min')
+            continue
+        gone = _FLEET_GONE_AT.get(key)
+        if gone is not None and now - gone < float(g.get('respawn_min', 30.0)) * 60.0:
+            continue
+        fleet_spawn(rid, g, reason=f'(script: {src})')
+
+def navy_console(args, by='console'):
+    """navy list | script <room> | spawn <room> <group|all> | del <gid|all> | reload"""
+    if not args:
+        return ['usage: navy list | script <room> | spawn <room> <group name|all> | del <gid|all> | reload']
+    v = args[0].lower()
+    try:
+        if v == 'list':
+            out = []
+            for gid, f in FLEETS.items():
+                fl = SHIPS.get(f['flag'])
+                out.append(f'gid {gid} room {f["room"]} {f["name"]} camp {f["camp"]}: flagship 0x{f["flag"]:04x}'
+                           + (f' ({fl["name"]}) at ({fl["pos"][0]:.0f},{fl["pos"][1]:.0f}) {fl.get("_v", 0.0):.1f} m/s' if fl else ' (sunk/gone)')
+                           + f', escorts {["0x%04x" % o for o in f["escorts"] if o in SHIPS]}')
+            return out or ['no task groups at sea']
+        if v == 'script' and len(args) >= 2:
+            rid = int(args[1], 0); d, src = fleet_script_for_room(rid)
+            out = [f'room {rid}: fleet script from {src}: {len(d.get("groups") or [])} group(s)']
+            for g in d.get('groups') or []:
+                out.append(f'  {g.get("name")!r} camp {g.get("camp")} {g.get("flagship")} + {g.get("escorts")} {g.get("formation", "ring")}/{g.get("spacing", 700)} m, '
+                           f'spawn {g.get("spawn")} hdg {g.get("heading", 0)}, patrol {len(g.get("patrol") or [])} pt(s) {"loop" if g.get("loop", True) else "once"} '
+                           f'at {g.get("speed", 10)} m/s, respawn {g.get("respawn_min", 30)} min{"" if g.get("enabled", True) else " (DISABLED)"}')
+            return out
+        if v == 'spawn' and len(args) >= 3:
+            rid = int(args[1], 0); d, src = fleet_script_for_room(rid); want = ' '.join(args[2:])
+            gs = [g for g in d.get('groups') or [] if want.lower() == 'all' or str(g.get('name', '')).lower() == want.lower()]
+            if not gs:
+                return [f'no group {want!r} in the script ({src})']
+            res = [fleet_spawn(rid, g, reason=f'({by})') for g in gs]
+            return [f'raised {sum(1 for r in res if r is not None)} group(s): gids {[r for r in res if r is not None]}']
+        if v == 'del' and len(args) >= 2:
+            if args[1].lower() == 'all':
+                return [f'deleted {sum(fleet_delete(g, by) for g in list(FLEETS))} ship(s)']
+            return [f'deleted {fleet_delete(int(args[1], 0), by)} ship(s)']
+        if v == 'reload':
+            FLEET_SCRIPTS.clear(); SEALANES.clear()
+            return ['fleet scripts and sea lanes will be re-read from mapdata on next use']
+    except Exception as e:
+        return [f'navy: {e}']
+    return ['navy: unknown verb']
+
+# --- v967f5e CARRIER TAKE-OFF QUEUE (msg 55 / 0x37 both ways) -------------------------------------
+# Client -> host (FUN_004fcfc0, VNet_Snd.cpp): [0x37][plane ONumber u16][airfield ident u8][flag u8]
+#   flag 0 = 'I want to take off from this (floating) airfield' (state -> 0, cockpit 'You are waiting
+#   take-off queue'), flag 1 = 'airborne / leaving the queue' (state -> -1).
+# Host -> client (handler FUN_004f3cd0, table slot 55): [0x37][plane ONumber u16][airfield u8][state u8]
+#   -> plane +0x1ac0: 1 = cleared ('Hit Ctrl+W to take off!', the client arms the catapult run),
+#   0 = waiting, N >= 2 = 'You are N in take-off queue'. Ignored when the plane never asked (-1).
+# The generic echo used to bounce the request back as state 0 = 'waiting' forever (Alon 04:15).
+# Rules from the arena's [Main] CarrierTakeoffRequests (planes cleared at once) and
+# CarrierTakeoffInterval (seconds between clearances); defaults 2 / 20 as in the BOB dump.
+CARRIER_QUEUES   = {}     # af ident -> {'waiting': [(session, onum)], 'cleared': {session: t}, 'last_clear': t}
+CARRIER_TAKEOFF_REQUESTS = 2
+CARRIER_TAKEOFF_INTERVAL_S = 20.0
+CARRIER_CLEAR_TIMEOUT_S = 120.0   # a cleared pilot who never rolls gives the slot back
+
+def carrier_queue_cfg(rid):
+    try:
+        st = db_get_room_settings(rid) or {}
+        return (max(1, int(st.get('carrier_takeoff_requests') or CARRIER_TAKEOFF_REQUESTS)),
+                max(0.0, float(st.get('carrier_takeoff_interval') or CARRIER_TAKEOFF_INTERVAL_S)))
+    except Exception:
+        return CARRIER_TAKEOFF_REQUESTS, CARRIER_TAKEOFF_INTERVAL_S
+
+def carrier_queue_send(s, onum, af, state):
+    try:
+        pkt = build_ingame_pkt(bytes([0x37]) + struct.pack('<H', onum & 0xffff) + bytes([af & 0xff, state & 0xff]))
+        _submit_send(send_rel, s, pkt, f'<- take-off queue 55 af={af} state={state}', to=3.0)
+    except Exception:
+        logx('CARRIER', 'queue send failed')
+
+def _handle_takeoff_request_55(s, pl):
+    body = bytes(pl)
+    if len(body) < 9 or body[4] != 0x37:
+        return
+    onum, af, flag = struct.unpack_from('<H', body, 5)[0], body[7], body[8]
+    q = CARRIER_QUEUES.setdefault(af, {'waiting': [], 'cleared': {}, 'last_clear': 0.0})
+    if flag == 0:
+        if s in q['cleared'] or any(x[0] is s for x in q['waiting']):
+            return
+        q['waiting'].append((s, onum))
+        log('CARRIER', f'{s.current_pilot} (0x{onum:04x}) asks to take off from airfield {af} -> queue position {len(q["waiting"])} '
+                       f'({len(q["cleared"])} cleared)')
+        carrier_queue_tick(force_af=af)
+    else:
+        carrier_queue_leave(s, reason='airborne')
+
+def carrier_queue_leave(s, reason=''):
+    for af, q in list(CARRIER_QUEUES.items()):
+        was = q['cleared'].pop(s, None) is not None
+        n0 = len(q['waiting']); q['waiting'] = [x for x in q['waiting'] if x[0] is not s]
+        if was or len(q['waiting']) != n0:
+            log('CARRIER', f'{s.current_pilot} left the take-off queue of airfield {af} ({reason})')
+            carrier_queue_tick(force_af=af)
+
+def carrier_queue_tick(force_af=None):
+    """Clear the next pilot(s) when a slot and the interval allow; refresh everyone's position."""
+    now = time.time()
+    for af, q in list(CARRIER_QUEUES.items()):
+        # stale entries: pilots gone from the arena or whose plane changed
+        q['waiting'] = [(p, o) for p, o in q['waiting'] if getattr(p, 'entered_game', False) and getattr(p, 'my_obj_number', None) == o]
+        for p, t0 in list(q['cleared'].items()):
+            if not getattr(p, 'entered_game', False) or now - t0 > CARRIER_CLEAR_TIMEOUT_S:
+                q['cleared'].pop(p, None)
+        if not q['waiting'] and not q['cleared']:
+            CARRIER_QUEUES.pop(af, None); continue
+        rid = next((getattr(p, 'current_room', None) for p, _o in q['waiting']), None) or \
+              next((getattr(p, 'current_room', None) for p in q['cleared']), None)
+        n_req, interval = carrier_queue_cfg(rid)
+        changed = force_af == af
+        while q['waiting'] and len(q['cleared']) < n_req and now - q['last_clear'] >= interval:
+            p, o = q['waiting'].pop(0)
+            q['cleared'][p] = now; q['last_clear'] = now; changed = True
+            carrier_queue_send(p, o, af, 1)
+            log('CARRIER', f'{p.current_pilot} cleared for take-off from airfield {af} ({len(q["waiting"])} waiting)')
+        if changed:
+            for i, (p, o) in enumerate(q['waiting']):
+                carrier_queue_send(p, o, af, 0 if i == 0 else i + 1)
+
+def ship_recreate_for(s, reason='', near_xy=None, at_confirm=False):
+    """v967f5g: create every live ship of the room this session does not hold (joiner / re-fly /
+    back in range) - ships had no re-create path at all, so a cull (or a spawn with nobody in the
+    world) made them invisible for good (Alon 07:42)."""
+    rid = getattr(s, 'current_room', None); addr = getattr(s, 'addr', None)
+    todo = [(on, sh) for on, sh in list(SHIPS.items()) if sh['room'] == rid and addr not in sh['peers'] and not sh.get('dead')
+            and (near_xy is None or _recreate_allowed(s, on, 'ship', sh['pos'][0], sh['pos'][1], near_xy, at_confirm=at_confirm))]
+    n = 0
+    for on, sh in todo:
+        body = bytes([0x02]) + _ensure_ai_client_on(s) + build_ship_record(AI_CLIENT_ST, on, sh['camp'], sh['class'], w2=sh.get('faf', 0))
+        sh['peers'].add(addr)
+        _submit_send(send_rel, s, build_msg13(body), f'<- CreateObject 2 SHIP 0x{on:04x} (re-create {reason})', to=3.0)
+        n += 1
+    if n:
+        log('SHIP', f'{s.current_pilot}: re-created {n} ship(s) {reason}')
+        threading.Timer(1.0, lambda: [ship_broadcast_state(on) for on, _sh in todo]).start()
+    return n
+
 def ship_console(args, by='console'):
     """ship classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y>
        | hdg <onum> <deg> | hdgoff <deg> | aux <onum> a0 a1 a2 a3 | flags <onum> <n> | pitch <onum> <deg> | roll <onum> <deg>"""
     if not args:
-        return ['usage: ship classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y> | hdg <onum> <deg> | hdgoff <deg> | aux <onum> a0..a3 | flags <onum> <n> | pitch|roll <onum> <deg>']
+        return ['usage: ship classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y> | hdg <onum> <deg> | hdgoff <deg> | aux <onum> a0..a3 | flags <onum> <n> | pitch|roll <onum> <deg>',
+                '       ship goto <onum> <x> <y> [mps] | route <onum> <mps> x1 y1 x2 y2 .. | stop <onum|all> | ports <room> | sail <onum> <from_port> <to_port> [mps] | phys [..] | ahead <s>',
+                '       ship marks <room> [set <label> <x> <y> | del <label>] | grid <room> <row> <letters> | port <room> <scene> anchor <mark|x y> | port <room> <scene> approach <mark ..> | lane <room> <from> <to> <mark ..|del>']
     v = args[0].lower()
     try:
         if v == 'classes':
@@ -15886,11 +16570,118 @@ def ship_console(args, by='console'):
             on = spawn_ship(rid, camp, cls, (x, y, 0.0), hdg, reason=f'({by})')
             return [f'ship 0x{on:04x} spawned' if on is not None else 'spawn refused (see SHIP log)']
         if v == 'list':
-            return [f'0x{o:04x} room {s_["room"]} class {s_["class"]} ({s_["name"]}) camp {s_["camp"]} at ({s_["pos"][0]:.0f},{s_["pos"][1]:.0f}) hdg {math.degrees(s_["hdg"]):.0f} peers {len(s_["peers"])}' for o, s_ in SHIPS.items()] or ['no ships']
+            return [f'0x{o:04x} room {s_["room"]} class {s_["class"]} ({s_["name"]}) camp {s_["camp"]} at ({s_["pos"][0]:.0f},{s_["pos"][1]:.0f}) hdg {math.degrees(s_["hdg"]):.0f} '
+                    f'{s_.get("_v", 0.0):.1f} m/s' + (f' -> ({s_["drive"]["route"][0][0]:.0f},{s_["drive"]["route"][0][1]:.0f}) +{len(s_["drive"]["route"]) - 1} wp' if s_.get('drive') and s_['drive']['route'] else '')
+                    + f' peers {len(s_["peers"])}' for o, s_ in SHIPS.items()] or ['no ships']
         if v == 'del' and len(args) >= 2:
             if args[1].lower() == 'all':
                 return [f'deleted {sum(1 for o in list(SHIPS) if delete_ship(o, by))} ship(s)']
             return [f'deleted -> {delete_ship(int(args[1], 0), by)} session(s)']
+        if v == 'goto' and len(args) >= 4:
+            on = int(args[1], 0); mps = float(args[4]) if len(args) > 4 else None
+            ok = ship_set_route(on, [(float(args[2]), float(args[3]))], mps, reason=f'({by} goto)')
+            return [f'0x{on:04x} under way to ({float(args[2]):.0f},{float(args[3]):.0f}) at {SHIPS[on]["drive"]["mps"]:.1f} m/s' if ok else 'no such ship']
+        if v == 'route' and len(args) >= 5:
+            on = int(args[1], 0); mps = float(args[2]); pts = [(float(args[i]), float(args[i + 1])) for i in range(3, len(args) - 1, 2)]
+            ok = ship_set_route(on, pts, mps, reason=f'({by} route)')
+            return [f'0x{on:04x} under way, {len(pts)} waypoint(s)' if ok else 'no such ship / no points']
+        if v == 'stop' and len(args) >= 2:
+            if args[1].lower() == 'all':
+                return [f'{sum(1 for o in list(SHIPS) if ship_stop(o))} ship(s) stopping']
+            return ['stopping' if ship_stop(int(args[1], 0)) else 'no such ship']
+        if v == 'ports' and len(args) >= 2:
+            rid = int(args[1], 0); terr = _probe_terrain_for_room(rid)
+            ps = ship_ports(terr); sl = sealanes(terr)
+            if not ps:
+                return [f'room {rid}: terrain {_tbase(terr)} has no Port scenes (gsi type_name "Port")']
+            out = [f'room {rid} terrain {_tbase(terr)}: {len(ps)} port(s), {len(sl["lanes"])} mapped lane(s) (mapdata/sealanes_trn{int(_tbase(terr)):02d}.json)']
+            for i, x, y, camp in ps:
+                pp = sl['ports'].get(str(i)) or {}
+                out.append(f'  port scene {i} camp {camp} at ({x:.0f},{y:.0f}) anchor {tuple(pp["anchor"]) if pp.get("anchor") else "-"} approach {len(pp.get("approach") or [])} pt(s)')
+            for ln in sl['lanes']:
+                out.append(f'  lane {ln.get("from")} <-> {ln.get("to")}: {len(ln.get("points") or [])} point(s)')
+            return out
+        if v == 'sail' and len(args) >= 4:
+            on = int(args[1], 0); a = int(args[2]); b = int(args[3]); mps = float(args[4]) if len(args) > 4 else None
+            sh = SHIPS[on]
+            pts, note = ship_lane_route(_probe_terrain_for_room(sh['room']), a, b)
+            if not pts:
+                return [f'sail: {note}']
+            ok = ship_set_route(on, pts, mps, reason=f'({by} sail {a}->{b}, {note})')
+            return [f'0x{on:04x} sailing port {a} -> port {b}: {len(pts)} waypoint(s), {note}, {sh["drive"]["mps"]:.1f} m/s' if ok else 'no such ship']
+        if v == 'phys':
+            if len(args) >= 7:
+                key = args[1].lower()
+                vals = dict(vmax=float(args[2]), acc=float(args[3]), yaw_max=float(args[4]), yaw_acc=float(args[5]), yaw_per_mps=float(args[6]))
+                if key in SHIP_PHYS_DEFAULT:
+                    SHIP_PHYS_DEFAULT[key] = vals
+                    for cid in [c for c in SHIP_PHYS_BY_CLASS if ship_family(c) == key]:
+                        SHIP_PHYS_BY_CLASS.pop(cid, None)
+                else:
+                    SHIP_PHYS_BY_CLASS[int(key, 0)] = vals
+                return [f'ship physics {key} = {vals}']
+            out = ['ship physics (vmax m/s, acc m/s2, yaw_max rad/s, yaw_acc, yaw/mps):']
+            out += [f'  family {f}: {p}' for f, p in SHIP_PHYS_DEFAULT.items()]
+            out += [f'  class {c} ({SHIP_CLASSES.get(c, "?")}): {p}' for c, p in sorted(SHIP_PHYS_BY_CLASS.items())]
+            return out + ['usage: ship phys <family|class> <vmax> <acc> <yaw_max> <yaw_acc> <yaw_per_mps>']
+        if v == 'ahead' and len(args) >= 2:
+            global SHIP_LOOKAHEAD_S
+            SHIP_LOOKAHEAD_S = max(0.0, min(1.0, float(args[1])))
+            return [f'ship position look-ahead = {SHIP_LOOKAHEAD_S:.2f} s']
+        if v == 'marks' and len(args) >= 2:
+            terr = _probe_terrain_for_room(int(args[1], 0)); m = sea_marks(terr)
+            if len(args) >= 4 and args[2].lower() == 'del':
+                _gone = m.pop(args[3], None) is not None
+                json.dump(m, open(_marks_path(terr), 'w'), indent=1)
+                return [f'mark {args[3]!r} {"removed" if _gone else "not found"}']
+            if len(args) >= 6 and args[2].lower() == 'set':
+                sea_mark_set(terr, args[3], float(args[4]), float(args[5])); return [f'mark {args[3]!r} = {m[args[3]]}']
+            return [f'terrain {_tbase(terr)}: {len(m)} mark(s)'] + [f'  {k}: {xy[0]:.0f},{xy[1]:.0f} (grid {tc_grid(xy[0], xy[1])})' for k, xy in m.items()] \
+                   + ['usage: ##mark <label> in the arena (over the spot) | ship marks <room> [set <label> <x> <y> | del <label>]']
+        if v == 'grid' and len(args) >= 4:
+            x, y = grid_to_xy(int(args[2]), args[3])
+            return [f'map square {int(args[2])},{args[3].upper()} centre = {x:.0f},{y:.0f} (2 km squares; check: {tc_grid(x, y)})']
+        if v == 'port' and len(args) >= 5:
+            rid = int(args[1], 0); terr = _probe_terrain_for_room(rid); sidx = int(args[2]); sl = sealanes(terr)
+            if not any(i == sidx for i, _x, _y, _c in ship_ports(terr)):
+                return [f'scene {sidx} is not a Port scene on terrain {_tbase(terr)} - `ship ports {rid}`']
+            pp = sl['ports'].setdefault(str(sidx), {})
+            what = args[3].lower()
+            if what == 'anchor':
+                xy = _mark_xy(terr, args[4], args[5] if len(args) > 5 else None)
+                if xy is None:
+                    return [f'unknown mark {args[4]!r} (ship marks {rid})']
+                pp['anchor'] = [round(xy[0], 1), round(xy[1], 1)]
+            elif what == 'approach':
+                pts = []
+                toks = args[4:]
+                i = 0
+                while i < len(toks):
+                    xy = _mark_xy(terr, toks[i], toks[i + 1] if i + 1 < len(toks) else None)
+                    if xy is None:
+                        return [f'unknown mark {toks[i]!r}']
+                    pts.append([round(xy[0], 1), round(xy[1], 1)]); i += 1 if toks[i] in sea_marks(terr) else 2
+                pp['approach'] = pts
+            else:
+                return ['usage: ship port <room> <scene> anchor <mark|x y> | approach <mark> [mark ..] (in order, anchor -> open sea)']
+            sealanes_save(terr)
+            return [f'port {sidx}: anchor {pp.get("anchor")} approach {pp.get("approach")} -> saved']
+        if v == 'lane' and len(args) >= 5:
+            rid = int(args[1], 0); terr = _probe_terrain_for_room(rid); a = int(args[2]); b = int(args[3]); sl = sealanes(terr)
+            if args[4].lower() == 'del':
+                n0 = len(sl['lanes']); sl['lanes'] = [ln for ln in sl['lanes'] if {int(ln.get('from', -1)), int(ln.get('to', -1))} != {a, b}]
+                sealanes_save(terr); return [f'{n0 - len(sl["lanes"])} lane(s) removed']
+            pts = []; toks = args[4:]; i = 0
+            while i < len(toks):
+                xy = _mark_xy(terr, toks[i], toks[i + 1] if i + 1 < len(toks) else None)
+                if xy is None:
+                    return [f'unknown mark {toks[i]!r}']
+                pts.append([round(xy[0], 1), round(xy[1], 1)]); i += 1 if toks[i] in sea_marks(terr) else 2
+            sl['lanes'] = [ln for ln in sl['lanes'] if {int(ln.get('from', -1)), int(ln.get('to', -1))} != {a, b}]
+            sl['lanes'].append({'from': a, 'to': b, 'points': pts})
+            sealanes_save(terr)
+            route, note = ship_lane_route(terr, a, b)
+            return [f'lane {a} <-> {b}: {len(pts)} open-sea point(s) saved; full route {a}->{b} = {len(route or [])} waypoint(s) ({note})']
         if v == 'move' and len(args) >= 4:
             s_ = SHIPS[int(args[1], 0)]; s_['pos'] = (float(args[2]), float(args[3]), s_['pos'][2])
             return [f'moved -> {ship_broadcast_state(int(args[1], 0))} session(s)']
@@ -16123,6 +16914,7 @@ def send_tank_update(onum, tick_for, payload26):
 # (a missed re-create is the old benign failure, a duplicate create is a CTD).
 INSERT_CULL_RANGE_M  = 15000.0   # client [Range] Information default (FA.exe 0x583433: push 0x3a98)
 INSERT_CULL_MARGIN_M = 1000.0
+INSERT_CULL_DELETE_CHUNK = 24    # v968f5e: explicit msg-3 deletes per msg-13 at the insert mirror (24 x 13 B)
 
 def _mirror_insert_cull(s, x, y):
     """Re-arm the relay create of every peer plane the client of `s` has just distance-culled at
@@ -16162,18 +16954,32 @@ def _mirror_insert_cull_ai(s, x, y):
     way _mirror_insert_cull does for peer planes: forget this session on every tank / soldier /
     train / car / ship farther than INSERT_CULL_RANGE_M + margin from the spawn point. Must run
     BEFORE the ServerConfirm re-create of this life (no duplicate create for an object kept)."""
+    # v968f5e [THREE CTDs - Taurus x2, Bama, 10-24 11:08/11:17/12:45, 'Assertion failed
+    # (!Objects[no->Number()])' Network.cpp:391 = a CREATE for an ONumber the client still holds].
+    # The v967f5b mirror ASSUMED the client had dropped everything beyond 16 km at InsertPlayer and
+    # forgot the peer; the ServerConfirm re-create 1 ms later then re-created everything within the
+    # 18 km REJOIN radius - every object in the 16-18 km band came back as a DUPLICATE create (Bama:
+    # tank 0x03cb at 16.3 km, forgotten 11:08:35.398, re-created .399, CTD). Worse, none of the three
+    # client logs shows a single 'Check discon. and del .. (Dist=' line at that InsertPlayer: the
+    # client's distance cull (FUN_004fdb40(pos), only on one of the start-place paths and only for
+    # objects with +0x198 set) did not run at all, so the assumption itself was wrong. A missed
+    # re-create is invisible objects; a duplicate create is a CTD - so never assume: for every AI
+    # object beyond the limit send the client an EXPLICIT delete (msg 3, batched in msg-13 groups),
+    # then forget the peer. A delete for an object the client already culled is a no-op there; the
+    # re-create that follows (same reliable queue, in order) is now always a create after a delete.
     try:
         addr = getattr(s, 'addr', None); rid = getattr(s, 'current_room', None)
         if addr is None or rid is None:
             return 0
         lim = INSERT_CULL_RANGE_M + INSERT_CULL_MARGIN_M
-        n = 0; kinds = {}
+        n = 0; kinds = {}; dels = []
         for kind, coll in (('tank', TANKS), ('soldier', SOLDIERS), ('car', CARS), ('ship', SHIPS)):
             for onum, o in list(coll.items()):
                 if o.get('room') != rid or addr not in o.get('peers', ()):
                     continue
                 if math.hypot(o['pos'][0] - x, o['pos'][1] - y) > lim:
                     o['peers'].discard(addr); n += 1; kinds[kind] = kinds.get(kind, 0) + 1
+                    dels.append(bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF))
         for onum, tr in list(TRAINS.items()):
             if tr.get('room') != rid or addr not in tr.get('peers', ()):
                 continue
@@ -16184,9 +16990,14 @@ def _mirror_insert_cull_ai(s, x, y):
                 continue
             if math.hypot(tx - x, ty - y) > lim:
                 tr['peers'].discard(addr); n += 1; kinds['train'] = kinds.get('train', 0) + 1
+                dels.append(bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF))
+        for i in range(0, len(dels), INSERT_CULL_DELETE_CHUNK):
+            chunk = dels[i:i + INSERT_CULL_DELETE_CHUNK]
+            _submit_send(send_rel, s, build_msg13(*chunk), f'<- delete x{len(chunk)} AI objects beyond {lim / 1000:.0f} km (insert mirror)', to=3.0)
         if n:
-            log('INSERT-CULL', f'{s.current_pilot}: AI objects beyond {lim / 1000:.0f} km of his spawn forgotten on his client '
-                               f'({", ".join(f"{v} {k}(s)" for k, v in kinds.items())}) -> re-created when back in range')
+            log('INSERT-CULL', f'{s.current_pilot}: {n} AI object(s) beyond {lim / 1000:.0f} km of his spawn '
+                               f'({", ".join(f"{v} {k}(s)" for k, v in kinds.items())}) -> explicit deletes sent in '
+                               f'{(len(dels) + INSERT_CULL_DELETE_CHUNK - 1) // INSERT_CULL_DELETE_CHUNK} msg-13(s), forgotten; re-created when back in range')
         return n
     except Exception:
         logx('INSERT-CULL', 'AI mirror failed')
@@ -19251,6 +20062,14 @@ def _recreate_near_pilots():
                 if t['room'] == rid and not t.get('dead') and s.addr not in t['peers'] \
                         and _recreate_allowed(s, onum, 'tank', t['pos'][0], t['pos'][1], pos):
                     near_any = True; break
+        if not near_any:                                                        # v967f5g: cars and ships too
+            for coll, kind in ((CARS, 'car'), (SHIPS, 'ship')):
+                for onum, o in coll.items():
+                    if o['room'] == rid and not o.get('dead') and s.addr not in o['peers'] \
+                            and _recreate_allowed(s, onum, kind, o['pos'][0], o['pos'][1], pos):
+                        near_any = True; break
+                if near_any:
+                    break
         if not near_any:
             for onum, sd in SOLDIERS.items():
                 if sd['room'] == rid and s.addr not in sd['peers'] \
@@ -19269,7 +20088,7 @@ REJOIN_RADIUS_M = 30000.0   # v688f5: back to 30 km (see AI_TELEMETRY_FAR_M)
 # (online run 09-20: 9,645 culls / 15,660 re-creates; 66,018 'Get coord for missing object' on
 # one client). Per-kind re-create radii inside the client's own cull, and a per-(client, object)
 # COOLDOWN after a cull that is lifted only once the pilot has closed RECREATE_APPROACH_M.
-REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0, 'car': 18000.0}   # v965f5g
+REJOIN_RADIUS_BY_KIND = {'tank': 18000.0, 'soldier': 6000.0, 'train': 18000.0, 'car': 18000.0, 'ship': 18000.0}   # v965f5g/v967f5g
 
 def _spawn_in_range(p, kind, x, y):
     """v811f5: create a NEW AI object on this peer only if it is within the kind's re-create range of
@@ -20000,6 +20819,21 @@ def room_group_records(room_id, viewer_camp=None):
                         # bound the box to tank column 1 - a frame across 10 x 7 km of map (Alon 10-24
                         # screenshot). Cars carry no group id, so use an id no column has -> icon only.
                         'w6': 0x4000 | (int(cid) & 0x3fff)})
+        # v967f5e: ships on the tactical map (user: the carrier showed on the HQ map, not in the world
+        # map) - kind 0 (destroyer glyph) for surface ships, 6 (submarine) for the uboat
+        for onum, sh in list(SHIPS.items()):
+            if sh.get('room') != room_id or sh.get('dead'):
+                continue
+            if sh.get('faf'):
+                continue        # v968f5c: a carrier is drawn by the client as a floating airfield already (double icon, Alon 15:07)
+            _dr = sh.get('drive') or {}
+            _rt = _dr.get('route') or []
+            _dst = (_rt[0] if _dr.get('loop') else _rt[-1]) if _rt else None            # next patrol point / final destination
+            out.append({'camp': sh.get('camp', 0), 'kind': GROUP_KIND['sub'] if str(sh.get('name', '')).startswith('uboat') else GROUP_KIND['ship'],
+                        'strategy': GROUP_STRATEGY['goto'] if _dst else (GROUP_STRATEGY['defend'] if _dr.get('station') else 0), 'f3': 1,
+                        'uc': int(sh.get('class', 150)), 'count': 1,
+                        'x': _dst[0] if _dst else sh['pos'][0], 'y': _dst[1] if _dst else sh['pos'][1], 'tx': sh['pos'][0], 'ty': sh['pos'][1],
+                        'w6': 0x4000 | (int(onum) & 0x3fff)})
         for onum, c in list(CARS.items()):
             if c.get('room') != room_id or c.get('dead') or onum in _in_convoy:
                 continue
@@ -21302,7 +22136,7 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, a
     client record = 385 B is field-proven), leaving invisible tanks that went on capturing.
     v627f5: near_xy/radius restrict it to objects within reach of the pilot (the client culls
     beyond ~38 km, so creating far objects only feeds a create/cull loop)."""
-    if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS or CARS):
+    if not SPAWN_TANKS or not (TANKS or SOLDIERS or TRAINS or CARS or SHIPS):
         return 0
     rid = getattr(s, 'current_room', None)
     def _near(x, y, kind='tank', onum=None):
@@ -21380,7 +22214,8 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, a
     if tn:
         log('TRAIN', f'{s.current_pilot}: re-created {tn} train(s) {reason}')
     cn = car_recreate_for(s, reason, near_xy=near_xy, at_confirm=at_confirm) if CARS else 0   # v963f5c/v965f5g
-    return n + sn + tn + cn
+    shn = ship_recreate_for(s, reason, near_xy=near_xy, at_confirm=at_confirm) if SHIPS else 0  # v967f5g
+    return n + sn + tn + cn + shn
 
 def preload_squadron_list(s, reason=''):
     """Push the 0xce squadron list to a client so it has the list loaded in-session. Once per
@@ -25530,6 +26365,14 @@ def _alloc_start_place(s, af, n_req):
     room = s.current_room
     _now = time.time()
     _ref = s.__dict__.setdefault('_sp_refused', {})          # (room, af, n) -> time refused
+    # v968f5g: a refusal = exit code 9 right after a grant AND this new ask is for the SAME field
+    # soon after (the client bounced off the place and wants another); a TAB to a different field
+    # (the usual exit-9) is not one.
+    _e9 = s.__dict__.pop('_sp_exit9', None)
+    if _e9 is not None and _e9[1] == room and _e9[2] == af and _now - _e9[0] <= SP_REFUSE_WINDOW_S:
+        _ref[(room, af, _e9[3])] = _now
+        log('FLY23', f'{s.current_pilot}: asked AF {af} again {_now - _e9[0]:.1f}s after leaving start place {_e9[3]} '
+                     f'with exit code 9 -> that place marked refused for {SP_REFUSED_TTL_S:.0f}s [v923f5/v968f5g]')
     for _k in [k for k, t in _ref.items() if _now - t > SP_REFUSED_TTL_S]:
         _ref.pop(_k, None)
     def _bad(k):
@@ -25804,6 +26647,10 @@ def handle_leave_arena(s):
         _c['peers'].discard(getattr(s, 'addr', None))
     for _sh in SHIPS.values():                     # v967f5
         _sh['peers'].discard(getattr(s, 'addr', None))
+    try:
+        carrier_queue_leave(s, reason='left the arena')   # v967f5e
+    except Exception:
+        pass
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -29109,13 +29956,18 @@ def _ingame_own_object_removed(s, tb, stored):
                 # v923f5: an exit with code 9 within SP_REFUSE_WINDOW_S of a start-place grant is
                 # the client refusing that place ('Waiting for position on airfield') - remember
                 # it so the next ask gets a different one (see _alloc_start_place)
+                # v968f5g: NOT marked here any more. Exit code 9 right after a grant is also the
+                # client's ordinary TAB airfield switch ('TAB. Asking SP on AF 14' -> grant ->
+                # 'ExitEvent MissExitCode=9' -> 'InsertPlayer AF 14', Bama messages03 11:19:45,
+                # 12:27:38, 12:52:19) - 29 'place marked refused' lines on 10-24 were all TABs, and
+                # every pilot who tabbed to a field twice inside 2 min was pushed off place 0 for
+                # nothing. A refusal is exit 9 followed by ANOTHER ASK FOR THE SAME FIELD; the
+                # allocator decides when that ask arrives (see _alloc_start_place).
                 try:
                     _g = s.__dict__.get('_last_sp_grant')
                     if mec_nib == 9 and _g and time.time() - _g[0] <= SP_REFUSE_WINDOW_S:
                         _, _, _gaf, _gmid, _gn = _g
-                        s.__dict__.setdefault('_sp_refused', {})[(s.current_room, _gaf, _gn)] = time.time()
-                        log('FLY23', f'{s.current_pilot}: exit code 9 {time.time() - _g[0]:.1f}s after the grant of '
-                                     f'start place {_gn} on AF {_gaf} -> place marked refused; next ask gets another [v923f5]')
+                        s.__dict__['_sp_exit9'] = (time.time(), s.current_room, _gaf, _gn)
                 except Exception:
                     pass
         elif scored:
@@ -30484,6 +31336,10 @@ def _supply_chain_step(rid):
             ensure_camp_convoys(rid)                                    # v966f5b: self-gating (on-demand scan in every mode)
         except Exception:
             logx('CONVOY', 'ensure_camp_convoys failed')
+        try:
+            ensure_fleets(rid)                                          # v968f5b: scripted task groups (self-gating)
+        except Exception:
+            logx('FLEET', 'ensure_fleets failed')
     try:
         tc_check_win(rid)                          # v640f5
     except Exception:
@@ -32270,7 +33126,9 @@ PREFIXED_LOBBY_SUBS = {0xcb, 0xce, 0xd2, 0xd4, 0xd5, 0xd7, 0xd9, 0xdb, 0xdf, 0xd
     # these direct handlers reads its fields at pl[5:9]/pl[9:] of the DIRECT frame, so the
     # re-frame (drop the 4-byte prefix, release cmd) hands them exactly what they expect.
 PREFIXED_INGAME_SUBS = {0x22, 0x1a, 0x33, 0x39, 0x46, 0x2a, 0x70,
-                        0x6a, 0x69, 0x71}   # v948f5: cargo 106 / air-drop 105 / paratroop 113 (see below)
+                        0x6a, 0x69, 0x71,   # v948f5: cargo 106 / air-drop 105 / paratroop 113 (see below)
+                        0x37}               # v967f5f: carrier take-off request 55 (Alon 04:24: 'out 55'5' x14, nothing
+                                            # on the server, no echo - the prefixed form was dropped unseen)
     # v948f5 [FLOWN-IN CARGO NEVER LANDED]: Moira 10-20 16:40:22 unloaded 917 kg x3 at Front Airfield
     # 43 - the client logged 'out 106'19' and 69 ms later 'in 106'19' + 'Unknown Type 106': the request
     # came back as an ECHO. No CARGO line on the server. The three pick-ups that session arrived
@@ -33780,6 +34638,16 @@ def handle_post_auth(s, cmd, pl):
         # DO NOT echo: echoing type=0x52 back to FA.exe causes infinite retry loops
         # and fills the squadron page with GAME_DEF garbage when triggered by wrong 0xce data.
         if tb == 0x52 and not _catalog_3a:   # v393f5: catalog escape (see length-rule note above)
+            if sub == 0x37 and len(pl) >= 9 and getattr(s, 'entered_game', False):
+                # v967f5j [CARRIER TAKE-OFF REQUEST FOUND]: msg 55 has a 5-byte body ([0x37][ONumber u16]
+                # [af u8][flag u8]) so the client frames it with T=0x52 - the SAME type nibble as the
+                # lobby's [sub][u32] requests (0xd4 GAME_DEF, 0xd7 SetArena, ...). This block's
+                # catch-all ('type=0x52 sub=.. accepted (not echoed)', debug level) swallowed it
+                # before the in-game NO_ECHO dispatch (v967f5e) ever ran - the three earlier guesses
+                # (reliable path, prefixed re-frame, unreliable scan) all sat downstream of here.
+                # Proven by the v967f5i DIAG55 dump: pt=1 seq cb.. raw 00520000 37 1e01 c8 00/01.
+                _handle_takeoff_request_55(s, bytes(pl))
+                return
             if sub == 0xe0:
                 # v316: sub=0xe0 is the "Display Pilots" roster request, NOT "EnterArena".
                 # It was labelled EnterArena because a 0xe0 is often seen shortly before
@@ -34041,7 +34909,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69}  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69, 0x37}   # v967f5e: 0x37=msg55 carrier take-off request -> queue reply  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
@@ -34098,6 +34966,8 @@ def handle_post_auth(s, cmd, pl):
                 _handle_cargo_request_106(s, stored)    # v606f5: cargo pick-up / drop
             elif sub == 0x69:
                 _handle_give_rsc_105(s, stored)         # v609f5: air-dropped cargo chutes
+            elif sub == 0x37:
+                _handle_takeoff_request_55(s, stored)   # v967f5e: carrier take-off queue
             log('POST-AUTH', f'cmd=0 sub=0x{sub:02x} (notify, must not echo) -> swallow')
             return
         if TRIM_RELIABLE_ECHOES and sub in TRIM_ECHO_SUBS:
@@ -34990,6 +35860,10 @@ def on_pkt(data, addr):
                 _ack_q.put((time.time() + ACK_DELAY_S, _ackpkt, s.addr))
             else:
                 time.sleep(ACK_DELAY_S); sock.sendto(_ackpkt, s.addr)
+            if time.time() < s.__dict__.get('_rel_trace_until', 0.0):             # v968f5f reltrace
+                log('RELTRACE', f'{getattr(s, "current_pilot", "?")} RX seq={cs9} sz={sz} dup={_dup} '
+                                f'delivered={len(_deliver)} held={len(_buf)} next={getattr(s, "_rx_next", "?")} '
+                                f'pl={hx(pl[:8])}')
             for pl, sz, _dup in _deliver:
                 cv=struct.unpack_from('>H',pl,2)[0] if len(pl)>=4 else 0
                 if getattr(s,'entered_game',False):
@@ -35356,6 +36230,7 @@ threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: grou
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 car_classes_load()                                                  # v963f5: NetCar probe class list
 ship_classes_load()                                                 # v967f5: NetShip probe class list
+ship_phys_load()                                                    # v968f5: per-class ship physics (dump v12)
 threading.Thread(target=car_tick, daemon=True, name='car_tick').start()   # v964f5: road movement + convoys
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive
 threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts
@@ -35396,6 +36271,13 @@ while running:
     if not data: continue
     pt=data[0]; sz=len(data)
     _perf['rx'] += 1; _perf['rxb'] += sz          # v399f5
+    # v967f5i DIAG55: every small datagram carrying 0x37 anywhere in its first 24 bytes, raw, so the
+    # take-off request's real framing can be read (three guesses at its path found nothing)
+    try:
+        if 9 <= sz <= 40 and 0x37 in data[:24] and DIAG55_ON:
+            log('DIAG55', f'from {addr}: pt={pt} sz={sz} raw={hx(data[:min(sz, 40)])}')
+    except Exception:
+        pass
     # v864f5 [ARE WE KEEPING UP?]: was another datagram already waiting when this one was taken?
     # If so the receive thread is BEHIND (head-of-line blocking: a slow handler ahead delayed this
     # packet). Counted as 'backlog' reads; the PERF line shows what share of packets were read

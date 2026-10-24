@@ -1,0 +1,50 @@
+{
+ "_help": [
+  "fleet script for terrain 6 (English Channel): task groups the room scheduler raises while pilots are in the arena.",
+  "group: name, camp (0 US 1 GB 2 SU 3 GE 4 JP), flagship (carrier|battle|cruiser|cargo|uboat or a class id), escorts [..],",
+  "formation ring|column|line, spacing m, spawn [x,y] (default: first patrol point), heading deg, speed m/s,",
+  "patrol [[x,y],..] (loop true = closed circuit, false = there and back once), respawn_min, enabled.",
+  "The arena setting \"Naval task groups\" on the web TC tab overrides this file. Console: navy script|spawn|list|del|reload."
+ ],
+ "terrain": 6,
+ "groups": [
+  {
+   "name": "Channel Force",
+   "camp": 1,
+   "flagship": "carrier",
+   "escorts": [
+    "cruiser",
+    "battle"
+   ],
+   "formation": "ring",
+   "spacing": 700,
+   "spawn": [
+    -7300,
+    1581
+   ],
+   "heading": 90,
+   "speed": 12,
+   "patrol": [
+    [
+     -7300,
+     1581
+    ],
+    [
+     -3000,
+     1581
+    ],
+    [
+     -3000,
+     -2500
+    ],
+    [
+     -7300,
+     -2500
+    ]
+   ],
+   "loop": true,
+   "respawn_min": 30,
+   "enabled": false
+  }
+ ]
+}

@@ -1,3 +1,198 @@
+v968f5g (2026-10-24) - every TAB field switch was being booked as a 'refused start place'
+- Alon asked to look at the 'place marked refused' line in Bama's episode. Client log: the normal
+  TAB airfield switch is 'TAB. Asking SP on AF 14' -> grant -> 'ExitEvent MissExitCode=9' ->
+  'InsertPlayer AF 14' - exit code 9 follows the grant by 20-100 ms every time (11:19:45, 12:27:38,
+  12:52:19). The v923f5 rule ('exit 9 within 8 s of a grant = the client refused that place') fired
+  on all of them: 29 'place marked refused' lines on 10-24, every one a TAB (VENOM, In_2_Deep,
+  SilverFox, SeanTB1, Chuckdiver, PhiD, Bama), and 'start place(s) [0] on AF 9 skipped -> granting
+  1' pushed pilots off place 0 whenever they came back to a field within 2 min - the opposite of
+  what the rule was for. Bama's own 12:52 case was a TAB whose grant his slow link delivered 6 s
+  late - still a TAB, not a refusal, and not related to the slowness.
+- Now: exit 9 after a grant only REMEMBERS the place; it is marked refused when the NEXT ask is for
+  the SAME airfield within the window (the Moira 10-05 loop: spawn, bounce off, ask again) - the
+  allocator logs 'asked AF n again Xs after leaving start place k with exit code 9 -> refused'. A
+  TAB to another field clears it.
+
+v968f5f (2026-10-24) - Bama's slow menus (messages03): not the server's processing; `reltrace` added
+- Client log vs live log for the 12:52 episode: his requests reached us and were handled within
+  ~100 ms (TAB start-place ask 12:52:12.866 -> FLY23 grant logged 12.953; hangar list 0x3a sent
+  20.526 -> CAREER line 20.607), every reliable send to him was ACKed inside the 3 s window (no
+  RELKEEP line for him all afternoon except the two CTD moments), yet his client logged the replies
+  3-18 s later, trickling in one at a time (grant 19.029 = 6 s; hangar list 38.749 = 18 s; the 8
+  crater records 22-28 s). Same shape at 12:27:43 (3-4 s). The transport on his side acknowledged
+  promptly but his game loop received late - his link queueing (TICK-JITTER 12:28:11: his frames
+  arrived in a 59/s burst) or his client (a refused spawn, HQ world rebuild, big cull bursts) -
+  nothing in the file logs can split those two.
+- Console `reltrace <pilot> [seconds]`: logs that one session's reliable channel at INFO - every
+  send (seq, size, label), its ACK delay and retransmit count (NOACK when the window expires), every
+  reliable packet received (seq, duplicate, delivered/held behind a hole). Next time a pilot reports
+  slow menus: `reltrace Bama 300`, let him click around, then read the RELTRACE lines: ACK delays
+  growing to seconds = his link; ACKs fast while he still waits = his client.
+
+v968f5e (2026-10-24) - LIVE CTDs (Bama x2 11:08/11:17, Taurus 12:45): duplicate create at re-entry
+- All three client logs end the same way: InsertPlayer, then 'Create NetTank/NetCar .. ONumber=N' for
+  an object the client STILL HELD -> 'Assertion failed (!Objects[no->Number()])' Network.cpp:391
+  (dev build = CTD). Live log (v967f5c): '[INSERT-CULL] Bama: AI objects beyond 16 km .. forgotten
+  (8 tank(s) ..)' at 11:08:35.398 and '[TANK] Bama: re-created 8 tank(s) (at ServerConfirm, in
+  range)' at .399 - the v967f5b mirror forgot everything beyond 16 km on the ASSUMPTION the client
+  had culled it, and the ServerConfirm re-create 1 ms later re-created everything within the 18 km
+  REJOIN radius: every object in the 16-18 km band (tank 0x03cb at 16.3 km) went out as a second
+  create. And the assumption was wrong anyway: none of the three logs has a 'Check discon. and del
+  .. (Dist=' line at that InsertPlayer (the client's distance cull runs only on one start-place path
+  and only for objects with +0x198 set - FUN_00468420 / FUN_004fdb40(pos)).
+- FIX: the insert mirror never assumes any more. Every AI object (tank/soldier/car/ship/train) held
+  by the client beyond 16 km gets an EXPLICIT msg-3 delete, batched 24 per msg-13 (the same
+  delete-then-create the peer-plane re-entry has always used: 'Server require delete object 1209 ..
+  Receive create object 1209' in one group), then the peer is forgotten; the re-create that follows
+  sits behind the deletes in the same reliable queue. A delete for an object already culled is a
+  no-op on the client ('DelObject -1'). Objects the server kept (<= 16 km) are untouched.
+- Deploy: server.py (web_server.py carries the naval TC-tab box from v968f5b and can go with it).
+- VERIFY on live: INSERT-CULL lines now read '.. -> explicit deletes sent in N msg-13(s), forgotten';
+  no more '!Objects' asserts on the dev-build clients after an HQ re-entry / respawn; client logs show
+  'Server require delete object N' bursts right after InsertPlayer before any re-create.
+
+v968f5d (2026-10-24) - sea marks from the cockpit + console lane editor (no JSON editing)
+- Alon 15:46: coordinates for the lanes cannot be read without landing. The server already tracks
+  every pilot's position, so: in the arena, fly over the spot and type `##mark <label>` (sysops) -
+  the mark is saved to mapdata/marks_trnNN.json and echoed with its grid square; `##pos` shows the
+  position only. Console: `ship marks <room>` lists them (set/del by hand too); `ship grid <room>
+  <row> <letters>` turns a map square (e.g. 64 BI) into its centre coordinate (2 km squares);
+  `ship port <room> <scene> anchor <mark|x y>`, `ship port <room> <scene> approach <mark> <mark> ..`
+  (anchor -> open sea order) and `ship lane <room> <from> <to> <mark> ..` (open-sea points between
+  the two approaches; `del` removes) write sealanes_trnNN.json at once and report the full route
+  length. Workflow for one lane: overfly the water off port A (##mark a_anchor), the channel out
+  (##mark a_out), the open sea turn points (##mark sea1 ..), the channel into port B (##mark b_out),
+  off port B (##mark b_anchor); then `ship port 62 103 anchor a_anchor`, `ship port 62 103 approach
+  a_out`, same for B, `ship lane 62 103 102 sea1 sea2`; test with `ship sail <onum> 103 102`.
+
+v968f5c (2026-10-24) - carrier double icon on the map
+- FIELD (Alon 15:07, screenshots): `ship goto` moves the hull smoothly; the carrier showed TWO map
+  icons - the client already draws a floating airfield (msg 78 / FAF ident) and the msg-26 group
+  record added a ship glyph on top. Carriers no longer get a group record; other ships keep theirs,
+  now with Go to + the destination (next patrol point on a loop) while under way and Defend while
+  keeping station. The 'X' over the carrier is the client's own aircraft marker (pilot on deck).
+
+v968f5b (2026-10-24) - NAVAL TASK GROUPS: fleet scripts for open-water maps (no ports needed)
+- Alon: "we also have other open water maps so we will need another mechanism for scripting carrier
+  groups". A FLEET SCRIPT describes task groups directly: flagship (the carrier) on a patrol - a closed
+  loop of sea points or there-and-back - with escorts keeping station in a ring / column / line at
+  `spacing` m. Per terrain mapdata/fleets_trnNN.json (template for trn06 with one DISABLED example at
+  the carrier spot -7300,1581); per arena the TC-tab text box 'Naval task groups' (room setting
+  fleet_script, validated on save) overrides the file. ensure_fleets runs in the room scheduler
+  (economy rooms, pilots in the world): raises every enabled group once, re-raises respawn_min after
+  the whole group is gone; the team hears "AI: <name> has put to sea."
+- Station keeping (new 'station' drive mode): slot = (dx right, dy forward) in the FORMATION frame,
+  whose axis follows the flagship's heading at FLEET_FORM_SLEW 0.35 deg/s (a 700 m slot swinging with
+  a 2 deg/s carrier turn would move at 28 m/s - no escort could hold it); speed = flagship speed +
+  0.12 x along-track error, floored at half the flagship's speed unless the slot is >300 m astern.
+  Patrol loops never brake at the last point. Offline sim (carrier 12 m/s on a 4 km box, 3 cruisers
+  ring 700 m): station error 3 m on the legs, <= 175 m through the 90-deg turns, escorts 5-16 m/s.
+  An escort whose leader is gone heaves to.
+- Console `navy list | script <room> | spawn <room> <group|all> | del <gid|all> | reload`.
+- VERIFY (English Channel room): `navy script 62` shows the template; enable it (file or web box) or
+  `navy spawn 62 Channel Force`: carrier + cruiser + battleship appear at -7300,1581 heading east,
+  the carrier steams the 4-point box at 12 m/s, the escorts hold abeam ~700 m and swing round in the
+  turns; spawn from the carrier while it moves (take-off queue), land on it. `navy list` shows speeds.
+
+v968f5 (2026-10-24) - SHIPS SAIL: the client's Ship::Move mirrored, goto/route/sail, sea lanes
+- RE: Ship::Move = FUN_00649a00(dt). The 24-byte update's four aux words are the ship's controls and
+  state, in Unpack order: @0x10 rudder (/32768 -> obj+0x370), @0x12 throttle (/32768 -> +0x36c),
+  @0x14 speed (/512 m/s -> +0x350), @0x16 yaw rate (x pi/655360 rad/s -> +0x354). Per frame:
+  speed += clamp(vmax*throttle - speed, +-dt*acc); yaw += clamp(cap*rudder - yaw, +-dt*yaw_acc) with
+  cap = min(|speed|*yaw_per_mps + 4 deg/s, yaw_max); heading += yaw*dt; pos += forward*speed*dt.
+  Forward comes from FUN_00647ef0 = (sin hdg, cos hdg): COMPASS heading (0 = north/+Y, 90 = east/+X,
+  positive yaw = clockwise) - the convention `ship hdg` has used all along. Class numbers sit in the
+  record at class-base+0x54 (+0x24 vmax, +0x28 reverse, +0x2c yaw_max, +0x30 yaw_acc, +0x34 acc,
+  +0x38 yaw/mps); fa_dump_tank_tables.py v12 dumps them as ship_classes[].phys (re-run the dumper in a
+  ship arena and copy tank_tables.json to mapdata to replace the family defaults).
+- Server driver (same 4 Hz clock as cars): the ship runs the client's own law - heading error to the
+  next waypoint -> rudder (SHIP_YAW_GAIN 0.35), throttle = wanted/vmax (half speed in a sharp turn),
+  braking distance v^2/2a before the last waypoint, waypoint reach max(40 m, 4 s of way), position
+  sent SHIP_LOOKAHEAD_S 0.1 ahead. Speed and yaw words are re-sent every tick, so a wrong vmax
+  guess costs only acc x 0.25 s of client drift between updates. Family defaults (m/s): battle 13.9,
+  cruiser 16.5, carrier 16.0, cargo 5.7, uboat 8.3 (`ship phys` shows/overrides).
+- Sea lanes: mapdata/sealanes_trnNN.json (ports: anchor + approach waypoints out to sea; lanes:
+  from/to port scene indices + open-sea points, used both ways) - the server has no water map, so the
+  lanes are mapped by hand; a template for terrain 6 (English Channel, 5 Port scenes 102-106) is
+  written with anchors ON the scene positions - move them onto water. Port scenes = gsi type_name
+  'Port' (scene type 14 on trn06; Mediterrain has none).
+- Console: ship goto <onum> <x> <y> [mps] | route <onum> <mps> x1 y1 x2 y2 .. | stop <onum|all> |
+  ports <room> | sail <onum> <from_port> <to_port> [mps] | phys [family|class v a ymax yacc yper] |
+  ahead <s>; `ship list` shows speed and the next waypoint. Keep-alive pauses while under way.
+- VERIFY: spawn a battleship at sea, `ship goto <onum> <x> <y> 10` 2-3 km away: it should turn
+  toward the point at a few deg/s, work up to 10 m/s, run smooth (no rubber band, bow along the
+  track), slow in the last ~400 m and stop within 40 m; SHIP log 'under way' / 'arrived'. Then a
+  carrier under way: take off and land on a moving deck. If the hull steps or lags: `ship ahead 0.2`;
+  if it noticeably speeds up/slows between ticks: the family vmax is off - dump v12 or `ship phys`.
+- NEXT: transports carrying tanks port to port (load at a friendly port, sail the lane, unload a
+  column), carrier task groups, uboats, a water map from the terrain archive.
+
+v967f5j (2026-10-24) - carrier take-off request FOUND: swallowed by the type-0x52 lobby catch-all
+- DIAG55 (v967f5i raw dump) settled it: the request is an ordinary RELIABLE message (VCNC dword
+  0x20000000 = type 1), payload 00 52 00 00 | 37 <ONumber u16 LE> c8 <flag>. The 5-byte body gives
+  it T=0x52 - the same type nibble as the lobby's [sub][u32] requests (0xd4 GAME_DEF, 0xd7 SetArena,
+  0xd1 squadron join...). handle_post_auth's `tb == 0x52` block answered those subs and RETURNED on
+  any other sub ('type=0x52 sub=.. accepted (not echoed)', debug level) - upstream of the in-game
+  NO_ECHO dispatch, so the v967f5e handler, the v967f5f re-frame and the v967f5h datagram scan
+  never got the packet. The 0x52 block now routes sub 0x37 (in game, len >= 9) to
+  _handle_takeoff_request_55 first. Flag observed on the wire: 0 = request (first press), 1 =
+  cancel/airborne, alternating per Ctrl+W press - matches the RE reading.
+- The v967f5h unreliable-channel scan is removed (wrong guess); DIAG55 is off; 0x37 stays in
+  NO_ECHO_SUBS / PREFIXED_INGAME_SUBS as defence-in-depth.
+- VERIFY: on the carrier deck press Ctrl+W once -> server 'CARRIER <pilot> (0x..) asks to take off
+  from airfield 200 -> queue position 1' then 'cleared for take-off' and the cockpit line changes to
+  'Hit Ctrl+W to take off!'; a second pilot asking within CarrierTakeoffInterval (20 s) should read
+  'You are 2 in take-off queue' (or 'waiting' when first in line) until his turn.
+
+v967f5h (2026-10-24) - msg 55 is sent on the UNRELIABLE channel
+- FIELD (Alon 07:53): still 'out 55'5' x6 and no server line even with the re-frame - the request
+  is not a reliable message at all: it rides the appspace datagram channel like msg 7. The
+  datagram receive branch now scans for [..][0x37] at offsets 0/4 and feeds
+  _handle_takeoff_request_55; the reply goes back reliably (a normal VNET slot-55 handler).
+
+v967f5g (2026-10-24) - ships invisible: no re-create path + no telemetry tiers
+- FIELD (Alon 07:42): ships spawned with nobody in the world ('-> 0 session(s)') or forgotten by the
+  spawn-time mirror cull ('forgotten ... (1 ship(s))') never came back - the probe had no
+  re-create path. Also convoy cars 30 km away were still streamed ('Check discon. and del 324
+  (car) Dist=32769' then 'Get coord for missing object' spam): car/ship telemetry had none of the
+  tanks' distance tiers.
+- ship_recreate_for (joiner / ServerConfirm / back in range, REJOIN 'ship' 18 km) hooked into
+  tank_recreate_for; the 1 Hz near-pilots trigger now also looks at cars and ships; car and ship
+  broadcasts go through _ai_peer_send_ok (near/mid/far tiers, silence cull mirror) like tanks.
+
+v967f5f (2026-10-24) - msg 55 arrives PREFIXED: re-frame it
+- FIELD (Alon 04:24): 14 x 'out 55'5' from the deck, no CARRIER line, no 'in 55' - the request
+  came in the attached-time wrapper and 0x37 was not in PREFIXED_INGAME_SUBS, so the re-frame did
+  not fire and it was dropped before any handler (same fate as cargo 106 before v948f5). Added.
+
+v967f5e (2026-10-24) - carrier take-off queue (msg 55) + ships on the tactical map
+- FIELD (Alon 04:15): ship hdg steers the bow; AA fires when hostile; the carrier appears on the HQ
+  map and in the base list, a pilot can spawn on its deck; take-off showed 'You are waiting
+  take-off queue' forever.
+- RE: msg 55 (0x37) both ways. Client (FUN_004fcfc0): [0x37][plane ONumber u16][airfield u8]
+  [flag u8], flag 0 = want to take off, 1 = airborne/leaving. Host reply (handler FUN_004f3cd0,
+  slot 55): same shape, byte 4 = state -> plane +0x1ac0: 1 cleared ('Hit Ctrl+W to take off!'),
+  0 waiting, N>=2 'You are N in take-off queue' (Texts 170/171/174, cockpit line FUN_00474e90).
+  Our generic echo returned the request as state 0 = waiting forever.
+- Server: 0x37 in NO_ECHO_SUBS -> _handle_takeoff_request_55; per-airfield queue CARRIER_QUEUES:
+  clear up to CarrierTakeoffRequests pilots at once, CarrierTakeoffInterval seconds apart
+  (settings carrier_takeoff_requests / carrier_takeoff_interval, defaults 2 / 20 as the arena
+  dump), positions pushed to the rest, 120 s clearance timeout, pilots dropped on exit/leave.
+- Ships get msg-26 map records (destroyer glyph; submarine for the uboat; a carrier = Defend).
+
+v967f5d (2026-10-24) - ships spawn; carrier needs a floating-airfield ident
+- FIELD (Alon 04:00): battle-us/gb/su/ge spawn and show ('Create NetShip (battle-us)'); class 160
+  carrier-us CTD: 'Assertion failed (FAFIdent>=AF_MANAGER::GetStaticFields()) shipnet.cpp:86'.
+  RE (Unpack tail 0x656ac1): a class whose info+0x4c is set (carrier) takes the record word @+2
+  (ship +0x32c = NET +0x284) as its FAFIdent, asserts it is >= the terrain's static airfield count,
+  then FUN_00565950 creates/binds a NetFloatAF with that ident ('Create NetFloatAF(Camp=%i)...'),
+  stores it at +0x2fc and reports availability (msg 78 from the host). We sent 0.
+- spawn_ship: carriers get FAFIdent = first free from SHIP_FAF_BASE 200 (u8 on the wire); record
+  word @+2 carries it. Ship class names now from head dword[0] (ai0.str ids): 150-154 battle,
+  155-159 cargo, 160-164 carrier, 165-169 cruiser (-us -gb -su -ge -jp), 190 uboat.
+- Open: heading zero direction, whether the carrier appears on the Fly screen (the StartPlace grant
+  echoes any AF ident, so a deck spawn request will be granted), z/pitch on the water.
+
 v967f5b/c (2026-10-24) - bug round: TAB cull mirror for AI objects, convoy map box, captured
 destination, convoy escort knob
 - (3) Bama/Meno (messages60, live 21:17 UTC): after a TAB to AF 9 the client dropped every AI object

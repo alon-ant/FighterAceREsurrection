@@ -2717,6 +2717,21 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 'interval, a Flak lorry at the tail, 40 km/h overland from depot to scene (the tank driver: path-finding around obstacles). It unloads at the '
                 'depot, waits a minute and drives home empty - a target both ways; every lorry destroyed is cargo the front '
                 'does not get. Teams hear their own convoys on the AI channel. Needs the car classes in tank_tables.json.</p>')
+            # NAVAL TASK GROUPS (v968f5b): a fleet script - carrier groups on patrol with escorts in formation,
+            # for open-water maps with no ports; overrides mapdata/fleets_trnNN.json for this arena.
+            _fs = str(overrides.get('fleet_script', '') or '')
+            craters_html += (
+                '<label style="display:block; margin:14px 0 4px;">Naval task groups (fleet script, JSON - leave empty to use the terrain\'s mapdata/fleets_trnNN.json)<br>'
+                '<textarea name="s_fleet_script" rows="8" style="width:100%; max-width:640px; font-family:monospace; font-size:12px; padding:6px; margin-top:3px;" '
+                'placeholder=\'{"groups": [{"name": "TF-58", "camp": 0, "flagship": "carrier", "escorts": ["cruiser", "cruiser", "battle"], '
+                '"formation": "ring", "spacing": 700, "spawn": [x, y], "heading": 270, "speed": 12, "patrol": [[x, y], [x, y], [x, y]], '
+                '"loop": true, "respawn_min": 30, "enabled": true}]}\'>' + hesc(_fs) + '</textarea></label>'
+                '<p class="muted" style="margin:0 0 12px; max-width:640px;">Each group is a flagship (carrier = a floating airfield pilots can '
+                'spawn on, with its take-off queue) steaming a patrol - a closed loop of open-sea points (loop true) or there and back - at '
+                '<i>speed</i> m/s, with the escorts (battle, cruiser, cargo, uboat; a type picks the team\'s own nation) holding station in a '
+                'ring, column or line at <i>spacing</i> metres. Groups are raised when pilots are in the arena and re-raised <i>respawn_min</i> '
+                'after the whole group is gone. Coordinates are world metres (x east, y north) - check them with the console: '
+                '<code>ship ports &lt;room&gt;</code>, <code>navy script &lt;room&gt;</code>, <code>navy spawn &lt;room&gt; &lt;name&gt;</code>.</p>')
             # ARENA PASSWORD (client-side gate). Current value = the editor's override if one has
             # been set, else the password the arena was CREATED with (read from the blob via the
             # game-server bridge). The field is pre-filled with that value so an unchanged save
@@ -4485,6 +4500,25 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             else:
                 settings.pop('supply_mode', None)
             settings['convoy_on_demand'] = 'on' if qs.get('s_convoy_on_demand', [''])[0].strip() else 'off'
+            _fsv = qs.get('s_fleet_script', [''])[0].strip()                 # v968f5b
+            if _fsv:
+                try:
+                    _fsd = json.loads(_fsv)
+                    if not isinstance(_fsd, dict) or not isinstance(_fsd.get('groups'), list):
+                        raise ValueError('top level must be {"groups": [...]}')
+                    for _g in _fsd['groups']:
+                        if not isinstance(_g, dict) or not _g.get('name'):
+                            raise ValueError('every group needs a "name"')
+                        if not (_g.get('spawn') or _g.get('patrol')):
+                            raise ValueError('group %r needs "spawn" or "patrol"' % _g.get('name'))
+                    settings['fleet_script'] = json.dumps(_fsd)
+                except Exception as _fe:
+                    self.send_html(f"<h2 style='color:red;'>Fleet script not saved</h2><p>{hesc(str(_fe))}</p>"
+                                   "<p>Fix the JSON and save again (the other settings were not saved either).</p>"
+                                   f"<a href='/admin/arena_settings?room_id={rid}'>&larr; Back to the arena</a>")
+                    return
+            else:
+                settings.pop('fleet_script', None)
             _esc = qs.get('s_convoy_escort', [''])[0].strip().lower()        # v967f5c
             if _esc in ('aa', 'flak', 'none'):
                 settings['convoy_escort'] = _esc

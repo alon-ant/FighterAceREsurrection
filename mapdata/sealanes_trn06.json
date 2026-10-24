@@ -1,0 +1,72 @@
+{
+ "_help": [
+  "sea lanes for terrain 6 (English Channel). ports: anchor = the water point where a ship waits off the port",
+  "(defaults to the scene position - MOVE IT ONTO WATER); approach = waypoints leading OUT of the anchor to open sea, in order.",
+  "lanes: from/to = port scene indices, points = open-sea waypoints from the end of from.approach to the end of to.approach",
+  "(a lane is used in both directions). Console: ship ports <room>, ship sail <onum> <from> <to> [mps]."
+ ],
+ "terrain": 6,
+ "ports": {
+  "102": {
+   "name": "Port",
+   "scene_xy": [
+    39917,
+    9860
+   ],
+   "anchor": [
+    39917,
+    9860
+   ],
+   "approach": []
+  },
+  "103": {
+   "name": "Port",
+   "scene_xy": [
+    21057,
+    18476
+   ],
+   "anchor": [
+    21057,
+    18476
+   ],
+   "approach": []
+  },
+  "104": {
+   "name": "Port",
+   "scene_xy": [
+    58501,
+    14506
+   ],
+   "anchor": [
+    58501,
+    14506
+   ],
+   "approach": []
+  },
+  "105": {
+   "name": "Port",
+   "scene_xy": [
+    -83721,
+    -60236
+   ],
+   "anchor": [
+    -83721,
+    -60236
+   ],
+   "approach": []
+  },
+  "106": {
+   "name": "Port",
+   "scene_xy": [
+    -62919,
+    1124
+   ],
+   "anchor": [
+    -62919,
+    1124
+   ],
+   "approach": []
+  }
+ },
+ "lanes": []
+}

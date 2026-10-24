@@ -197,6 +197,50 @@ def dump_car_classes(m):
         print('  (empty - the car .tki set loads with the arena; enter a TC arena and re-run)')
     return out
 
+def dump_ship_classes(m):
+    """v11 (2026-10-23): SHIP class list @0xc89c0c (FUN_006503e0, shipfact.cpp: 'Create NetShip'):
+    node+0x34 -> info, info+4 = class id (the msg-2 record byte [1]); class base = node-0x24. Types
+    per ai0.str: cargo (Liberty), cruiser (Indianapolis), carrier (Essex), battle (Indiana), uboat;
+    one entry per nation (cargo-us .. uboat). Needs an arena whose unit set loads ships."""
+    head = m.u32(0x00c89c0c) or 0
+    print(f'ship class list head @0x00c89c0c = 0x{head:08x}')
+    out = []
+    node, n, seen = head, 0, set()
+    while node and node not in seen and n < 64:
+        seen.add(node); n += 1
+        info = m.u32(node + 0x34) or 0
+        cid = m.u32(info + 4) if info else None
+        head_ids = [m.u32(info + i * 4) for i in range(16)] if info else []
+        blob = m.read(info, 0x200) if info else b''
+        base = m.read(node - 0x24, 0x60) if node > 0x24 else b''
+        def _f(off):
+            return struct.unpack_from('<f', blob, off)[0] if blob and len(blob) >= off + 4 else None
+        # v12 (2026-10-24): the ship PHYSICS record. Ship::Move FUN_00649a00 reads obj+0x3ac = the
+        # pointer at class-base+0x54 (= node+0x30): +0x24 max speed (m/s), +0x28 reverse max speed,
+        # +0x2c max yaw rate (rad/s), +0x30 yaw acceleration, +0x34 acceleration (m/s^2), +0x38 yaw
+        # rate per m/s of speed; forward max = +0x24 x class-base+0x40 (node+0x1c, a scale float).
+        phys_ptr = m.u32(node + 0x30) or 0
+        phys = m.read(phys_ptr, 0x40) if phys_ptr else b''
+        scale = struct.unpack_from('<f', base, 0x40)[0] if base and len(base) >= 0x44 else None
+        def _pf(off):
+            return struct.unpack_from('<f', phys, off)[0] if phys and len(phys) >= off + 4 else None
+        phys_rec = {'ptr': hex(phys_ptr), 'hex': phys.hex() if phys else '', 'scale': scale,
+                    'vmax': _pf(0x24), 'vrev': _pf(0x28), 'yaw_max': _pf(0x2c), 'yaw_acc': _pf(0x30),
+                    'acc': _pf(0x34), 'yaw_per_mps': _pf(0x38)}
+        rec = {'node': hex(node), 'info': hex(info), 'class_id': cid, 'head_dwords': head_ids,
+               'phys': phys_rec,
+               'info_head_hex': blob.hex() if blob else '', 'base_hex': base.hex() if base else '',
+               'strings_in_info': ascii_runs(blob) if blob else [], 'strings_in_base': ascii_runs(base) if base else [],
+               'floats': {hex(o): _f(o) for o in range(0x08, 0x120, 4)}}
+        out.append(rec)
+        print(f'  [{n:2d}] node=0x{node:08x} info=0x{info:08x} class_id={cid} head={head_ids[:8]} str={rec["strings_in_info"][:4]}')
+        print(f'        phys@0x{phys_ptr:08x}: vmax={phys_rec["vmax"]} vrev={phys_rec["vrev"]} yaw_max={phys_rec["yaw_max"]} '
+              f'yaw_acc={phys_rec["yaw_acc"]} acc={phys_rec["acc"]} yaw/mps={phys_rec["yaw_per_mps"]} scale={scale}')
+        node = m.u32(node + 4) or 0
+    if not out:
+        print('  (empty - no ship classes loaded in this arena; try an arena whose map has ports/carriers)')
+    return out
+
 def dump_film_table(m):
     """v6: FILM record-type table (FilmRea3.cpp). Handler xrefs land at 0xc2c2d8 / 0xc2c330 (stride
     0x2c?) - dump the raw region so the (type -> size, callback) layout can be solved offline, and
@@ -320,6 +364,7 @@ def main():
         res = {'create_header_table': dump_create_table(m), 'tank_classes': dump_tank_classes(m),
                'float_consts': dump_float_consts(m), 'soldier_classes': dump_soldier_classes(m),
                'car_classes': dump_car_classes(m),
+               'ship_classes': dump_ship_classes(m),
                'film_table': dump_film_table(m), 'film_sizes': dump_film_sizes(m),
                'wagon_classes': dump_wagon_classes(m), 'roadmap': dump_roadmap(m)}
     finally:
