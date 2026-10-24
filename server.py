@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v966f5d'
+VERSION = 'v967f5c'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8197,6 +8197,9 @@ def console_handler():
                             log('CONSOLE', f'tc trigger scene {_sidx} as {_pil.current_pilot}: {"fired" if _ok else "not fired (same camp / unknown scene)"}')
                 else:
                     log('CONSOLE', 'usage: tc status | tc trigger <scene> [room] | tc assault <scene> [n] [camp] | tc paradrop <scene> [n] [camp] | tc reset')
+            elif cmd == 'ship':                                     # v967f5 NetShip probe
+                for _l in ship_console(parts[1].split() if len(parts) > 1 else [], by='console'):
+                    log('CONSOLE', _l)
             elif cmd == 'convoy':                                   # v964f5 road convoys
                 for _l in convoy_console(parts[1].split() if len(parts) > 1 else [], by='console'):
                     log('CONSOLE', _l)
@@ -15338,6 +15341,14 @@ def _scene_xy(terrain, sidx):
     r = tc_scene_xy(terrain, sidx)
     return (r[0], r[1], (r[2] or 'scene').strip()) if r else None
 
+def convoy_escort_for_room(rid):
+    """'both' (AA car head + Flak car tail), 'aa', 'flak' or 'none' - web setting convoy_escort."""
+    try:
+        v = str((db_get_room_settings(rid) or {}).get('convoy_escort') or 'both').lower()
+    except Exception:
+        v = 'both'
+    return v if v in ('both', 'aa', 'flak', 'none') else 'both'
+
 def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=True):
     """A column from scene src to scene dst overland: AA car in front, the lorries, Flak car at the
     tail, CONVOY_GAP_M apart, each following the vehicle ahead; the lead plans the route."""
@@ -15351,7 +15362,8 @@ def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=T
     dx, dy = d[0] - s[0], d[1] - s[1]
     L = math.hypot(dx, dy) or 1.0
     ux, uy = dx / L, dy / L
-    names = ([CONVOY_ESCORT_HEAD] if escort else []) + list(cargo_names) + ([CONVOY_ESCORT_TAIL] if escort else [])
+    esc = convoy_escort_for_room(rid) if escort else 'none'                 # v967f5b web knob
+    names = ([CONVOY_ESCORT_HEAD] if esc in ('both', 'aa') else []) + list(cargo_names) + ([CONVOY_ESCORT_TAIL] if esc in ('both', 'flak') else [])
     names = [n for n in names if n in by_name]
     if not names:
         return None
@@ -15432,12 +15444,28 @@ def convoy_tick():
             continue
         _convoy_relink(cv, alive)
         lead = CARS[alive[0]]
+        # v967f5b (Alon 10-24: 'enemy convoy moved on to base, recently captured'): the destination
+        # changed hands while the column was on the road -> turn for home at once; the depot lost
+        # -> the column still goes home but despawns on arrival (its vehicles have nowhere to park).
+        try:
+            if cv['phase'] == 'out' and scene_camp(cv['terrain'], cv['dst']) != cv['camp']:
+                cv['phase'] = 'unload'; cv['unload_until'] = now      # the 'back' branch below takes over this tick
+                d = _scene_xy(cv['terrain'], cv['dst']) or (0, 0, 'scene')
+                log('CONVOY', f'convoy {cid} camp {cv["camp"]}: destination scene {cv["dst"]} captured by camp '
+                              f'{scene_camp(cv["terrain"], cv["dst"])} - turning back with {cv["cargo"]}')
+                _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} supply convoy: {d[2]} {tc_grid(d[0], d[1])} has fallen - turning back')
+                cv['aborted'] = True
+        except Exception:
+            logx('CONVOY', 'destination ownership check failed')
         if lead.get('arrived') and 'lead_arrived_at' not in cv:
             cv['lead_arrived_at'] = now
         settled = lead.get('arrived') and (_convoy_settled(alive) or now - cv.get('lead_arrived_at', now) > 45.0)
         if cv['phase'] == 'out' and settled:
-            cv['phase'] = 'unload'; cv['unload_until'] = now + CONVOY_UNLOAD_S
-            convoy_unload(cv, alive)
+            if scene_camp(cv['terrain'], cv['dst']) != cv['camp']:
+                cv['phase'] = 'unload'; cv['unload_until'] = now; cv['aborted'] = True   # arrived at a lost scene: no unload
+            else:
+                cv['phase'] = 'unload'; cv['unload_until'] = now + CONVOY_UNLOAD_S
+                convoy_unload(cv, alive)
         elif cv['phase'] == 'unload' and now >= cv.get('unload_until', 0):
             cv['phase'] = 'back'
             prev = None
@@ -15687,6 +15715,207 @@ def convoy_console(args, by='console'):
         return [f'convoy: {e}']
     return ['convoy: unknown verb']
 
+# ======================================================================================
+# v967f5 [NETSHIP PROBE] (user 10-23: "time to go sailing"): object Type 6 NetShip. Create
+# dispatcher FUN_004f26b0 case 6 -> FUN_006503e0 (shipfact.cpp 'Create NetShip (%s)'): record
+# [6|nation<<4][class id][s16 @2 -> +0x32c][s16 @4 -> +0x338] + trailer = 19 B; class list
+# @0xc89c0c (node+0x34 -> info, info+4 = id; dump v11 'ship_classes'). Types (ai0.str 1041-1114,
+# 1161-1170): cargo (Liberty ship), cruiser (Indianapolis), carrier (Essex, AA + Flak guns),
+# battle (Indiana), uboat - one class per nation. NET vtable 0xa51244, Unpack 0x656740: update
+# = 24 B: [9 B plane-family packed position (FUN_007cca00)][s16 pitch x pi/65536][s16 heading
+# x 2pi/65536][s16 roll x 2pi/65536][flags u8 (bit0 -> +0xf4)][s16 x 1/32768 -> +0x2c8]
+# [s16 x 1/32768 -> +0x2c4][s16 x 1/512 -> +0x2a8][s16 x 4.8e-6 -> +0x2ac]. The two record
+# words are terrain-cell handles the client recomputes from the position (FUN_00619a10) - 0 sent.
+# ======================================================================================
+SHIP_OBJ_TYPE     = 6
+SHIP_HEADER_SIZE  = 6
+SHIP_UPDATE_SIZE  = 24
+SHIP_ANGLE_FULL   = 2.0 * math.pi / 65536.0      # heading / roll word unit (0x38c91c6c = 9.59e-5)
+SHIP_ANGLE_HALF   = math.pi / 65536.0            # pitch word unit (0x38491c6c = 4.79e-5)
+SHIP_KEEPALIVE_S  = 2.0
+SHIP_HEADING_OFFSET_DEG = 0.0                    # probe knob: the word's zero direction vs world +X (`ship hdgoff`)
+SHIP_CLASSES      = {}        # class id -> name (from tank_tables.json 'ship_classes')
+SHIPS             = {}        # onum -> {'room','camp','class','pos','hdg','peers','created','name','aux','flags'}
+SHIP_ALIASES      = {'cargo': 'cargo', 'transport': 'cargo', 'liberty': 'cargo', 'cruiser': 'cruiser',
+                     'carrier': 'carrier', 'cv': 'carrier', 'battle': 'battle', 'battleship': 'battle',
+                     'bb': 'battle', 'uboat': 'uboat', 'sub': 'uboat', 'submarine': 'uboat'}
+
+def ship_classes_load():
+    try:
+        d = json.load(open(mapdata_path('tank_tables.json')))
+        for c in d.get('ship_classes') or []:
+            cid = c.get('class_id')
+            if cid is None:
+                continue
+            strs = [s_ for s_ in (c.get('strings_in_info') or []) + (c.get('strings_in_base') or []) if len(s_) > 3]
+            nm = next((s_ for s_ in strs if re.match(r'^(cargo|cruiser|carrier|battle|uboat)(-[a-z]{2})?$', s_)), None) \
+                 or (strs[0] if strs else f'ship class {cid}')
+            SHIP_CLASSES[int(cid)] = nm
+        if SHIP_CLASSES:
+            log('SHIP', f'ship classes from tank_tables.json: {SHIP_CLASSES}')
+    except Exception as _e:
+        log('SHIP', f'ship classes not loaded ({_e}) - run fa_dump_tank_tables.py v11 in an arena with ships')
+
+def ship_class_lookup(tok, camp=None):
+    """int id, type alias (carrier/battle/cruiser/cargo/uboat) or full name -> class id, or None.
+    A type alias picks the camp's own nation variant when one exists (carrier-gb for camp 1)."""
+    try:
+        cid = int(tok)
+        return cid if cid in SHIP_CLASSES else None
+    except ValueError:
+        pass
+    t = SHIP_ALIASES.get(tok.lower(), tok.lower())
+    suf = {0: 'us', 1: 'gb', 2: 'su', 3: 'ge', 4: 'jp'}.get(camp)
+    for cid, n in SHIP_CLASSES.items():
+        if n.lower() == t or (suf and n.lower() == f'{t}-{suf}'):
+            return cid
+    for cid, n in SHIP_CLASSES.items():
+        if n.lower().startswith(t):
+            return cid
+    return None
+
+def build_ship_record(st, onumber, nation, class_id, w2=0, w4=0):
+    rec = bytearray(SHIP_HEADER_SIZE + 13)
+    rec[0] = (SHIP_OBJ_TYPE & 0x0f) | ((nation & 7) << 4)
+    rec[1] = class_id & 0xff
+    struct.pack_into('<hh', rec, 2, int(w2), int(w4))
+    struct.pack_into('<H', rec, SHIP_HEADER_SIZE, st & 0xffff)
+    struct.pack_into('<H', rec, SHIP_HEADER_SIZE + 2, onumber & 0xffff)
+    return bytes(rec)
+
+def pack_ship_state(x, y, z, heading_rad, flags=0, pitch=0.0, roll=0.0, aux=(0, 0, 0, 0)):
+    """24-byte NetShip update (see the block notes)."""
+    h = heading_rad + math.radians(SHIP_HEADING_OFFSET_DEG)
+    h = (h + math.pi) % (2 * math.pi) - math.pi
+    body = pack_plane_pos9(x, y, z)
+    body += struct.pack('<hhh', _s16c(pitch / SHIP_ANGLE_HALF), _s16c(h / SHIP_ANGLE_FULL), _s16c(roll / SHIP_ANGLE_FULL))
+    body += bytes([flags & 0xff])
+    body += struct.pack('<hhhh', *[_s16c(a) for a in aux])
+    assert len(body) == SHIP_UPDATE_SIZE, len(body)
+    return body
+
+def build_ship_update(tick, onumber, payload24):
+    size = 1 + 2 + 2 + SHIP_UPDATE_SIZE                    # 29
+    bc, t = size // 16, ((size % 16) << 4) | 0x02
+    return bytes([bc, t, 0, 0, 0x07]) + struct.pack('<HH', tick & 0xffff, onumber & 0xffff) + bytes(payload24)
+
+def spawn_ship(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
+    if room_id is None or not tank_consts_ok():
+        return None
+    if int(class_id) not in SHIP_CLASSES:
+        log('SHIP', f'spawn refused - class {class_id} is not in the dumped ship class list {sorted(SHIP_CLASSES)}'); return None
+    _names = room_active_camp_names(room_id)
+    if _names and int(camp) not in _names:
+        log('SHIP', f'spawn refused - camp {camp} is not active in room {room_id} (friendly-fire reflection, see cars)'); return None
+    onum = next_obj_number()
+    SHIPS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id),
+                   'pos': (float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) > 2 else 0.0),
+                   'hdg': math.radians(heading_deg), 'peers': set(), 'created': time.time(),
+                   'name': SHIP_CLASSES.get(int(class_id), '?'), 'aux': (0, 0, 0, 0), 'flags': 0, 'pitch': 0.0, 'roll': 0.0}
+    rec = build_ship_record(AI_CLIENT_ST, onum, camp, class_id)
+    n = 0
+    for p in get_sessions_in_room(room_id):
+        if not getattr(p, 'entered_game', False):
+            continue
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
+        _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 SHIP class={class_id} camp={camp} ONumber=0x{onum:04x} {reason}', to=3.0)
+        SHIPS[onum]['peers'].add(getattr(p, 'addr', None)); n += 1
+    log('SHIP', f'room {room_id}: spawn ship ONumber=0x{onum:04x} class={class_id} ({SHIPS[onum]["name"]}) camp={camp} '
+                f'at ({pos[0]:.0f},{pos[1]:.0f}) hdg {heading_deg:.0f} -> {n} session(s) {reason}')
+    threading.Timer(0.5, ship_broadcast_state, args=(onum,)).start()
+    threading.Timer(SHIP_KEEPALIVE_S, _ship_keepalive, args=(onum,)).start()
+    return onum
+
+def ship_broadcast_state(onum):
+    sh = SHIPS.get(onum)
+    if sh is None:
+        return 0
+    x, y, z = sh['pos']
+    try:
+        pl = pack_ship_state(x, y, z, sh['hdg'], flags=sh.get('flags', 0), pitch=sh.get('pitch', 0.0), roll=sh.get('roll', 0.0), aux=sh.get('aux', (0, 0, 0, 0)))
+    except Exception as _e:
+        log('SHIP', f'pack failed for 0x{onum:04x}: {_e}'); return 0
+    n = 0
+    for p in get_sessions_in_room(sh['room']):
+        if getattr(p, 'addr', None) not in sh['peers'] or getattr(p, 'last_telem_tick', None) is None:
+            continue
+        frame = build_ship_update(_ai_stamp(p, onum), onum, pl)
+        seq = p.nundgram()
+        try:
+            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, p.addr); n += 1
+        except OSError:
+            pass
+    return n
+
+def _ship_keepalive(onum):
+    if onum not in SHIPS:
+        return
+    ship_broadcast_state(onum)
+    threading.Timer(SHIP_KEEPALIVE_S, _ship_keepalive, args=(onum,)).start()
+
+def delete_ship(onum, reason='', entry=None):
+    sh = SHIPS.pop(onum, None)
+    ai_onum_released(onum)
+    if sh is None:
+        return 0
+    raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + (bytes(entry) if entry else struct.pack('<H', onum & 0xFFFF))
+    n = 0
+    for p in get_sessions_in_room(sh['room']):
+        if getattr(p, 'addr', None) in sh['peers']:
+            _submit_send(send_rel, p, build_msg13(raw), f'<- delete SHIP 0x{onum:04x} {reason}', to=3.0); n += 1
+    log('SHIP', f'room {sh["room"]}: delete ship 0x{onum:04x} -> {n} session(s) {reason}')
+    return n
+
+def ship_console(args, by='console'):
+    """ship classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y>
+       | hdg <onum> <deg> | hdgoff <deg> | aux <onum> a0 a1 a2 a3 | flags <onum> <n> | pitch <onum> <deg> | roll <onum> <deg>"""
+    if not args:
+        return ['usage: ship classes | spawn <room> <class> <x> <y> [camp] [hdg] | list | del <onum|all> | move <onum> <x> <y> | hdg <onum> <deg> | hdgoff <deg> | aux <onum> a0..a3 | flags <onum> <n> | pitch|roll <onum> <deg>']
+    v = args[0].lower()
+    try:
+        if v == 'classes':
+            if not SHIP_CLASSES:
+                return ['ship classes: (none - run fa_dump_tank_tables.py v11 in an arena whose map has ships, copy tank_tables.json to mapdata, restart)']
+            return ['ship classes: ' + ', '.join(f'{k}={n}' for k, n in sorted(SHIP_CLASSES.items())), 'aliases: ' + ' '.join(sorted(SHIP_ALIASES))]
+        if v == 'spawn' and len(args) >= 5:
+            rid = int(args[1], 0); x = float(args[3]); y = float(args[4])
+            camp = int(args[5]) if len(args) > 5 else 0; hdg = float(args[6]) if len(args) > 6 else 0.0
+            cls = ship_class_lookup(args[2], camp)
+            if cls is None:
+                return [f'unknown ship class {args[2]!r} - try `ship classes`']
+            on = spawn_ship(rid, camp, cls, (x, y, 0.0), hdg, reason=f'({by})')
+            return [f'ship 0x{on:04x} spawned' if on is not None else 'spawn refused (see SHIP log)']
+        if v == 'list':
+            return [f'0x{o:04x} room {s_["room"]} class {s_["class"]} ({s_["name"]}) camp {s_["camp"]} at ({s_["pos"][0]:.0f},{s_["pos"][1]:.0f}) hdg {math.degrees(s_["hdg"]):.0f} peers {len(s_["peers"])}' for o, s_ in SHIPS.items()] or ['no ships']
+        if v == 'del' and len(args) >= 2:
+            if args[1].lower() == 'all':
+                return [f'deleted {sum(1 for o in list(SHIPS) if delete_ship(o, by))} ship(s)']
+            return [f'deleted -> {delete_ship(int(args[1], 0), by)} session(s)']
+        if v == 'move' and len(args) >= 4:
+            s_ = SHIPS[int(args[1], 0)]; s_['pos'] = (float(args[2]), float(args[3]), s_['pos'][2])
+            return [f'moved -> {ship_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'hdg' and len(args) >= 3:
+            s_ = SHIPS[int(args[1], 0)]; s_['hdg'] = math.radians(float(args[2]))
+            return [f'heading set -> {ship_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'hdgoff' and len(args) >= 2:
+            global SHIP_HEADING_OFFSET_DEG
+            SHIP_HEADING_OFFSET_DEG = float(args[1])
+            return [f'ship heading offset = {SHIP_HEADING_OFFSET_DEG:.0f} deg'] + [f'0x{o:04x} -> {ship_broadcast_state(o)}' for o in list(SHIPS)]
+        if v in ('pitch', 'roll') and len(args) >= 3:
+            s_ = SHIPS[int(args[1], 0)]; s_[v] = math.radians(float(args[2]))
+            return [f'{v} set -> {ship_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'aux' and len(args) >= 6:
+            s_ = SHIPS[int(args[1], 0)]; s_['aux'] = tuple(int(a) for a in args[2:6])
+            return [f'aux set -> {ship_broadcast_state(int(args[1], 0))} session(s)']
+        if v == 'flags' and len(args) >= 3:
+            s_ = SHIPS[int(args[1], 0)]; s_['flags'] = int(args[2], 0)
+            return [f'flags set -> {ship_broadcast_state(int(args[1], 0))} session(s)']
+    except KeyError:
+        return ['no such ship']
+    except Exception as e:
+        return [f'ship: {e}']
+    return ['ship: unknown verb']
+
 def car_console(args, by='console'):
     """car classes | car spawn <room> <class> <x> <y> [camp] [heading] | car list | car del <onum|all>
        | car move <onum> <x> <y> | car aux <onum> a0 a1 a2 a3 a4 | car flags <onum> <n>"""
@@ -15924,6 +16153,45 @@ def _mirror_insert_cull(s, x, y):
     except Exception:
         logx('INSERT-CULL', 'mirror failed')
 
+def _mirror_insert_cull_ai(s, x, y):
+    """v967f5b [TAB CULL MIRROR FOR AI OBJECTS] (Bama/Meno 10-23 21:17, messages60): at InsertPlayer
+    the client drops EVERY object beyond its 15 km information range - the TAB logs show all 16
+    tanks at 18-25 km 'Check discon. and del' - and the delete notify for that burst left no trace
+    on the server, so the tanks stayed in his peer sets, were never re-created, and only came back
+    at his next ServerConfirm six minutes later (the map box moved all along). Mirror the rule the
+    way _mirror_insert_cull does for peer planes: forget this session on every tank / soldier /
+    train / car / ship farther than INSERT_CULL_RANGE_M + margin from the spawn point. Must run
+    BEFORE the ServerConfirm re-create of this life (no duplicate create for an object kept)."""
+    try:
+        addr = getattr(s, 'addr', None); rid = getattr(s, 'current_room', None)
+        if addr is None or rid is None:
+            return 0
+        lim = INSERT_CULL_RANGE_M + INSERT_CULL_MARGIN_M
+        n = 0; kinds = {}
+        for kind, coll in (('tank', TANKS), ('soldier', SOLDIERS), ('car', CARS), ('ship', SHIPS)):
+            for onum, o in list(coll.items()):
+                if o.get('room') != rid or addr not in o.get('peers', ()):
+                    continue
+                if math.hypot(o['pos'][0] - x, o['pos'][1] - y) > lim:
+                    o['peers'].discard(addr); n += 1; kinds[kind] = kinds.get(kind, 0) + 1
+        for onum, tr in list(TRAINS.items()):
+            if tr.get('room') != rid or addr not in tr.get('peers', ()):
+                continue
+            try:
+                rails = rails_for(tr.get('terrain') or _probe_terrain_for_room(rid))
+                (tx, ty, _tz), _ = rail_point(rails['roads'][tr['road']], tr['node'], tr['dist'])
+            except Exception:
+                continue
+            if math.hypot(tx - x, ty - y) > lim:
+                tr['peers'].discard(addr); n += 1; kinds['train'] = kinds.get('train', 0) + 1
+        if n:
+            log('INSERT-CULL', f'{s.current_pilot}: AI objects beyond {lim / 1000:.0f} km of his spawn forgotten on his client '
+                               f'({", ".join(f"{v} {k}(s)" for k, v in kinds.items())}) -> re-created when back in range')
+        return n
+    except Exception:
+        logx('INSERT-CULL', 'AI mirror failed')
+        return 0
+
 def _ai_cull_list(s, ids):
     """v712f5: process a client cull list of 2-byte object ids: every id that is one of our AI
     objects loses this session from its peer set (re-created when back in range); unknown ids
@@ -15931,7 +16199,7 @@ def _ai_cull_list(s, ids):
     addr = getattr(s, 'addr', None)
     n = 0
     for onum in ids:
-        coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else (CARS if onum in CARS else None)))   # v965f5g cars
+        coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else (CARS if onum in CARS else (SHIPS if onum in SHIPS else None))))   # v965f5g cars, v967f5 ships
         if coll is None:
             # a PEER plane in the same list (mixed cull) -> re-arm the relay create, like PEERDEL
             try:
@@ -15947,7 +16215,7 @@ def _ai_cull_list(s, ids):
         if addr not in coll[onum]['peers']:
             continue
         coll[onum]['peers'].discard(addr); n += 1
-        _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else ('train' if coll is TRAINS else 'car'))
+        _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else ('train' if coll is TRAINS else ('car' if coll is CARS else 'ship')))
         try:                                                     # v785f5: start the re-create cooldown
             if coll is TRAINS:
                 _rl = rails_for(coll[onum].get('terrain') or _probe_terrain_for_room(coll[onum]['room']))
@@ -16000,6 +16268,11 @@ def _tank_note_client_delete(s, pl):
             elif sd is not None:
                 sd['peers'].discard(getattr(s, 'addr', None))       # v590f5: soldiers are bare entries too
                 _note_client_cull(s, onum, sd['pos'][0], sd['pos'][1])              # v785f5
+                i += 2
+            elif onum in SHIPS:                                          # v967f5
+                if getattr(s, 'addr', None) in SHIPS[onum]['peers']:
+                    SHIPS[onum]['peers'].discard(s.addr)
+                    log('SHIP', f'{s.current_pilot} dropped ship 0x{onum:04x} (client delete notify)')
                 i += 2
             elif onum in CARS:                                           # v965f5g: cars are bare entries too
                 _c = CARS[onum]
@@ -16116,6 +16389,11 @@ def _handle_tank_hit_51(s, pl):
                 continue
             if t is None and victim in CARS:
                 _handle_car_hit(s, victim, attacker, dmg)              # v963f5c
+                continue
+            if t is None and victim in SHIPS:                          # v967f5 probe: log only
+                _sh = SHIPS[victim]
+                _sh['hp'] = _sh.get('hp', 0.0) + float(dmg)
+                log('SHIPHIT', f'{s.current_pilot} (obj 0x{attacker:04x}) hit {_sh["name"]} 0x{victim:04x} camp {_sh["camp"]} for {dmg} (total {_sh["hp"]:.0f})')
                 continue
             if t is None:
                 # v799f5 [HITS ON PLANES ARE EVIDENCE]: the shooter's client reports every hit here
@@ -19155,6 +19433,8 @@ def arena_reset_state(room_id):
         CONVOYS.pop(cid, None)
     for onum in [o for o, c in list(CARS.items()) if c['room'] == room_id]:
         delete_car(onum, reason='(arena reset)')
+    for onum in [o for o, sh in list(SHIPS.items()) if sh['room'] == room_id]:
+        delete_ship(onum, reason='(arena reset)')
     for key in [k for k in list(TRIGGERS) if k[0] == room_id]:
         TRIGGERS.pop(key, None)
     for key in [k for k in list(_TRAIN_LOST_AT) if k[0] == room_id]:
@@ -19716,7 +19996,10 @@ def room_group_records(room_id, viewer_camp=None):
                         'strategy': GROUP_STRATEGY['return'] if cv['phase'] == 'back' else (GROUP_STRATEGY['hold'] if cv['phase'] == 'unload' else GROUP_STRATEGY['goto']),
                         'f3': 1, 'uc': int(lead.get('class', 181)), 'count': min(255, len(alive)),
                         'x': txy[0] if txy else lx, 'y': txy[1] if txy else ly, 'tx': lx, 'ty': ly,
-                        'w6': int(cid) & 0x7fff})
+                        # v967f5b: w6 is the GROUP ID the client binds a frame to (v941f5 note). Convoy id 1
+                        # bound the box to tank column 1 - a frame across 10 x 7 km of map (Alon 10-24
+                        # screenshot). Cars carry no group id, so use an id no column has -> icon only.
+                        'w6': 0x4000 | (int(cid) & 0x3fff)})
         for onum, c in list(CARS.items()):
             if c.get('room') != room_id or c.get('dead') or onum in _in_convoy:
                 continue
@@ -19725,7 +20008,7 @@ def room_group_records(room_id, viewer_camp=None):
                         'strategy': GROUP_STRATEGY['defend'] if _aa else (GROUP_STRATEGY['goto'] if c.get('goal') is not None else 0),
                         'f3': 1, 'uc': int(c.get('class', 181)), 'count': 1,
                         'x': c['pos'][0], 'y': c['pos'][1], 'tx': c['pos'][0], 'ty': c['pos'][1],
-                        'w6': 0})
+                        'w6': 0x4000 | (int(onum) & 0x3fff)})       # v967f5b: never a column id
     return out
 
 def send_group_info_26(s, reason=''):
@@ -23499,11 +23782,11 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     # 'shot down' (MEC 5) with the AI object as hunter - no player owns it, so it landed in
     # 'Planes Lost' instead of 'Planes Lost to AI' (user 09-13: GB tank kill not tallied).
     _ai_hunter = (hunter_obj is not None and hunter_obj not in (0, 0xffff)
-                  and (hunter_obj in TANKS or hunter_obj in SOLDIERS or hunter_obj in TRAINS or hunter_obj in CARS))   # v965f5g
+                  and (hunter_obj in TANKS or hunter_obj in SOLDIERS or hunter_obj in TRAINS or hunter_obj in CARS or hunter_obj in SHIPS))   # v965f5g/v967f5
     _lost_to_ai = (killer is None) and ((_mec in AI_KILL_MEC_NIBBLES) or _ai_hunter)
     if _ai_hunter and killer is None:
         try:
-            _ai_kind = 'tank' if hunter_obj in TANKS else ('soldier' if hunter_obj in SOLDIERS else ('train' if hunter_obj in TRAINS else f'car ({CARS[hunter_obj].get("name")})'))
+            _ai_kind = 'tank' if hunter_obj in TANKS else ('soldier' if hunter_obj in SOLDIERS else ('train' if hunter_obj in TRAINS else (f'car ({CARS[hunter_obj].get("name")})' if hunter_obj in CARS else f'ship ({SHIPS[hunter_obj].get("name")})')))
             log('DEATH', f'{victim.current_pilot} shot down by AI {_ai_kind} 0x{hunter_obj:04x} -> Planes Lost to AI')
         except Exception:
             pass
@@ -25519,6 +25802,8 @@ def handle_leave_arena(s):
         _tr['peers'].discard(getattr(s, 'addr', None))
     for _c in CARS.values():                       # v963f5c
         _c['peers'].discard(getattr(s, 'addr', None))
+    for _sh in SHIPS.values():                     # v967f5
+        _sh['peers'].discard(getattr(s, 'addr', None))
     # v503f5 [BAIL-EXIT LOBBY CTD - THE ROOT]: arm the trailing-delete guard for THIS leave.
     # The msg-3 router runs `(s.entered_game or s._left_world) and sub == 0x03` - designed so
     # _left_world 'keeps catching the trailing del-client 0x03 after entered_game clears'. A NORMAL
@@ -26589,6 +26874,11 @@ def handle_compound(s, outer_cmd, pl):
     if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19,
                      0x3b, 0x47, 0x49, 0x07):
         if inner_sub == 0x03:
+            try:                                        # v967f5b trace
+                _ids_dbg3 = [struct.unpack_from('<H', inner, i)[0] for i in range(5, min(len(inner) - 1, 29), 2)]
+                log('CULLRX', f'{s.current_pilot}: msg-3 {len(inner) - 4}B via COMPOUND path ids {["0x%04x" % i for i in _ids_dbg3]}')
+            except Exception:
+                pass
             # v681f5: the compound-wrapped delete NOTIFY was swallowed UNREAD - the client's cull
             # of a train after a TAB never cleared him from the train's peer set, so it was never
             # re-created when he came back (messages50 07:00:24: updates for 260, no create).
@@ -28098,6 +28388,7 @@ def _fire_server_confirm(s, via='', ident=None):
                 time.sleep(0.1)
             _pos = _s.__dict__.get('_pos_xy')
             if _pos is not None:
+                _mirror_insert_cull_ai(_s, _pos[0], _pos[1])          # v967f5b: before any re-create of this life
                 tank_recreate_for(_s, reason='(at ServerConfirm, in range)', near_xy=_pos, radius=REJOIN_RADIUS_M, per_kind=True, at_confirm=True)
             else:
                 tank_recreate_for(_s, reason='(at ServerConfirm, no position yet)')
@@ -28505,6 +28796,15 @@ def _ingame_own_object_removed(s, tb, stored):
             s.para_obj_number = None
             return
 
+    # v967f5b trace: every inbound msg-3 that looks like a list (>= 2 entries) - the TAB cull bursts of
+    # 10-23 (out 3'51, out 3'33) left no server line at all; this shows which path they take.
+    try:
+        if len(stored) >= 9:
+            _ids_dbg = [struct.unpack_from('<H', stored, i)[0] for i in range(5, min(len(stored) - 1, 5 + 2 * 12), 2)]
+            log('CULLRX', f'{s.current_pilot}: msg-3 {len(stored) - 4}B tb=0x{tb:02x} ids {["0x%04x" % i for i in _ids_dbg]}'
+                          f'{"..." if len(stored) - 5 > 24 else ""} (entered={getattr(s, "entered_game", False)} left_world={getattr(s, "_left_world", False)})')
+    except Exception:
+        pass
     # v692f5: the AI-object cull notify is parsed BEFORE the in-world gate below - during a TAB the
     # client's own-plane delete comes first (which sets _left_world) and the cull list ~150 ms
     # later (messages58 21:08:41.386 'out 3'4' then .533 'out 3'3'); the v682f5 check inside the
@@ -28518,14 +28818,14 @@ def _ingame_own_object_removed(s, tb, stored):
     try:
         _ids_pre = ([struct.unpack_from('<H', stored, i)[0] for i in range(5, len(stored) - 1, 2)]
                     if len(stored) >= 7 and (len(stored) - 5) % 2 == 0 else [])
-        if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS for i in _ids_pre):
+        if _ids_pre and any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS or i in SHIPS for i in _ids_pre):
             _ai_cull_list(s, _ids_pre)
             return
     except Exception:
         logx('TANK', 'AI cull-list parse (pre-gate) failed')
     try:
         _onum_pre = struct.unpack_from('<H', stored, 5)[0] if len(stored) >= 7 else None
-        if _onum_pre is not None and (_onum_pre in TANKS or _onum_pre in SOLDIERS or _onum_pre in TRAINS or _onum_pre in CARS):
+        if _onum_pre is not None and (_onum_pre in TANKS or _onum_pre in SOLDIERS or _onum_pre in TRAINS or _onum_pre in CARS or _onum_pre in SHIPS):
             _tank_note_client_delete(s, stored)
             return
     except Exception:
@@ -28549,7 +28849,7 @@ def _ingame_own_object_removed(s, tb, stored):
         # the 'neither its own nor any peer's -> swallow' branch below and return, so the train's
         # peer entry was never cleared and the train was never re-created after a TAB
         # (server.log 10:08:35 PEERDEL 0x0107..0x0110 = trains 263-272).
-        if _onum is not None and (_onum in TANKS or _onum in SOLDIERS or _onum in TRAINS or _onum in CARS):
+        if _onum is not None and (_onum in TANKS or _onum in SOLDIERS or _onum in TRAINS or _onum in CARS or _onum in SHIPS):
             try:
                 _tank_note_client_delete(s, stored)
             except Exception:
@@ -28691,10 +28991,10 @@ def _ingame_own_object_removed(s, tb, stored):
             _tail0 = 5 + _esz0
             if len(stored) >= _tail0 + 2:
                 _tail_ids = [struct.unpack_from('<H', stored, i)[0] for i in range(_tail0, len(stored) - 1, 2)]
-                if any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS for i in _tail_ids):
+                if any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS or i in SHIPS for i in _tail_ids):
                     _tank_note_client_delete(s, bytes(stored[:5]) + bytes(stored[_tail0:]))
                 for _tid in _tail_ids:
-                    if _tid in TANKS or _tid in SOLDIERS or _tid in TRAINS or _tid in CARS or _tid in (0, 0xffff):
+                    if _tid in TANKS or _tid in SOLDIERS or _tid in TRAINS or _tid in CARS or _tid in SHIPS or _tid in (0, 0xffff):
                         continue
                     _peer_t, _byc = _peer_owning_object(s, _tid)
                     if _peer_t is not None and _peer_t is not s:
@@ -33783,6 +34083,12 @@ def handle_post_auth(s, cmd, pl):
             crater_record_in(s, bytes(stored[4:]))
         if sub in NO_ECHO_SUBS:
             if sub == 0x03:
+                try:                                    # v967f5b trace (see CULLRX in _ingame_own_object_removed)
+                    _ids_dbg2 = [struct.unpack_from('<H', stored, i)[0] for i in range(5, min(len(stored) - 1, 29), 2)]
+                    log('CULLRX', f'{s.current_pilot}: msg-3 {len(stored) - 4}B via NO_ECHO path ids {["0x%04x" % i for i in _ids_dbg2]}'
+                                  f' (entered={getattr(s, "entered_game", False)} left_world={getattr(s, "_left_world", False)})')
+                except Exception:
+                    pass
                 _tank_note_client_delete(s, stored)     # v563f5: client dropped a tank -> forget that peer
             elif sub == 0x33:
                 _handle_tank_hit_51(s, stored)          # v572f5: NetTank hit report
@@ -35049,6 +35355,7 @@ threading.Thread(target=_stats_online_loop, daemon=True).start()      # v891f5: 
 threading.Thread(target=_obj_repair_loop, daemon=True).start()    # v556f5: ground-object repair clock
 _load_tank_consts()                                                 # v560f5: tank telemetry scales
 car_classes_load()                                                  # v963f5: NetCar probe class list
+ship_classes_load()                                                 # v967f5: NetShip probe class list
 threading.Thread(target=car_tick, daemon=True, name='car_tick').start()   # v964f5: road movement + convoys
 threading.Thread(target=_tank_driver_loop, daemon=True).start()   # v560f5: tank mover/keep-alive
 threading.Thread(target=_arena_count_poll_loop, daemon=True).start()  # v313: live arena player counts

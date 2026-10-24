@@ -2698,6 +2698,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 '<label style="display:block; margin:10px 0;">Convoy every (minutes, per team)<br>'
                 '<input type="number" name="s_convoy_minutes" min="2" max="120" value="' + hesc(str(_cvm), quote=True) + '" '
                 'placeholder="10" style="width:120px; padding:6px;"></label>'
+                '<label style="display:block; margin:10px 0;">Convoy escort (the cars that shoot back)<br>'
+                '<select name="s_convoy_escort" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + ''.join('<option value="' + v + '"' + (' selected' if str(overrides.get('convoy_escort', 'both') or 'both').lower() == v else '') + '>' + l + '</option>'
+                          for v, l in (('both', 'AA car in front and Flak car at the tail (default)'), ('aa', 'AA car only (machine guns)'),
+                                       ('flak', 'Flak car only'), ('none', 'No escort - lorries alone')))
+                + '</select></label>'
+                '<p class="muted" style="margin:-6px 0 12px; max-width:640px;">The escorts\' guns are driven by each pilot\'s own client '
+                'and obey the AA / Flak gunner sliders on the Game Settings tab (there is no separate car-gun setting in the game); this '
+                'knob decides how many guns a convoy brings.</p>'
                 '<label style="display:block; margin:10px 0;"><input type="checkbox" name="s_convoy_on_demand" value="1"'
                 + (' checked' if str(_cod).lower() in ('1', 'on', 'true', 'yes') else '') + '> '
                 'On-demand convoys (works in every mode, trains-only included): a scene whose fuel/ammo/metal store falls '
@@ -4476,6 +4485,11 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             else:
                 settings.pop('supply_mode', None)
             settings['convoy_on_demand'] = 'on' if qs.get('s_convoy_on_demand', [''])[0].strip() else 'off'
+            _esc = qs.get('s_convoy_escort', [''])[0].strip().lower()        # v967f5c
+            if _esc in ('aa', 'flak', 'none'):
+                settings['convoy_escort'] = _esc
+            else:
+                settings.pop('convoy_escort', None)
             for _ck, _lo, _hi in (('craters_vanish_min', 1, 120), ('craters_vanish_max', 1, 1000), ('trains_per_camp', 0, 12),
                                   ('convoy_minutes', 2, 120)):   # v686f5, v959f5, v964f5
                 _cv = qs.get('s_' + _ck, [''])[0].strip()

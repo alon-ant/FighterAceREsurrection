@@ -1,3 +1,45 @@
+v967f5b/c (2026-10-24) - bug round: TAB cull mirror for AI objects, convoy map box, captured
+destination, convoy escort knob
+- (3) Bama/Meno (messages60, live 21:17 UTC): after a TAB to AF 9 the client dropped every AI object
+  beyond its 15 km information range (16 tanks at 18-25 km, 'Check discon. and del'); the server
+  logged NOTHING for that msg-3 burst (out 3'33) - nor for the 21:11 one (out 3'51) - so the tanks
+  stayed in his peer sets and were not re-created until his next ServerConfirm six minutes later
+  (map box moving, nothing on the ground). v967f5b: _mirror_insert_cull_ai at the ServerConfirm
+  re-create (before anything is re-created for the new life) forgets the pilot on every tank /
+  soldier / train / car / ship farther than INSERT_CULL_RANGE_M + margin (16 km) from his spawn -
+  the same rule _mirror_insert_cull applies to peer planes; they come back by the 1 Hz range path.
+  CULLRX trace on all three msg-3 entry points (own-object handler, NO_ECHO path, compound) to
+  catch where the cull lists go.
+- (1) The convoy's msg-26 record used w6 = convoy id; the client binds the box FRAME by group id
+  (v941f5) and convoy 1 bound tank column 1 - a frame across 10 x 7 km (screenshot). w6 is now
+  0x4000|id for convoys and loose cars (no column has it -> icon at the lead, no frame).
+- (2) Enemy convoy rolled on to a recently captured base: convoy_tick now checks the destination's
+  owner every tick - captured -> 'has fallen - turning back' AI line, column turns for home with its
+  cargo; arriving at a lost scene -> no unload, straight home.
+- (4) 'car AA slider': the game has no car-gun quality field ([AI] AAquality / FlakQuality /
+  BomberGunner / ShipAA / TankAA only); the escorts' guns follow the AA and Flak sliders. Web TC tab
+  'Convoy escort' = both | aa | flak | none (settings convoy_escort) decides what a convoy brings.
+
+v967f5 (2026-10-23) - NETSHIP PROBE: "time to go sailing"
+- RE: object Type 6 NetShip. Create: dispatcher case 6 -> FUN_006503e0 (shipfact.cpp): record
+  [6|nation<<4][class][s16 @2 -> +0x32c][s16 @4 -> +0x338] + trailer (19 B); the two words are
+  terrain-cell handles the client recomputes from the position (FUN_00619a10 on DAT_00c8892c) -
+  0 sent. Class list @0xc89c0c: node+0x34 -> info, info+4 = id (fa_dump_tank_tables.py v11
+  'ship_classes'). Types in ai0.str: cargo-xx (Liberty ship = transport), cruiser-xx
+  (Indianapolis), carrier-xx (Essex; MG_/MC_ gun names = AA + Flak), battle-xx (Indiana), uboat;
+  AIUNITS\*.sdd/.sdw/.trl/.spi per type. Update (NET vtable 0xa51244, Unpack 0x656740) = 24 B:
+  9-byte plane-family packed position + s16 pitch (pi/65536) + s16 heading + s16 roll
+  (2pi/65536) + flags u8 + 4 s16 motion words (x1/32768, x1/32768, x1/512, x4.8e-6).
+- Server: SHIP_CLASSES/SHIPS, ship_classes_load (type-nation names), ship_class_lookup (alias
+  carrier/battle/cruiser/cargo|transport/uboat|sub picks the camp's nation variant),
+  build_ship_record, pack_ship_state (SHIP_HEADING_OFFSET_DEG probe knob), spawn_ship (camp must be
+  active in the arena), 2 s keep-alive, delete_ship; hits on a ship logged (SHIPHIT); ships in the
+  cull/notify/death-attribution/arena-reset/leave paths. Console `ship classes | spawn <room>
+  <class> <x> <y> [camp] [hdg] | list | del | move | hdg | hdgoff | pitch | roll | aux | flags`.
+- Offline: record 19 B, update 24 B, frame 29 B. Needs: the v11 dump in an arena whose unit set
+  loads ships, then a spawn at sea. Open: heading word zero direction, what the 4 motion words
+  do (speed/rudder?), carriers as spawn points, cargo ships carrying tanks.
+
 =====================================================================================
 BANK 2026-10-23 - v960f5c .. v966f5d (local build; live server last seen at v960f5b)
 =====================================================================================
