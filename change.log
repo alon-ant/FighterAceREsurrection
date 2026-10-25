@@ -1,3 +1,84 @@
+v968f5x (2026-10-25) - rocket/bomb splash on lorries: lethal near misses + shooter feedback; wagon hits above ONumber 1023
+- Taurus (messages05, 14:17-14:19): two rocket salvos reached the server as msg-52 records with 3 and 5
+  size-1 craters (rockets DO leave craters - v968f5o's note was wrong) and the splash was applied:
+  27 / 37+31 damage to the 80-90 hp AA trucks at 17-22 m, no kill, and NOTHING on his screen - the
+  client prints 'You have hit' only for hits it detects itself, and its splash code skips NetCars.
+  Hence 'rockets have no effect'. The one lorry he did kill in that pass (14:18:57) was a 500 lb bomb.
+- Splash model: full damage inside CAR_SPLASH_PLATEAU (30%) of the radius, linear to zero at the edge;
+  centre damage raised (size 1: 150 @ R 25 - a rocket within 7.5 m kills any lorry, 15 m = 86, 20 m =
+  43; size 2: 240 @ 40; size 3: 340 @ 55; size 4: 480 @ 75). Was 70/110/170/260 with a 0.3 floor.
+- Feedback line to the shooter on a non-lethal splash hit: built but OFF (CAR_SPLASH_TELL=False,
+  Alon: it would flood the players). Kills draw the native cyan line as before.
+- Wagon hits: the railcar index rides on the wire as onum + index*0x400 and the decoder assumed
+  ONumbers < 1024 ('victim >> 10'); today's trains sit at 0x0580/0x05cb, so every wagon hit read as
+  'not one of our tanks' (44 of them in run_011915) and only the loco took damage. The train is now
+  found by subtracting k*0x400 for k = 1..31.
+- NOT changed: gun hits on lorries. Both logs hold 117 'You have hit GER train' and not one car hit
+  of any kind, so the client never detected a bullet on a car in them; whether guns were tried on
+  the convoy cannot be told from the logs. Bama's client DID report gun-path (msg-51) hits on six
+  convoy cars on 10-24 19:22:59 - a convoy parked at its destination. Open: moving vs parked.
+
+v968f5w (2026-10-25) - bail-out canopy to a peer without the bailer's station = CTD (Alon 23:45:39, messages53)
+- 'Create NetParachuter. St=11, ONumber=962' -> 'Exception: There is no GamerClientScore for
+  Client=11' (VNet.cpp:474). A pilot's canopy record is HUMAN-owned (tag 0x82) and binds to the
+  owner's NET::CLIENT station, which a peer only receives inside the FIRST plane create we send
+  him (client+object). Yoda had left the arena at 23:16 (his station went with 'Yoda leaving
+  game' on every client), re-entered at 23:37 127 km from Alon and radar-hidden, so Alon never got
+  his plane; at 23:45 Yoda bailed and the bail handler sent the canopy OBJECT-ONLY to every flying
+  peer - Alon's client had no station 11 to bind it to and asserted. (Crew chutes are tag 0x32,
+  not human-owned, hence harmless; the 23:40/23:43 ones went through fine.)
+- FIX: the bail loop now consults the same _client_created_peers tracker the plane relay uses;
+  a peer who has no station for the bailer gets the client+canopy msg-2 (the 2009 'in 2'65' form
+  v554f5 already implements for arena entry during a descent), which registers the station first.
+  The PARA line says '[client+canopy form: peer had no station for him]' when that path is taken.
+
+v968f5v (2026-10-25) - per-pilot round-trip meter + lag lead (Yoda 10-24 'lagging/jumping planes', messages38)
+- DIAGNOSIS: Yoda's client log logged 4,515 'Move1/Move2' lines = FA.exe FUN_007e4a20 giving up on a
+  remote object whose state arrived 300+ conductor ticks (6 s+) old and resetting it; AI lorries and
+  human planes alike, all with the SAME age at any moment (so the stamp clock was his own, i.e. the
+  server's projection was fine and the frames were simply late). His own request/reply round trips
+  (msg 34 nearest-enemy, 108 pairs in the log) ran 60-90 ms until 22:33:23, then 2.3-7 s (22 s once)
+  for the remaining 42 minutes with brief dips. Server side: 0.0% loss both ways (STATLOSS), PERF
+  normal, no retransmits, every other pilot clean -> a queue on his link (bufferbloat/Wi-Fi), not
+  the server. His 'Not receive resources answer 15.020 seconds' errors (x2) are the same delay.
+- RTT METER: the client answers every 2-second STATUS request with the seq echoed; the first reply
+  for a seq minus its send time is a round-trip sample (no new traffic). Per session: last, EWMA
+  (0.3), max. A 'LAG' line once a minute while the EWMA is over LAG_WARN_MS (1000), a recovery line
+  under 400 ms; the figure now appears in STATLOSS, RETX ('rtt~?ms' was never filled) and `clocks`.
+- LAG LEAD: frames to a receiver are stamped with HIS clock projected to the moment we send (v883);
+  they then spend his downlink in flight and arrive (his RTT) old, so his client dead-reckons that
+  far forward and resets beyond 6 s = the jumping. For a receiver whose RTT is over LAG_LEAD_MIN_S
+  (1 s) relay and AI stamps now carry (RTT - 0.5 s) ticks of lead, so a frame arrives looking ~0.5 s
+  old: everything on his screen moves smoothly and is late by his own latency (which it is anyway).
+  min(EWMA, last) so a latency DROP cuts the lead at once (a stamp in his future, < -12 ticks, is an
+  error + reset) and a rise is followed gradually; no STATUS reply for 15 s -> lead 0. Nothing
+  changes for a pilot under 1 s RTT. Knobs: LAG_LEAD_ENABLE/MIN_S/KEEP_S/MAX_S.
+
+v968f5u (2026-10-25) - lorries load from the depot (Alon 01:12: 'more metal than a train?')
+- Yes it was possible, and it made no sense: a convoy's cargo came from nowhere (3 box lorries =
+  7,500 kg metal whatever the depot held), while a train only carries the producer's REAL surplus
+  (what it has above half its capacity - often 3,250 kg of metal). Now each lorry loads what the
+  depot can spare - a producer keeps TRAIN_PICKUP_KEEP (50%) of its capacity, a plain store keeps
+  SUPPLY_CHAIN_RESERVE (25%) - and the stock leaves the depot at departure. A lorry with less than
+  CONVOY_MIN_LOAD_KG (300 kg) to load is not sent, so columns shrink to what is really there; with
+  no loaded lorry at all the column is not sent ('NOT sent - depot has nothing to spare'). A lorry
+  lost on the road loses real stock; an aborted run (destination captured) brings its load back
+  to the depot's store on arrival home. Train and lorry now draw from the same pool by the same
+  rule, which is what makes 'train or convoy' a real choice.
+
+v968f5t (2026-10-25) - convoys: nearest depot that can cover the need; no metal runs to intact fields
+- Alon 01:03 (online session 19:19-22:56, 28 convoys): sizes differ by CARGO, not team - a column is
+  3 lorries per kind needed (JP's asks happened to be ammo+metal = 6 lorries / 8 vehicles, US/GB's
+  metal only = 3 / 5). Distances: convoy_pick_source ranked 'most stock first, distance only breaks
+  ties', so a bomber base 36-60 km away with a mountain of metal beat the support factory 7 km up
+  the road (20 of the 28 drove 31-60 km). Now a depot that can cover the need (>= 50% of it on
+  hand, or it produces that resource) ranks by DISTANCE, nearest first; the richest depot wins
+  only when nobody in reach can cover it.
+- Nine of tonight's convoys were 'stock 95%' metal columns to airfields with nothing broken (their
+  metal store sat at zero, which read as 'low'). Metal alone no longer calls a convoy unless the
+  scene has destroyed storage or damage to rebuild; when fuel/ammo are low, metal rides along only
+  if something is broken (up to 3 box lorries).
+
 v968f5s (2026-10-24) - the REAP flood (SneekyPete): a SYN retransmit is not a reconnect
 - Live 19:19:06-48: 'reaped stale session for account="SneekyPete" (reconnect)' 28 times in 42 s.
   His client re-sent its SYN every 1.5 s (it never saw our SYNACK - or saw it too late); each SYN

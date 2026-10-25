@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f5s'
+VERSION = 'v968f5x'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7485,7 +7485,9 @@ def console_handler():
                         _dev = (_r - TICK_RATE_DEFAULT) / TICK_RATE_DEFAULT * 100.0
                         log('CONSOLE', f'clocks: {_pn:<22} room {_rm}: clock {_r:6.2f}/s ({_dev:+.2f}% vs {TICK_RATE_DEFAULT:.0f}, '
                                        f'{_span:.0f}s baseline) | jitter: last-second {(_ew or 0):5.1f}/s, '
-                                       f'{_jn} late/burst windows | frames {_age:.1f}s old')
+                                       f'{_jn} late/burst windows | frames {_age:.1f}s old'
+                                       f' | rtt {_s.__dict__.get("_rtt_ms", "?")}ms (max {_s.__dict__.get("_rtt_max_s", 0.0):.1f}s, '
+                                       f'lead {_lag_lead_ticks(_s, _r or TICK_RATE_DEFAULT)} ticks)')   # v968f5v
             elif cmd == 'desync':
                 # v862f5: list the automatic desync events of this run
                 if not _DESYNC_EVENTS:
@@ -13652,6 +13654,74 @@ TICK_RATE_CLAMP_PCT = 10.0      # v929f5: the projection never uses a measured r
                                 # a frozen client catching up, or frames arriving in bursts, not a conductor that
                                 # really runs at 79 Hz; projecting a 1 s silence at 79/s stamps 29 cycles too far.
 AI_TICK_PROJECT = True          # v884f5: server-simulated objects (tanks/trains/soldiers/driven chutes) use the projected clock too
+# v968f5v [LAG: MEASURE IT, THEN STOP THE JUMPING] (Yoda 10-24 22:33-23:15, messages38). His client log
+# showed every remote object - AI lorries and human planes alike - arriving 300-800 conductor ticks
+# (6-16 s) old: FUN_007e4a20 dead-reckons a state up to 300 ticks forward and RESETS it beyond
+# ('Move1/Move2' lines, 4,500 of them) = planes teleporting. His own request/reply round trips in the
+# same log went 60-90 ms -> 2.3-7 s (22 s once) from 22:33:23 to the end, with 0% loss: a queue on
+# his link (bufferbloat), not the server (PERF clean, every other pilot 0.0%, no retransmits). The
+# server had NO per-pilot latency figure to show it (RETX printed 'rtt~?ms'). Two things:
+#   1. RTT METER - the STATUS request the heartbeat sends every 2 s is answered by the client with the
+#      seq echoed, so (first reply time - send time) is a free round-trip sample. EWMA + last + max
+#      per session, a LAG line when it crosses LAG_WARN_MS (once a minute), a recovery line, the
+#      figure in STATLOSS/RETX/`clocks`.
+#   2. LAG LEAD - the stamp we write on frames to a receiver is HIS clock projected to the moment we
+#      SEND (v883); the frame then spends his downlink delay in flight, so on arrival it is (his RTT)
+#      old and the client catches up/resets. For a pilot whose RTT is over LAG_LEAD_MIN_S we add
+#      (RTT - LAG_LEAD_KEEP_S) ticks of lead: the state arrives looking ~0.5 s old, the client
+#      simulates only that much forward, and everything on his screen is smooth - and late by his
+#      own latency, which it is anyway. min(ewma, last) so a DROP in latency is honoured at once
+#      (a lead longer than the true delay stamps the frame in his future: < -12 ticks = error +
+#      reset), a RISE only gradually. Nothing changes for a pilot under LAG_LEAD_MIN_S.
+LAG_RTT_ALPHA   = 0.3       # EWMA weight of a new STATUS round-trip sample
+LAG_WARN_MS     = 1000      # a LAG line when the EWMA round trip is above this
+LAG_CLEAR_MS    = 400       # ... and a recovery line once it is back under this
+LAG_LOG_S       = 60.0      # at most one LAG line per pilot per minute
+LAG_LEAD_ENABLE = True      # add the lag lead to relay/AI stamps for high-latency receivers
+LAG_LEAD_MIN_S  = 1.0       # round trip above which the lead kicks in
+LAG_LEAD_KEEP_S = 0.5       # catch-up the client is still left to do (25 ticks - a normal 500 ms link)
+LAG_LEAD_MAX_S  = 20.0      # never lead more than this
+LAG_SAMPLE_STALE_S = 15.0   # no STATUS reply this long -> lead 0 (safe side)
+
+def _lag_sample(sess, rtt_s, resends):
+    """v968f5v: one STATUS round-trip sample for sess (seconds). Keeps last/EWMA/max, logs LAG."""
+    now = time.time()
+    d = sess.__dict__
+    d['_rtt_last_s'] = rtt_s; d['_rtt_last_at'] = now
+    e = d.get('_rtt_ewma_s')
+    e = rtt_s if e is None else (1.0 - LAG_RTT_ALPHA) * e + LAG_RTT_ALPHA * rtt_s
+    d['_rtt_ewma_s'] = e
+    d['_rtt_ms'] = int(e * 1000)
+    d['_rtt_n'] = d.get('_rtt_n', 0) + 1
+    if rtt_s > d.get('_rtt_max_s', 0.0):
+        d['_rtt_max_s'] = rtt_s
+    ms = e * 1000.0
+    if ms >= LAG_WARN_MS:
+        d['_lag_n'] = d.get('_lag_n', 0) + 1
+        if now - d.get('_lag_warned', 0.0) >= LAG_LOG_S:
+            d['_lag_warned'] = now; d['_lag_open'] = True
+            rate = _tick_rate_clamped(sess)
+            log('LAG', f'{getattr(sess, "current_pilot", "?")}: round trip {ms/1000:.1f}s (last {rtt_s:.1f}s, '
+                       f'max {d["_rtt_max_s"]:.1f}s, {d["_lag_n"]} high samples this session'
+                       f'{", after " + str(resends) + " resend(s)" if resends else ""}) - his link is queueing, '
+                       f'not losing (see STATLOSS); frames to him now lead {_lag_lead_ticks(sess, rate)} ticks so '
+                       f'objects stay smooth (and late) instead of jumping')
+    elif ms <= LAG_CLEAR_MS and d.get('_lag_open'):
+        d['_lag_open'] = False; d['_lag_warned'] = 0.0
+        log('LAG', f'{getattr(sess, "current_pilot", "?")}: round trip back to {ms:.0f}ms - lead off')
+
+def _lag_lead_ticks(sess, rate):
+    """v968f5v: extra ticks of lead for frames to sess (0 for a normal link)."""
+    if not LAG_LEAD_ENABLE:
+        return 0
+    d = sess.__dict__
+    e = d.get('_rtt_ewma_s'); l = d.get('_rtt_last_s')
+    if e is None or l is None or time.time() - d.get('_rtt_last_at', 0.0) > LAG_SAMPLE_STALE_S:
+        return 0
+    r = min(e, l)
+    if r < LAG_LEAD_MIN_S:
+        return 0
+    return int((min(r, LAG_LEAD_MAX_S) - LAG_LEAD_KEEP_S) * rate)
 
 def _s16(d):
     """v883f5: wrap-aware signed difference of two 16-bit ticks."""
@@ -13774,7 +13844,7 @@ def _relay_stamp_for(p, onum):
     if age > RELAY_TICK_PROJECT_MAX_S or (age > STALE_TICK_WARN_S and not STALE_TICK_EXTRAP):
         return None
     rate = _tick_rate_clamped(p)
-    stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD) & 0xFFFF
+    stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD + _lag_lead_ticks(p, rate)) & 0xFFFF   # v968f5v lag lead
     if RELAY_TICK_MONOTONIC:
         sl = p.__dict__.setdefault('_stamp_last', {})
         last = sl.get(onum)
@@ -13804,7 +13874,7 @@ def _ai_stamp(sess, onum):
             age = time.time() - getattr(sess, 'last_telem_time', 0.0)
             if base is not None and 0.0 <= age <= RELAY_TICK_PROJECT_MAX_S:
                 rate = _tick_rate_clamped(sess)
-                st = (int(base) + int(age * rate)) & 0xFFFF
+                st = (int(base) + int(age * rate) + _lag_lead_ticks(sess, rate)) & 0xFFFF   # v968f5v lag lead
                 if RELAY_TICK_MONOTONIC:
                     sl = sess.__dict__.setdefault('_stamp_last', {})
                     last = sl.get(('ai', onum))
@@ -15272,7 +15342,17 @@ def _handle_car_hit(s, victim, attacker, dmg, how='msg-51'):
 # applies the splash itself to every car in range (cars only - tanks already get the client's own
 # hits). Rockets leave no crater and still rely on the client.
 CAR_BOMB_SPLASH = True
-CAR_BOMB_SPLASH_BY_SIZE = {1: (25.0, 70.0), 2: (35.0, 110.0), 3: (50.0, 170.0), 4: (70.0, 260.0)}   # size -> (radius m, damage at the centre)
+# v968f5x [ROCKETS DO LEAVE CRATERS - AND WERE TOO WEAK] (Alon 10-25, Taurus messages05): a Mosquito
+# salvo arrives as one msg 52 with 3-5 size-1 craters (bombs: size 2-3). The server applied them, but
+# with the v968f5o table a rocket 17-22 m off did 27-37 to an 80-90 hp AA truck and nothing was
+# printed - the client only announces hits IT detects, and its splash code skips NetCars - so the
+# pilot saw 'no effect'. New model: full damage inside CAR_SPLASH_PLATEAU of the radius, then linear
+# to zero at the edge; centre damage raised so a near miss (<= plateau) kills any lorry and a 15-20 m
+# miss hurts. And every non-lethal splash hit is reported to the shooter as an AI line (kills already
+# draw the native cyan 'destroyed' line through the kill entry).
+CAR_BOMB_SPLASH_BY_SIZE = {1: (25.0, 150.0), 2: (40.0, 240.0), 3: (55.0, 340.0), 4: (75.0, 480.0)}   # size -> (radius m, damage inside the plateau)
+CAR_SPLASH_PLATEAU = 0.3         # fraction of the radius with full damage (size 1: 7.5 m, size 3: 16.5 m)
+CAR_SPLASH_TELL = False          # v968f5x: AI line to the shooter on a non-lethal splash hit - OFF (Alon 10-25: floods the players)
 
 def crater_positions(body):
     """[(x, y, size)] from a msg-52 body ([0x34][sq u16][time i32][dword ..])."""
@@ -15295,6 +15375,7 @@ def bomb_splash_on_cars(s, body):
         return 0
     rid = getattr(s, 'current_room', None)
     hits = 0
+    told = []
     for x, y, size in crater_positions(body):
         r, dmg0 = CAR_BOMB_SPLASH_BY_SIZE.get(size, CAR_BOMB_SPLASH_BY_SIZE[2])
         for onum, c in list(CARS.items()):
@@ -15302,11 +15383,20 @@ def bomb_splash_on_cars(s, body):
                 continue
             d = math.hypot(c['pos'][0] - x, c['pos'][1] - y)
             if d <= r:
-                dmg = dmg0 * (1.0 - 0.7 * d / r)
+                _pl = r * CAR_SPLASH_PLATEAU                                    # v968f5x plateau + linear
+                dmg = dmg0 if d <= _pl else dmg0 * (r - d) / (r - _pl)
                 _handle_car_hit(s, onum, getattr(s, 'my_obj_number', 0) or 0, int(round(dmg)), how=f'bomb splash {d:.0f} m (size {size})')
                 hits += 1
+                c2 = CARS.get(onum)
+                if c2 is not None and not c2.get('dead'):
+                    told.append(f'{c2["name"]} {max(0, int(round(100.0 * c2["hp"] / car_hp_max(c2))))}%')
     if hits:
         log('CARHIT', f'{s.current_pilot}: crater record -> {hits} car(s) in the blast')
+        if CAR_SPLASH_TELL and told:
+            try:
+                tc_say(rid, f'Your blast hit {", ".join(told[:4])}{" ..." if len(told) > 4 else ""}', to=s)
+            except Exception:
+                pass
     return hits
 
 def car_killed(onum, killer, reason=''):
@@ -15399,7 +15489,9 @@ CONVOY_PER_CAMP_MAX    = 2
 CONVOY_REQUEST_COOLDOWN_S = 600.0  # on-demand: one request per scene per 10 min
 CONVOY_LOW_FRAC        = 0.35      # on-demand: a store below this fraction of capacity calls one
 CONVOY_LORRIES_MAX     = 6
+CONVOY_MIN_LOAD_KG     = 300       # v968f5u: a lorry is sent only with at least this much on board
 CONVOY_MAX_KM          = 120.0     # depot search radius
+CONVOY_SOURCE_COVER    = 0.5       # v968f5t: a depot holding this share of the need (or producing it) can 'cover' it -> nearest such depot wins
 CONVOYS                = {}        # cid -> dict
 _CONVOY_NEXT_AT        = {}        # (room, camp) -> monotonic
 _CONVOY_REQ_AT         = {}        # (room, sidx) -> time
@@ -15586,8 +15678,34 @@ def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=T
           'started': time.time(), 'cargo': {}, 'lost': {}}
     hdg = math.degrees(math.atan2(uy, ux))
     lead_x, lead_y = s[0] + ux * CONVOY_ARRIVE_M, s[1] + uy * CONVOY_ARRIVE_M   # clear of the depot's buildings
+    # v968f5u [LORRIES LOAD FROM THE DEPOT] (Alon 01:12: 'some convoys have more metal than a train -
+    # is that possible?'): it was - a convoy's cargo came from nowhere while a train only carries the
+    # producer's real surplus. Each lorry now loads what the depot can spare: a producer keeps
+    # TRAIN_PICKUP_KEEP of its capacity (the train rule), a plain store keeps SUPPLY_CHAIN_RESERVE;
+    # a lorry that finds nothing to load is not sent (smaller or no column), a part load drives
+    # as a part load, and a lorry lost on the road loses real stock.
+    _avail = {}
+    try:
+        _sf, _sdet = _station_fill(rid, terrain, src_sidx)
+        for _k, (_have, _cap, _prod) in _sdet.items():
+            _keep = int(_cap * (TRAIN_PICKUP_KEEP if _prod else SUPPLY_CHAIN_RESERVE))
+            _avail[_k] = max(0, int(_have) - _keep)
+    except Exception:
+        _avail = {}
     prev = None
     for i, name in enumerate(names):
+        cargo = CONVOY_CARGO_KG.get(name)
+        if cargo:
+            kind, kg = cargo
+            kg = min(int(kg), int(_avail.get(kind, 0)))
+            if kg < CONVOY_MIN_LOAD_KG:
+                continue                                          # nothing worth loading for this lorry
+            _m, _f, _a = _scene_store_take(rid, terrain, src_sidx, kg if kind == 'metal' else 0, kg if kind == 'fuel' else 0, kg if kind == 'ammo' else 0)
+            kg = {'metal': _m, 'fuel': _f, 'ammo': _a}[kind]
+            if kg < CONVOY_MIN_LOAD_KG:
+                continue
+            _avail[kind] = max(0, _avail.get(kind, 0) - kg)
+            cargo = (kind, int(kg))
         px, py = lead_x - ux * i * CONVOY_GAP_M, lead_y - uy * i * CONVOY_GAP_M
         try:
             px, py = tank_clear_spot(terrain, px, py)
@@ -15595,10 +15713,12 @@ def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=T
             pass
         on = spawn_car(rid, camp, by_name[name], (px, py, 0.0), hdg, reason=f'(convoy {cid} {reason})')
         if on is None:
+            if cargo:
+                _scene_store_add(rid, terrain, src_sidx, cargo[1] if cargo[0] == 'metal' else 0, cargo[1] if cargo[0] == 'fuel' else 0, cargo[1] if cargo[0] == 'ammo' else 0)
             continue
         c = CARS[on]
         c.update({'terrain': terrain, 'convoy': cid, 'slot': i, 'mps': CONVOY_MPS, 'ahead': prev,
-                  'cargo': CONVOY_CARGO_KG.get(name), 'arrived': False})
+                  'cargo': cargo, 'arrived': False})
         if prev is None:
             c['goal'] = (d[0] - ux * CONVOY_ARRIVE_M, d[1] - uy * CONVOY_ARRIVE_M)
         else:
@@ -15607,10 +15727,14 @@ def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=T
         if c['cargo']:
             cv['cargo'][c['cargo'][0]] = cv['cargo'].get(c['cargo'][0], 0) + c['cargo'][1]
         prev = on
-    if not cv['vehicles']:
+    nl = sum(1 for on in cv['vehicles'] if CARS.get(on, {}).get('cargo'))
+    if not cv['vehicles'] or nl == 0:
+        for on in cv['vehicles']:                                  # escorts without a single loaded lorry: stand down
+            delete_car(on, reason=f'(convoy {cid}: nothing to load at scene {src_sidx})')
+        log('CONVOY', f'room {rid}: convoy {cid} camp {camp} NOT sent - depot scene {src_sidx} "{s[2]}" has nothing to spare '
+                      f'(spare {_avail})')
         return None
     CONVOYS[cid] = cv
-    nl = sum(1 for on in cv['vehicles'] if CARS.get(on, {}).get('cargo'))
     log('CONVOY', f'room {rid}: convoy {cid} camp {camp} ({len(cv["vehicles"])} vehicles, {nl} lorries, {cv["cargo"]}) '
                   f'scene {src_sidx} "{s[2]}" -> {dst_sidx} "{d[2]}" {L / 1000:.0f} km {reason}')
     _convoy_say(cv, f'{tc_camp_tag(camp)} supply convoy of {nl} lorries left {s[2]} {tc_grid(s[0], s[1])} '
@@ -15689,10 +15813,17 @@ def convoy_tick():
             cv.pop('lead_arrived_at', None)
             log('CONVOY', f'convoy {cid}: heading home ({len(alive)} vehicles)')
         elif cv['phase'] == 'back' and settled:
+            _ret = {'metal': 0, 'fuel': 0, 'ammo': 0}
             for on in alive:
+                cg = CARS.get(on, {}).get('cargo')
+                if cg:                                                 # v968f5u: an aborted run brings its load back to the depot
+                    _m, _f, _a = _scene_store_add(cv['room'], cv['terrain'], cv['src'], cg[1] if cg[0] == 'metal' else 0,
+                                                  cg[1] if cg[0] == 'fuel' else 0, cg[1] if cg[0] == 'ammo' else 0)
+                    _ret['metal'] += _m; _ret['fuel'] += _f; _ret['ammo'] += _a
                 delete_car(on, reason=f'(convoy {cid} home)')
             CONVOYS.pop(cid, None)
-            log('CONVOY', f'convoy {cid} camp {cv["camp"]}: back at the depot, {len(alive)} vehicle(s) - done')
+            log('CONVOY', f'convoy {cid} camp {cv["camp"]}: back at the depot, {len(alive)} vehicle(s) - done'
+                          + (f'; returned {_ret} to the store' if any(_ret.values()) else ''))
 
 def convoy_unload(cv, alive):
     rid, terrain, sidx = cv['room'], cv['terrain'], cv['dst']
@@ -15775,13 +15906,23 @@ def convoy_pick_source(rid, terrain, camp, dst_sidx, need):
         if dist > CONVOY_MAX_KM * 1000.0 or dist < 2 * CONVOY_ARRIVE_M + CONVOY_GAP_M * 8:
             continue
         _frac, det = _station_fill(rid, terrain, sidx)
-        score = 0.0
+        # v968f5t [NEAREST DEPOT THAT CAN COVER IT] (Alon 01:03: 'the distances are huge .. should
+        # spawn from the nearest support/tank factory or other scene'): the old rank was 'most stock
+        # wins, distance only breaks ties', so a bomber base 36-60 km away with a mountain of metal
+        # beat the support factory 7 km up the road every time (online 19:19-22:56: 20 of 28 convoys
+        # drove 31-60 km). Now: a depot that can cover the need (>= CONVOY_SOURCE_COVER of it, a
+        # producer of it always counts as covering) ranks by DISTANCE, nearest first; only when
+        # nobody in reach can cover it does the richest one win.
+        score = 0.0; need_tot = 0.0; covers = True
         for k, kg in need.items():
             have, cap, prod = det.get(k, (0, 0, False))
             score += min(have, kg) * (1.5 if prod else 1.0)
+            need_tot += kg
+            if not prod and have < kg * CONVOY_SOURCE_COVER:
+                covers = False
         if score <= 0:
             continue
-        key = (score, -dist)
+        key = (1 if covers else 0, -dist if covers else score, score if covers else -dist)
         if best is None or key > best[0]:
             best = (key, sidx)
     return best[1] if best else None
@@ -15829,6 +15970,14 @@ def convoy_request(rid, sidx, reason='', force=False):
     frac, det = _station_fill(rid, terrain, sidx)
     need = {k: int(cap * TRAIN_DROP_FILL) - have for k, (have, cap, prod) in det.items() if not prod and cap > 0 and have < cap * CONVOY_LOW_FRAC}
     _lost_objs = _SCENE_CAP_LOSS_OBJ.get((rid, sidx)) or {}
+    if 'metal' in need and not _lost_objs and not force:
+        try:                                              # v968f5t: metal rides only when something is broken
+            if trn_scene_damage_frac(rid, sidx) <= 0.0:
+                need.pop('metal', None)
+            else:
+                need['metal'] = min(need['metal'], 3 * int(CONVOY_CARGO_KG['Furgon'][1]))
+        except Exception:
+            need.pop('metal', None)
     if _lost_objs:
         for _r, _vol in _lost_objs.values():
             if _r in ('fuel', 'ammo'):
@@ -15867,7 +16016,17 @@ def convoy_low_stock_scan(rid):
         _bombed = bool(_SCENE_CAP_LOSS_OBJ.get((rid, sidx)))            # v968f5j: storage destroyed -> cap 0 is not 'full'
         if frac is None and not _bombed:
             continue
-        if _bombed or any(have < cap * CONVOY_LOW_FRAC for have, cap, prod in det.values() if cap > 0):
+        # v968f5t: METAL alone does not call a convoy unless the scene has something to rebuild (destroyed
+        # storage or damage on it) - 95%-full airfields were calling 7,500 kg metal columns 36-60 km
+        # ('stock 95%' x9 tonight) because their metal store sat at zero with nothing broken.
+        _low = {k for k, (have, cap, prod) in det.items() if cap > 0 and have < cap * CONVOY_LOW_FRAC}
+        if _low == {'metal'} and not _bombed:
+            try:
+                if trn_scene_damage_frac(rid, sidx) <= 0.0:
+                    continue
+            except Exception:
+                continue
+        if _bombed or _low:
             convoy_request(rid, sidx, reason=(f'stock {frac:.0%}' if frac is not None else 'storage bombed out') + (' + storage destroyed' if _bombed and frac is not None else ''))
 
 def ensure_camp_convoys(rid):
@@ -17385,9 +17544,21 @@ def _handle_tank_hit_51(s, pl):
             i += 6
             # v626f5: a TRAIN hit names the railcar - victim = train ONumber | (car index << 10):
             # 0x010d loco, 0x0d0d car 3, 0x1d0d car 7 (live 09-10 22:34). ONumbers stay < 1024.
-            _car = victim >> 10
-            if _car and (victim & 0x3ff) in TRAINS:
-                _handle_train_hit(s, victim & 0x3ff, attacker, dmg, car=_car)
+            # v968f5x: ONumbers DO pass 1023 (today's trains sit at 0x0580/0x05cb), so 'victim >> 10'
+            # no longer separates the railcar index from the number (0x0dcb = 0x05cb + 2*0x400 read as
+            # car 3 of 0x01cb -> 'not one of our tanks', every wagon hit on 10-25 ignored). The wire
+            # value is simply onum + index*0x400; find the train it belongs to by subtraction.
+            _car = 0; _base = None
+            if victim not in TRAINS and victim not in TANKS and victim not in CARS and victim not in SOLDIERS:
+                for _k in range(1, 32):
+                    _b = victim - _k * 0x400
+                    if _b < 0:
+                        break
+                    if _b in TRAINS:
+                        _car, _base = _k, _b
+                        break
+            if _car:
+                _handle_train_hit(s, _base, attacker, dmg, car=_car)
                 continue
             t = TANKS.get(victim)
             if t is None and victim in SOLDIERS:
@@ -22671,7 +22842,8 @@ def send_parachuter_create_for(src, dst, predel=False, with_client=False):
             log('PARA', f'score post-create skipped: {_e}')
     log('PARA', f'create-parachuter {src.current_pilot} St={src.client_number} '
                 f'ONumber=0x{src.para_obj_number:04x} rec={len(rec)}B '
-                f'body={hx(bytes(body))} -> {dst.current_pilot}')
+                f'body={hx(bytes(body))} -> {dst.current_pilot}'
+                + (' [client+canopy form: peer had no station for him]' if with_client else ''))   # v968f5w
     return True
 
 CREW_CHUTE_STALE_S = 40.0    # v796f5: a crew chute unseen for this long is down; never re-create it
@@ -35635,10 +35807,24 @@ def handle_post_auth(s, cmd, pl):
                     except Exception as _e534:
                         log('BAILCRUMBLE', f'[warn] {s.current_pilot}: relay failed: {_e534}')
                 if PARA_SEND_CREATE:
+                    # v968f5w [CANOPY ON A PEER WITHOUT MY STATION -> CTD] (Alon 10-24 23:45:39,
+                    # messages53: 'Create NetParachuter. St=11, ONumber=962' -> 'There is no
+                    # GamerClientScore for Client=11', VNet.cpp:474). The pilot record (tag 0x8x =
+                    # HUMAN-owned) binds the canopy to GamerClientScore[St]; that station reaches a
+                    # peer ONLY inside the first plane create we send him (client+object, see the
+                    # relay hook). Yoda re-entered the arena 127 km from Alon, radar-hidden, so Alon
+                    # never got his plane - and his station from Yoda's EARLIER session had gone
+                    # with 'Yoda leaving game'. Then Yoda bailed and this loop sent the canopy
+                    # object-only to every flying peer. Use the same station tracker the plane
+                    # path uses: a peer not in _client_created_peers gets the 2009 client+canopy
+                    # form (v554f5 'in 2'65'), which registers the station first.
+                    _ccp_bail = s.__dict__.setdefault('_client_created_peers', set())
                     for _peer in get_sessions_in_room(s.current_room):
                         if _peer is not s and getattr(_peer, 'flying', False):
+                            _wc_bail = _peer.addr not in _ccp_bail
                             threading.Thread(target=send_parachuter_create_for,
-                                             args=(s, _peer), daemon=True).start()
+                                             args=(s, _peer), kwargs={'with_client': _wc_bail},
+                                             daemon=True).start()
                     # v256: THE REAL PARACHUTER LIFECYCLE (from the 2009 ground truth).
                     # A real parachuter is NOT positioned by network telemetry. The 2009 client log
                     # shows a create, a local model load, then NOTHING on the wire naming that object
@@ -36033,6 +36219,13 @@ def on_pkt(data, addr):
                 if s.__dict__.get('_statreply_last_seq') == _rseq:
                     raise StopIteration
                 s._statreply_last_seq = _rseq
+                # v968f5v: the FIRST reply echoing the pending seq answers the copy we sent at
+                # _status_pending['sent'] -> a round-trip sample for the LAG meter.
+                _pd = s.__dict__.get('_status_pending')
+                if _pd is not None and _pd.get('seq') == _rseq:
+                    _rtt_s = time.time() - _pd.get('sent', 0.0)
+                    if 0.0 <= _rtt_s <= 60.0:
+                        _lag_sample(s, _rtt_s, _pd.get('resends', 0))
             except StopIteration:
                 _rseq = None
             except Exception:
@@ -36090,6 +36283,7 @@ def on_pkt(data, addr):
                         f'ul_ewma={getattr(s,"_loss_ul_ewma",0.0)*100:+.1f}% '
                         f'dl_total={(1-getattr(s,"_loss_dl_rx",0)/_dt)*100:+.2f}% '
                         f'ul_total={(1-getattr(s,"_loss_ul_rx",0)/_ut)*100:+.2f}% '
+                        f'rtt={getattr(s, "_rtt_ms", "?")}ms (max {getattr(s, "_rtt_max_s", 0.0):.1f}s) '   # v968f5v
                         f'(n={s._statreply_n})')
             except Exception:
                 pass
