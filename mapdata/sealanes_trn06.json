@@ -1,5 +1,6 @@
 {
  "_help": [
+  "direct: true = port-to-port straight lines (no islands on this map); lanes are optional, anchors should sit on water.",
   "sea lanes for terrain 6 (English Channel). ports: anchor = the water point where a ship waits off the port",
   "(defaults to the scene position - MOVE IT ONTO WATER); approach = waypoints leading OUT of the anchor to open sea, in order.",
   "lanes: from/to = port scene indices, points = open-sea waypoints from the end of from.approach to the end of to.approach",
@@ -68,5 +69,6 @@
    "approach": []
   }
  },
- "lanes": []
+ "lanes": [],
+ "direct": true
 }

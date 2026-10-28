@@ -2638,6 +2638,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _eco_opt('on',  'On - production, supplies, trains, tank battalions, country scores')
                 + _eco_opt('off', 'Off - arcade: full service at every field, no AI ground war')
                 + '</select></label>'
+                # v968f5z: same-side kills. Default follows the arena's camps block exactly as the
+                # client does (one alliance group = free-for-all, everyone hostile, kills count).
+                + '<label style="display:block; margin:12px 0;">Same-side kills<br>'
+                '<select name="s_team_kills" style="padding:7px; margin-top:3px; min-width:340px;">'
+                + ''.join('<option value="' + v + '"' + (' selected' if str(overrides.get('team_kills', '') or '').lower() == v else '') + '>' + l + '</option>'
+                          for v, l in (('', 'Default - from the arena camps (one alliance group = free-for-all, kills count)'),
+                                       ('everyone', 'Everyone is a target - same-side kills count'),
+                                       ('teams', 'Teams - a same-side kill is a death with no credit')))
+                + '</select></label>'
                 '<p class="muted" style="margin:-6px 0 12px; max-width:640px;">Needs the terrain\'s map data '
                 '(trn_tables / scene profiles, rails for trains - see ADDING_A_MAP.md). Pilots inside the arena '
                 'see the change at their next spawn; trains and production start within a minute.</p>')
@@ -4494,6 +4503,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             _sm = qs.get('s_scoring_mode', [''])[0].strip().lower()
             if _sm in ('ffa', 'tc', 'none', 'events'):
                 settings['scoring_mode'] = _sm
+            _tk = qs.get('s_team_kills', [''])[0].strip().lower()            # v968f5z
+            if _tk in ('everyone', 'teams'):
+                settings['team_kills'] = _tk
             _eco = qs.get('s_economy', [''])[0].strip().lower()              # v960f5c
             if _eco in ('on', 'off'):
                 settings['economy'] = _eco

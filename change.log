@@ -1,3 +1,63 @@
+v968f6c (2026-10-28) - convoys halt under air attack; vehicles re-created in place (gun hits on lorries)
+- Taurus (10-25 messages07): FW-190 gun passes on a moving convoy - his client registered NOTHING
+  (0 msg-51, no green line); the convoy's AA hit him 40+ times and killed him once. Every case on
+  record where a client DID register gun hits on a car, the car was standing where that client had
+  created it (10-23 static test; Bama 10-24, convoy parked at the Tank Factory, six msg-51 hits).
+  Working theory: the client's bullet test uses a collision registration made at creation, which
+  the car physics never moves.
+- CONVOY_HALT_ON_ATTACK: an enemy plane within 2.5 km and no more than 1,500 m above the lead halts
+  the column (speed 0; AA keeps firing); it rolls again 45 s after the last threat. AI line to the
+  camp: 'supply convoy under air attack at <grid> - column halted, AA engaging'.
+- CONVOY_HALT_RECREATE: once the halted column has settled (< 0.3 m/s), each vehicle is deleted and
+  re-created in ONE msg-13 on every client holding it, at its halted position (the parachuter
+  predel+create form), then its state frame is re-sent. Log: 'HALTED - <pilot> N m away' and
+  'halted and settled -> N vehicle(s) re-created in place'.
+- TEST READS: hits after HALTED alone -> motion was the problem; hits only after 're-created' ->
+  creation point; neither -> the car models, deeper RE needed.
+
+v968f6b (2026-10-28) - engines would not start after a hangar hop (Bama 10-28 15:36, messages25; Yoda 10-24 22:44)
+- Bama spawned at AF 8, took the 13 s refuel/repair, hopped to AF 14: the server fired a ground-stop
+  restore on the OLD plane as it left (15:36:46.645, stamping last_resupply_at), the exit msg-59
+  was correctly ignored, and the NEW plane's spawn 'Ask resources' 0.4 s later fell inside the 5 s
+  resupply debounce and was dropped WITHOUT A LOG LINE. No msg-60 grant -> the client waited 15 s
+  ('ERROR: Not receive resources answer 15.020 seconds') and the engines never started. Yoda hit
+  the same thing on 10-24 (hangar hop 7->11).
+- The debounce is now per plane: an ask from a different object number is a new life and is always
+  answered; a repeat on the same plane inside 5 s is still swallowed, now with a RESUPPLY line.
+
+v968f6a (2026-10-28) - 'Tank limit reached' with two columns rolling (Meno 10-26 21:05, messages63)
+- Server log: '64 tanks alive >= TC_MAX_TANKS_PER_ROOM and no side has an idle column to recall' -
+  GE (_Shadow_) had six battalions out (48 tanks) and SU two (16); Meno's third trigger (JP Tank
+  Factory 62,AU) was refused for the ROOM total, not his side's.
+- v860f5 'NO ARTIFICIAL TANK CAP' had put the per-camp block under `if False:` but left the room-cap
+  branch as that block's `elif`, which Python still evaluates - the cap stayed live for a month.
+  Now behind TC_ROOM_TANK_CAP_ENFORCED = False: production (units built from metal) and the
+  object-number reserve are the only limits, as intended. A sweep found no other `if False: ... elif`.
+
+v968f5z (2026-10-28) - free-for-all arenas: same-side kills count (Alon: room 130 is FFA)
+- v945f5's team-kill rule compared nations only, so in a Free-For-All arena two SU pilots shooting
+  each other got 15 'TEAM KILL, no credit'. The client decides hostility from the camps block:
+  Camps.cpp splits the AllianceVar into alliance groups ('0-1-2-3-4' = five teams); a single group
+  ('01234', the FFA template) sets the camps FFA flag -> GAME_DEF+0x88 -> IsEnemy() true for every
+  pair of camps (that is why the hits registered). The server now reads the same AllianceVar from
+  the room's GAME_DEF (room_everyone_hostile, cached 60 s): one group = kills count, several =
+  team-kill rule. Checked against the local DB: 'Free For All' -> everyone hostile, 'Nations at
+  war' / 'Territorial Combat 1' -> teams. Web: per-arena 'Same-side kills' dropdown (settings_json
+  'team_kills' = everyone | teams | default).
+- Those 15 kills are not re-credited retroactively (the deaths were booked at the time).
+
+v968f5y (2026-10-28) - a team-kill bail was booked twice (Taurus/SpUn 10-26 00:00, messages11)
+- Taurus and SpUn were BOTH on side 2 (SU) in room 130 and shot each other down for half an hour:
+  every kill was a TEAM KILL (v945f5) - the native cyan line still draws, the victim's death is
+  booked, nobody is credited. That part is correct and explains '0 kills for either of us'.
+  Pilots: a bail (MEC 5) keeps the pilot unless he is captured; SpUn bailed every time (11 planes,
+  0 pilots), Taurus bailed 4x and crashed 3x (MEC 1 = pilot lost, -440 each).
+- BUG: Taurus's first death (00:00:20) was booked at the bail - latched hunter SpUn, team kill, death
+  booked, no credit - and try_bail_kill_now took 'no killer' for 'nothing booked', so the husk
+  coming down at 00:00:37 booked the same plane again: -240 twice, planes_lost +2 for one Yak. Now
+  a bail whose death was booked without a creditable killer marks the plane like a credited bail,
+  and the husk-down is a plain delete.
+
 v968f5x (2026-10-25) - rocket/bomb splash on lorries: lethal near misses + shooter feedback; wagon hits above ONumber 1023
 - Taurus (messages05, 14:17-14:19): two rocket salvos reached the server as msg-52 records with 3 and 5
   size-1 craters (rockets DO leave craters - v968f5o's note was wrong) and the splash was applied:

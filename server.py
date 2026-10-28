@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f5x'
+VERSION = 'v968f6c'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15768,6 +15768,94 @@ def _convoy_settled(alive):
             return False
     return True
 
+# v968f6c [GUNS DO NOT TOUCH A MOVING LORRY - HALT UNDER ATTACK] (Taurus 10-25 messages07: FW-190 passes
+# on a convoy, not one hit registered by his client - no msg-51, no green line; Alon 10-28). What
+# the logs agree on: cars that were STATIONARY where the client created them took gun hits (10-23
+# room 61 test; Bama 10-24 on a convoy parked at the Tank Factory, six msg-51 hits), cars that have
+# driven since their creation take none. The client runs the car physics itself (FUN_00687a10), so
+# the drawn lorry is where the server thinks it is - the bullet test is what misses, most likely
+# against a collision registration left at the creation point. Two switchable measures, which also
+# happen to be what a real convoy did under air attack:
+#   CONVOY_HALT_ON_ATTACK  - an enemy plane within CONVOY_HALT_RADIUS_M and lower than CONVOY_HALT_ALT_M
+#                            above the lead stops the column (AA keeps firing); it rolls again
+#                            CONVOY_HALT_S after the last threat.
+#   CONVOY_HALT_RECREATE   - once halted and settled, every car is deleted+re-created in ONE msg-13 on
+#                            each client that holds it (the parachuter predel+create form), so the
+#                            client's collision registration is rebuilt at the halted position.
+# If hits register with HALT alone the problem is motion; if only after RECREATE it is the creation
+# point; if neither, it is the car models. The log says which case fired ('HALTED' / 're-created').
+CONVOY_HALT_ON_ATTACK  = True
+CONVOY_HALT_RADIUS_M   = 2500.0
+CONVOY_HALT_ALT_M      = 1500.0    # enemy plane this far above the lead (or lower) counts as an attack
+CONVOY_HALT_S          = 45.0      # keep halted this long after the last threat
+CONVOY_HALT_RECREATE   = True
+CONVOY_HALT_SETTLE_MPS = 0.3       # all vehicles slower than this = the column has stopped
+
+def _convoy_threat(cv, lead):
+    """Nearest enemy plane low over the column, as (session, dist_m) or None."""
+    best = None
+    lx, ly, lz = lead['pos']
+    for p in get_sessions_in_room(cv['room']):
+        if not getattr(p, 'flying', False) or getattr(p, 'nation', None) == cv['camp'] or getattr(p, 'nation', None) is None:
+            continue
+        xy = p.__dict__.get('_pos_xy')
+        if not xy or time.time() - p.__dict__.get('_pos_at', 0.0) > 10.0:
+            continue
+        d = math.hypot(xy[0] - lx, xy[1] - ly)
+        if d > CONVOY_HALT_RADIUS_M:
+            continue
+        pz = p.__dict__.get('_pos_z')
+        if pz is not None and pz - lz > CONVOY_HALT_ALT_M:
+            continue
+        if best is None or d < best[1]:
+            best = (p, d)
+    return best
+
+def car_recreate_in_place(onum, reason=''):
+    """v968f6c: delete+create the car in ONE msg-13 on every client that holds it, at its current
+    position (the client rebuilds the object - and, we expect, its collision registration)."""
+    c = CARS.get(onum)
+    if c is None or c.get('dead'):
+        return 0
+    n = 0
+    _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    for p in get_sessions_in_room(c['room']):
+        if getattr(p, 'addr', None) not in c['peers'] or not getattr(p, 'entered_game', False):
+            continue
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
+        _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} delete+create in place {reason}', to=3.0)
+        n += 1
+    if n:
+        threading.Timer(0.6, lambda: car_broadcast_state(onum)).start()
+    return n
+
+def _convoy_halt_step(cid, cv, alive, lead, now):
+    if not CONVOY_HALT_ON_ATTACK or cv['phase'] not in ('out', 'back'):
+        return
+    thr = _convoy_threat(cv, lead)
+    if thr is not None:
+        if not cv.get('halted'):
+            cv['halted'] = True; cv['halt_id'] = cv.get('halt_id', 0) + 1; cv.pop('halt_recreated', None)
+            for on in alive:
+                CARS[on]['mps'] = 0.0
+            log('CONVOY', f'convoy {cid} camp {cv["camp"]}: HALTED - {thr[0].current_pilot} {thr[1]:.0f} m away, low '
+                          f'(halt #{cv["halt_id"]}, {len(alive)} vehicle(s))')
+            _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} supply convoy under air attack at '
+                            f'{tc_grid(lead["pos"][0], lead["pos"][1])} - column halted, AA engaging')
+        cv['halt_until'] = now + CONVOY_HALT_S
+        for on in alive:                                   # a phase change may have restored the road speed
+            CARS[on]['mps'] = 0.0
+        if (CONVOY_HALT_RECREATE and cv.get('halt_recreated') != cv['halt_id']
+                and all(abs(float(CARS[on].get('_speed_mps', 0.0))) <= CONVOY_HALT_SETTLE_MPS for on in alive)):
+            cv['halt_recreated'] = cv['halt_id']
+            n = sum(car_recreate_in_place(on, reason=f'(convoy {cid} halted)') for on in alive)
+            log('CONVOY', f'convoy {cid}: halted and settled -> {len(alive)} vehicle(s) re-created in place on their clients ({n} sends)')
+    elif cv.get('halted') and now >= cv.get('halt_until', 0.0):
+        cv['halted'] = False
+        for on in alive:
+            CARS[on]['mps'] = CONVOY_MPS
+        log('CONVOY', f'convoy {cid} camp {cv["camp"]}: threat gone for {CONVOY_HALT_S:.0f}s - rolling again')
+
 def convoy_tick():
     now = time.time()
     for cid, cv in list(CONVOYS.items()):
@@ -15780,6 +15868,10 @@ def convoy_tick():
             continue
         _convoy_relink(cv, alive)
         lead = CARS[alive[0]]
+        try:
+            _convoy_halt_step(cid, cv, alive, lead, now)                 # v968f6c
+        except Exception:
+            logx('CONVOY', 'halt step failed')
         # v967f5b (Alon 10-24: 'enemy convoy moved on to base, recently captured'): the destination
         # changed hands while the column was on the road -> turn for home at once; the depot lost
         # -> the column still goes home but despawns on arrival (its vehicles have nowhere to park).
@@ -18212,7 +18304,13 @@ def tc_raise_column(room_id, camp, n_want, target_sidx, purpose, trigger_pilot):
                 tc_say(room_id, f'AI: Tank limit reached - no tanks available to {purpose} {tc_camp_tag(scene_camp(terrain, target_sidx))} '
                                 f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}', camp=camp)
                 return None
-    elif _alive >= TC_MAX_TANKS_PER_ROOM:
+    elif TC_ROOM_TANK_CAP_ENFORCED and _alive >= TC_MAX_TANKS_PER_ROOM:
+        # v968f6a [THE CAP v860 'REMOVED' WAS STILL LIVE] (Meno 10-26 21:05:54, messages63): v860f5 put
+        # the per-camp block under `if False:` but left this branch as its `elif`, so Python still
+        # evaluated it - 64 tanks alive (GE's six battalions + SU's two) and Meno's third trigger was
+        # refused with 'Tank limit reached' although his own side had two columns and full factories.
+        # Guarded by TC_ROOM_TANK_CAP_ENFORCED (False): production and the object-number reserve are
+        # the only limits, as v860 intended.
         # v859f5 [THE ROOM CAP BLOCKED A SIDE WITH NO TANKS]: 48 tanks of the OTHER sides refused
         # Bama's JP trigger ('No tanks available' with 288 tanks in his rear factories, 09-26 19:50).
         # At the room cap the side furthest OVER its share gives up its oldest idle garrison, so a
@@ -18567,6 +18665,7 @@ TC_FIRE_HOLD_S       = 120.0    # v927f5: a scene with a kill on it this recent 
 CAPTURE_ASSIST_BONUS = 1000     # v607f5: to the pilot whose paratroops made the capture (trigger pilot gets the 2000)
 TC_DEFEND_IDLE_S    = 1200.0    # v604f5: a defending column with no enemy in range for this long is withdrawn
 TC_MAX_TANKS_PER_ROOM = 64      # v860f5: NO LONGER ENFORCED (production is the limit; see tc_raise_column) - kept for the console
+TC_ROOM_TANK_CAP_ENFORCED = False   # v968f6a: the room cap's `elif` had stayed live after v860 (see tc_raise_column); True re-arms it
 TC_MAX_TANKS_PER_CAMP = 24      # v860f5: NO LONGER ENFORCED
 # v600f5: PPT class ids (low 5 bits of the kill-tail's last byte) for AI hunters. Plane = 2 is
 # proven; the others are knobs (`tc ppt <tank> <soldier> <aa>`) - the client's kill line names the
@@ -25015,9 +25114,13 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     # collisions count as a death; the 2004 page gives no points for killing your own side).
     if (killer is not None and getattr(killer, 'nation', None) is not None
             and getattr(killer, 'nation', None) == getattr(victim, 'nation', None)):
-        log('KILL', f'attribution: {killer.current_pilot} is on {victim.current_pilot}\'s own side -> '
-                    f'TEAM KILL, death booked, no credit [v945f5]')
-        killer = None
+        if room_everyone_hostile(getattr(victim, 'current_room', None)):            # v968f5z
+            log('KILL', f'attribution: {killer.current_pilot} and {victim.current_pilot} share a side, but this '
+                        f'arena is free-for-all (one alliance group) -> kill stands [v968f5z]')
+        else:
+            log('KILL', f'attribution: {killer.current_pilot} is on {victim.current_pilot}\'s own side -> '
+                        f'TEAM KILL, death booked, no credit [v945f5]')
+            killer = None
     # ---- VICTIM: always dies. Count it and break the ace streak. ----
     victim.k_deaths = getattr(victim, 'k_deaths', 0) + 1
     victim.kills_since_death = 0
@@ -25280,9 +25383,21 @@ def try_bail_kill_now(s):
     # double-book: run_080757 08:11:01 booked, 08:12:02 re-credited on respawn). The peer exit-
     # delete still carries the hunter via exit_entry below - attribution and the wire tail are
     # separate concerns.
+    _kd0 = getattr(s, 'k_deaths', 0)
     _killer, _kbailed = score_on_death(s, _stored, hunter_obj=None,
                                        victim_obj=_plane, pilot_lost=False)
     if _killer is None:
+        if getattr(s, 'k_deaths', 0) > _kd0:
+            # v968f5y [TEAM-KILL BAIL BOOKED TWICE] (Taurus 10-26 00:00:20/00:00:37, messages11): the
+            # latched hunter was on the victim's own side, so score_on_death booked the DEATH (plane
+            # lost, -240, k_deaths+1) and returned no killer (v945f5 team kill = no credit). Reading
+            # 'no killer' as 'nothing booked' let the husk-down path book the same plane again
+            # (-240 twice, planes_lost +2 for one Yak). Mark the plane booked so the husk coming
+            # down is a plain delete, exactly as for a credited bail.
+            _BAIL_KILL_BOOKED[_plane] = ('nobody (team kill)', time.time())
+            log('BAILKILL', f'{s.current_pilot} bailed with latch obj 0x{_hobj:04x}: death booked at the bail '
+                            f'with no creditable killer (team kill) -> husk-down will not book it again [v968f5y]')
+            return True
         log('BAILKILL', f'{s.current_pilot} bailed with latch obj 0x{_hobj:04x} but killer '
                         f'unresolved at bail -> fall back to husk-down path [v536f5]')
         return False
@@ -28363,6 +28478,51 @@ def parse_gamedef_territories(game_def_raw):
     p += 4                                   # 2 ushorts
     tmap = list(struct.unpack_from('<8i', d, p))
     return names, tmap
+
+# v968f5z [FREE-FOR-ALL = NO TEAM-KILL RULE] (Alon 10-28: room 130 is a free-for-all arena; Taurus and
+# SpUn, both SU, shot each other down 15 times and v945f5 booked every one as a TEAM KILL). The client
+# decides hostility from the camps block: Camps.cpp FUN_0056e990 splits the AllianceVar into alliance
+# GROUPS at the separator ('01-234' = {0,1} vs {2,3,4}); ONE group or none ('01234') sets the camps
+# FFA flag (struct [0x1f]; copied to GAME_DEF+0x88 by the terrain loader -> DAT_00bfa434 = 0), and
+# IsEnemy FUN_0046bba0 then returns TRUE for every pair of camps except Neutral - which is exactly
+# why Taurus's guns registered 'You have hit SU Cpt SpUn' at all. The server now reads the same
+# flag, so the team-kill rule applies only where the client itself would refuse the hit. Web
+# override per arena: settings_json 'team_kills' = 'everyone' (FFA) | 'teams' | '' (from the AllianceVar).
+_ROOM_FFA_CACHE = {}        # room_id -> (when, bool)
+
+def room_everyone_hostile(room_id):
+    """True when the arena's camps block makes every camp hostile to every other (FFA)."""
+    if room_id is None:
+        return False
+    now = time.time()
+    _c = _ROOM_FFA_CACHE.get(room_id)
+    if _c is not None and now - _c[0] < 60.0:
+        return _c[1]
+    val = False
+    try:
+        _ov = str((db_get_room_settings(room_id) or {}).get('team_kills', '') or '').lower()
+    except Exception:
+        _ov = ''
+    if _ov in ('everyone', 'ffa', 'all'):
+        val = True
+    elif _ov == 'teams':
+        val = False
+    else:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+            conn.close()
+            d = decompress_gamedef(row[0]) if row and row[0] else None
+            if d and len(d) >= 14:
+                block_len = d[13]
+                camps = bytes(d[14:14 + block_len])
+                av = camps[:camps.index(0)]
+                groups = [g for g in re.split(rb'[^0-9A-Fa-f]+', av) if g]
+                val = len(groups) <= 1                       # one alliance group = everyone hostile
+        except Exception:
+            val = False
+    _ROOM_FFA_CACHE[room_id] = (now, val)
+    return val
 
 def apply_room_territories(room_id, reason=''):
     """Rewrite the terrain's scene camps from the room's territory assignment (once per room;
@@ -33299,6 +33459,7 @@ def _handle_repair_request_119(s, pl):
     s.resupplied_this_stop = True
     s._grant_pos = _pos
     s.last_resupply_at = now
+    s._last_resupply_obj = getattr(s, 'my_obj_number', None)      # v968f6b
     s._repair_119_pending = 0.0   # v505f5: serviced directly, clear any pending retry
     log('RESUPPLY', f'{s.current_pilot} msg-119 repair REQUEST -> granting '
                     f'(movement={_mv}, pos={_pos})')
@@ -33494,9 +33655,19 @@ def _handle_ask_resources_59(s, pl):
                         f'(movement={_mv} >= {CRASH_MOVEMENT_MIN})')
         return
     # shared DEBOUNCE + ONE-SHOT so the poll / a 119 retry cannot double-grant the same stop
-    if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE:
+    # v968f6b [SPAWN ASK SWALLOWED BY THE DEBOUNCE] (Bama 10-28 15:36:47, messages25; Yoda 10-24
+    # 22:44:55): a hangar hop fires a ground-stop restore on the OLD plane as it leaves (stamping
+    # last_resupply_at), and the NEW plane's spawn ask lands 0.4 s later inside the 5 s debounce ->
+    # dropped silently -> the client waits 15 s ('Not receive resources answer'), the engines never
+    # start. The debounce is per STOP of one plane; a different object number is a new life and
+    # always gets its grant.
+    if (now - getattr(s, 'last_resupply_at', 0.0)) < AUTO_RESUPPLY_DEBOUNCE \
+            and s.__dict__.get('_last_resupply_obj') == s.my_obj_number:
+        log('RESUPPLY', f'{s.current_pilot} msg-59 Ask-resources within the debounce of the same plane '
+                        f'0x{s.my_obj_number:04x} ({now - s.last_resupply_at:.1f}s) - not repeated')
         return
     s.last_resupply_at = now
+    s._last_resupply_obj = s.my_obj_number
     s.resupplied_this_stop = True
     try:
         _hist = getattr(s, '_pos_hist', None)
@@ -33602,6 +33773,7 @@ def _resupply_poll_loop():
                 s.resupplied_this_stop = True
                 s._grant_pos = pos
                 s.last_resupply_at = now
+                s._last_resupply_obj = getattr(s, 'my_obj_number', None)      # v968f6b
                 # v505f5/v506f5: honor an explicit repair need even in an air-start arena (where a
                 # plain poll grant is suppressed). Two triggers: a DEFERRED msg-119 (the 0.5s poll is
                 # the retry it never had), OR the plane is DAMAGED (took_damage) - a plane already
