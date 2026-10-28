@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6h'
+VERSION = 'v968f6i'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15554,16 +15554,29 @@ def convoy_minutes_for_room(rid):
         return CONVOY_INTERVAL_MIN
 
 # --- the car driver (the tank driver's control law, FUN_00687a10 on the client) ---
+def car_frame_hp(c):
+    """v968f6i: the frame word at +0xc IS THE CAR'S HIT POINTS. The owner's Pack (0x689e8c) writes
+    its +0x280 HP there and the receiver's Unpack stores it straight into +0x280 (NET sub +0x1d8).
+    We sent 0, so every client held the lorry at 0 HP and FUN_00689260 ('old HP must be > 0') could
+    never run the explosion - the lethal msg-51 of v968f6h arrived and did nothing (Alon 10-29 00:53,
+    messages59: 'in 51'7' then the plain delete). Alive = the server's current HP, at least 1."""
+    try:
+        hp = int(round(float(c.get('hp', car_hp_max(c)))))
+    except Exception:
+        hp = int(CAR_FALLBACK_HP)
+    return max(1, min(32767, hp))
+
 def car_motion_aux(c):
-    """[+0xc int][+0xe throttle][+0x10 steer][+0x12 speed seed][+0x14 turn]"""
+    """[+0xc HIT POINTS][+0xe throttle][+0x10 steer][+0x12 speed seed][+0x14 turn]"""
+    hp = car_frame_hp(c)
     if c.get('drive_test') is not None:
         mps = float(c['drive_test'])
-        return (0, _s16c(mps / CAR_MAX_MPS * 32767), 0, _s16c(mps * CAR_TICK_MPS_UNIT * 16384), 0)
+        return (hp, _s16c(mps / CAR_MAX_MPS * 32767), 0, _s16c(mps * CAR_TICK_MPS_UNIT * 16384), 0)
     if not CAR_CLIENT_INTEGRATE or c.get('position_only'):
-        return (0, 0, 0, 0, 0)
+        return (hp, 0, 0, 0, 0)
     thr = float(c.get('_throttle', 0.0)); steer = float(c.get('_steer', 0.0))
     seed = float(c.get('_speed_mps', 0.0)) * CAR_TICK_MPS_UNIT
-    return (0, _s16c(thr * 32767), _s16c(steer * 32767), _s16c(seed * 16384), 0)
+    return (hp, _s16c(thr * 32767), _s16c(steer * 32767), _s16c(seed * 16384), 0)
 
 def _car_drive_step(onum, c, dt, now):
     """One driver tick for a car with a goal. Returns True when it moved."""

@@ -1,3 +1,12 @@
+v968f6i (2026-10-29) - the lorry frame's +0xc word is its HIT POINTS (why v968f6h's lethal hit did nothing)
+- Live 22:52: 'lethal msg-51 to 3 client(s)' was sent and received ('in 51'7' in messages59), no
+  explosion. roadhit.cpp FUN_00689260 destroys only if the OLD HP (+0x280) was > 0. The owner's Pack
+  (0x689e8c) writes its +0x280 into the frame word at +0xc, and the receiver's Unpack stores that word
+  straight into +0x280 - the word we had always sent as 0 ('[+0xc int] no visible effect'). Every
+  client therefore held every lorry at 0 HP, and no hit could ever blow it up.
+- Frames now carry the server's current HP (>= 1) in that word; the lethal hit then takes it below
+  zero and the client runs the car's own explosion + wreck. Nothing else changed.
+
 v968f6h (2026-10-29) - destroyed lorries explode (Alon: 'they just despawn'); object-number fixes
 - WHY THEY DESPAWNED: the client's ExitDataArrive handler (FUN_004f8f20) blows up only tanks (type 3,
   FUN_004a02a0) and soldiers (0x11) on a kill-family delete; a car (type 5) is removed silently. The
