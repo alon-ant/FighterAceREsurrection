@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6c'
+VERSION = 'v968f6f'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15784,12 +15784,28 @@ def _convoy_settled(alive):
 #                            client's collision registration is rebuilt at the halted position.
 # If hits register with HALT alone the problem is motion; if only after RECREATE it is the creation
 # point; if neither, it is the car models. The log says which case fired ('HALTED' / 're-created').
-CONVOY_HALT_ON_ATTACK  = True
+# v968f6e (Alon 10-28: 'the re-create is the one; halting to become hittable makes no sense'): the
+# column keeps rolling and every vehicle is re-created in place every CONVOY_RECREATE_PERIOD_S while
+# an enemy plane is inside CONVOY_HALT_RADIUS_M - the state frame follows the create at once, so the
+# client has the position within one 4 Hz tick. If a MOVING re-created lorry takes hits, that is the
+# fix; if only a standing one does, flip CONVOY_HALT_ON_ATTACK back on (`convoy halt on`).
+# The client cannot be told to drive a NetCar itself: the type-5 create record carries class and
+# camp only (FUN_0067fe30 reads nothing else), the route-following AI exists only for the client's
+# own road traffic, and motion comes solely from our throttle/steer frames.
+CONVOY_RECREATE_UNDER_ATTACK = True
+CONVOY_RECREATE_PERIOD_S     = 3.0
+CONVOY_HALT_ON_ATTACK  = False
 CONVOY_HALT_RADIUS_M   = 2500.0
 CONVOY_HALT_ALT_M      = 1500.0    # enemy plane this far above the lead (or lower) counts as an attack
 CONVOY_HALT_S          = 45.0      # keep halted this long after the last threat
 CONVOY_HALT_RECREATE   = True
 CONVOY_HALT_SETTLE_MPS = 0.3       # all vehicles slower than this = the column has stopped
+# v968f6d: live 10-28 21:40-21:43 (run_213320): every gun hit on a convoy lorry - Taurus's Furgon
+# (51+402, msg-51) and Alon's Car for Fuel (50) - came AFTER 're-created in place'; none before.
+# Whether a halted-but-not-re-created column takes hits is still untested (Alon's re-create followed
+# the halt by 0.25 s). CONVOY_HALT_RECREATE_DELAY_S holds the re-create that long after the column
+# has settled, so a pass can be flown at the halted column first. `convoy haltdelay <s>` sets it live.
+CONVOY_HALT_RECREATE_DELAY_S = 0.0
 
 def _convoy_threat(cv, lead):
     """Nearest enemy plane low over the column, as (session, dist_m) or None."""
@@ -15811,9 +15827,13 @@ def _convoy_threat(cv, lead):
             best = (p, d)
     return best
 
-def car_recreate_in_place(onum, reason=''):
+CONVOY_RECREATE_CLIENT_M = 3000.0   # v968f6f: re-create a lorry only on clients whose plane is this close to it
+
+def car_recreate_in_place(onum, reason='', near_only=True):
     """v968f6c: delete+create the car in ONE msg-13 on every client that holds it, at its current
-    position (the client rebuilds the object - and, we expect, its collision registration)."""
+    position (the client rebuilds the object - and, we expect, its collision registration).
+    v968f6f: near_only -> only clients whose own plane is within CONVOY_RECREATE_CLIENT_M of the
+    car (the ones who can shoot at it); a pilot 12 km away keeps the copy he has."""
     c = CARS.get(onum)
     if c is None or c.get('dead'):
         return 0
@@ -15822,17 +15842,35 @@ def car_recreate_in_place(onum, reason=''):
     for p in get_sessions_in_room(c['room']):
         if getattr(p, 'addr', None) not in c['peers'] or not getattr(p, 'entered_game', False):
             continue
+        if near_only:
+            _xy = p.__dict__.get('_pos_xy')
+            if not _xy or math.hypot(_xy[0] - c['pos'][0], _xy[1] - c['pos'][1]) > CONVOY_RECREATE_CLIENT_M:
+                continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
         _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} delete+create in place {reason}', to=3.0)
         n += 1
     if n:
-        threading.Timer(0.6, lambda: car_broadcast_state(onum)).start()
+        threading.Timer(0.08, lambda: car_broadcast_state(onum)).start()   # v968f6e: right behind the create
     return n
 
 def _convoy_halt_step(cid, cv, alive, lead, now):
-    if not CONVOY_HALT_ON_ATTACK or cv['phase'] not in ('out', 'back'):
+    if cv['phase'] not in ('out', 'back'):
         return
     thr = _convoy_threat(cv, lead)
+    if CONVOY_RECREATE_UNDER_ATTACK:                                          # v968f6e: rolling re-create
+        if thr is not None:
+            if now - cv.get('recreate_at', 0.0) >= CONVOY_RECREATE_PERIOD_S:
+                cv['recreate_at'] = now
+                n = sum(car_recreate_in_place(on, reason=f'(convoy {cid} under attack)') for on in alive)
+                cv['recreate_n'] = cv.get('recreate_n', 0) + 1
+                if cv['recreate_n'] == 1 or cv['recreate_n'] % 10 == 0:
+                    log('CONVOY', f'convoy {cid} camp {cv["camp"]}: under attack by {thr[0].current_pilot} ({thr[1]:.0f} m) - '
+                                  f'{len(alive)} vehicle(s) re-created in place while rolling (#{cv["recreate_n"]}, {n} sends)')
+        elif cv.get('recreate_n'):
+            log('CONVOY', f'convoy {cid}: threat gone after {cv["recreate_n"]} rolling re-create(s)')
+            cv['recreate_n'] = 0
+    if not CONVOY_HALT_ON_ATTACK:
+        return
     if thr is not None:
         if not cv.get('halted'):
             cv['halted'] = True; cv['halt_id'] = cv.get('halt_id', 0) + 1; cv.pop('halt_recreated', None)
@@ -15847,8 +15885,14 @@ def _convoy_halt_step(cid, cv, alive, lead, now):
             CARS[on]['mps'] = 0.0
         if (CONVOY_HALT_RECREATE and cv.get('halt_recreated') != cv['halt_id']
                 and all(abs(float(CARS[on].get('_speed_mps', 0.0))) <= CONVOY_HALT_SETTLE_MPS for on in alive)):
+            if 'halt_settled_at' not in cv or cv.get('halt_settled_for') != cv['halt_id']:
+                cv['halt_settled_at'] = now; cv['halt_settled_for'] = cv['halt_id']
+                if CONVOY_HALT_RECREATE_DELAY_S > 0:
+                    log('CONVOY', f'convoy {cid}: halted and settled - re-create held {CONVOY_HALT_RECREATE_DELAY_S:.0f}s (test window: guns on the halted column)')
+            if now - cv['halt_settled_at'] < CONVOY_HALT_RECREATE_DELAY_S:
+                return
             cv['halt_recreated'] = cv['halt_id']
-            n = sum(car_recreate_in_place(on, reason=f'(convoy {cid} halted)') for on in alive)
+            n = sum(car_recreate_in_place(on, reason=f'(convoy {cid} halted)', near_only=False) for on in alive)
             log('CONVOY', f'convoy {cid}: halted and settled -> {len(alive)} vehicle(s) re-created in place on their clients ({n} sends)')
     elif cv.get('halted') and now >= cv.get('halt_until', 0.0):
         cv['halted'] = False
@@ -16159,9 +16203,9 @@ def ensure_camp_convoys(rid):
             break
 
 def convoy_console(args, by='console'):
-    """convoy list | convoy run <room> <camp> [src_sidx dst_sidx] | convoy request <room> <sidx> | convoy stop <id|all>"""
+    """convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | haltdelay [s]"""
     if not args:
-        return ['usage: convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all>']
+        return ['usage: convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | haltdelay [s]']
     v = args[0].lower()
     try:
         if v == 'list':
@@ -16184,6 +16228,22 @@ def convoy_console(args, by='console'):
         if v == 'request' and len(args) >= 3:
             cid = convoy_request(int(args[1]), int(args[2]), reason=by, force=True)
             return [f'convoy {cid} dispatched' if cid else 'no convoy (see CONVOY log)']
+        if v == 'halt' and len(args) >= 2:                          # v968f6e
+            global CONVOY_HALT_ON_ATTACK
+            CONVOY_HALT_ON_ATTACK = args[1].lower() in ('on', '1', 'true')
+            return [f'convoy halt on attack = {"ON" if CONVOY_HALT_ON_ATTACK else "off"}']
+        if v == 'recreate' and len(args) >= 2:                      # v968f6e
+            global CONVOY_RECREATE_UNDER_ATTACK, CONVOY_RECREATE_PERIOD_S
+            if args[1].lower() in ('off', '0'):
+                CONVOY_RECREATE_UNDER_ATTACK = False
+            else:
+                CONVOY_RECREATE_UNDER_ATTACK = True; CONVOY_RECREATE_PERIOD_S = max(1.0, float(args[1]))
+            return [f'convoy rolling re-create under attack = {"every %.0fs" % CONVOY_RECREATE_PERIOD_S if CONVOY_RECREATE_UNDER_ATTACK else "off"}']
+        if v == 'haltdelay':                                        # v968f6d
+            global CONVOY_HALT_RECREATE_DELAY_S
+            if len(args) >= 2:
+                CONVOY_HALT_RECREATE_DELAY_S = max(0.0, float(args[1]))
+            return [f'convoy haltdelay = {CONVOY_HALT_RECREATE_DELAY_S:.0f}s (re-create held this long after a halted column settles; 0 = at once)']
         if v == 'stop' and len(args) >= 2:
             ids = list(CONVOYS) if args[1].lower() == 'all' else [int(args[1])]
             n = 0

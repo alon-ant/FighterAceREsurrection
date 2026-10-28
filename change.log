@@ -1,3 +1,38 @@
+v968f6f (2026-10-28) - rolling re-create only on clients within 3 km of the lorry
+- Traffic bound (Alon): the rolling re-create is one reliable msg-13 of ~45 B (delete 11 + create 22
+  + wrapper) plus one 40 B state frame, per lorry, per client, every 3 s - and now only to clients
+  whose own plane is within CONVOY_RECREATE_CLIENT_M (3,000 m) of that lorry, i.e. the pilots who
+  can actually shoot it. Worst realistic case, an 8-lorry column with 3 attackers overhead: 8 msgs/s,
+  ~700 B/s for the whole fight - less than one plane's telemetry relay to one peer (10 Hz x 88 B =
+  880 B/s). Clients farther away keep the copy they have. The halted-column re-create (when halt is
+  switched on) still goes to every holder once.
+
+v968f6e (2026-10-28) - convoys keep rolling; vehicles re-created in place every 3 s while under attack
+- Alon: the re-create is the fix, halting to become hittable makes no sense. Default is now: no halt
+  (CONVOY_HALT_ON_ATTACK False), and while an enemy plane is within 2.5 km / 1,500 m above the lead
+  every vehicle is deleted+created in one msg-13 on each client holding it every 3 s
+  (CONVOY_RECREATE_UNDER_ATTACK / CONVOY_RECREATE_PERIOD_S), with its state frame 80 ms behind the
+  create so the client has the position within one 4 Hz tick. Log: 'under attack by <pilot> - N
+  vehicle(s) re-created in place while rolling (#k)', then 'threat gone after k rolling re-create(s)'.
+- Console: `convoy halt on|off`, `convoy recreate <s|off>`, `convoy haltdelay <s>`. If a MOVING
+  re-created lorry does not take hits, `convoy halt on` restores the 10-28 behaviour that did.
+- Can the client drive the lorries itself? No: the type-5 create record carries class and camp
+  only (FUN_0067fe30 reads nothing else), the route-following AI exists only for the client's own
+  road traffic, and a NetCar moves solely on our throttle/steer frames (FUN_00687a10) - the client
+  already integrates the motion; it is the bullet test that does not follow.
+
+v968f6d (2026-10-28) - convoy halt test result + `convoy haltdelay`
+- LIVE (run_213320, v968f6c): convoy 1 HALTED 21:40:18 (Taurus) -> re-created in place 21:40:38 ->
+  msg-51 GUN hits 21:40:56 (Furgon 51+402, killed). Convoy 1 HALTED again 21:43:12 (Alon), re-created
+  0.25 s later, Alon's gun hit at 21:43:23 (Car for Fuel 50, killed) - his client: 'Create NetCar
+  277' then 'You have hit JPN car' x2, green lines. First gun kills on convoy lorries ever recorded.
+  Both came after the re-create; whether a halted column is hittable BEFORE it is re-created is
+  still untested.
+- CONVOY_HALT_RECREATE_DELAY_S (default 0) holds the in-place re-create that long after the halted
+  column settles; `convoy haltdelay <s>` on the console sets it live. For the test: haltdelay 30,
+  strafe the column while 'halted and settled - re-create held' is in the log, then again after
+  're-created in place'.
+
 v968f6c (2026-10-28) - convoys halt under air attack; vehicles re-created in place (gun hits on lorries)
 - Taurus (10-25 messages07): FW-190 gun passes on a moving convoy - his client registered NOTHING
   (0 msg-51, no green line); the convoy's AA hit him 40+ times and killed him once. Every case on
