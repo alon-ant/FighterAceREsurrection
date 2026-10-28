@@ -1,3 +1,17 @@
+v968f6g (2026-10-29) - lorries created once and kept live: re-created only on a terrain-cell crossing
+- Live (Alon 10-29 00:14): with the 3 s rolling re-create, guns AND rockets hit moving lorries - the
+  fix works - but every re-create flashes the vehicle. The periodic re-create is now OFF.
+- Model: the client appears to keep a car in the terrain cell it was created in (bullets/rockets are
+  tested per cell; the tank path re-files a moving tank, the road-car path never does). Trn.cpp's
+  scene grid is 2,048 m (1 << (WORLD_SIZE2-11) cells of 0x800). Each car remembers, per client, the
+  cell it was created in; when it drives into another cell it is re-created in place on that client
+  once (log: '<name> crossed into cell (x,y) -> re-created in place on N client(s)'). A column at
+  11 m/s crosses a cell every ~3 min: one blink per crossing per lorry, nothing in between.
+- Console: `convoy cell <m|off>` (cell size; try 1024 if a lorry that has not crossed a 2,048 m cell
+  is unhittable), `convoy recreate 3` re-arms the rolling re-create if the cell model is wrong.
+- Test reads: hits on a lorry that has driven far inside its creation cell -> cell model right;
+  hits only right after a crossing -> cell smaller; no hits -> back to `convoy recreate 3`.
+
 v968f6f (2026-10-28) - rolling re-create only on clients within 3 km of the lorry
 - Traffic bound (Alon): the rolling re-create is one reliable msg-13 of ~45 B (delete 11 + create 22
   + wrapper) plus one 40 B state frame, per lorry, per client, every 3 s - and now only to clients

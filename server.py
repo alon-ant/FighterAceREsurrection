@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6f'
+VERSION = 'v968f6g'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15249,6 +15249,7 @@ def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
         body = bytes([0x02]) + _ensure_ai_client_on(p) + rec
         _submit_send(send_rel, p, build_msg13(body), f'<- CreateObject 2 CAR class={class_id} camp={camp} ONumber=0x{onum:04x} {reason}', to=3.0)
         CARS[onum]['peers'].add(getattr(p, 'addr', None))
+        _car_note_created(CARS[onum], getattr(p, 'addr', None))              # v968f6g
         n += 1
     log('CAR', f'room {room_id}: spawn car ONumber=0x{onum:04x} class={class_id} ({CARS[onum]["name"]}) camp={camp} '
                f'at ({pos[0]:.0f},{pos[1]:.0f}) hdg {heading_deg:.0f} -> {n} session(s) {reason}')
@@ -15444,6 +15445,7 @@ def car_recreate_for(s, reason='', near_xy=None, at_confirm=False):
     for on, c in todo:
         body = bytes([0x02]) + _ensure_ai_client_on(s) + build_car_record(AI_CLIENT_ST, on, c['camp'], c['class'])
         c['peers'].add(addr)
+        _car_note_created(c, addr)                                             # v968f6g
         _submit_send(send_rel, s, build_msg13(body), f'<- CreateObject 2 CAR 0x{on:04x} (re-create {reason})', to=3.0)
         n += 1
     if n:
@@ -15624,6 +15626,11 @@ def car_tick():
                 if moved or now - c.get('last_sent', 0.0) >= CAR_IDLE_S:
                     c['last_sent'] = now
                     car_broadcast_state(on)
+                if moved:
+                    try:
+                        car_cell_check(on, c, now)                 # v968f6g
+                    except Exception:
+                        logx('CAR', f'cell check 0x{on:04x} failed')
             convoy_tick()
             try:
                 ship_tick_step(dt, now)                  # v968f5: ships sail on the same 4 Hz clock
@@ -15792,8 +15799,56 @@ def _convoy_settled(alive):
 # The client cannot be told to drive a NetCar itself: the type-5 create record carries class and
 # camp only (FUN_0067fe30 reads nothing else), the route-following AI exists only for the client's
 # own road traffic, and motion comes solely from our throttle/steer frames.
-CONVOY_RECREATE_UNDER_ATTACK = True
+CONVOY_RECREATE_UNDER_ATTACK = False   # v968f6g: off - the cell-crossing re-create below replaces it (console `convoy recreate 3` re-arms)
 CONVOY_RECREATE_PERIOD_S     = 3.0
+# v968f6g [CREATED ONCE, KEPT LIVE] (Alon 10-29: guns and rockets hit the re-created lorries, but the
+# 3 s re-create flashes). What the client appears to lose is the car's membership of the terrain
+# CELL it was created in: bullets and rockets are tested against the objects of the cells they
+# cross, the tank path re-files a tank when it moves, the road-car path never does. The terrain's
+# scene grid is 2,048 m (Trn.cpp: 1 << (WORLD_SIZE2 - 11) cells of 0x800). So a lorry is re-created
+# on a client ONLY when it has crossed into a different CAR_CELL_M cell since that client created
+# it - a column at 11 m/s crosses one every ~3 minutes, one blink per crossing, no traffic the rest
+# of the time. If a lorry that has NOT crossed a cell since creation turns out unhittable, the cell
+# is smaller than 2,048 m: `convoy cell 1024`. If even a fresh one is unhittable, the theory is wrong
+# and `convoy recreate 3` brings the rolling re-create back.
+CAR_CELL_RECREATE = True
+CAR_CELL_M        = 2048.0
+
+def _car_cell(x, y):
+    return (int(math.floor(x / CAR_CELL_M)), int(math.floor(y / CAR_CELL_M)))
+
+def _car_note_created(c, addr):
+    """Remember the cell a client created this car in (at the car's position now)."""
+    try:
+        c.setdefault('cell_at', {})[addr] = _car_cell(c['pos'][0], c['pos'][1])
+    except Exception:
+        pass
+
+def car_cell_check(onum, c, now):
+    """v968f6g: re-create the car, in place, on every client whose copy was created in another cell."""
+    if not CAR_CELL_RECREATE or c.get('dead') or not c.get('peers'):
+        return 0
+    here = _car_cell(c['pos'][0], c['pos'][1])
+    cells = c.setdefault('cell_at', {})
+    stale = [a for a in c['peers'] if cells.get(a) is not None and cells.get(a) != here]
+    if not stale:
+        return 0
+    n = 0
+    _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    for p in get_sessions_in_room(c['room']):
+        if getattr(p, 'addr', None) not in stale or not getattr(p, 'entered_game', False):
+            continue
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
+        _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} re-filed in cell {here} for {p.current_pilot}', to=3.0)
+        cells[p.addr] = here
+        n += 1
+    if n:
+        threading.Timer(0.08, lambda: car_broadcast_state(onum)).start()
+        _perf['car_cell_recreate'] = _perf.get('car_cell_recreate', 0) + n
+        if now - c.get('_cell_logged', 0.0) > 30.0:
+            c['_cell_logged'] = now
+            log('CAR', f'{c["name"]} 0x{onum:04x} crossed into cell {here} -> re-created in place on {n} client(s) [v968f6g]')
+    return n
 CONVOY_HALT_ON_ATTACK  = False
 CONVOY_HALT_RADIUS_M   = 2500.0
 CONVOY_HALT_ALT_M      = 1500.0    # enemy plane this far above the lead (or lower) counts as an attack
@@ -15848,6 +15903,7 @@ def car_recreate_in_place(onum, reason='', near_only=True):
                 continue
         body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
         _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} delete+create in place {reason}', to=3.0)
+        _car_note_created(c, p.addr)                                           # v968f6g
         n += 1
     if n:
         threading.Timer(0.08, lambda: car_broadcast_state(onum)).start()   # v968f6e: right behind the create
@@ -16203,9 +16259,9 @@ def ensure_camp_convoys(rid):
             break
 
 def convoy_console(args, by='console'):
-    """convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | haltdelay [s]"""
+    """convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | cell <m|off> | haltdelay [s]"""
     if not args:
-        return ['usage: convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | haltdelay [s]']
+        return ['usage: convoy list | run <room> <camp> [src dst] | request <room> <sidx> | stop <id|all> | halt on|off | recreate <s|off> | cell <m|off> | haltdelay [s]']
     v = args[0].lower()
     try:
         if v == 'list':
@@ -16239,6 +16295,13 @@ def convoy_console(args, by='console'):
             else:
                 CONVOY_RECREATE_UNDER_ATTACK = True; CONVOY_RECREATE_PERIOD_S = max(1.0, float(args[1]))
             return [f'convoy rolling re-create under attack = {"every %.0fs" % CONVOY_RECREATE_PERIOD_S if CONVOY_RECREATE_UNDER_ATTACK else "off"}']
+        if v == 'cell' and len(args) >= 2:                          # v968f6g
+            global CAR_CELL_RECREATE, CAR_CELL_M
+            if args[1].lower() in ('off', '0'):
+                CAR_CELL_RECREATE = False
+            else:
+                CAR_CELL_RECREATE = True; CAR_CELL_M = max(128.0, float(args[1]))
+            return [f'car cell re-create = {"%.0f m cells" % CAR_CELL_M if CAR_CELL_RECREATE else "off"} ({_perf.get("car_cell_recreate", 0)} so far)']
         if v == 'haltdelay':                                        # v968f6d
             global CONVOY_HALT_RECREATE_DELAY_S
             if len(args) >= 2:
