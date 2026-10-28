@@ -1,3 +1,20 @@
+v968f6h (2026-10-29) - destroyed lorries explode (Alon: 'they just despawn'); object-number fixes
+- WHY THEY DESPAWNED: the client's ExitDataArrive handler (FUN_004f8f20) blows up only tanks (type 3,
+  FUN_004a02a0) and soldiers (0x11) on a kill-family delete; a car (type 5) is removed silently. The
+  car's own destruction - roadhit.cpp FUN_00689260: HP <= 0 -> FUN_00689160 explosion, 15 s wreck -
+  is reachable from the network through OnRemoteHit (vtable+0x70), which the client's INBOUND msg-51
+  handler (FUN_004f3c20, VNET table slot 0xc81fa4 - the server never used it) calls for each 6-byte
+  record [victim u16][attacker s16][damage u16].
+- FIX: car_killed sends one lethal msg-51 record (damage 0xFFFF, attacker = the killer's plane) to
+  every client holding the car -> the client plays the explosion; the kill-entry delete (cyan line)
+  follows CAR_KILL_DELETE_DELAY_S = 1.5 s later. CAR_EXPLODE_VIA_HIT switches it.
+- CONSTRAINT: the inbound handler keeps only 10 bits of the victim number (the top 6 = trailer
+  index), so only objects numbered < 1024 can be hit from the server side. Lorries now take their
+  numbers from 0x100..0x3FF first (next_obj_number(low=True)); a lorry that had to take a ring number
+  falls back to the plain delete (logged).
+- BUG FIX: _obj_numbers_in_use() reserved tanks, soldiers and trains but NOT cars or ships - a plane
+  could be issued a live lorry's number (the v782f5 '!Objects[N]' CTD class). Both added.
+
 v968f6g (2026-10-29) - lorries created once and kept live: re-created only on a terrain-cell crossing
 - Live (Alon 10-29 00:14): with the 3 s rolling re-create, guns AND rockets hit moving lorries - the
   fix works - but every re-create flashes the vehicle. The periodic re-create is now OFF.

@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6g'
+VERSION = 'v968f6h'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12804,6 +12804,7 @@ def _obj_numbers_in_use():
     # train, and every recently deleted AI number (a peer may still hold it), is reserved too.
     try:
         used.update(TANKS.keys()); used.update(SOLDIERS.keys()); used.update(TRAINS.keys())
+        used.update(CARS.keys()); used.update(SHIPS.keys())        # v968f6h: cars and ships were missing (a plane could be issued a live lorry's number)
         _now_m = time.monotonic()
         for _n, _t in list(_AI_ONUM_QUARANTINE.items()):
             if _now_m - _t <= OBJ_HISTORY_GRACE_SEC:
@@ -12824,9 +12825,19 @@ def ai_onum_released(n):
     except Exception:
         pass
 
-def next_obj_number():
+OBJ_NUMBER_LOW_MAX = 0x03FF   # v968f6h: the client's inbound hit record (msg 51, FUN_004f3c20) keeps only 10 bits of the
+                              # victim number (the top 6 are the trailer index), so an object the server wants to HIT
+                              # from its side must be numbered below 1024. Lorries are allocated from this range first.
+
+def next_obj_number(low=False):
     global _obj_num_next
     used = _obj_numbers_in_use()          # gathered BEFORE the lock (sl nests outside)
+    if low:
+        with _obj_num_lock:
+            for n in range(0x0100, OBJ_NUMBER_LOW_MAX + 1):
+                if n not in used and not any(q[0] == n for q in _obj_num_free):
+                    return n
+        log('OBJNUM', 'no free number below 0x400 - lorry takes one from the ring (will not explode on its clients)')
     with _obj_num_lock:
         if RECYCLE_OBJ_NUMBERS and _obj_num_free:
             n, freed_at = _obj_num_free[0]
@@ -15233,7 +15244,7 @@ def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
     if _names and int(camp) not in _names:
         log('CAR', f'spawn refused - camp {camp} is not active in room {room_id}; active: '
                    + ', '.join(f'{c}={n[0]}' for c, n in sorted(_names.items()) if c != 7)); return None
-    onum = next_obj_number()
+    onum = next_obj_number(low=True)                                      # v968f6h
     h = math.radians(heading_deg)
     CARS[onum] = {'room': room_id, 'camp': int(camp) & 7, 'class': int(class_id), 'pos': (float(pos[0]), float(pos[1]), float(pos[2]) if len(pos) > 2 else 0.0),
                   'fwd': (math.cos(h), math.sin(h), 0.0), 'peers': set(), 'created': time.time(), 'name': CAR_CLASSES.get(int(class_id), '?'),
@@ -15316,6 +15327,8 @@ CAR_HP_BY_NAME = {'Ambulance': 60.0, 'Car for Ammo': 50.0, 'Car for Fuel': 40.0,
                   'Flak Car': 90.0, 'Radar Car': 70.0, 'Furgon': 60.0, 'Cistern': 40.0, 'Fura': 50.0}
 CAR_FALLBACK_HP   = 60.0
 CAR_KILL_SCORE    = 100          # between a paratrooper (50) and a tank (250)
+CAR_EXPLODE_VIA_HIT = True       # v968f6h: deliver the kill as a lethal msg-51 so the client plays the car's explosion
+CAR_KILL_DELETE_DELAY_S = 1.5    # v968f6h: kill-entry delete (cyan line) this long after the lethal hit
 # Cistern/Fura are TRAILERS: roadcar.cpp:55 asserts (pCar||pInfo->pCI) - no driving info of their
 # own, the client expects a towing car (messages17/18 10-23: CTD on each). Not spawnable alone.
 CAR_TRAILER_NAMES = {'Cistern', 'Fura'}
@@ -15430,6 +15443,26 @@ def car_killed(onum, killer, reason=''):
     entry = None
     if killer is not None and getattr(killer, 'my_obj_number', None) is not None:
         entry = struct.pack('<H', onum & 0x7fff) + bytes([0x53]) + kill_tail_hunter(killer, killer.my_obj_number)
+    # v968f6h [LORRIES EXPLODE] (Alon 10-29: 'they just despawn'). The ExitDataArrive handler blows up
+    # only tanks (type 3) and soldiers (0x11) on a kill-family delete; a car (type 5) is simply removed.
+    # The car has its own destruction sequence - roadhit.cpp FUN_00689260: HP <= 0 -> FUN_00689160
+    # explosion + 15 s wreck - reached from the network through its OnRemoteHit (vtable+0x70), which the
+    # client's INBOUND msg-51 handler (FUN_004f3c20, table slot 0xc81fa4) calls for every 6-byte record
+    # [victim u16][attacker s16][damage u16]. So the kill is delivered as one lethal hit record to every
+    # client holding the car, and the kill-entry delete (cyan line) follows CAR_KILL_DELETE_DELAY_S later.
+    # The handler masks the victim to 10 bits (the rest is the trailer index), hence the <0x400 pool.
+    if CAR_EXPLODE_VIA_HIT and onum < 0x400 and c.get('peers'):
+        _att = (getattr(killer, 'my_obj_number', None) if killer is not None else None)
+        _rec = bytes([0x33]) + struct.pack('<HhH', onum & 0x3ff, int(_att) if _att is not None and 0 <= int(_att) < 0x8000 else -1, 0xFFFF)
+        _nh = 0
+        for _p in get_sessions_in_room(c['room']):
+            if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False):
+                _submit_send(send_rel, _p, build_msg13(_rec), f'<- lethal hit 51 on CAR 0x{onum:04x} -> explosion ({_p.current_pilot})', to=3.0)
+                _nh += 1
+        log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> client-side explosion; kill-entry delete in {CAR_KILL_DELETE_DELAY_S:.1f}s')
+        _CAR_GONE[onum] = (time.time(), f'killed {reason}')
+        threading.Timer(CAR_KILL_DELETE_DELAY_S, lambda: delete_car(onum, reason=f'(killed by {kname or "?"}, after the blast)', entry=entry)).start()
+        return
     delete_car(onum, reason=f'(killed by {kname or "?"})', entry=entry)
     _CAR_GONE[onum] = (time.time(), f'killed {reason}')
 
