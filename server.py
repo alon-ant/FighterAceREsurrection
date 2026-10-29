@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6i'
+VERSION = 'v968f6l'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -15328,7 +15328,13 @@ CAR_HP_BY_NAME = {'Ambulance': 60.0, 'Car for Ammo': 50.0, 'Car for Fuel': 40.0,
 CAR_FALLBACK_HP   = 60.0
 CAR_KILL_SCORE    = 100          # between a paratrooper (50) and a tank (250)
 CAR_EXPLODE_VIA_HIT = True       # v968f6h: deliver the kill as a lethal msg-51 so the client plays the car's explosion
-CAR_KILL_DELETE_DELAY_S = 1.5    # v968f6h: kill-entry delete (cyan line) this long after the lethal hit
+CAR_KILL_DELETE_DELAY_S = 6.0    # v968f6h: kill-entry delete (cyan line) this long after the lethal hit. v968f6j: 1.5 -> 6 -
+                                 # the explosion and burning wreck are effects ATTACHED to the car and die with the delete;
+                                 # at 1.5 s a kill seen from rocket range (Alon 10-29 01:34) showed nothing. Console: `car killdelay <s>`.
+CAR_KILL_DELETE_RTT_FACTOR = 1.5 # v968f6k: plus this many of the receiving client's round trips (a stalled channel bunches the two)
+CAR_KILL_LINE_VIA_DECOY = True   # v968f6l: cyan line at the kill through a create+kill decoy; the wreck itself stays CAR_WRECK_S
+CAR_WRECK_S             = 15.0   # v968f6l: the client's own wreck timer (FUN_00689160 -> 15000 ms); plain delete after it
+CAR_KILL_DELETE_MAX_S   = 12.0   # v968f6k: ceiling for the per-client delete delay
 # Cistern/Fura are TRAILERS: roadcar.cpp:55 asserts (pCar||pInfo->pCI) - no driving info of their
 # own, the client expects a towing car (messages17/18 10-23: CTD on each). Not spawnable alone.
 CAR_TRAILER_NAMES = {'Cistern', 'Fura'}
@@ -15459,9 +15465,54 @@ def car_killed(onum, killer, reason=''):
             if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False):
                 _submit_send(send_rel, _p, build_msg13(_rec), f'<- lethal hit 51 on CAR 0x{onum:04x} -> explosion ({_p.current_pilot})', to=3.0)
                 _nh += 1
-        log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> client-side explosion; kill-entry delete in {CAR_KILL_DELETE_DELAY_S:.1f}s')
+        # v968f6l [CYAN LINE AT THE KILL, WRECK STAYS] (Alon: 'the cyan line needs to be first, with the
+        # explosion'). The only thing that prints the native 'X destroyed Y car' is ExitDataArrive on a
+        # kill-entry delete, and that delete also removes the object - with the explosion and wreck
+        # attached to it. So the line is drawn through a DECOY: one msg-13 per client = [create a car of
+        # the same class/camp under a fresh number][kill-entry delete of that number]. The decoy exists
+        # for the length of the batch, prints the line, and is gone; the real lorry keeps burning and is
+        # removed by a plain delete CAR_WRECK_S later (the client's own wreck timer is 15 s).
+        if CAR_KILL_LINE_VIA_DECOY and entry is not None and killer is not None:
+            _d = next_obj_number()
+            _drec = build_car_record(AI_CLIENT_ST, _d, c['camp'], c['class'])
+            _ddel = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _d & 0x7fff) + bytes([0x53]) \
+                    + kill_tail_hunter(killer, killer.my_obj_number)
+            _nd = 0
+            for _p in get_sessions_in_room(c['room']):
+                if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False):
+                    _submit_send(send_rel, _p, build_msg13(bytes([0x02]) + _ensure_ai_client_on(_p) + _drec, _ddel),
+                                 f'<- decoy CAR 0x{_d:04x} create+kill (cyan line for 0x{onum:04x}) -> {_p.current_pilot}', to=3.0)
+                    _nd += 1
+            ai_onum_released(_d)
+            log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> explosion + wreck; cyan line via decoy 0x{_d:04x} '
+                       f'to {_nd} client(s); plain delete of the wreck in {CAR_WRECK_S:.0f}s')
+            _CAR_GONE[onum] = (time.time(), f'killed {reason}')
+            threading.Timer(CAR_WRECK_S, lambda: delete_car(onum, reason=f'(wreck removed, killed by {kname or "?"})')).start()
+            return
+        # v968f6k [PER-CLIENT DELETE, SCALED BY HIS ROUND TRIP]: the lethal hit and the kill-entry delete
+        # are both reliable; on a stalled channel (Alon 10-29, 2-15 s RTT, 31% loss) they arrive back to
+        # back and the car is removed in the frame the blast starts. Each client's delete now waits
+        # CAR_KILL_DELETE_DELAY_S + CAR_KILL_DELETE_RTT_FACTOR x his measured round trip (cap
+        # CAR_KILL_DELETE_MAX_S); the car leaves the table 0.5 s after the last one.
+        _plan = []
+        for _p in get_sessions_in_room(c['room']):
+            if getattr(_p, 'addr', None) in c['peers']:
+                _rtt = float(_p.__dict__.get('_rtt_ewma_s') or 0.0)
+                _plan.append((_p, min(CAR_KILL_DELETE_MAX_S, CAR_KILL_DELETE_DELAY_S + CAR_KILL_DELETE_RTT_FACTOR * _rtt)))
+        log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> client-side explosion; kill-entry delete in '
+                   + ', '.join(f'{_q.current_pilot} {_d:.1f}s' for _q, _d in _plan))
         _CAR_GONE[onum] = (time.time(), f'killed {reason}')
-        threading.Timer(CAR_KILL_DELETE_DELAY_S, lambda: delete_car(onum, reason=f'(killed by {kname or "?"}, after the blast)', entry=entry)).start()
+        _raw = (bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + bytes(entry)) if entry is not None \
+            else (bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF))
+        for _q, _d in _plan:
+            threading.Timer(_d, lambda _q=_q: _submit_send(send_rel, _q, build_msg13(_raw),
+                                                          f'<- delete CAR 0x{onum:04x} (kill entry, after the blast) -> {_q.current_pilot}', 3.0)).start()
+        _last = max([_d for _q, _d in _plan] or [0.0]) + 0.5
+        def _drop(_on=onum, _k=kname):
+            _c2 = CARS.pop(_on, None); ai_onum_released(_on)
+            if _c2 is not None:
+                log('CAR', f'room {_c2["room"]}: car 0x{_on:04x} dropped from the table (killed by {_k or "?"}, deletes sent per client)')
+        threading.Timer(_last, _drop).start()
         return
     delete_car(onum, reason=f'(killed by {kname or "?"})', entry=entry)
     _CAR_GONE[onum] = (time.time(), f'killed {reason}')
@@ -17333,6 +17384,11 @@ def car_console(args, by='console'):
                 '       car drive <onum> <mps> (calibration, no streaming) | integrate on|off | goto <onum> <x> <y> [mps]']
     v = args[0].lower()
     try:
+        if v == 'killdelay':                                            # v968f6j
+            global CAR_KILL_DELETE_DELAY_S
+            if len(args) >= 2:
+                CAR_KILL_DELETE_DELAY_S = max(0.0, float(args[1]))
+            return [f'car killdelay = {CAR_KILL_DELETE_DELAY_S:.1f}s (kill-entry delete / cyan line this long after the lethal hit)']
         if v == 'classes':
             if not CAR_CLASSES:
                 return ['car classes: (none - run fa_dump_tank_tables.py v10 in a TC arena, then copy tank_tables.json to mapdata)']

@@ -1,3 +1,29 @@
+v968f6l (2026-10-29) - cyan line at the moment of the kill, wreck stays (Alon: 'the cyan line needs to be first')
+- The native 'X destroyed Y car' line is printed only by ExitDataArrive on a kill-entry delete, and
+  that delete removes the object together with the explosion and wreck attached to it. The line is
+  now drawn through a DECOY: one msg-13 per client = [create a car of the same class and camp under
+  a fresh number][kill-entry delete of that number]. The decoy lives for the length of the batch,
+  prints the cyan line with the killer's name, and is gone. The real lorry gets the lethal msg-51
+  (explosion, burning wreck) and a plain delete CAR_WRECK_S = 15 s later - the client's own wreck
+  timer. The v968f6k per-client delayed kill-entry delete remains as the fallback
+  (CAR_KILL_LINE_VIA_DECOY = False) and for kills with no creditable killer.
+
+v968f6k (2026-10-29) - the kill-entry delete goes to each client on its own clock
+- On top of v968f6j's 6 s: the delete to each client waits CAR_KILL_DELETE_DELAY_S (`car killdelay`) +
+  CAR_KILL_DELETE_RTT_FACTOR (1.5) x that client's measured round trip, capped at 12 s, and the car
+  leaves the server table 0.5 s after the last one. A clean link is unchanged; Alon's 4 s link that
+  night gets its delete 12 s after the hit, its cyan line that late, its explosion intact. Taurus
+  confirmed a single cyan line per kill, so the kill entry stays on the delete.
+
+v968f6j (2026-10-29) - kill-entry delete 6 s after the lethal hit; `car killdelay <s>`
+- Live 23:29-23:33 (v968f6i): Taurus's gun kills exploded; Alon's rocket kills (his client reported
+  them as msg-51 hits of 250/226 and received the lethal 'in 51'7') showed nothing. Both ran the
+  same server path; the one difference is where the pilot was - the car's explosion and 15 s wreck
+  are effects attached to the object and vanish with the kill-entry delete, which came 1.5 s after
+  the hit: close enough to see on a gun pass, invisible from rocket range. Delay raised to 6 s; the
+  cyan 'destroyed' line (drawn by the delete) comes that much later - the trade-off is yours:
+  `car killdelay 1.5` for the fast line, `car killdelay 15` for the whole wreck.
+
 v968f6i (2026-10-29) - the lorry frame's +0xc word is its HIT POINTS (why v968f6h's lethal hit did nothing)
 - Live 22:52: 'lethal msg-51 to 3 client(s)' was sent and received ('in 51'7' in messages59), no
   explosion. roadhit.cpp FUN_00689260 destroys only if the OLD HP (+0x280) was > 0. The owner's Pack
