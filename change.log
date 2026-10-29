@@ -1,3 +1,40 @@
+v968f6x (2026-10-29) - infantry does not fight tanks (Alon 18:26, supersedes the v746f5 'clear the tanks first' rule)
+- User rule: soldiers are not supposed to kill tanks; it takes a massive number of them, and even then
+  only the lighter tanks after aircraft have already damaged them - 'very very rare'.
+- SOLDIER_VS_TANK_DPS 12 -> 0.3 per man per second, scaled by 200/HP (a light tank takes a little
+  more, cap x1.5). Four men vs a fresh 200 HP tank = ~170 s while the tank kills a man every 2 s
+  (TC_TANK_VS_SOLDIER_DPS 6 vs SOLDIER_HP 12) -> they die first; twenty men finish a tank left at 40 HP
+  in ~7 s.
+- The stick no longer stands and fights defending tanks: enemy INFANTRY is still cleared first, but
+  with tanks on the scene the men go on working the defences and soft objects under fire, and a man
+  within gun range of a tank plinks it in passing. A tank that does go down still gets the soldier-
+  hunter kill entry and AI line of v968f6w. Log: 'scene N held by K enemy tank(s) - the troops cannot
+  take them on, working the scene under fire'. Capture still needs the defenders gone (tanks or
+  aircraft do that).
+
+v968f6w (2026-10-29) - the troops' kills were silent (Taurus, live run_232509 23:30-23:46, messages24)
+- What happened at scene 48 (JP Tank Factory 62,AU): Taurus bombed it past 60% -> trigger, US attack
+  column staged 14.7 km away; Scraps dropped 6 paratroops ON the scene at 23:34; the AA batteries
+  killed two men ('Japan anti-aircraft destroyed United States soldier' - that line exists); the
+  remaining four destroyed both AA batteries (23:34:55, 23:36:18) which pushed the damage to 83%
+  and raised the JP defence column AT the scene; the four men then killed all eight defending tanks
+  with AT fire in three minutes (v746f5 user rule: the stick clears defenders first; SOLDIER_VS_TANK_DPS
+  12 x 4 men vs 200 HP = ~4 s a tank); the attack column arrived to an empty perimeter and the scene
+  was captured at 23:46. Scene 47 ran the same way with stick 2. So the troops did the work - the
+  server told nobody:
+  (1) a building killed by a stick sent the 'You have destroyed' 36 to the DROPPING pilot only;
+      everyone else saw the wreck appear (the msg-30 destroy form carries no text);
+  (2) a tank killed by infantry went through tank_killed(killer=None) -> a PLAIN delete, no kill
+      entry -> no cyan line anywhere ('DESTROYED by ? (infantry fire)' x8 in the log).
+- Fix: tank_killed_by_tank takes a soldier as hunter too (tail PPT class = PPT_CLASS_SOLDIER, the
+  client composes 'US soldier destroyed JPN tank'); the stick's tank kill uses it and adds the AI
+  line '<US> paratroops destroyed a <JP> tank defending <scene> at <grid>'. An object destroyed by a
+  stick gets the AI line '<US> paratroops destroyed <JP> AA battery at <scene> <grid> (dropped by
+  <pilot>)' to the room; the TC log says 'infantry fire (stick N)' instead of 'tank fire'.
+- Not changed (by design, user rules): troops engage defending tanks (v746f5), cannot push a scene
+  past 30% on soft targets, cannot hit hangars/factories. If 4 men killing 8 tanks is too strong,
+  SOLDIER_VS_TANK_DPS is the knob.
+
 =====================================================================================
 BANK 2026-10-29 - v967f5 .. v968f6v (local build; live server at v968f6i; user: "bank the car work so far")
 =====================================================================================

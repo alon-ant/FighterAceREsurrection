@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6v'
+VERSION = 'v968f6x'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -18365,7 +18365,11 @@ def is_defence_name(name):
         return False
     return any(k in n for k in DEFENCE_NAME_KEYS)
 SOLDIER_VS_SOLDIER_DPS = 2.0    # v746f5: infantry firefight (SOLDIER_HP 12 -> ~6 s per man)
-SOLDIER_VS_TANK_DPS    = 12.0   # v746f5: infantry AT fire on a tank holding the scene
+SOLDIER_VS_TANK_DPS    = 0.3    # v746f5: infantry AT fire on a tank holding the scene. v968f6x (Alon 10-29 18:26: 'soldiers
+                                # aren't supposed to be able to kill tanks ... it takes a massive amount of them, and even then
+                                # the lighter ones after they have absorbed damage from an aircraft'): 12 -> 0.3 per man per
+                                # second, scaled by 200/HP (light tanks a little more). 4 men vs a fresh 200 HP tank = 170 s,
+                                # while the tank kills a man every 2 s; 20 men finish a tank left at 40 HP in ~7 s.
 DEFENCE_RANGE       = 250.0     # v599f5: a scene's defence objects engage enemy soldiers within this
 DEFENCE_TTK_S       = 30.0      # v737f5: seconds for ONE defence object to kill ONE soldier. The damage
                                 # per second is derived from SOLDIER_HP, so lowering soldier HP for
@@ -19366,7 +19370,24 @@ def tc_ai_destroy_object(room_id, obj, oi, by='', credit_pilot=None):
     if sc is not None and sc >= 0:
         frac = trn_scene_damage_frac(room_id, sc)
         SCENE_HP[(room_id, sc)] = int(round(SCENE_DEFAULT_HP * (1.0 - frac)))
-        log('TC', f'room {room_id}: tank fire destroyed obj {obj} "{oi["name"]}" - scene {sc} damage {frac * 100:.0f}%')
+        _inf = str(by).startswith('stick')
+        log('TC', f'room {room_id}: {"infantry" if _inf else "tank"} fire ({by}) destroyed obj {obj} "{oi["name"]}" - scene {sc} damage {frac * 100:.0f}%')
+        if _inf:
+            # v968f6w (Taurus 10-28: 'no messages indicating troops created any damage' - only the
+            # dropping pilot got his 'You have destroyed' 36; everyone else saw the wreck appear):
+            # one AI line to the room per object the troops take down.
+            try:
+                _trn = _probe_terrain_for_room(room_id)
+                _txy = tc_scene_xy(_trn, sc)
+                _acamp = None
+                for _st in STICKS.values():
+                    if _st.get('room') == room_id and str(by) == f'stick {_st.get("id")}':
+                        _acamp = _st.get('camp'); break
+                tc_say(room_id, f'AI: {tc_camp_tag(_acamp) + " " if _acamp is not None else ""}paratroops destroyed '
+                                f'{tc_camp_tag(camp)} {oi["name"]} at {_txy[2].strip()} {tc_grid(_txy[0], _txy[1])}'
+                                + (f' (dropped by {credit_pilot})' if credit_pilot else ''))
+            except Exception:
+                pass
         try:
             supply_on_building_destroyed(room_id, sc, obj)             # v677f5: capacity + stock loss
         except Exception:
@@ -19725,13 +19746,21 @@ def tank_killed_by_tank(onum, shooter_onum):
                 _nl['_col_park'] = None; _nl['mps'] = t.get('mps') or _nl.get('mps')
                 col['dest'] = (float(_dest[0]), float(_dest[1])); _nl['_col_dest'] = col['dest']
     sh = TANKS.get(shooter_onum) or {}
-    log('TC', f'tank 0x{onum:04x} (camp {t["camp"]}) destroyed by tank 0x{shooter_onum:04x} (camp {sh.get("camp")})')
+    # v968f6w: a soldier can be the hunter too (Taurus 10-28 23:36, run_232509: eight defending tanks
+    # 'DESTROYED by ? (infantry fire)' went out as plain deletes - no cyan line on anyone's screen,
+    # 'no messages of the troops destroying the tanks'). The PPT class in the tail names the hunter:
+    # PPT_CLASS_SOLDIER -> the client's 'US soldier destroyed JPN tank'.
+    _is_sold = shooter_onum in SOLDIERS
+    if _is_sold:
+        sh = SOLDIERS.get(shooter_onum) or {}
+    _ppt = PPT_CLASS_SOLDIER if _is_sold else PPT_CLASS_TANK
+    log('TC', f'tank 0x{onum:04x} (camp {t["camp"]}) destroyed by {"soldier" if _is_sold else "tank"} 0x{shooter_onum:04x} (camp {sh.get("camp")})')
     # v600f5: the tail's PPT class names the hunter in the client's line ('GBR tank destroyed GER
     # tank' in the films) - PPT_CLASS_TANK is a knob until the PPT table is read
     entry = (struct.pack('<H', onum & 0x7fff) + bytes([0x53])
              + struct.pack('<H', shooter_onum & 0xffff) + struct.pack('<H', AI_CLIENT_ST)
-             + struct.pack('<I', AI_CLIENT_PI & 0xffff) + bytes([(PPT_CLASS_TANK & 0x1f) | ((int(sh.get('camp', 0)) & 7) << 5)]))
-    delete_tank(onum, reason=f'(killed by tank 0x{shooter_onum:04x})', entry=entry)
+             + struct.pack('<I', AI_CLIENT_PI & 0xffff) + bytes([(_ppt & 0x1f) | ((int(sh.get('camp', 0)) & 7) << 5)]))
+    delete_tank(onum, reason=f'(killed by {"soldier" if _is_sold else "tank"} 0x{shooter_onum:04x})', entry=entry)
 
 # --- v588f5 PARATROOPS (TC layer, item 6a) ----------------------------------------------
 # 2009 mechanic from FA.exe: a transport drops Type-2 parachuters with the HUMAN bit clear
@@ -22857,13 +22886,42 @@ def _tc_para_capture_tick():
             # tanks - before it touches anything else; a defended scene cannot be captured either
             # (tc_capture_scene refuses while any live enemy ground unit holds it).
             _dt2, _ds2 = tc_scene_defenders(rid, sidx, camp)
-            if _ds2 or _dt2:
+            # v968f6x [INFANTRY DOES NOT FIGHT TANKS]: v746f5 had the stick stand and fight the defending tanks
+            # before anything else - and with 12 DPS a man, four men killed eight tanks in three minutes
+            # (Taurus 10-28 23:36). Now enemy INFANTRY is still fought first; enemy TANKS are not a target to
+            # stand against: the men work the scene's defences and soft objects as usual while the tanks
+            # shoot them, and a man within gun range of a tank plinks it with SOLDIER_VS_TANK_DPS in passing.
+            if _dt2:
+                _lt = [TANKS[x] for x in _dt2 if x in TANKS and not TANKS[x].get('dead')]
+                for o in objs:
+                    sd = SOLDIERS.get(o)
+                    if sd is None or sd.get('dead') or not _lt:
+                        continue
+                    _nt = min(_lt, key=lambda v: math.hypot(v['pos'][0] - sd['pos'][0], v['pos'][1] - sd['pos'][1]))
+                    if math.hypot(_nt['pos'][0] - sd['pos'][0], _nt['pos'][1] - sd['pos'][1]) <= SOLDIER_GUN_RANGE:
+                        _hpm = max(50.0, float(tank_hp_max(_nt)))
+                        _nt['hp'] = _nt.get('hp', _hpm) - SOLDIER_VS_TANK_DPS * min(1.5, 200.0 / _hpm)
+                        if _nt['hp'] <= 0 and not _nt.get('dead'):
+                            _vcamp = _nt.get('camp'); _von = next((x for x in _dt2 if TANKS.get(x) is _nt), None)
+                            if _von is not None:
+                                tank_killed_by_tank(_von, o)
+                                _lt = [v for v in _lt if v is not _nt]
+                                try:
+                                    _txy = tc_scene_xy(terrain, sidx)
+                                    tc_say(rid, f'AI: {tc_camp_tag(camp)} paratroops destroyed a {tc_camp_tag(_vcamp)} tank '
+                                                f'defending {_txy[2].strip()} at {tc_grid(_txy[0], _txy[1])}')
+                                except Exception:
+                                    pass
+                if not _ds2 and now - st.get('_def_logged', 0.0) > 30.0:
+                    st['_def_logged'] = now
+                    log('PARA', f'stick {sid}: scene {sidx} held by {len(_dt2)} enemy tank(s) - the troops cannot take them on, '
+                                f'working the scene under fire [v968f6x]')
+            if _ds2:
                 for o in objs:
                     sd = SOLDIERS.get(o)
                     if sd is None or sd.get('dead'):
                         continue
-                    _cd = ([(x, SOLDIERS[x]['pos']) for x in _ds2 if x in SOLDIERS and not SOLDIERS[x].get('dead')]
-                           + [(x, TANKS[x]['pos']) for x in _dt2 if x in TANKS and not TANKS[x].get('dead')])
+                    _cd = [(x, SOLDIERS[x]['pos']) for x in _ds2 if x in SOLDIERS and not SOLDIERS[x].get('dead')]
                     if not _cd:
                         break
                     _tg = min(_cd, key=lambda e: math.hypot(e[1][0] - sd['pos'][0], e[1][1] - sd['pos'][1]))
@@ -22881,11 +22939,7 @@ def _tc_para_capture_tick():
                             if v2['hp'] <= 0:
                                 soldier_killed(_tg[0], None, reason='(infantry fire)',
                                                ai_hunter=(PPT_CLASS_SOLDIER, camp))
-                        else:
-                            v3 = TANKS[_tg[0]]
-                            v3['hp'] = v3.get('hp', tank_hp_max(v3)) - SOLDIER_VS_TANK_DPS
-                            if v3['hp'] <= 0 and not v3.get('dead'):
-                                tank_killed(_tg[0], None, reason='(infantry fire)')
+                        # (v968f6x: tanks are no longer in this list - see the plink block above)
                     else:
                         # v939f5: out of range -> hand the defender to the walk as this man's
                         # target; _soldier_goal closes to SOLDIER_STAND_OFF of it, inside gun range
@@ -22893,8 +22947,7 @@ def _tc_para_capture_tick():
                         sd['_tgt_obj'] = (('unit', _tg[0]), None, _tg[1][0], _tg[1][1], True)
                 if now - st.get('_def_logged', 0.0) > 30.0:
                     st['_def_logged'] = now
-                    log('PARA', f'stick {sid}: scene {sidx} defended by {len(_dt2)} tank(s) / {len(_ds2)} soldier(s) '
-                                f'- clearing them first')
+                    log('PARA', f'stick {sid}: scene {sidx} defended by {len(_ds2)} enemy soldier(s) - clearing them first')
                 continue
             _all = tc_scene_objects(rid, terrain, sidx)
             # v736f5: the scene's DEFENCES (AA / flak batteries, towers, bunkers, MG posts) are what
