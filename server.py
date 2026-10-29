@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6l'
+VERSION = 'v968f6v'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -12804,6 +12804,7 @@ def _obj_numbers_in_use():
     # train, and every recently deleted AI number (a peer may still hold it), is reserved too.
     try:
         used.update(TANKS.keys()); used.update(SOLDIERS.keys()); used.update(TRAINS.keys())
+        used.update(CAR_ALIAS.keys())                                          # v968f6r: numbers clients hold for rotated cars
         used.update(CARS.keys()); used.update(SHIPS.keys())        # v968f6h: cars and ships were missing (a plane could be issued a live lorry's number)
         _now_m = time.monotonic()
         for _n, _t in list(_AI_ONUM_QUARANTINE.items()):
@@ -15268,6 +15269,37 @@ def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
     # v965f5: idle keep-alive is the car_tick's job (CAR_IDLE_S); no per-car timer chain
     return onum
 
+# v968f6r [NUMBER ROTATION - NO BLINK AT THE CELL CROSSING] (Alon 10-29 13:03/13:19: run_124058 12:57:13 the
+# Flak car crossed into cell (0,-7) under his guns -> delete+create = a blink of one client creation
+# pass, ~150-300 ms, during the attack). The server's record keeps ONE canonical number (the CARS
+# key, the convoy's vehicle list, the hit log); what each CLIENT holds may differ: at a crossing the
+# in-range clients get the lorry CREATED under a fresh low-pool number at the same spot, frames for
+# it at once, and the old number deleted CAR_ROTATE_OVERLAP_S (+RTT) later - an overlap of two
+# identical models instead of a gap. c['held'][addr] = the number that client holds; CAR_ALIAS maps
+# every issued number back to the canonical one for inbound hits / hunters / culls.
+CAR_ROTATE_ON_CROSS  = True
+CAR_ROTATE_OVERLAP_S = 0.6
+CAR_LETHAL_SETTLE_S  = 1.0   # v968f6s: a lethal 51 waits until this long (+RTT) after the client's create of the number it names
+CAR_ALIAS = {}            # held number -> canonical CARS key
+
+def _car_num_for(c, addr, onum):
+    """The number this client holds for car `onum` (the canonical one until a rotation)."""
+    try:
+        return int(c.get('held', {}).get(addr, onum))
+    except Exception:
+        return onum
+
+def car_resolve(num):
+    """Canonical CARS key for a number a client used (hit record, hunter, cull)."""
+    return CAR_ALIAS.get(num, num)
+
+def _car_release_numbers(onum, c):
+    """On removal: quarantine the canonical number and every alias ever issued for this car."""
+    ai_onum_released(onum)
+    for _k in [k for k, v in CAR_ALIAS.items() if v == onum]:
+        CAR_ALIAS.pop(_k, None)
+        ai_onum_released(_k)
+
 def car_broadcast_state(onum):
     c = CARS.get(onum)
     if c is None:
@@ -15288,7 +15320,8 @@ def car_broadcast_state(onum):
             continue
         if not _ai_peer_send_ok(c, p, x, y, _now, kind='tank', onum=onum):      # v967f5g: same tiers as tanks
             continue
-        frame = build_car_update(_ai_stamp(p, onum), onum, pl)
+        _num = _car_num_for(c, p.addr, onum)                                 # v968f6r
+        frame = build_car_update(_ai_stamp(p, _num), _num, pl)
         seq = p.nundgram()
         try:
             sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, p.addr); n += 1
@@ -15306,17 +15339,19 @@ def _car_keepalive(onum):
 def delete_car(onum, reason='', entry=None):
     """msg-3 record; `entry` = 12-byte kill entry (see delete_tank) -> 'has destroyed' line."""
     c = CARS.pop(onum, None)
-    ai_onum_released(onum)
     if c is None:
+        ai_onum_released(onum)
         return 0
-    if entry is not None:
-        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + bytes(entry)
-    else:
-        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
     n = 0
     for p in get_sessions_in_room(c['room']):
         if getattr(p, 'addr', None) in c['peers']:
-            _submit_send(send_rel, p, build_msg13(raw), f'<- delete CAR 0x{onum:04x}{" (kill entry)" if entry else ""} {reason}', to=3.0); n += 1
+            _num = _car_num_for(c, p.addr, onum)                               # v968f6r: the number HE holds
+            if entry is not None:
+                raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0x7fff) + bytes(entry[2:])
+            else:
+                raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0xFFFF)
+            _submit_send(send_rel, p, build_msg13(raw), f'<- delete CAR 0x{onum:04x}{"/0x%04x" % _num if _num != onum else ""}{" (kill entry)" if entry else ""} {reason}', to=3.0); n += 1
+    _car_release_numbers(onum, c)
     log('CAR', f'room {c["room"]}: delete car 0x{onum:04x}{" with kill entry" if entry else ""} -> {n} session(s) {reason}')
     return n
 
@@ -15328,13 +15363,25 @@ CAR_HP_BY_NAME = {'Ambulance': 60.0, 'Car for Ammo': 50.0, 'Car for Fuel': 40.0,
 CAR_FALLBACK_HP   = 60.0
 CAR_KILL_SCORE    = 100          # between a paratrooper (50) and a tank (250)
 CAR_EXPLODE_VIA_HIT = True       # v968f6h: deliver the kill as a lethal msg-51 so the client plays the car's explosion
-CAR_KILL_DELETE_DELAY_S = 6.0    # v968f6h: kill-entry delete (cyan line) this long after the lethal hit. v968f6j: 1.5 -> 6 -
+CAR_KILL_DELETE_DELAY_S = 14.0   # v968f6h: kill-entry delete (cyan line) this long after the lethal hit. v968f6j: 1.5 -> 6. v968f6n: 14 -
+                                 # the client arms its own 15 000 ms alarm on the wreck (FUN_00689160 -> alarmsys FUN_005b8c80(15000));
+                                 # the delete must land while the object still exists or it names nothing (no cyan line).
                                  # the explosion and burning wreck are effects ATTACHED to the car and die with the delete;
                                  # at 1.5 s a kill seen from rocket range (Alon 10-29 01:34) showed nothing. Console: `car killdelay <s>`.
 CAR_KILL_DELETE_RTT_FACTOR = 1.5 # v968f6k: plus this many of the receiving client's round trips (a stalled channel bunches the two)
-CAR_KILL_LINE_VIA_DECOY = True   # v968f6l: cyan line at the kill through a create+kill decoy; the wreck itself stays CAR_WRECK_S
-CAR_WRECK_S             = 15.0   # v968f6l: the client's own wreck timer (FUN_00689160 -> 15000 ms); plain delete after it
-CAR_KILL_DELETE_MAX_S   = 12.0   # v968f6k: ceiling for the per-client delete delay
+CAR_KILL_LINE_VIA_DECOY = True   # v968f6l decoy line. v968f6m: OFF (Alon 10-29 09:53, local test: no cyan line) - the client
+                                 # v968f6p: ON again as the TWO-STEP (create, frame, kill-delete 0.6 s + RTT later). Alon 11:37:
+                                 # 'destroyed car, got hit lines, no cyan message, car did explode' - messages63 09:31:15: the
+                                 # lethal 51 landed, he was shot down 8 s later, the re-entry wiped every car (13'79 plain
+                                 # deletes), and the kill-entry delete at +14 s (3'21) found nothing: no ExitDataArrive, no line.
+                                 # A line bound to the wreck's end is lost whenever anything removes the wreck first.
+                                 # defers object creation to its main loop ('Receive create object' -> 'Create NetCar' 150-300 ms
+                                 # later in every log), so a kill-entry delete in the SAME batch found nothing to name. Kept as a
+                                 # two-step (create, positioning frame, kill-delete CAR_DECOY_LINE_DELAY_S later) for a later test.
+CAR_DECOY_LINE_DELAY_S  = 0.6    # v968f6m: beat between the decoy's create and its kill-entry delete
+CAR_WRECK_S             = 20.0   # v968f6m: = TANK_WRECK_S - a dead lorry stays as a wreck as long as a dead tank
+CAR_DEAD_HP_AFTER_S     = 3.0    # v968f6n: a dead lorry's frames report HP 0 from this long after the kill (the lethal hit has landed by then)
+CAR_KILL_DELETE_MAX_S   = 30.0   # v968f6k: ceiling for the per-client delete delay (v968f6m: 12 -> 30 so `car killdelay 20` fits)
 # Cistern/Fura are TRAILERS: roadcar.cpp:55 asserts (pCar||pInfo->pCI) - no driving info of their
 # own, the client expects a towing car (messages17/18 10-23: CTD on each). Not spawnable alone.
 CAR_TRAILER_NAMES = {'Cistern', 'Fura'}
@@ -15426,6 +15473,16 @@ def car_killed(onum, killer, reason=''):
     if c is None or c.get('dead'):
         return
     c['dead'] = True
+    # v968f6m [WRECKS DROVE ON] (Alon 10-29): the server stopped sending frames for a dead lorry, so each
+    # client's car physics carried on with the last throttle and the burning wreck rolled down the road
+    # until the delete. Zero the motion and send a stop frame now; car_tick keeps the wreck's keep-alive
+    # frames going (CAR_IDLE_S) so it stays put and is not culled before CAR_WRECK_S.
+    c['goal'] = None; c['_throttle'] = 0.0; c['_steer'] = 0.0; c['_speed_mps'] = 0.0; c['mps'] = 0.0
+    c['died_at'] = time.time()
+    try:
+        car_broadcast_state(onum)
+    except Exception:
+        pass
     kname = getattr(killer, 'current_pilot', None) if killer is not None else None
     log('CAR', f'{c["name"]} 0x{onum:04x} camp {c["camp"]} DESTROYED by {kname or "?"} {reason}')
     try:
@@ -15459,11 +15516,26 @@ def car_killed(onum, killer, reason=''):
     # The handler masks the victim to 10 bits (the rest is the trailer index), hence the <0x400 pool.
     if CAR_EXPLODE_VIA_HIT and onum < 0x400 and c.get('peers'):
         _att = (getattr(killer, 'my_obj_number', None) if killer is not None else None)
-        _rec = bytes([0x33]) + struct.pack('<HhH', onum & 0x3ff, int(_att) if _att is not None and 0 <= int(_att) < 0x8000 else -1, 0xFFFF)
+        _attn = int(_att) if _att is not None and 0 <= int(_att) < 0x8000 else -1
         _nh = 0
+        _now_k = time.time()
         for _p in get_sessions_in_room(c['room']):
             if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False):
-                _submit_send(send_rel, _p, build_msg13(_rec), f'<- lethal hit 51 on CAR 0x{onum:04x} -> explosion ({_p.current_pilot})', to=3.0)
+                _num = _car_num_for(c, _p.addr, onum)                          # v968f6r: the number HE holds
+                _rec = bytes([0x33]) + struct.pack('<HhH', _num & 0x3ff, _attn, 0xFFFF)
+                # v968f6s [THE FLAK CAR THAT WOULD NOT DIE] (Alon 10-29 14:01; messages66 11:49:21): the lorry was
+                # rotated 0.28 s before the kill, and the lethal 51 for the new number reached the client in the
+                # same batch as - and was processed BEFORE - its 'Create NetCar' (the client builds objects in
+                # a later pass). A hit on an object that does not exist yet is dropped: no explosion, and the
+                # new copy lived on, undamaged, shooting, until the 20 s wreck delete. The lethal record now
+                # waits until CAR_LETHAL_SETTLE_S + RTT after that client's create of the number it names.
+                _since = _now_k - float(c.get('held_at', {}).get(_p.addr, 0.0))
+                _wait = max(0.0, CAR_LETHAL_SETTLE_S + float(_p.__dict__.get('_rtt_ewma_s') or 0.0) - _since)
+                _desc = f'<- lethal hit 51 on CAR 0x{onum:04x}{"/0x%04x" % _num if _num != onum else ""} -> explosion ({_p.current_pilot})'
+                if _wait > 0.01:
+                    threading.Timer(_wait, lambda _p=_p, _rec=_rec, _desc=_desc: _submit_send(send_rel, _p, build_msg13(_rec), _desc + f' [held {_wait:.2f}s for his create]', 3.0)).start()
+                else:
+                    _submit_send(send_rel, _p, build_msg13(_rec), _desc, to=3.0)
                 _nh += 1
         # v968f6l [CYAN LINE AT THE KILL, WRECK STAYS] (Alon: 'the cyan line needs to be first, with the
         # explosion'). The only thing that prints the native 'X destroyed Y car' is ExitDataArrive on a
@@ -15478,12 +15550,33 @@ def car_killed(onum, killer, reason=''):
             _ddel = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _d & 0x7fff) + bytes([0x53]) \
                     + kill_tail_hunter(killer, killer.my_obj_number)
             _nd = 0
-            for _p in get_sessions_in_room(c['room']):
-                if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False):
-                    _submit_send(send_rel, _p, build_msg13(bytes([0x02]) + _ensure_ai_client_on(_p) + _drec, _ddel),
-                                 f'<- decoy CAR 0x{_d:04x} create+kill (cyan line for 0x{onum:04x}) -> {_p.current_pilot}', to=3.0)
-                    _nd += 1
-            ai_onum_released(_d)
+            _holders = [_p for _p in get_sessions_in_room(c['room'])
+                        if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False)]
+            for _p in _holders:
+                _submit_send(send_rel, _p, build_msg13(bytes([0x02]) + _ensure_ai_client_on(_p) + _drec),
+                             f'<- decoy CAR 0x{_d:04x} create (cyan line for 0x{onum:04x}) -> {_p.current_pilot}', to=3.0)
+                _nd += 1
+            try:                                                   # v968f6m: park the decoy on the wreck so it is never seen elsewhere
+                _dpl = pack_car_state(c['pos'][0], c['pos'][1], c['pos'][2], c['fwd'], flags=0, aux=(1, 0, 0, 0, 0))
+                def _decoy_frame(_ps=_holders, _dd=_d, _pl=_dpl):
+                    for _q in _ps:
+                        try:
+                            sock.sendto(bytes([0x00, 0x00, 0x20, _q.nundgram(), 0x00, 0x00, 0x00, 0x00]) + build_car_update(_ai_stamp(_q, _dd), _dd, _pl), _q.addr)
+                        except Exception:
+                            pass
+                threading.Timer(0.15, _decoy_frame).start()
+            except Exception:
+                pass
+            # v968f6p: per client, CAR_DECOY_LINE_DELAY_S + his round trip - the create is deferred to the client's
+            # main loop ('Receive create object' -> 'Create NetCar' 150-300 ms), and on a stalled channel both
+            # reliable messages arrive together; the delete must find the decoy already built or it prints nothing.
+            _dmax = 0.0
+            for _q in _holders:
+                _dd_s = CAR_DECOY_LINE_DELAY_S + float(_q.__dict__.get('_rtt_ewma_s') or 0.0)
+                _dmax = max(_dmax, _dd_s)
+                threading.Timer(_dd_s, lambda _q=_q, _dd=_d, _raw=_ddel: _submit_send(
+                    send_rel, _q, build_msg13(_raw), f'<- decoy CAR 0x{_dd:04x} kill-entry delete (cyan line) -> {_q.current_pilot}', 3.0)).start()
+            threading.Timer(_dmax + 1.0, lambda _dd=_d: ai_onum_released(_dd)).start()
             log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> explosion + wreck; cyan line via decoy 0x{_d:04x} '
                        f'to {_nd} client(s); plain delete of the wreck in {CAR_WRECK_S:.0f}s')
             _CAR_GONE[onum] = (time.time(), f'killed {reason}')
@@ -15502,14 +15595,21 @@ def car_killed(onum, killer, reason=''):
         log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> client-side explosion; kill-entry delete in '
                    + ', '.join(f'{_q.current_pilot} {_d:.1f}s' for _q, _d in _plan))
         _CAR_GONE[onum] = (time.time(), f'killed {reason}')
-        _raw = (bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + bytes(entry)) if entry is not None \
-            else (bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF))
+        def _raw_for(_q):                                                       # v968f6r: per client number
+            _num = _car_num_for(c, _q.addr, onum)
+            if entry is not None:
+                return bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0x7fff) + bytes(entry[2:])
+            return bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0xFFFF)
         for _q, _d in _plan:
-            threading.Timer(_d, lambda _q=_q: _submit_send(send_rel, _q, build_msg13(_raw),
+            threading.Timer(_d, lambda _q=_q: _submit_send(send_rel, _q, build_msg13(_raw_for(_q)),
                                                           f'<- delete CAR 0x{onum:04x} (kill entry, after the blast) -> {_q.current_pilot}', 3.0)).start()
         _last = max([_d for _q, _d in _plan] or [0.0]) + 0.5
         def _drop(_on=onum, _k=kname):
-            _c2 = CARS.pop(_on, None); ai_onum_released(_on)
+            _c2 = CARS.pop(_on, None)
+            if _c2 is not None:
+                _car_release_numbers(_on, _c2)
+            else:
+                ai_onum_released(_on)
             if _c2 is not None:
                 log('CAR', f'room {_c2["room"]}: car 0x{_on:04x} dropped from the table (killed by {_k or "?"}, deletes sent per client)')
         threading.Timer(_last, _drop).start()
@@ -15527,10 +15627,13 @@ def car_recreate_for(s, reason='', near_xy=None, at_confirm=False):
             and (near_xy is None or _recreate_allowed(s, on, 'car', c['pos'][0], c['pos'][1], near_xy, at_confirm=at_confirm))]
     n = 0
     for on, c in todo:
-        body = bytes([0x02]) + _ensure_ai_client_on(s) + build_car_record(AI_CLIENT_ST, on, c['camp'], c['class'])
+        _num = int(c.get('cur_num', on))                                        # v968f6r: the number in the lorry's present cell
+        body = bytes([0x02]) + _ensure_ai_client_on(s) + build_car_record(AI_CLIENT_ST, _num, c['camp'], c['class'])
         c['peers'].add(addr)
+        c.setdefault('held', {})[addr] = _num
+        c.setdefault('held_at', {})[addr] = time.time()                        # v968f6s
         _car_note_created(c, addr)                                             # v968f6g
-        _submit_send(send_rel, s, build_msg13(body), f'<- CreateObject 2 CAR 0x{on:04x} (re-create {reason})', to=3.0)
+        _submit_send(send_rel, s, build_msg13(body), f'<- CreateObject 2 CAR 0x{on:04x}{"/0x%04x" % _num if _num != on else ""} (re-create {reason})', to=3.0)
         n += 1
     if n:
         log('CAR', f'{s.current_pilot}: re-created {n} car(s) {reason}')
@@ -15574,6 +15677,11 @@ CONVOY_INTERVAL_MIN    = 10        # scheduled convoys per camp (web: convoy_min
 CONVOY_PER_CAMP_MAX    = 2
 CONVOY_REQUEST_COOLDOWN_S = 600.0  # on-demand: one request per scene per 10 min
 CONVOY_LOW_FRAC        = 0.35      # on-demand: a store below this fraction of capacity calls one
+CONVOY_URGENT_SPACING_S = 60.0     # v968f6v: an URGENT need (store low / no storage left) not covered by a column already on
+                                   # the road to that scene may follow the last request after this, not the 10 min cooldown
+CONVOY_REBUILD_DELAY_S = 600.0     # v968f6t: destroyed storage alone (stock still fine) calls a metal convoy only this long
+                                   # after the first hit - never the instant the bomb lands (Alon 10-29 14:32)
+_CONVOY_DAMAGE_AT      = {}        # v968f6t: (room, scene) -> when its storage was first destroyed since the last convoy
 CONVOY_LORRIES_MAX     = 6
 CONVOY_MIN_LOAD_KG     = 300       # v968f5u: a lorry is sent only with at least this much on board
 CONVOY_MAX_KM          = 120.0     # depot search radius
@@ -15615,6 +15723,14 @@ def car_frame_hp(c):
         hp = int(round(float(c.get('hp', car_hp_max(c)))))
     except Exception:
         hp = int(CAR_FALLBACK_HP)
+    # v968f6n [THE WRECK CAME BACK TO LIFE]: v968f6m kept the keep-alive frames going for a dead lorry
+    # and every one of them carried HP >= 1 - the Unpack writes that word straight into the car's HP,
+    # so 2 s after the blast the client's wreck was 'alive' again and the lorry stood intact until the
+    # delete ('some kills despawned too quickly', Alon 10-29 11:06). After CAR_DEAD_HP_AFTER_S the dead
+    # lorry's frames carry HP 0; the stop frame sent at the kill still says 1, because the lethal hit
+    # (reliable, in flight) needs the client's old HP > 0 to run the explosion at all.
+    if c.get('dead') and time.time() - float(c.get('died_at', 0.0)) >= CAR_DEAD_HP_AFTER_S:
+        return 0
     return max(1, min(32767, hp))
 
 def car_motion_aux(c):
@@ -15713,7 +15829,13 @@ def car_tick():
         try:
             now = time.time()
             for on, c in list(CARS.items()):
-                if c.get('dead') or c.get('drive_test') is not None:
+                if c.get('dead'):
+                    if (now - c.get('last_sent', 0.0) >= CAR_IDLE_S
+                            and now - float(c.get('died_at', 0.0)) >= CAR_DEAD_HP_AFTER_S):   # v968f6m/n: the wreck's keep-alive, HP 0
+                        c['last_sent'] = now
+                        car_broadcast_state(on)
+                    continue
+                if c.get('drive_test') is not None:
                     continue
                 moved = False
                 try:
@@ -15723,11 +15845,16 @@ def car_tick():
                 if moved or now - c.get('last_sent', 0.0) >= CAR_IDLE_S:
                     c['last_sent'] = now
                     car_broadcast_state(on)
-                if moved:
-                    try:
-                        car_cell_check(on, c, now)                 # v968f6g
-                    except Exception:
-                        logx('CAR', f'cell check 0x{on:04x} failed')
+                # v968f6q (Alon 10-29 13:03): the check ran only on a tick the lorry MOVED. A pilot who left the
+                # range while the column crossed a cell kept a stale copy, and when he came back the lorries were
+                # standing (unloading, halted, parked) - so nothing re-filed them until they rolled again, in the
+                # middle of his run ('the cars blink and I couldn't hit them before the blink'). Every tick now:
+                # the function returns at once when no held copy is stale, and a returning pilot is re-created
+                # the tick he crosses the range line.
+                try:
+                    car_cell_check(on, c, now)                     # v968f6g/q
+                except Exception:
+                    logx('CAR', f'cell check 0x{on:04x} failed')
             convoy_tick()
             try:
                 ship_tick_step(dt, now)                  # v968f5: ships sail on the same 4 Hz clock
@@ -15931,20 +16058,75 @@ def car_cell_check(onum, c, now):
     if not stale:
         return 0
     n = 0
-    _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    _rng = room_tag_range_m(c['room'])                                              # v968f6o: the arena's tag range
+    _near = []
     for p in get_sessions_in_room(c['room']):
         if getattr(p, 'addr', None) not in stale or not getattr(p, 'entered_game', False):
             continue
-        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
-        _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} re-filed in cell {here} for {p.current_pilot}', to=3.0)
+        # v968f6o (Alon 10-29 11:14): only clients within the arena's 'other tags' visual range get the
+        # re-create. A pilot farther out keeps his stale copy and his cell_at stays stale, so this check
+        # fires again on the next tick and he is re-created the moment he comes within range.
+        _xy = p.__dict__.get('_pos_xy')
+        if not _xy or math.hypot(_xy[0] - c['pos'][0], _xy[1] - c['pos'][1]) > _rng:
+            continue
+        _near.append((p, math.hypot(_xy[0] - c['pos'][0], _xy[1] - c['pos'][1])))
+    if not _near:
+        return 0
+    held = c.setdefault('held', {})
+    if CAR_ROTATE_ON_CROSS:
+        # v968f6r: one fresh number per cell the lorry is in (shared by every client re-filed in that
+        # cell); the client's old copy is deleted only after the new one is surely built.
+        _cur = int(c.get('cur_num', onum))
+        if c.get('cur_cell') != here or any(_car_num_for(c, p.addr, onum) == _cur for p, _d in _near):
+            # a new cell, or a stale client already holds the current number (he was created with it
+            # while the lorry was in another cell): never send a create for a number he already has.
+            _cur = next_obj_number(low=True)
+            c['cur_num'] = _cur; c['cur_cell'] = here
+            CAR_ALIAS[_cur] = onum
+        _olds = []
+        for p, _dist in _near:
+            _old = _car_num_for(c, p.addr, onum)
+            body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, _cur, c['camp'], c['class'])
+            _submit_send(send_rel, p, build_msg13(body), f'<- CAR 0x{onum:04x} rotated to 0x{_cur:04x} in cell {here} for {p.current_pilot} ({_dist:.0f} m)', to=3.0)
+            held[p.addr] = _cur
+            c.setdefault('held_at', {})[p.addr] = time.time()                  # v968f6s
+            cells[p.addr] = here
+            _olds.append((p, _old))
+            n += 1
+        car_broadcast_state(onum)                                                  # frames for the new number right away
+        threading.Timer(0.1, lambda: car_broadcast_state(onum)).start()
+        threading.Timer(0.25, lambda: car_broadcast_state(onum)).start()
+        for p, _old in _olds:
+            if _old == _cur:
+                continue
+            _wait = CAR_ROTATE_OVERLAP_S + float(p.__dict__.get('_rtt_ewma_s') or 0.0)
+            _rawd = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _old & 0xFFFF)
+            threading.Timer(_wait, lambda p=p, _old=_old, _rawd=_rawd: _submit_send(
+                send_rel, p, build_msg13(_rawd), f'<- CAR 0x{onum:04x}: old copy 0x{_old:04x} deleted after the overlap -> {p.current_pilot}', 3.0)).start()
+        def _tidy(_on=onum):
+            _c2 = CARS.get(_on)
+            if _c2 is None:
+                return
+            _live = set(_c2.get('held', {}).values()) | {_on}
+            for _k in [k for k, v in CAR_ALIAS.items() if v == _on and k not in _live]:
+                CAR_ALIAS.pop(_k, None); ai_onum_released(_k)                  # nobody holds it any more
+        threading.Timer(CAR_ROTATE_OVERLAP_S + 3.0, _tidy).start()
+        _perf['car_cell_rotate'] = _perf.get('car_cell_rotate', 0) + n
+        log('CAR', f'{c["name"]} 0x{onum:04x} crossed into cell {here} -> rotated to 0x{_cur:04x} on {n} client(s): '
+                   + ', '.join(f'{p.current_pilot} {d:.0f} m' for p, d in _near) + ' [v968f6r]')
+        return n
+    for p, _dist in _near:
+        _num = _car_num_for(c, p.addr, onum)
+        _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0xFFFF)
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, _num, c['camp'], c['class'])
+        _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} re-filed in cell {here} for {p.current_pilot} ({_dist:.0f} m)', to=3.0)
         cells[p.addr] = here
         n += 1
     if n:
         threading.Timer(0.08, lambda: car_broadcast_state(onum)).start()
         _perf['car_cell_recreate'] = _perf.get('car_cell_recreate', 0) + n
-        if now - c.get('_cell_logged', 0.0) > 30.0:
-            c['_cell_logged'] = now
-            log('CAR', f'{c["name"]} 0x{onum:04x} crossed into cell {here} -> re-created in place on {n} client(s) [v968f6g]')
+        log('CAR', f'{c["name"]} 0x{onum:04x} crossed into cell {here} -> re-created in place on {n} client(s): '
+                   + ', '.join(f'{p.current_pilot} {d:.0f} m' for p, d in _near) + ' [v968f6g]')
     return n
 CONVOY_HALT_ON_ATTACK  = False
 CONVOY_HALT_RADIUS_M   = 2500.0
@@ -15979,7 +16161,53 @@ def _convoy_threat(cv, lead):
             best = (p, d)
     return best
 
-CONVOY_RECREATE_CLIENT_M = 3000.0   # v968f6f: re-create a lorry only on clients whose plane is this close to it
+CONVOY_RECREATE_CLIENT_M = 3000.0   # v968f6f: re-create a lorry only on clients whose plane is this close to it.
+                                    # v968f6o: FALLBACK only - the range is the arena's 'Visual range - other tags'
+                                    # (room_tag_range_m), so each arena sets it in its own settings; `convoy range` shows it.
+CONVOY_RECREATE_RANGE_FROM_TAGS = True   # v968f6o: False -> the fixed CONVOY_RECREATE_CLIENT_M again (`convoy range fixed`)
+CONVOY_RECREATE_TAG_FACTOR = 2.0         # v968f6p (Alon 10-29 11:37): the tag range itself (3281 ft) is inside gun range - a fast
+                                         # pass fired before the re-create landed. Twice the tag range, capped at CONVOY_RECREATE_CAP_FT.
+CONVOY_RECREATE_CAP_FT     = 9000.0      # v968f6p: ceiling (2743 m)
+_ROOM_TAG_RANGE_CACHE = {}               # room_id -> (when, metres)
+
+def room_tag_range_m(room_id):
+    """v968f6o (Alon 10-29 11:14): the lorry re-create range = the arena's 'Visual range - other tags'.
+    That is the distance at which the client draws a tag on a ground object, i.e. the range inside
+    which a pilot can tell a lorry apart and line up on it - beyond it he keeps the copy he has.
+    Web override (settings_json 'vr_other_tags', feet) first, else the value in the arena's own
+    GAME_DEF tail (ARENA_TAIL_FIELDS delta 47, float32 metres); cached 60 s; CONVOY_RECREATE_CLIENT_M
+    when neither can be read or the knob is off."""
+    if not CONVOY_RECREATE_RANGE_FROM_TAGS or room_id is None:
+        return CONVOY_RECREATE_CLIENT_M
+    now = time.time()
+    _c = _ROOM_TAG_RANGE_CACHE.get(room_id)
+    if _c is not None and now - _c[0] < 60.0:
+        return _c[1]
+    val = None
+    try:
+        _ov = (db_get_room_settings(room_id) or {}).get('vr_other_tags')
+        if _ov not in (None, ''):
+            val = float(_ov) / _M2FT
+    except Exception:
+        val = None
+    if val is None:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+            conn.close()
+            if row and row[0]:
+                _ft = arena_settings_read(row[0]).get('vr_other_tags')
+                if _ft:
+                    val = float(_ft) / _M2FT
+        except Exception:
+            val = None
+    if val is None or not (val > 0):
+        val = CONVOY_RECREATE_CLIENT_M
+    else:
+        val = min(val * CONVOY_RECREATE_TAG_FACTOR, CONVOY_RECREATE_CAP_FT / _M2FT)     # v968f6p
+    val = max(500.0, min(30000.0, val))
+    _ROOM_TAG_RANGE_CACHE[room_id] = (now, val)
+    return val
 
 def car_recreate_in_place(onum, reason='', near_only=True):
     """v968f6c: delete+create the car in ONE msg-13 on every client that holds it, at its current
@@ -15991,14 +16219,17 @@ def car_recreate_in_place(onum, reason='', near_only=True):
         return 0
     n = 0
     _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF)
+    _rng = room_tag_range_m(c['room']) if near_only else 0.0                      # v968f6o: the arena's tag range
     for p in get_sessions_in_room(c['room']):
         if getattr(p, 'addr', None) not in c['peers'] or not getattr(p, 'entered_game', False):
             continue
         if near_only:
             _xy = p.__dict__.get('_pos_xy')
-            if not _xy or math.hypot(_xy[0] - c['pos'][0], _xy[1] - c['pos'][1]) > CONVOY_RECREATE_CLIENT_M:
+            if not _xy or math.hypot(_xy[0] - c['pos'][0], _xy[1] - c['pos'][1]) > _rng:
                 continue
-        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, onum, c['camp'], c['class'])
+        _num = _car_num_for(c, p.addr, onum)                                   # v968f6r
+        _del = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _num & 0xFFFF)
+        body = bytes([0x02]) + _ensure_ai_client_on(p) + build_car_record(AI_CLIENT_ST, _num, c['camp'], c['class'])
         _submit_send(send_rel, p, build_msg13(_del, body), f'<- CAR 0x{onum:04x} delete+create in place {reason}', to=3.0)
         _car_note_created(c, p.addr)                                           # v968f6g
         n += 1
@@ -16115,26 +16346,54 @@ def convoy_tick():
                           + (f'; returned {_ret} to the store' if any(_ret.values()) else ''))
 
 def convoy_unload(cv, alive):
+    """v968f6t [METAL FIRST, THEN THE FUEL] (Alon 10-29 14:32: 'if fuel storage is destroyed and no storage
+    is available to store the delivered fuel then we wasted fuel'). Before: every lorry was poured into
+    the store in column order, clamped to the capacity still standing, and only then was metal spent
+    on repairs - so the fuel for a bombed tank was lost and the tank rebuilt empty. Now: (1) the metal
+    lorries unload first and their kilograms are spent DIRECTLY on repairs, the destroyed storage of
+    the resources this column carries first, then the other destroyed objects, then craters, the
+    remainder into the metal store; (2) fuel and ammo go into the (repaired) stores; (3) whatever a
+    store cannot take stays on its lorry and rides home to the depot (the 'back' branch returns it)."""
     rid, terrain, sidx = cv['room'], cv['terrain'], cv['dst']
     got = {'metal': 0, 'fuel': 0, 'ammo': 0}
-    for on in alive:
-        cg = CARS[on].get('cargo')
-        if not cg:
-            continue
-        kind, kg = cg
-        m, f, a = _scene_store_add(rid, terrain, sidx, kg if kind == 'metal' else 0, kg if kind == 'fuel' else 0, kg if kind == 'ammo' else 0)
-        got['metal'] += m; got['fuel'] += f; got['ammo'] += a
-        CARS[on]['cargo'] = None
-    if got['metal'] > 0:
+    kept = {'metal': 0, 'fuel': 0, 'ammo': 0}
+    repaired, spent = [], 0
+    _carried = {CARS[on]['cargo'][0] for on in alive if CARS[on].get('cargo')}
+    def _storage_first():
+        _lost = _SCENE_CAP_LOSS_OBJ.get((rid, sidx)) or {}
+        _mine = [o for o, (r, v) in _lost.items() if r in _carried and r != 'metal']
+        _rest = [o for o in _lost if o not in _mine]
+        return _mine + _rest
+    for on in [o for o in alive if (CARS[o].get('cargo') or ('', 0))[0] == 'metal']:
+        kind, kg = CARS[on]['cargo']
+        _left = int(kg)
         try:
-            _rep, _sp = cargo_repair_scene(rid, sidx, got['metal'], reason=f'convoy {cv["id"]}')
-            if _rep:
-                log('CONVOY', f'convoy {cv["id"]}: {len(_rep)} object(s) at scene {sidx} repaired with {_sp} kg of delivered metal')
+            _rep, _sp = cargo_repair_scene(rid, sidx, _left, reason=f'convoy {cv["id"]}', from_delivery=True, priority=_storage_first())
+            repaired += _rep; spent += _sp; _left -= int(_sp)
         except Exception:
             logx('CONVOY', 'convoy metal repair failed')
+        if _left > 0:
+            m, _f, _a = _scene_store_add(rid, terrain, sidx, _left, 0, 0)
+            got['metal'] += m; _left -= m
+        CARS[on]['cargo'] = (kind, _left) if _left > 0 else None
+        kept['metal'] += max(0, _left)
+    for on in [o for o in alive if (CARS[o].get('cargo') or ('', 0))[0] in ('fuel', 'ammo')]:
+        kind, kg = CARS[on]['cargo']
+        _m, f, a = _scene_store_add(rid, terrain, sidx, 0, kg if kind == 'fuel' else 0, kg if kind == 'ammo' else 0)
+        _acc = f if kind == 'fuel' else a
+        got[kind] += _acc
+        _left = int(kg) - int(_acc)
+        CARS[on]['cargo'] = (kind, _left) if _left > 0 else None
+        kept[kind] += max(0, _left)
+    if repaired:
+        log('CONVOY', f'convoy {cv["id"]}: {len(repaired)} object(s) at scene {sidx} repaired with {spent} kg of delivered metal (storage first)')
     xy = _scene_xy(terrain, sidx) or (0, 0, 'scene')
     parts = [f'{v}kg {k}' for k, v in got.items() if v]
-    log('CONVOY', f'convoy {cv["id"]} camp {cv["camp"]} at scene {sidx} "{xy[2]}": unloaded {got} (lost en route {cv["lost"]})')
+    if spent:
+        parts.insert(0, f'{spent}kg metal into repairs')
+    log('CONVOY', f'convoy {cv["id"]} camp {cv["camp"]} at scene {sidx} "{xy[2]}": unloaded {got}, {spent} kg metal spent on repairs'
+                  + (f', no room for {({k: v for k, v in kept.items() if v})} - rides home' if any(kept.values()) else '')
+                  + f' (lost en route {cv["lost"]})')
     _convoy_say(cv, f'{tc_camp_tag(cv["camp"])} supply convoy at {xy[2]} {tc_grid(xy[0], xy[1])}: '
                     + (f'unloaded {", ".join(parts)}' if parts else 'nothing left to unload'))
 
@@ -16170,9 +16429,27 @@ def _convoy_cargo_for(need):
     """need = {kind: kg} -> lorry names, CONVOY_LORRIES_MAX at most, biggest shortfall first."""
     names = []
     per = {'fuel': 'Car for Fuel', 'ammo': 'Car for Ammo', 'metal': 'Furgon'}
-    for kind, kg in sorted(need.items(), key=lambda kv: -kv[1]):
-        n = min(3, max(1, int(math.ceil(kg / float(CONVOY_CARGO_KG[per[kind]][1])))))
-        names += [per[kind]] * n
+    # v968f6t: metal rides at the head - it rebuilds the storage before the fuel and ammo behind it unload.
+    # v968f6v (Alon 10-29 16:30: 'fuel was also destroyed' - convoy 2 asked for fuel 112,959 / ammo 170,000 /
+    # metal 25,500, and the 3+3 metal/ammo lorries filled the 6 slots before fuel got one): every needed
+    # kind gets a lorry first, the remaining slots go round-robin to the kind with the most need per lorry.
+    order = sorted(need, key=lambda k: (0 if k == 'metal' else 1, -need[k]))
+    want = {k: min(3, max(1, int(math.ceil(need[k] / float(CONVOY_CARGO_KG[per[k]][1]))))) for k in order}
+    if sum(want.values()) <= CONVOY_LORRIES_MAX:
+        alloc = want
+    else:
+        alloc = {k: 1 for k in order[:CONVOY_LORRIES_MAX]}
+        if 'metal' in alloc:                              # metal in full first: it rebuilds the tanks the rest goes into
+            alloc['metal'] = min(want['metal'], CONVOY_LORRIES_MAX - (len(alloc) - 1))
+        left = CONVOY_LORRIES_MAX - sum(alloc.values())
+        while left > 0:
+            cand = [k for k in alloc if alloc[k] < want[k]]
+            if not cand:
+                break
+            k = max(cand, key=lambda k: need[k] / float(alloc[k] * CONVOY_CARGO_KG[per[k]][1]))
+            alloc[k] += 1; left -= 1
+    for k in order:
+        names += [per[k]] * alloc.get(k, 0)
     return names[:CONVOY_LORRIES_MAX]
 
 def _camp_scenes(terrain, camp):
@@ -16239,8 +16516,9 @@ def convoy_request(rid, sidx, reason='', force=False):
     if not force and not convoy_on_demand_for_room(rid):
         return None
     now = time.time()
-    if not force and now - _CONVOY_REQ_AT.get((rid, sidx), 0) < CONVOY_REQUEST_COOLDOWN_S:
-        return None
+    _in_cooldown = (not force and now - _CONVOY_REQ_AT.get((rid, sidx), 0) < CONVOY_REQUEST_COOLDOWN_S)
+    if _in_cooldown and now - _CONVOY_REQ_AT.get((rid, sidx), 0) < CONVOY_URGENT_SPACING_S:
+        return None                                       # v968f6v: even an urgent follow-up waits a minute
     terrain = _probe_terrain_for_room(rid)
     camp = scene_camp(terrain, sidx)
     if camp is None or camp > 6:
@@ -16257,8 +16535,28 @@ def convoy_request(rid, sidx, reason='', force=False):
     # supply mode only decides the SCHEDULED traffic); a scene with destroyed storage asks for the
     # fuel/ammo its lost tanks held plus metal to rebuild them (the convoy repairs on unload).
     frac, det = _station_fill(rid, terrain, sidx)
-    need = {k: int(cap * TRAIN_DROP_FILL) - have for k, (have, cap, prod) in det.items() if not prod and cap > 0 and have < cap * CONVOY_LOW_FRAC}
+    # v968f6t [NEED, NOT DAMAGE, CALLS THE CONVOY]: the stock is judged against the FULL capacity (what is
+    # standing + what was bombed), so a field at 70% with one tank gone is not 'low' and gets nothing now;
+    # fuel/ammo ride only when the stock really is below CONVOY_LOW_FRAC of that, sized to fill it (the
+    # metal on the same column rebuilds the tanks first, see convoy_unload). A resource whose storage is
+    # ALL gone (nothing can be stored or served) is urgent whatever the stock says. Metal for a mere
+    # rebuild waits CONVOY_REBUILD_DELAY_S after the first hit.
+    _cl = _SCENE_CAP_LOSS.get((rid, sidx)) or {}
     _lost_objs = _SCENE_CAP_LOSS_OBJ.get((rid, sidx)) or {}
+    _st, _pp = supply_state(rid, terrain, sidx)
+    _rates = (_pp or {}).get('rates') or {}
+    need = {}
+    _bombed_out = []
+    for k in ('fuel', 'ammo', 'metal'):
+        _cap_eff = int(((_pp or {}).get('caps') or {}).get(k, 0) or 0)
+        _cap_full = _cap_eff + int(_cl.get(k, 0) or 0)
+        if _cap_full <= 0 or float(_rates.get(k, 0)) > 0:
+            continue
+        _have = int((_st or {}).get(k, 0))
+        if _cap_eff <= 0:
+            _bombed_out.append(k)
+        if _have < _cap_full * CONVOY_LOW_FRAC:
+            need[k] = int(_cap_full * TRAIN_DROP_FILL) - _have
     if 'metal' in need and not _lost_objs and not force:
         try:                                              # v968f5t: metal rides only when something is broken
             if trn_scene_damage_frac(rid, sidx) <= 0.0:
@@ -16268,11 +16566,31 @@ def convoy_request(rid, sidx, reason='', force=False):
         except Exception:
             need.pop('metal', None)
     if _lost_objs:
-        for _r, _vol in _lost_objs.values():
-            if _r in ('fuel', 'ammo'):
-                need[_r] = need.get(_r, 0) + int(_vol * TRAIN_DROP_FILL)
-        need['metal'] = max(need.get('metal', 0), min(3, len(_lost_objs)) * int(CONVOY_CARGO_KG['Furgon'][1]))
+        _dmg_at = _CONVOY_DAMAGE_AT.get((rid, sidx), now)
+        _urgent = force or any(k in need for k in ('fuel', 'ammo')) or bool(_bombed_out)
+        if _urgent or now - _dmg_at >= CONVOY_REBUILD_DELAY_S:
+            need['metal'] = max(need.get('metal', 0), min(3, len(_lost_objs)) * int(CONVOY_CARGO_KG['Furgon'][1]))
+            if not _urgent:
+                reason = (reason + ' | ' if reason else '') + f'rebuild {len(_lost_objs)} storage object(s), {int((now - _dmg_at) / 60)} min after the hit'
+            elif _bombed_out:
+                reason = (reason + ' | ' if reason else '') + f'no {"/".join(_bombed_out)} storage left'
+        else:
+            need.pop('metal', None)                       # not yet: the storage is missed only when the stock runs low
     need = {k: v for k, v in need.items() if v > 0}
+    # v968f6v [A COLUMN ON THE ROAD COVERS ITS KINDS]: what a convoy already heading to this scene carries
+    # is not asked for again; what it does NOT carry (convoy 1 was metal-only when the fuel and ammo
+    # tanks fell minutes later) may follow at once if urgent, the 10 min cooldown notwithstanding.
+    _covered = set()
+    for _cv in CONVOYS.values():
+        if _cv['room'] == rid and _cv['dst'] == sidx and _cv['phase'] in ('out', 'unload') and not _cv.get('aborted'):
+            _covered |= {k for k, v in (_cv.get('cargo') or {}).items() if v > 0}
+    if _covered and not force:
+        need = {k: v for k, v in need.items() if k not in _covered}
+    if _in_cooldown:
+        _urgent_now = any(k in need for k in ('fuel', 'ammo')) or bool(_bombed_out and need)
+        if not _urgent_now:
+            return None
+        reason = (reason + ' | ' if reason else '') + 'urgent follow-up' + (f', {"/".join(sorted(_covered))} already on the road' if _covered else '')
     if not force and not need:
         return None
     if force and not need:
@@ -16284,6 +16602,7 @@ def convoy_request(rid, sidx, reason='', force=False):
         log('CONVOY', f'room {rid}: scene {sidx} needs {need} but no friendly depot within {CONVOY_MAX_KM:.0f} km has it')
         return None
     _CONVOY_REQ_AT[(rid, sidx)] = now
+    _CONVOY_DAMAGE_AT.pop((rid, sidx), None)                                   # v968f6t: this column answers the damage
     cid = convoy_spawn(rid, camp, src, sidx, _convoy_cargo_for(need), reason=f'(requested: {reason})')
     if cid is not None:
         log('CONVOY', f'room {rid}: scene {sidx} (camp {camp}) requested supplies {need} -> convoy {cid} from scene {src}')
@@ -16398,7 +16717,40 @@ def convoy_console(args, by='console'):
                 CAR_CELL_RECREATE = False
             else:
                 CAR_CELL_RECREATE = True; CAR_CELL_M = max(128.0, float(args[1]))
-            return [f'car cell re-create = {"%.0f m cells" % CAR_CELL_M if CAR_CELL_RECREATE else "off"} ({_perf.get("car_cell_recreate", 0)} so far)']
+            return [f'car cell re-create = {"%.0f m cells" % CAR_CELL_M if CAR_CELL_RECREATE else "off"} ({_perf.get("car_cell_recreate", 0)} re-creates, {_perf.get("car_cell_rotate", 0)} rotations so far)']
+        if v == 'rotate' and len(args) >= 2:                        # v968f6r
+            global CAR_ROTATE_ON_CROSS, CAR_ROTATE_OVERLAP_S
+            if args[1].lower() in ('off', '0'):
+                CAR_ROTATE_ON_CROSS = False
+            else:
+                CAR_ROTATE_ON_CROSS = True
+                try:
+                    CAR_ROTATE_OVERLAP_S = max(0.2, float(args[1]))
+                except ValueError:
+                    pass
+            return [f'car number rotation at a cell crossing = {"ON, overlap %.1fs + RTT" % CAR_ROTATE_OVERLAP_S if CAR_ROTATE_ON_CROSS else "off (delete+create in one message)"} ({len(CAR_ALIAS)} alias(es) live)']
+        if v == 'range':                                            # v968f6o
+            global CONVOY_RECREATE_RANGE_FROM_TAGS, CONVOY_RECREATE_CLIENT_M
+            if len(args) >= 2:
+                if args[1].lower() in ('tags', 'tag', 'auto'):
+                    CONVOY_RECREATE_RANGE_FROM_TAGS = True
+                elif args[1].lower() == 'fixed':
+                    CONVOY_RECREATE_RANGE_FROM_TAGS = False
+                else:
+                    CONVOY_RECREATE_RANGE_FROM_TAGS = False; CONVOY_RECREATE_CLIENT_M = max(500.0, float(args[1]))
+            _ROOM_TAG_RANGE_CACHE.clear()
+            _how = ("%.1f x the arena's other-tags visual range, capped at %.0f ft" % (CONVOY_RECREATE_TAG_FACTOR, CONVOY_RECREATE_CAP_FT)
+                    if CONVOY_RECREATE_RANGE_FROM_TAGS else "fixed %.0f m" % CONVOY_RECREATE_CLIENT_M)
+            out = [f'convoy re-create range = {_how}']
+            for _rid in sorted({c['room'] for c in CARS.values()} | {cv.get('room') for cv in CONVOYS.values() if cv.get('room') is not None}):
+                out.append(f'  room {_rid}: {room_tag_range_m(_rid):.0f} m ({room_tag_range_m(_rid) * _M2FT:.0f} ft)')
+            return out
+        if v == 'rebuild':                                          # v968f6t
+            global CONVOY_REBUILD_DELAY_S
+            if len(args) >= 2:
+                CONVOY_REBUILD_DELAY_S = max(0.0, float(args[1]) * 60.0)
+            _pend = [f'room {k[0]} scene {k[1]} {int((time.time() - t) / 60)} min ago' for k, t in _CONVOY_DAMAGE_AT.items()]
+            return [f'convoy rebuild delay = {CONVOY_REBUILD_DELAY_S / 60:.0f} min (destroyed storage alone calls a metal column after this; low stock or no storage left calls one at once)']                     + ([f'  pending: ' + ', '.join(_pend)] if _pend else [])
         if v == 'haltdelay':                                        # v968f6d
             global CONVOY_HALT_RECREATE_DELAY_S
             if len(args) >= 2:
@@ -17684,6 +18036,7 @@ def _ai_cull_list(s, ids):
     addr = getattr(s, 'addr', None)
     n = 0
     for onum in ids:
+        onum = car_resolve(onum)                                                # v968f6r
         coll = TANKS if onum in TANKS else (SOLDIERS if onum in SOLDIERS else (TRAINS if onum in TRAINS else (CARS if onum in CARS else (SHIPS if onum in SHIPS else None))))   # v965f5g cars, v967f5 ships
         if coll is None:
             # a PEER plane in the same list (mixed cull) -> re-arm the relay create, like PEERDEL
@@ -17859,6 +18212,7 @@ def _handle_tank_hit_51(s, pl):
         while i + 6 <= len(body):
             victim, attacker, dmg = struct.unpack_from('<HHH', body, i)
             i += 6
+            victim = car_resolve(victim)                                        # v968f6r: a rotated lorry's number
             # v626f5: a TRAIN hit names the railcar - victim = train ONumber | (car index << 10):
             # 0x010d loco, 0x0d0d car 3, 0x1d0d car 7 (live 09-10 22:34). ONumbers stay < 1024.
             # v968f5x: ONumbers DO pass 1023 (today's trains sit at 0x0580/0x05cb), so 'victim >> 10'
@@ -19542,7 +19896,7 @@ def _scene_store_take(room_id, terrain, sidx, metal, fuel, ammo):
             got.append(take)
     return tuple(got)
 
-def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False):
+def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False, priority=None):
     """Spend metal on the scene's destroyed objects, cheapest first. Returns (objs repaired, kg spent).
     v754f5: metal from the STORE is deducted (train deliveries). v774f5: from_delivery=True spends
     the DELIVERED kilograms directly (a cargo drop) - a field whose metal storage is dead has no
@@ -19558,12 +19912,33 @@ def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False):
         budget = min(float(metal_kg), float(_avail))
     if budget <= 0:
         return [], 0
+    _pre_done, _pre_spent = [], 0
+    if priority:
+        # v968f6t: the caller's objects (a convoy's destroyed storage) come BEFORE the craters and the
+        # cheapest-first rest - the fuel behind the metal needs a tank to go into
+        _pt, _ps = [], 0
+        for o in priority:
+            if (room_id, o) not in _SCENE36_DESTROYED:
+                continue
+            oi = trn_obj_info(room_id, o)
+            if not oi or oi.get('scene') != int(sidx):
+                continue
+            cost = max(50.0, float(oi.get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE)
+            if _ps + cost > budget:
+                continue
+            _pt.append(o); _ps += cost
+        if _pt:
+            _pre_done = repair_objects(room_id, _pt, reason=f'(metal repair {reason}, storage first)') or []
+            _pre_spent = int(sum(max(50.0, float((trn_obj_info(room_id, o) or {}).get('value', 0)) * CARGO_REPAIR_KG_PER_VALUE) for o in _pre_done))
+            budget -= _pre_spent
+            if budget <= 0:
+                return _pre_done, _pre_spent
     # v831f5: delivered metal fills the scene's craters first (oldest first), the rest rebuilds objects
     if from_delivery:
         _cf, _ckg = crater_repair_scene(room_id, sidx, budget, reason=reason)
         budget -= _ckg
         if budget <= 0:
-            return [], _ckg
+            return _pre_done, _pre_spent + _ckg
     dead = sorted((o for (r2, o) in _SCENE36_DESTROYED if r2 == room_id), key=lambda o: (trn_obj_info(room_id, o) or {}).get('value', 0))
     todo, spent = [], 0
     for o in dead:
@@ -19580,8 +19955,8 @@ def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False):
         if not from_delivery and r and r[0] is not None:
             with _SUPPLY_LOCK:
                 r[0]['metal'] = max(0, int(r[0].get('metal', 0)) - _paid)
-        return done, _paid
-    return [], 0
+        return _pre_done + done, _pre_spent + _paid
+    return _pre_done, _pre_spent
 
 def _handle_cargo_request_106(s, pl):
     if not CARGO_MODEL:
@@ -22271,7 +22646,8 @@ def ai_objects_reset_for(s, reason=''):
     if not ids:
         return 0
     for on in ids:
-        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', on & 0xFFFF)
+        _wire = _car_num_for(CARS[on], addr, on) if on in CARS else on                          # v968f6r: the number HE holds
+        raw = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _wire & 0xFFFF)
         _submit_send(send_rel, s, build_msg13(raw), f'<- delete AI object 0x{on:04x} {reason}', to=3.0)
         if on in TANKS:
             TANKS[on]['peers'].discard(addr)
@@ -22279,6 +22655,7 @@ def ai_objects_reset_for(s, reason=''):
             SOLDIERS[on]['peers'].discard(addr)
         if on in CARS:
             CARS[on]['peers'].discard(addr)
+            CARS[on].get('held', {}).pop(addr, None)                                             # v968f6r
     log('TC', f'{s.current_pilot}: {len(ids)} AI object(s) deleted on his client {reason} - re-created at his next ServerConfirm')
     return len(ids)
 
@@ -25368,6 +25745,8 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
     # v677f5: a kill by one of OUR AI objects (tank / soldier / train station) arrives as a normal
     # 'shot down' (MEC 5) with the AI object as hunter - no player owns it, so it landed in
     # 'Planes Lost' instead of 'Planes Lost to AI' (user 09-13: GB tank kill not tallied).
+    if hunter_obj is not None:
+        hunter_obj = car_resolve(hunter_obj)                                    # v968f6r
     _ai_hunter = (hunter_obj is not None and hunter_obj not in (0, 0xffff)
                   and (hunter_obj in TANKS or hunter_obj in SOLDIERS or hunter_obj in TRAINS or hunter_obj in CARS or hunter_obj in SHIPS))   # v965f5g/v967f5
     _lost_to_ai = (killer is None) and ((_mec in AI_KILL_MEC_NIBBLES) or _ai_hunter)
@@ -32135,10 +32514,14 @@ def supply_on_building_destroyed(room_id, scene_id, obj_idx):
                     lost[ukind] = share
     if lost:
         log('SUPPLY', f'scene {scene_id}: {b.get("name")} (obj {obj_idx}) destroyed - lost {lost}')
+        # v968f6t [NO CONVOY ON THE BOMB] (Alon 10-29 14:32: 'immediately after damaging some storage a convoy is
+        # spawned .. the target still had enough supplies'). The destruction only starts the scene's clock; the
+        # minute scan (convoy_low_stock_scan -> convoy_request) decides: at once when a store is low or a
+        # resource has no storage left at all, otherwise a metal column CONVOY_REBUILD_DELAY_S later.
         try:
-            convoy_request(room_id, int(scene_id), reason=f'{b.get("name")} destroyed')   # v964f5 on-demand supply
+            _CONVOY_DAMAGE_AT.setdefault((room_id, int(scene_id)), time.time())
         except Exception:
-            logx('CONVOY', 'convoy request failed')
+            pass
     return lost
 
 def seed_room_economy(room_id):
@@ -32574,6 +32957,12 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
         rates = tuple(int(round(r0 * _eff)) for r0 in rates)
         eff_pct = tuple(int(round(max(0.0, min(1.0, _eff)) * 100)) for _ in order)
         cap_pct = tuple(100 if fc <= 0 else max(0, min(100, c * 100 // fc)) for c, fc in zip(caps, _fcaps))
+        # v968f6u [BOMBED OUT IS NOT 'UNLIMITED'] (Alon 10-29 16:24: 'BJ 71 was reduced to 0 ammo and 0 fuel,
+        # HQ tactical map showed it at unlimited ammo and fuel'). A scene whose storage of a resource is
+        # ALL destroyed has an effective capacity of 0, and a 0 in the capacity array (G) is what the stock
+        # client uses for 'this scene does not track that resource' = unlimited. The map now carries the
+        # UNDAMAGED capacity with 0 stored and 'capacity intact' (H) 0% - which reads as what it is.
+        caps = tuple(c if c > 0 else fc for c, fc in zip(caps, _fcaps))
     else:
         eff_pct = pct; cap_pct = pct
     # v659f5 THE MAPPING, READ BACK FROM THE PANEL (09-12 screenshots, Support Factory 5 + Bomber

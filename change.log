@@ -1,3 +1,198 @@
+=====================================================================================
+BANK 2026-10-29 - v967f5 .. v968f6v (local build; live server at v968f6i; user: "bank the car work so far")
+=====================================================================================
+Deploy together: server.py (v968f6v), web_server.py (same-side-kills select, v968f5z),
+mapdata\ (tank_tables.json with 'car_classes', scene profiles, rails, sea lanes).
+Still to field-test by players: v968f6r number rotation (the drawn-but-missing lorries report
+of 14:22 is unresolved - isolate with `convoy rotate off`), v968f6s/t/u/v of this afternoon.
+
+LORRY HIT REGISTRATION (the chapter's core, v968f6c..v968f6s):
+- Why gun/rocket hits on lorries never registered: the client files a car for hit tests in the
+  2,048 m terrain cell where it was CREATED (Trn.cpp cells of 0x800) and never re-files it as it
+  drives; re-creating the object in place restores hits (proven live with halt + re-create, then
+  rolling re-create, then the cell-crossing re-create of v968f6g). Final form: ONE fresh low-pool
+  object number per cell the lorry enters (v968f6r rotation: create new, frames at once, delete the
+  old copy 0.6 s + RTT later - an overlap, no blink), sent only to clients within 2 x the arena's
+  'Visual range - other tags' (cap 9000 ft; v968f6o/p), checked every tick (v968f6q). Per-client
+  held numbers + CAR_ALIAS resolve inbound hits/hunters/culls; joiners get the current cell's
+  number. Console: convoy range | rotate | cell.
+- Why destroyed lorries only despawned: the ExitDataArrive kill-delete blows up tanks (type 3) and
+  soldiers (0x11) only; a car (5) is removed. The car has its own destruction in roadhit.cpp
+  (HP <= 0 -> FUN_00689160 explosion + 15 s alarm), reached from the net by the inbound msg-51
+  handler -> OnRemoteHit. So a kill is a LETHAL 51 record per client (v968f6h), the frame's +0xc
+  word is the car's HP and must be sent (v968f6i: 0 killed the explosion), dead lorries stop and
+  keep HP-0 frames after 3 s (v968f6m/n), and the lethal record waits 1 s + RTT after a fresh
+  create on that client (v968f6s, the flak car that would not die).
+- The cyan 'destroyed GER car' line: only the kill-entry delete prints it and it removes the
+  wreck; a DECOY car (create, frame, kill-delete 0.6 s + RTT later) prints it while the wreck
+  burns until CAR_WRECK_S 20 s (v968f6l/m/p; the same-batch form failed on deferred creation).
+- Object numbers: cars/ships reserved in the ring; lorries from the low pool 0x100-0x3FF because
+  hit records carry 10 bits (v968f6h); wagon hits above ONumber 1023 decoded by subtraction
+  (v968f5x).
+
+CONVOY ECONOMY (v968f5t/u, v968f6t/u/v): lorries load real depot stock and bring undelivered cargo
+home; nearest depot that can cover the need; a convoy answers NEED not the bomb (stock judged
+against full capacity; urgent = low store or no storage left; a mere rebuild waits 10 min); metal
+rides at the head and is spent directly on repairs, destroyed storage of the carried kinds first,
+then fuel/ammo into the repaired tanks, leftovers ride home; every needed kind gets a lorry;
+urgent follow-ups 60 s after a column that does not carry the kind; HQ map shows a bombed-out
+resource as 0 / full capacity, not 'unlimited'. Splash curve for bombs/rockets on lorries
+(v968f5x, shooter feedback OFF per user).
+
+OTHER FIXES IN THE SPAN: naval chapter start (v967f5j..v968f5h: ships sail, task groups, sea
+lanes, carrier queue); graceful update/restart + soft boot (v968f5n/q/r); REAP flood (s); kill
+credit / re-arm (m); FFA same-side kills count (v968f5z) and team-kill double booking (y); per-pilot
+RTT meter + lag lead (v968f5v, Yoda's jumping planes = his link); bail canopy CTD (w); tank cap
+leftover (v968f6a); engine start after a hangar hop (b).
+
+v968f6v (2026-10-29) - every needed kind gets a lorry; an urgent need follows a column already on the road
+- Alon 16:30: 'fuel was also destroyed'. run_152035: five fuel objects fell 16:05-16:10 (after convoy 1
+  had left metal-only at 16:08:36); convoy 2 at 16:18:37 asked for fuel 112,959 / ammo 170,000 / metal
+  25,500 but the 3 metal + 3 ammo lorries filled the six slots and fuel got none. And it could not
+  leave before 16:18 because of the 10 min per-scene cooldown, although convoy 1 carried no fuel/ammo.
+- _convoy_cargo_for: metal in full first (it rebuilds the tanks the rest goes into), then one lorry
+  per needed kind, the remaining slots round-robin to the kind with the most need per lorry
+  (example above -> 3 Furgon, 2 ammo, 1 fuel).
+- convoy_request: kinds already carried by a column on the road to the scene ('out'/'unload', not
+  aborted) are not asked for again; an URGENT remaining need (fuel/ammo low, or no storage left)
+  may follow CONVOY_URGENT_SPACING_S (60 s) after the last request instead of the 10 min cooldown
+  (per-camp cap of 2 still applies). Reason tag: 'urgent follow-up, metal already on the road'.
+
+v968f6u (2026-10-29) - the HQ map showed a bombed-out field as 'unlimited'
+- Alon 16:24: BJ 71 at 0 ammo / 0 fuel, the tactical map said unlimited. With every storage object of
+  a resource destroyed the scene's effective capacity is 0, and a 0 in the msg-71 capacity array (G)
+  is the stock client's 'untracked resource' = unlimited. scene_prodinfo_arrays now sends the
+  UNDAMAGED capacity in G when the effective one is 0; stored (F) stays 0 and 'capacity intact' (H)
+  reads 0%. The complex % (C) was already 0.
+- v968f6t check (run_152035): convoy 1 'stock 100% + storage destroyed | no metal storage left' -
+  metal only, 2 lorries; unloaded '3750 kg metal spent on repairs (storage first)', 8 objects
+  rebuilt; convoy 2 after the ammo tanks fell: 'no ammo/metal storage left', metal + ammo, metal at
+  the head. Working as designed.
+
+v968f6t (2026-10-29) - convoys answer NEED, not the bomb; metal unloads first and rebuilds the storage
+- Alon 14:32: a convoy spawned the instant a storage was hit although the field still had plenty;
+  and fuel delivered to a field whose fuel tank is gone has nowhere to go.
+- Dispatch: the destroyed-building hook no longer calls convoy_request; it only stamps
+  _CONVOY_DAMAGE_AT. The minute scan decides through convoy_request, where the stock is now judged
+  against the FULL capacity (standing + bombed, _SCENE_CAP_LOSS): fuel/ammo ride only when the stock
+  is below CONVOY_LOW_FRAC of that, sized to fill it. Urgent at once: a store really low, or a resource
+  with NO storage left (nothing can be served). Otherwise destroyed storage alone calls a metal column
+  only CONVOY_REBUILD_DELAY_S (10 min) after the first hit - the attacker no longer gets a convoy as a
+  receipt for his bomb. `convoy rebuild <min>` (shows pending scenes).
+- Column order: metal (Furgon) at the head.
+- convoy_unload rewritten: metal lorries first, their kilograms spent DIRECTLY on repairs
+  (cargo_repair_scene from_delivery, new `priority` = the destroyed storage of the resources this
+  column carries, before craters and the cheapest-first rest), remainder into the metal store; then
+  fuel/ammo into the repaired tanks; whatever a store cannot take STAYS ON ITS LORRY and rides home
+  (the v968f5u 'back' branch returns it to the depot). Log: 'unloaded {...}, N kg metal spent on
+  repairs, no room for {...} - rides home'.
+
+v968f6s (2026-10-29) - the flak car that would not die: the lethal 51 waits for the client's create
+- Alon 14:01: the last escort kept shooting after he had destroyed it. run_132809 / messages66
+  11:49:21: Flak Car 0x0117 was rotated to 0x0125 (293) at 21.171 (210 m), killed at 21.446; the
+  client received the lethal 51 at 21.497 in the same batch as the create and processed it BEFORE
+  'Create NetCar 293' (21.498) - a hit on an object not yet built is dropped. The old copy 292 was
+  deleted on schedule (21.779), the decoy 294 printed the cyan line (22.089, the two-step works),
+  and 293 lived on undamaged and shooting ('GER car sliced your fuselage' 25.701) until the 20 s
+  wreck delete. Not the decoy: it was created and deleted within 0.6 s as designed.
+- Fix: c['held_at'][addr] = when each client was sent the number he holds (rotation / joiner
+  create); the lethal record to that client waits until CAR_LETHAL_SETTLE_S (1.0 s) + his RTT after
+  it. In the common case (no rotation in the last second) nothing changes; in the rotation case the
+  explosion comes up to a second late and the cyan line may precede it.
+
+v968f6r (2026-10-29) - number rotation at the cell crossing: overlap instead of a blink
+- run_124058 12:57:13: the Flak car crossed into cell (0,-7) under Alon's guns and the delete+create
+  blinked during the attack (v968f6q's 'standing lorries' theory was wrong - they were driving). The
+  client builds a created object in its next creation pass (one per ~330 ms: 'Get coord for missing
+  object' -> 'Create NetCar'), so a delete+create in one message is a gap of up to one pass. A
+  crossing while a pilot is inside the 2 km range is unavoidable on a 7 km route - so the blink is
+  removed instead: the lorry is CREATED under a fresh low-pool number at the same spot (frames at 0,
+  0.1, 0.25 s), and the client's old number is deleted CAR_ROTATE_OVERLAP_S 0.6 s + his RTT later.
+  Two identical models overlap for half a second; the new one is hittable from its first frame.
+- The server record keeps ONE canonical number (CARS key, convoy vehicle list, CARHIT log). Per
+  client: c['held'][addr] = the number he holds; CAR_ALIAS[number] -> canonical, applied to inbound
+  hit records (victim), AI hunters ('GER car has shot you'), and culls; reserved in
+  _obj_numbers_in_use; released with the car (or by the tidy pass once nobody holds the number).
+  Frames, the lethal 51, kill-entry deletes, plain deletes, the re-entry cleanup and the joiner
+  re-create all use the number that client holds (joiners get the lorry's current cell number).
+- Off-range pilots keep their stale copy and get the rotation (create new, delete old after the
+  overlap) when they come inside 2 x tag range - the old copy is 2 km away, the overlap unseen.
+- Console: `convoy rotate off` -> the v968f6g delete+create; `convoy rotate <s>` sets the overlap;
+  `convoy cell` shows re-creates and rotations. Why the 'crossed into cell' line now lists each
+  re-filed pilot with his distance, every time (the 30 s rate limit is gone).
+
+v968f6q (2026-10-29) - cell re-create checked every tick, not only when the lorry moved
+- Alon 13:03: kill and hits fine; left the fight, came back into range, the cars blinked in the middle
+  of the run and could not be hit before the blink. car_cell_check ran only on a tick the lorry moved:
+  the column had crossed a cell while he was out of range (his copy stale, held back by the range
+  rule), then stood still (unloading / halted / parked) when he returned - nothing re-filed the stale
+  copies until the lorries rolled again, which happened during his attack. The check now runs every
+  car tick (CAR_TICK_HZ); it returns at once when no held copy is stale, so a returning pilot is
+  re-created the tick he crosses the 2 x tag range line, ~13 s before he is over the column at
+  Typhoon speed.
+
+v968f6p (2026-10-29) - re-create range = 2 x tag range (cap 9000 ft); cyan line via the two-step decoy
+- Alon 11:37: 3281 ft is inside gun range - a fast pass fired before the re-create landed.
+  room_tag_range_m now returns CONVOY_RECREATE_TAG_FACTOR (2.0) x the arena's other-tags range, capped
+  at CONVOY_RECREATE_CAP_FT (9000 ft = 2743 m): all five arenas -> 6562 ft = 2000 m. `convoy range`.
+- The re-create flicker: a delete+create in one msg-13 removes the object at once while the client
+  defers the create to its main loop ('Receive create object' -> 'Create NetCar' 150-300 ms later),
+  so the lorry is missing for a few frames. Only a client change or an object-number rotation
+  (create the new copy first, delete the old one after) could remove it; the doubled range keeps it
+  out of the attack run.
+- 'Destroyed car, got hit lines, no cyan message, car did explode' - messages63 09:31:15: lethal 51
+  landed (in 13'10 {51'7}), Alon was shot down 8 s later, the re-entry wiped every car (13'79 plain
+  deletes incl. the wreck), and the kill-entry delete at +14 s (in 3'21) found no object -> no
+  ExitDataArrive, no line. The line must not depend on the wreck surviving: CAR_KILL_LINE_VIA_DECOY
+  back ON as the two-step (decoy create on the wreck's spot, positioning frame at 0.15 s, kill-entry
+  delete per client at CAR_DECOY_LINE_DELAY_S 0.6 s + his RTT). The real wreck gets a plain delete
+  at CAR_WRECK_S (20 s; the client's own 15 s alarm usually beats it, harmlessly).
+  Expected in the client log: 'Receive create object <decoy>' / 'Create NetCar' / 0.6 s later
+  'Server require delete object <decoy>' + 'ExitDataArrive. Number=<decoy>. MEC=5, EEC=3. (car)' +
+  'EVENT You have destroyed GER car'.
+
+v968f6o (2026-10-29) - lorry re-create range = the arena's 'Visual range - other tags'
+- Alon 11:14: 'have the recreate range set at the tag visibility range from the arena settings
+  (can be changed per arena)'. room_tag_range_m(room): the web override (settings_json
+  'vr_other_tags', feet) first, else the value in the arena's own GAME_DEF tail (delta 47); 60 s
+  cache; CONVOY_RECREATE_CLIENT_M (3000 m) only as a fallback. All five arenas currently read
+  3281 ft = 1000 m.
+- The cell-crossing re-create (v968f6g, the one in production) now sends only to clients whose plane
+  is within that range of the lorry; a pilot farther out keeps his copy and his cell_at stays stale,
+  so he is re-created the moment he comes within range. The rolling/halt re-create
+  (car_recreate_in_place near_only) uses the same range.
+- Console: `convoy range` shows the mode and each live room's range; `convoy range tags|fixed|<m>`;
+  the cache is cleared on every call, so a web-edit of the tag range takes within 60 s anyway.
+
+v968f6n (2026-10-29) - the wreck came back to life; kill delay = tank wreck time
+- Alon 11:06 (local, v968f6m): 'some kills despawned too quickly'. v968f6m kept the keep-alive frames
+  going for a dead lorry and each carried HP >= 1 (car_frame_hp clamps to 1) - and the client's Unpack
+  writes that word straight into the car's HP, so 2 s after the blast the wreck was 'alive' again:
+  intact lorry until the delete. Now the stop frame at the kill still says HP 1 (the lethal hit needs
+  the old HP > 0), and from CAR_DEAD_HP_AFTER_S = 3 s the dead lorry's frames say HP 0.
+- CAR_KILL_DELETE_DELAY_S 6 -> 14: the wreck stays ~14 s (the client arms its own 15 000 ms alarm on
+  a destroyed car - FUN_00689160 -> alarmsys FUN_005b8c80(15000) - so a later delete would find no
+  object and print no cyan line). The fire/smoke effects are separate effects and outlive the model,
+  as a tank's do. `car killdelay <s>` live.
+- Green-line misses on some gun/rocket hits are the cell model (v968f6g), not this change: a lorry
+  created in another 2,048 m cell is unhittable until it crosses - `convoy cell 1024` to test a
+  smaller cell, `convoy recreate 3` to fall back to the rolling re-create that never missed.
+
+v968f6m (2026-10-29) - decoy line off; wrecks stop and stay put; `car killdelay` reaches the tank wreck time
+- Alon 09:53 (local test of v968f6l): cars explode, NO cyan line. Every client log shows 'Receive
+  create object N' and 'Create NetCar' 150-300 ms later - creation is deferred to the main loop, so a
+  kill-entry delete in the same batch found no object to name. CAR_KILL_LINE_VIA_DECOY = False; the
+  lethal hit + per-client delayed kill-entry delete (v968f6k, Taurus OK) is the active path again. The
+  decoy is kept as a two-step (create, positioning frame on the wreck, kill-delete 0.6 s later) for a
+  later test.
+- Wrecks drove on: frames stopped for a dead lorry and each client's car physics carried the last
+  throttle until the delete. A kill now zeroes the motion, sends a stop frame at once, and the wreck
+  keeps its 2 s keep-alive frames so it stays where it died and is not culled.
+- CAR_WRECK_S = 20 (= TANK_WRECK_S); CAR_KILL_DELETE_MAX_S 12 -> 30. While the decoy is off the
+  kill-entry delete both prints the cyan line and ends the wreck, so the two cannot be separated:
+  `car killdelay 6` = line (and wreck end) 6 s after the blast; `car killdelay 20` = tank-length wreck,
+  line 20 s late. Live knob, no restart.
+
 v968f6l (2026-10-29) - cyan line at the moment of the kill, wreck stays (Alon: 'the cyan line needs to be first')
 - The native 'X destroyed Y car' line is printed only by ExitDataArrive on a kill-entry delete, and
   that delete removes the object together with the explosion and wreck attached to it. The line is
