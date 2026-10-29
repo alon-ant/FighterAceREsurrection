@@ -1,3 +1,33 @@
+v968f6z (2026-10-30) - CTD after a chute landing: duplicate create of a rotated lorry (Flakmagic/Inky, messages78)
+- 21:54:07 live (v968f6x): 'Assertion failed (!Objects[no->Number()]) Network.cpp:391' on 'Create
+  NetCar (furgon) ONumber=275'. His client had held 275 since 21:45:42 (a rotation copy, v968f6r) and
+  never got a delete for it. At his respawn from the chute the INSERT-CULL mirror deleted the 6 cars
+  beyond 16 km - naming their CANONICAL numbers, which his client did not hold - forgot him as a peer,
+  and the ServerConfirm re-create one ms later issued the cars' CURRENT numbers, 275 among them: a
+  second create of a number he still had = the assert.
+- Every path that sends a car delete now names the number the client holds (INSERT-CULL joins
+  delete_car / kill deletes / re-entry cleanup from v968f6r), and every path that forgets a car peer
+  (INSERT-CULL, silence cull, client delete-notify x2, world forget on death) also drops his held /
+  cell_at entries; the delete-notify handler resolves a held number to the canonical car.
+
+v968f6y (2026-10-29) - tick-lag meter + opt-in stamp compensation (Meno's jumping world, messages72)
+- Meno 20:56:27-43 and 21:02:55-21:08 (relog): 1,579 client 'Move1' resets - every object he held
+  (tank column 757-764/825/838 ~165 each, Clyde 718 x208, a train) hit the 300-tick age limit about
+  once a second with the age steady at 300-470 ticks; first episode the age GREW ~10 ticks/s from
+  629 to 796 over 16 s. His link: 33-37 ms, no loss, no TICK-RESYNC/JITTER/CLOCK line; Clyde's
+  frames steady. RE check: the client stamps every outgoing body with the conductor DAT_00cb9f20
+  (NetworkBody packers FUN_007e3450/007e4800/007e37d0) - the same counter it judges incoming frames
+  by - so a constant age on EVERYTHING means his frames reach us late by a steady amount: our stamps
+  (projected from the tick in his last frame) lag his conductor by exactly that. The conductor is
+  reset only by Timer init ('Start frames', FUN_007cf100) = every arena entry - so back-to-lobby and
+  re-enter clears it, a full relog is not needed; but players should not have to.
+- Server-side: D = wall-clock ticks since the long-baseline origin - his conductor's advance.
+  A slow clock (Chuckdiver, 43/s) grows D linearly for ever; a transit lag jumps and plateaus.
+  CLOCK-LAG line every 60 s when |D| >= 100 ticks (says plateau/transit or drifting/clock, rtt).
+  `clock comp on` adds a plateaued D to every stamp sent to that pilot (relay + AI paths) so frames
+  read current on his screen - OFF by default until seen working on a real episode; `clock comp`
+  lists every pilot's D, slope and compensation. Chuckdiver-type drift is never compensated.
+
 v968f6x (2026-10-29) - infantry does not fight tanks (Alon 18:26, supersedes the v746f5 'clear the tanks first' rule)
 - User rule: soldiers are not supposed to kill tanks; it takes a massive number of them, and even then
   only the lighter tanks after aircraft have already damaged them - 'very very rare'.

@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6x'
+VERSION = 'v968f6z'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7455,6 +7455,16 @@ def console_handler():
                     _secs = float(_a[1]) if len(_a) > 1 else 120.0
                     _t._rel_trace_until = time.time() + _secs
                     log('CONSOLE', f'reltrace: reliable channel of {_a[0]} logged for {_secs:.0f}s (RELTRACE)')
+            elif cmd == 'clock':                                                        # v968f6y: clock comp [on|off]
+                global STAMP_LAG_COMP
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if len(_a) >= 2 and _a[0].lower() == 'comp' and _a[1].lower() in ('on', 'off'):
+                    STAMP_LAG_COMP = (_a[1].lower() == 'on')
+                log('CONSOLE', f'tick-lag stamp compensation = {"ON" if STAMP_LAG_COMP else "off"} (applies when D >= {CLOCK_LAG_WARN_TICKS} ticks and plateaued; `clock comp on|off`)')
+                for _s in get_all_sessions():
+                    if getattr(_s, 'entered_game', False) and _s.__dict__.get('_tick_lag') is not None:
+                        log('CONSOLE', f'  {_s.current_pilot}: D={_s._tick_lag:+.0f} ticks ({_s._tick_lag / TICK_RATE_DEFAULT:+.1f}s) '
+                                       f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}')
             elif cmd == 'clocks':
                 # v935f5: every in-game session's measured conductor rate (ticks/s against the
                 # server's wall clock), not just the >2% outliers the CLOCK line reports. The
@@ -13636,6 +13646,20 @@ RELAY_TICK_MONOTONIC = True     # v883f5: never stamp an object earlier than its
 RELAY_TICK_PROJECT_MAX_S = 10.0 # v883f5: projection cap (= STALE_TICK_EXTRAP_MAX_S; beyond it the sender's tick passes)
 CLOCK_DRIFT_WARN_PCT = 2.0      # v912f5: a client conductor this far off TICK_RATE_DEFAULT is logged as drifting
 CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5 min
+# v968f6y [THE WORLD JUMPING ON ONE PILOT'S SCREEN] (Meno 10-29 20:56 and 21:02-21:08, messages72): every object
+# he held - the tank column, a train, Clyde's plane - hit the client's 300-tick 'Move1' reset once a second for
+# six minutes, the frame age steady at 300-470 ticks, until he relogged. His link was clean (35 ms, no loss)
+# and his frames reached us at 50/s. The one thing that produces a CONSTANT age on everything is a lag between
+# the conductor his client judges frames by and the tick in his frames when they reach us - i.e. his frames
+# arriving late by a steady amount. The server can measure that: wall-clock ticks since the baseline origin
+# minus his conductor's advance = TICK LAG D (a slow clock also grows D, but linearly and for ever; a transit
+# lag jumps and plateaus). Logged as CLOCK-LAG; with STAMP_LAG_COMP on, a plateaued D is added to every stamp
+# sent to him so the frames read current on his screen - the server-side substitute for the relog.
+CLOCK_LAG_WARN_TICKS   = 100     # 2 s
+CLOCK_LAG_LOG_S        = 60.0
+CLOCK_LAG_STABLE_SLOPE = 2.0     # ticks/s: below this D is a plateau (transit lag), above it a clock-rate difference
+CLOCK_LAG_SLOPE_WINDOW = 30.0    # s over which the slope is taken
+STAMP_LAG_COMP         = False   # console `clock comp on|off` - compensation is opt-in until it is seen working
 # v936f5 [THE 48.4/s 'SLOW CLOCK' WAS THE METER, NOT THE CLOCK]. Three independent proofs on 10-19:
 #   (1) FA.exe Timer FUN_007cf180 (disassembled from the binary): ticks = elapsed/20 with the remainder
 #       carried in lastTickTime, globalTick written nowhere else, telemetry stamps globalTick at [rec+1]
@@ -13790,6 +13814,34 @@ def _harvest_tick(src, pl):
         _un = _o[1] + _s16(t - prev)
         src._tick_origin = (_o[0], _un)
         _span = now - _o[0]
+        # v968f6y: tick lag D (see CLOCK_LAG_*)
+        try:
+            _D = _span * TICK_RATE_DEFAULT - _un
+            src._tick_lag = _D
+            _hist = src.__dict__.setdefault('_tick_lag_hist', [])
+            if not _hist or now - _hist[-1][0] >= 5.0:
+                _hist.append((now, _D))
+                while len(_hist) > 1 and now - _hist[0][0] > CLOCK_LAG_SLOPE_WINDOW + 5.0:
+                    _hist.pop(0)
+            _old = next((h for h in _hist if now - h[0] >= CLOCK_LAG_SLOPE_WINDOW), None)
+            _slope = (_D - _old[1]) / max(1.0, now - _old[0]) if _old is not None else None
+            src._tick_lag_slope = _slope
+            _stable = _slope is not None and abs(_slope) <= CLOCK_LAG_STABLE_SLOPE and _span >= TICK_RATE_LONG_MIN_S
+            _comp = int(round(_D)) if (STAMP_LAG_COMP and _stable and abs(_D) >= CLOCK_LAG_WARN_TICKS) else 0
+            if _comp != src.__dict__.get('_stamp_comp', 0):
+                log('CLOCK-LAG', f'{getattr(src, "current_pilot", "?")}: stamp compensation {src.__dict__.get("_stamp_comp", 0)} -> {_comp} ticks')
+            src._stamp_comp = _comp
+            if abs(_D) >= CLOCK_LAG_WARN_TICKS and _span >= TICK_RATE_LONG_MIN_S \
+                    and now - src.__dict__.get('_lag_logged', 0.0) >= CLOCK_LAG_LOG_S:
+                src._lag_logged = now
+                _rtt = src.__dict__.get('_rtt_ms')
+                log('CLOCK-LAG', f'{getattr(src, "current_pilot", "?")}: his frames run {_D / TICK_RATE_DEFAULT:+.1f} s '
+                                 f'{"behind" if _D > 0 else "ahead of"} the wall clock (D={_D:+.0f} ticks over {_span:.0f}s, '
+                                 f'slope {_slope:+.1f}/s{" = plateau: transit lag" if _stable else " = drifting: clock rate"}, '
+                                 f'rtt {_rtt if _rtt is not None else "?"} ms) - every frame we stamp for him reads that old on his screen'
+                                 + (f'; compensating {_comp:+d} ticks' if _comp else ' (compensation off)'))
+        except Exception:
+            pass
         if _span >= TICK_RATE_LONG_MIN_S:
             src._tick_rate_long = _un / _span
             # v912f5/v936f5 [CLIENT CLOCK DRIFT - REAL]: only a SUSTAINED deviation of the long rate
@@ -13856,7 +13908,8 @@ def _relay_stamp_for(p, onum):
     if age > RELAY_TICK_PROJECT_MAX_S or (age > STALE_TICK_WARN_S and not STALE_TICK_EXTRAP):
         return None
     rate = _tick_rate_clamped(p)
-    stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD + _lag_lead_ticks(p, rate)) & 0xFFFF   # v968f5v lag lead
+    stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD + _lag_lead_ticks(p, rate)
+             + int(p.__dict__.get('_stamp_comp', 0))) & 0xFFFF   # v968f5v lag lead; v968f6y tick-lag compensation
     if RELAY_TICK_MONOTONIC:
         sl = p.__dict__.setdefault('_stamp_last', {})
         last = sl.get(onum)
@@ -13886,7 +13939,8 @@ def _ai_stamp(sess, onum):
             age = time.time() - getattr(sess, 'last_telem_time', 0.0)
             if base is not None and 0.0 <= age <= RELAY_TICK_PROJECT_MAX_S:
                 rate = _tick_rate_clamped(sess)
-                st = (int(base) + int(age * rate) + _lag_lead_ticks(sess, rate)) & 0xFFFF   # v968f5v lag lead
+                st = (int(base) + int(age * rate) + _lag_lead_ticks(sess, rate)
+                      + int(sess.__dict__.get('_stamp_comp', 0))) & 0xFFFF   # v968f5v lag lead; v968f6y tick-lag compensation
                 if RELAY_TICK_MONOTONIC:
                     sl = sess.__dict__.setdefault('_stamp_last', {})
                     last = sl.get(('ai', onum))
@@ -14726,6 +14780,7 @@ def _ai_peer_send_ok(obj, p, x, y, now, kind='tank', onum=None):
             _sl[p.addr] = now
         elif now - _t0 >= AI_SILENCE_CULL_S:
             obj.get('peers', set()).discard(p.addr)
+            obj.get('held', {}).pop(p.addr, None); obj.get('cell_at', {}).pop(p.addr, None)   # v968f6z
             _sl.pop(p.addr, None)
             try:
                 _note_client_cull(p, onum if onum is not None else -1, x, y)
@@ -18004,8 +18059,15 @@ def _mirror_insert_cull_ai(s, x, y):
                 if o.get('room') != rid or addr not in o.get('peers', ()):
                     continue
                 if math.hypot(o['pos'][0] - x, o['pos'][1] - y) > lim:
+                    # v968f6z [CTD: !Objects[no->Number()]] (Flakmagic/Inky 10-29 21:54:07, messages78): a rotated lorry
+                    # (v968f6r) lives on the client under its HELD number; this delete named the canonical one, the
+                    # client kept its copy, and the re-create one ms later issued that very number again -> duplicate
+                    # create = Network.cpp:391 assert. Name the number HE holds, and forget his held/cell entries.
+                    _wire = _car_num_for(o, addr, onum) if kind == 'car' else onum
+                    if kind == 'car':
+                        o.get('held', {}).pop(addr, None); o.get('cell_at', {}).pop(addr, None)
                     o['peers'].discard(addr); n += 1; kinds[kind] = kinds.get(kind, 0) + 1
-                    dels.append(bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', onum & 0xFFFF))
+                    dels.append(bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _wire & 0xFFFF))
         for onum, tr in list(TRAINS.items()):
             if tr.get('room') != rid or addr not in tr.get('peers', ()):
                 continue
@@ -18053,6 +18115,8 @@ def _ai_cull_list(s, ids):
         if addr not in coll[onum]['peers']:
             continue
         coll[onum]['peers'].discard(addr); n += 1
+        if coll is CARS:
+            coll[onum].get('held', {}).pop(addr, None); coll[onum].get('cell_at', {}).pop(addr, None)   # v968f6z
         _kind = 'tank' if coll is TANKS else ('soldier' if coll is SOLDIERS else ('train' if coll is TRAINS else ('car' if coll is CARS else 'ship')))
         try:                                                     # v785f5: start the re-create cooldown
             if coll is TRAINS:
@@ -18093,7 +18157,7 @@ def _tank_note_client_delete(s, pl):
             return
         i = 5
         while i + 2 <= len(body):
-            onum = struct.unpack_from('<H', body, i)[0]
+            onum = car_resolve(struct.unpack_from('<H', body, i)[0])     # v968f6z: a rotated lorry's held number
             t = TANKS.get(onum)
             sd = SOLDIERS.get(onum)
             if t is not None:
@@ -18116,6 +18180,7 @@ def _tank_note_client_delete(s, pl):
                 _c = CARS[onum]
                 if getattr(s, 'addr', None) in _c['peers']:
                     _c['peers'].discard(s.addr)
+                    _c.get('held', {}).pop(s.addr, None); _c.get('cell_at', {}).pop(s.addr, None)   # v968f6z
                     _note_client_cull(s, onum, _c['pos'][0], _c['pos'][1])
                     log('CAR', f'{s.current_pilot} dropped car 0x{onum:04x} (client delete notify) - re-created when back within range')
                 i += 2
@@ -27841,6 +27906,7 @@ def handle_leave_arena(s):
         _tr['peers'].discard(getattr(s, 'addr', None))
     for _c in CARS.values():                       # v963f5c
         _c['peers'].discard(getattr(s, 'addr', None))
+        _c.get('held', {}).pop(getattr(s, 'addr', None), None); _c.get('cell_at', {}).pop(getattr(s, 'addr', None), None)   # v968f6z
     for _sh in SHIPS.values():                     # v967f5
         _sh['peers'].discard(getattr(s, 'addr', None))
     try:
