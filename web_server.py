@@ -3268,6 +3268,86 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
 
+        # ---- WHO'S ONLINE (v968f7a, Alon 10-30: for the fa-re.net "WHO'S ONLINE" block) ------------
+        # /whosonline/onlineplayers.json - the feed: who is connected and in which arena, CORS-open,
+        #                                  no-store, so the website (or anyone) can poll it.
+        # /whosonline                    - the embeddable page: a dark badge like /ticker, refreshed
+        #                                  every 5 s from the feed, grouped by arena; colours can be
+        #                                  matched to the site with ?bg=&fg=&accent=&muted= (hex, no #).
+        elif self.path.split('?')[0] in ('/whosonline/onlineplayers.json', '/whosonline.json'):
+            data = None
+            fn = SRV.get('online_players')
+            if fn:
+                try:
+                    data = fn()
+                except Exception:
+                    data = None
+            if not isinstance(data, dict):
+                data = {'updated': None, 'connected': 0, 'in_arena': 0, 'flying': 0, 'arenas': [], 'players': []}
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(body)
+
+        elif self.path.split('?')[0] in ('/whosonline', '/whosonline/'):
+            _q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            def _hex(k, d):
+                v = (_q.get(k, [''])[0] or '').strip().lstrip('#')
+                return ('#' + v) if re.fullmatch(r'[0-9a-fA-F]{3}|[0-9a-fA-F]{6}', v or '') else d
+            bg, fg, accent, muted = _hex('bg', '#1e1e1e'), _hex('fg', '#e6e6e6'), _hex('accent', '#7ec97e'), _hex('muted', '#888888')
+            page = ("""<!DOCTYPE html><html><head><meta charset="utf-8">
+<title>Fighter Ace - who's online</title>
+<style>
+html,body{margin:0;padding:0;background:%(bg)s;color:%(fg)s;font-family:Consolas,'Courier New',monospace;font-size:14px;}
+#w{padding:8px 14px;}
+.hd{color:%(accent)s;letter-spacing:.06em;text-transform:uppercase;font-size:13px;margin:0 0 6px 0;}
+.hd .n{color:%(fg)s;}
+.ar{margin:8px 0 2px 0;color:%(accent)s;text-transform:uppercase;font-size:12px;letter-spacing:.05em;}
+.ar .c{color:%(muted)s;text-transform:none;letter-spacing:0;}
+.pl{margin:0;padding:0 0 0 12px;list-style:none;}
+.pl li{line-height:1.5;white-space:nowrap;}
+.pl .side{color:%(muted)s;font-size:12px;}
+.pl .fly{color:%(accent)s;}
+.lobby{color:%(muted)s;margin-top:8px;font-size:12px;}
+.zero{color:%(muted)s;}
+</style></head><body><div id="w"><div class="hd">Who's online <span class="n">&hellip;</span></div><div id="b"></div></div>
+<script>
+function esc(t){return String(t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function tick(){
+ fetch('/whosonline/onlineplayers.json').then(function(r){return r.json();}).then(function(d){
+  var n=document.querySelector('.hd .n'); var b=document.getElementById('b');
+  n.textContent='\u00b7 '+d.connected+' connected \u00b7 '+d.in_arena+' in arena \u00b7 '+d.flying+' flying';
+  n.className='n'+(d.connected>0?'':' zero');
+  var html='';
+  var byArena={};
+  d.players.forEach(function(p){ if(p.arena_id===null||p.arena_id===undefined) return; (byArena[p.arena_id]=byArena[p.arena_id]||[]).push(p); });
+  d.arenas.forEach(function(a){
+   html+='<div class="ar">'+esc(a.arena)+' <span class="c">('+a.players+(a.flying?', '+a.flying+' flying':'')+')</span></div><ul class="pl">';
+   (byArena[a.arena_id]||[]).forEach(function(p){
+    html+='<li>'+(p.state==='flying'?'<span class="fly">&#9992;</span> ':'&nbsp;&nbsp;')+esc(p.pilot)
+        +(p.side?' <span class="side">'+esc(p.side)+'</span>':'')
+        +(p.minutes!==null&&p.minutes!==undefined?' <span class="side">'+p.minutes+' min</span>':'')+'</li>';
+   });
+   html+='</ul>';
+  });
+  var lobby=d.players.filter(function(p){return p.arena_id===null||p.arena_id===undefined;});
+  if(lobby.length) html+='<div class="lobby">In the lobby: '+lobby.map(function(p){return esc(p.pilot);}).join(', ')+'</div>';
+  if(!d.players.length) html='<div class="zero">Nobody online right now.</div>';
+  b.innerHTML=html;
+ }).catch(function(){});
+}
+tick();setInterval(tick,5000);
+</script></body></html>""" % {'bg': bg, 'fg': fg, 'accent': accent, 'muted': muted})
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(body)
+
         elif self.path == '/ticker':
             page = ("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
                     "<title>Fighter Ace - players online</title>"
@@ -4895,7 +4975,8 @@ def start_web_server(db_path, get_ticket_fn, gen_ticket_fn, log_fn, settings_rea
                      password_read_fn=None, arena_reset_fn=None, craters_defaults_fn=None,
                      server_py=None, version=None, push_lobby_news_fn=None, plane_roster_fn=None,
                      reality_read_fn=None, radar_read_fn=None, tournament_read_fn=None,
-                     evs_parse_fn=None):
+                     evs_parse_fn=None, online_players_fn=None):
+    SRV['online_players'] = online_players_fn        # v968f7a: web_online_players() -> dict (/whosonline)
     SRV['reality_read'] = reality_read_fn   # v948f5: date/time/weather editor defaults
     SRV['radar_read'] = radar_read_fn       # v949f5: radar editor defaults
     SRV['tournament_read'] = tournament_read_fn   # v952f5: tournament editor defaults

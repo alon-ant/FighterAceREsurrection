@@ -1,3 +1,16 @@
+v968f7a (2026-10-30) - WHO'S ONLINE feed + page for fa-re.net (Alon 00:21)
+- server.py: web_online_players() - every authenticated session with a pilot picked: pilot, arena
+  (rooms.room_name, cached 60 s), side tag, state lobby|arena|flying, minutes in the arena
+  (s._room_entered_at stamped at both arena-entry sites); per-arena counts; the three totals as
+  /ticker.json. No addresses, no account names. Handed to the web server as online_players_fn.
+- web_server.py: /whosonline/onlineplayers.json (alias /whosonline.json) - the feed, CORS-open,
+  no-store, for the website's own JS; /whosonline - the embeddable page (dark badge in the /ticker
+  family, Consolas, green accent, uppercase headings like the site's nav), refreshed every 5 s like
+  /ticker, players grouped by arena with a plane glyph for the ones flying, lobby names in a line;
+  ?bg=&fg=&accent=&muted= (hex, no #) to match fa-re.net's colours exactly. Both public (no login),
+  /ticker and /ticker.json unchanged.
+- Deploy: server.py + web_server.py together.
+
 v968f6z (2026-10-30) - CTD after a chute landing: duplicate create of a rotated lorry (Flakmagic/Inky, messages78)
 - 21:54:07 live (v968f6x): 'Assertion failed (!Objects[no->Number()]) Network.cpp:391' on 'Create
   NetCar (furgon) ONumber=275'. His client had held 275 since 21:45:42 (a rotation copy, v968f6r) and

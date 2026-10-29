@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f6z'
+VERSION = 'v968f7a'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13486,6 +13486,7 @@ def _maybe_grant_create_entry(s):
     if s.entered_game or s.client_granted or s.current_room is None:
         return False
     s.entered_game = True
+    s._room_entered_at = time.time()                  # v968f7a: /whosonline 'minutes in arena'
     s.__dict__.pop('_motd_room', None)          # v893f5
     s.nation = None                                   # "In Menu" until a side is picked
     assign_player_slot(s, s.current_room)
@@ -25444,6 +25445,66 @@ def web_player_counts():
     except Exception:
         return {'connected': 0, 'in_arena': 0, 'flying': 0}
 
+_ROOM_NAME_CACHE = {'at': 0.0, 'names': {}}
+
+def _room_names_cached():
+    """room_id -> room_name from the DB, refreshed every 60 s (the /whosonline feed polls at 5 s)."""
+    now = time.time()
+    if now - _ROOM_NAME_CACHE['at'] > 60.0:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            _ROOM_NAME_CACHE['names'] = {int(r[0]): (r[1] or f'Arena {r[0]}') for r in conn.execute("SELECT room_id, room_name FROM rooms").fetchall()}
+            conn.close()
+        except Exception:
+            pass
+        _ROOM_NAME_CACHE['at'] = now
+    return _ROOM_NAME_CACHE['names']
+
+def web_online_players():
+    """v968f7a (Alon 10-30 00:21): the WHO'S ONLINE feed for fa-re.net - who is connected and in which
+    arena. A CALLABLE handed to the web server (same pattern as web_player_counts) so every poll of
+    /whosonline/onlineplayers.json is the session table at that instant. Pilot name, arena, side and
+    state only - no addresses, no account names."""
+    out = {'updated': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'connected': 0, 'in_arena': 0,
+           'flying': 0, 'arenas': [], 'players': []}
+    try:
+        names = _room_names_cached()
+        with sl:
+            ss = [s for s in sids.values() if s.auth_done and not s.closing]
+        now = time.time()
+        rows = []
+        per_arena = {}
+        for s in ss:
+            pilot = getattr(s, 'current_pilot', None)
+            if not pilot:
+                continue                                    # logged in, no pilot picked yet
+            rid = getattr(s, 'current_room', None) if getattr(s, 'entered_game', False) else None
+            state = 'flying' if getattr(s, 'flying', False) else ('arena' if rid is not None else 'lobby')
+            camp = getattr(s, 'nation', None) if rid is not None else None
+            try:
+                side = tc_camp_tag(camp) if camp is not None and camp <= 6 else None
+            except Exception:
+                side = None
+            since = s.__dict__.get('_room_entered_at') if rid is not None else None
+            rows.append({'pilot': pilot, 'arena_id': rid, 'arena': names.get(rid) if rid is not None else None,
+                         'side': side, 'state': state,
+                         'minutes': int((now - since) / 60) if isinstance(since, (int, float)) and since > 0 else None})
+            out['connected'] += 1
+            if rid is not None:
+                out['in_arena'] += 1
+                per_arena.setdefault(rid, {'arena_id': rid, 'arena': names.get(rid) or f'Arena {rid}', 'players': 0, 'flying': 0})
+                per_arena[rid]['players'] += 1
+                if state == 'flying':
+                    per_arena[rid]['flying'] += 1
+            if state == 'flying':
+                out['flying'] += 1
+        rows.sort(key=lambda r: ((r['arena'] or '~').lower(), r['pilot'].lower()))
+        out['players'] = rows
+        out['arenas'] = sorted(per_arena.values(), key=lambda a: a['arena'].lower())
+    except Exception:
+        pass
+    return out
+
 def web_scoring_reference():
     """v404f5: everything the web /scoring reference page renders, in one dict. A CALLABLE
     handed to the web server (not a copy of the data) so the page always reflects the
@@ -28930,6 +28991,7 @@ def handle_compound(s, outer_cmd, pl):
             if pname not in existing:
                 db_room_join(s.current_room, pname, s.account or '')
         s.entered_game = True
+        s._room_entered_at = time.time()        # v968f7a: /whosonline 'minutes in arena'
         s.__dict__.pop('_motd_room', None)      # v893f5: a new arena entry on this connection
         s.entering_gidx = game_idx
         s.nation = None                       # enters "In Menu" until a side is picked
@@ -37609,6 +37671,7 @@ threading.Thread(
           extract_date_from_gamedef),
     kwargs={'scoring_ref_fn': web_scoring_reference,    # v404f5: /scoring page + ladder ranks
             'player_counts_fn': web_player_counts,      # v418f5: console player counter
+            'online_players_fn': web_online_players,    # v968f7a: /whosonline feed for fa-re.net
             'password_read_fn': arena_password_read,    # arena editor: current arena password
             'arena_reset_fn': lambda rid, winner, by: arena_reset(rid, winner_camp=winner, by=by),   # v640f5
             'craters_defaults_fn': lambda: (CRATERS_VANISH_MIN, CRATERS_VANISH_MAX),           # v686f5
