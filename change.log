@@ -1,3 +1,35 @@
+v968f7f (2026-10-30) - rebasing a client's NET clock (Alon 10:36: 'there must be a way to fix slow clocks')
+- There is: the STATUS request's base_incr_ms, which the client ADDS to its NET-time base (vcncNet
+  FUN_10007d13, found in v215). v937f5 already described the disease this cures: an increment that
+  never lands leaves the client 2 s low for good, his TimeSync sees the step and slews the conductor at
+  ~70% for 7 s - the 'jumping' on his screen. TimeCheck (v968f7e) now measures the deficit directly.
+- Per pilot: the NET-clock offset vs ours at entry = reference (median of the first 3 samples). When
+  three consecutive samples sit >= TIMECHECK_REBASE_MS (300) behind it, the next STATUS increment is
+  topped up by the deficit (cap 8 s, at most once per 30 s) - FORWARD only; a clock running ahead is
+  logged, never stepped back (a backward NET-time step is the client's 'HUGE backward NET Time'
+  meltdown). CLOCK-REBASE log lines; `clocks` shows the live offset.
+- OFF by default: every decision is logged '(dry)' until `clock rebase on`. Watch one session of dry
+  lines first: if the deficits it reports match the pilots who complain of jumping, switch it on.
+
+v968f7e (2026-10-30) - msg 89 TimeCheck probe; TC triggers on their real id (38); msg 6 never echoed
+- The client's inbound dispatch table (FA.exe registration block FUN_004f1300, base 0xc81ed8) was read
+  end to end and each handler named (see the 09:43 inventory). Three results applied, the rest noted.
+- msg 89 (0x59) TimeCheck: [0x59][SendTime u32] -> the client answers [0x59][SendTime][ReceiveTime]
+  with ReceiveTime = vcncGetTime(), its NET clock in ms = the conductor's time base. Sent every
+  TIMECHECK_PERIOD_S (5 s) to every in-game session on the STATUS loop (unreliable); the reply gives
+  the round trip (our wall clock) and OFFSET = his NET clock vs ours. TIMECHECK lines: a JUMP of
+  >= 400 ms between samples (the storm signature, read off his clock directly), a drift >= 1% over
+  the last two minutes, and a summary every 5 min; `clocks` shows offset / rtt / drift per pilot.
+  The client logs 'TimeCheckCB ...' when ReceiveTime-SendTime is outside -20..2000 ms and does nothing
+  else with it (the two debounce dwords it keeps are read by nobody) - harmless with our time base.
+- TC_EVENT is msg 38 (0x26), not 104: the handler 0x4fa080 ('TC_EVENT. %i %s Scene=%i'; type 1 =
+  defence, type 2 -> AttackTrigger(scene, camp, name)) sits at slot (0xc8203c-0xc81ed8)/4 = 38; the
+  0x4fa0b0 the v601 decode called msg 104 is the middle of that handler, and slot 104 is empty. Same
+  layout [id][type][camp][scene u16][pilot\0], id 0x26, TC_USE_MSG104 back ON (TC_EVENT_MSG_ID). The
+  AI-chat mission lines stay on until the script lines are seen.
+- NO_ECHO_SUBS += 0x06 (the client's 3-byte msg 6 has no inbound handler: 91 'Unsupported message 6'
+  in the uploaded logs, one per echo) and 0x59.
+
 v968f7d (2026-10-30) - the 'is it the lorries?' lever: convoy pause + rotation budget (Alon 09:11)
 - Evidence so far is circumstantial: the two jump storms (Meno 10-29 21:02, Inky 10-29 23:29) both
   happened in arenas with convoys rolling; Meno's began 25 s after his client silence-culled six

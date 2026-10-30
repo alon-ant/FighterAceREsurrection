@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7d'
+VERSION = 'v968f7f'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7455,16 +7455,21 @@ def console_handler():
                     _secs = float(_a[1]) if len(_a) > 1 else 120.0
                     _t._rel_trace_until = time.time() + _secs
                     log('CONSOLE', f'reltrace: reliable channel of {_a[0]} logged for {_secs:.0f}s (RELTRACE)')
-            elif cmd == 'clock':                                                        # v968f6y: clock comp [on|off]
-                global STAMP_LAG_COMP
+            elif cmd == 'clock':                                                        # v968f6y: clock comp [on|off]; v968f7f: clock rebase [on|off]
+                global STAMP_LAG_COMP, CLOCK_REBASE
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 if len(_a) >= 2 and _a[0].lower() == 'comp' and _a[1].lower() in ('on', 'off'):
                     STAMP_LAG_COMP = (_a[1].lower() == 'on')
+                if len(_a) >= 2 and _a[0].lower() == 'rebase' and _a[1].lower() in ('on', 'off'):
+                    CLOCK_REBASE = (_a[1].lower() == 'on')
+                log('CONSOLE', f'NET-clock rebase via STATUS increment = {"ON" if CLOCK_REBASE else "off (dry-run lines only)"} (`clock rebase on|off`; forward only, >= {TIMECHECK_REBASE_MS} ms behind the entry reference on 3 TimeCheck samples)')
                 log('CONSOLE', f'tick-lag stamp compensation = {"ON" if STAMP_LAG_COMP else "off"} (applies when D >= {CLOCK_LAG_WARN_TICKS} ticks and plateaued; `clock comp on|off`)')
                 for _s in get_all_sessions():
                     if getattr(_s, 'entered_game', False) and _s.__dict__.get('_tick_lag') is not None:
+                        _o = _s.__dict__.get('_tc89_off'); _sl = _s.__dict__.get('_tc89_slope')
                         log('CONSOLE', f'  {_s.current_pilot}: D={_s._tick_lag:+.0f} ticks ({_s._tick_lag / TICK_RATE_DEFAULT:+.1f}s) '
-                                       f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}')
+                                       f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}'
+                                       + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet'))
             elif cmd == 'clocks':
                 # v935f5: every in-game session's measured conductor rate (ticks/s against the
                 # server's wall clock), not just the >2% outliers the CLOCK line reports. The
@@ -13659,6 +13664,117 @@ CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5
 # minus his conductor's advance = TICK LAG D (a slow clock also grows D, but linearly and for ever; a transit
 # lag jumps and plateaus). Logged as CLOCK-LAG; with STAMP_LAG_COMP on, a plateaued D is added to every stamp
 # sent to him so the frames read current on his screen - the server-side substitute for the relog.
+# v968f7e [msg 89 TIMECHECK - THE CLIENT'S CLOCK, READ DIRECTLY]. FA.exe registers at slot 89 (0x59) the handler
+# 0x4f5290: on [0x59][SendTime u32] it replies [0x59][SendTime][ReceiveTime] with ReceiveTime = vcncGetTime(),
+# the vcnc NET clock in ms - the same clock the conductor runs on (Timer.cpp via the time hook). Nothing else
+# in the client acts on it (it logs 'TimeCheckCB ...' when ReceiveTime - SendTime is outside -20..2000 ms and
+# keeps two private debounce dwords nobody reads). So it is a free probe: round trip (our wall clock), and
+# OFFSET = ReceiveTime - our ms at send = his NET clock against ours. A steady offset is fine whatever its
+# value; a JUMP (TIMECHECK_JUMP_MS) or a drift (slope) is his clock moving - the storm signature, seen
+# without a single frame involved. Sent on the STATUS cadence to in-game sessions; `clocks` shows it.
+TIMECHECK_ENABLE   = True
+TIMECHECK_PERIOD_S = 5.0
+TIMECHECK_JUMP_MS  = 400
+TIMECHECK_LOG_S    = 300.0   # a steady summary per pilot this often; jumps and drift are logged as they happen
+TIMECHECK_DRIFT_WARN_PCT = 1.0
+# v968f7f [REBASING A CLIENT'S CLOCK] (Alon 10-30 10:36: 'there must be a way to fix slow clocks'). There is, and
+# it is the knob v215 found: every STATUS request carries base_incr_ms, which the client ADDS to its NET-time
+# base (vcncNet FUN_10007d13). The v937f5 note describes the failure this repairs: a STATUS increment that
+# never lands leaves his NET clock 2 s LOW for good, his TimeSync sees a -2 s step and slews the conductor
+# at ~70% for 7 s - 'every remote object on his screen catches up/jumps'. TimeCheck now measures the
+# deficit directly: his offset vs ours is taken at entry (median of the first samples = _tc89_ref) and
+# whenever he has fallen >= TIMECHECK_REBASE_MS behind that reference on three samples in a row, the next
+# STATUS increment is topped up by the deficit (forward only - a BACKWARD NET-time step is the client's
+# 'CRAP!!! HUGE backward NET Time' meltdown, so a clock running AHEAD is only logged), at most once per
+# TIMECHECK_REBASE_MIN_S and at most TIMECHECK_REBASE_MAX_MS at a time. Off by default: `clock rebase on`;
+# while off every decision is logged as '(dry)' so the behaviour can be watched first.
+CLOCK_REBASE            = False
+TIMECHECK_REBASE_MS     = 300
+TIMECHECK_REBASE_MIN_S  = 30.0
+TIMECHECK_REBASE_MAX_MS = 8000
+
+def send_timecheck_89(s):
+    try:
+        send_ms = int(time.time() * 1000) & 0xFFFFFFFF
+        pend = s.__dict__.setdefault('_tc89_pending', {})
+        pend[send_ms] = time.time()
+        for k in [k for k in pend if time.time() - pend[k] > 30.0]:
+            pend.pop(k, None)
+        sock.sendto(build_appspace_pkt(bytes([0x59]) + struct.pack('<I', send_ms)), s.addr)
+        s._tc89_sent = time.time()
+    except Exception:
+        pass
+
+def handle_timecheck_89(s, pl):
+    """[0x59][SendTime u32][ReceiveTime u32] from the client (pl[4] = 0x59)."""
+    try:
+        if len(pl) < 13:
+            return
+        send_ms, recv_ms = struct.unpack_from('<II', bytes(pl), 5)
+        now = time.time()
+        pend = s.__dict__.get('_tc89_pending') or {}
+        t0 = pend.pop(send_ms, None)
+        if t0 is None:
+            return                                           # not ours (or older than 30 s)
+        rtt = now - t0
+        # his NET-clock reading minus our send instant, corrected for half the round trip (u32, wrap-aware)
+        off = ((recv_ms - send_ms) & 0xFFFFFFFF)
+        if off >= 0x80000000:
+            off -= 0x100000000
+        off -= int(rtt * 500)
+        d = s.__dict__
+        prev = d.get('_tc89_off')
+        hist = d.setdefault('_tc89_hist', [])
+        hist.append((now, off))
+        while hist and now - hist[0][0] > 120.0:
+            hist.pop(0)
+        d['_tc89_off'] = off; d['_tc89_rtt_ms'] = int(rtt * 1000); d['_tc89_n'] = d.get('_tc89_n', 0) + 1
+        # v968f7f: the entry reference and the rebase decision
+        if d.get('_tc89_ref') is None:
+            _first = d.setdefault('_tc89_first', [])
+            _first.append(off)
+            if len(_first) >= 3:
+                d['_tc89_ref'] = sorted(_first)[1]
+                log('TIMECHECK', f'{getattr(s, "current_pilot", "?")}: NET clock reference set at {d["_tc89_ref"]:+d} ms vs ours')
+        else:
+            _dev = off - d['_tc89_ref']
+            _recent = [o - d['_tc89_ref'] for _t, o in hist[-3:]]
+            if len(_recent) == 3 and all(x <= -TIMECHECK_REBASE_MS for x in _recent) \
+                    and now - d.get('_tc89_rebased_at', 0.0) >= TIMECHECK_REBASE_MIN_S:
+                _top = int(min(TIMECHECK_REBASE_MAX_MS, -max(_recent)))
+                d['_tc89_rebased_at'] = now
+                if CLOCK_REBASE:
+                    d['_tc89_rebase_ms'] = d.get('_tc89_rebase_ms', 0) + _top
+                    d['_tc89_rebases'] = d.get('_tc89_rebases', 0) + 1
+                    log('CLOCK-REBASE', f'{getattr(s, "current_pilot", "?")}: NET clock {_dev:+d} ms behind his entry reference on 3 samples '
+                                        f'-> next STATUS increment +{_top} ms (rebase #{d["_tc89_rebases"]})')
+                else:
+                    log('CLOCK-REBASE', f'{getattr(s, "current_pilot", "?")}: (dry) NET clock {_dev:+d} ms behind his entry reference on 3 samples '
+                                        f'- would top up the next STATUS increment by {_top} ms (`clock rebase on`)')
+            elif len(_recent) == 3 and all(x >= TIMECHECK_REBASE_MS for x in _recent) \
+                    and now - d.get('_tc89_ahead_logged', 0.0) >= 60.0:
+                d['_tc89_ahead_logged'] = now
+                log('CLOCK-REBASE', f'{getattr(s, "current_pilot", "?")}: NET clock {_dev:+d} ms AHEAD of his entry reference - not corrected '
+                                    f'(a backward NET-time step is the client\'s meltdown); frames to him are stamped from his own ticks anyway')
+        slope = None
+        if len(hist) >= 6 and hist[-1][0] - hist[0][0] >= 60.0:
+            slope = (hist[-1][1] - hist[0][1]) / (hist[-1][0] - hist[0][0])      # ms of his clock per s of ours, minus 1:1
+            d['_tc89_slope'] = slope
+        name = getattr(s, 'current_pilot', '?')
+        if prev is not None and abs(off - prev) >= TIMECHECK_JUMP_MS:
+            log('TIMECHECK', f'{name}: his NET clock JUMPED {off - prev:+d} ms against ours (offset {prev:+d} -> {off:+d} ms, rtt {int(rtt * 1000)} ms, '
+                             f'sample #{d["_tc89_n"]}) - frames stamped from his last tick now read that far off on his screen')
+        elif slope is not None and abs(slope) >= 10.0 * TIMECHECK_DRIFT_WARN_PCT and now - d.get('_tc89_drift_logged', 0.0) >= 60.0:
+            d['_tc89_drift_logged'] = now
+            log('TIMECHECK', f'{name}: his NET clock drifts {slope:+.1f} ms/s against ours ({slope / 10.0:+.2f}%) over the last '
+                             f'{hist[-1][0] - hist[0][0]:.0f} s (offset now {off:+d} ms, rtt {int(rtt * 1000)} ms)')
+        elif now - d.get('_tc89_logged', 0.0) >= TIMECHECK_LOG_S:
+            d['_tc89_logged'] = now
+            log('TIMECHECK', f'{name}: NET clock offset {off:+d} ms vs ours, rtt {int(rtt * 1000)} ms'
+                             + (f', drift {slope:+.1f} ms/s' if slope is not None else '') + f' ({d["_tc89_n"]} samples)')
+    except Exception:
+        logx('TIMECHECK', 'reply parse failed')
+
 CLOCK_LAG_WARN_TICKS   = 100     # 2 s
 CLOCK_LAG_LOG_S        = 60.0
 CLOCK_LAG_STABLE_SLOPE = 2.0     # ticks/s: below this D is a plateau (transit lag), above it a clock-rate difference
@@ -23198,9 +23314,13 @@ def _tc_para_capture_tick():
 #        camp, name): the blue mission lines, siren and map markers of the films come from the
 #        script. Needs a script-loaded client (DAT_00c89e80) - the chat fallback stays available.
 TC_USE_MSG41  = True
-TC_USE_MSG104 = False             # v675f5: OFF - no handler in this client build (dispatch slot 104
-                                  # empty: 'NET::MESSAGE with Unknown Type 104' in every log); the
-                                  # AI-chat mission lines carry the trigger text
+TC_USE_MSG104 = True              # v675f5: OFF - no handler in this client build (dispatch slot 104 empty).
+                                  # v968f7e: ON again with the RIGHT id - the registration block FUN_004f1300
+                                  # puts the TC_EVENT handler (0x4fa080: 'TC_EVENT. %i %s Scene=%i' -> type 1
+                                  # defence / type 2 -> AttackTrigger(scene, camp, name)) at slot 0xc8203c -
+                                  # (0xc8203c - 0xc81ed8) / 4 = 38 (0x26). The 0x4fa0b0 address the v601 decode
+                                  # called 'msg 104' is the MIDDLE of that handler. Same layout, id 0x26.
+TC_EVENT_MSG_ID = 0x26            # v968f7e
 TC_CHAT_MISSION_LINES = True      # keep the AI-chat mission lines while msg 104 is being verified
 
 def send_scene_capture_41(room_id, sidx, camp):
@@ -23212,14 +23332,15 @@ def send_scene_capture_41(room_id, sidx, camp):
     log('TC', f'room {room_id}: msg 41 capture scene {sidx} -> camp {camp} ({n} session(s))')
 
 def send_trigger_104(room_id, sub, camp, sidx, pilot_name=''):
-    body = bytes([0x68, int(sub) & 0xff, int(camp) & 0xff]) + struct.pack('<H', int(sidx) & 0xffff) \
+    body = bytes([TC_EVENT_MSG_ID, int(sub) & 0xff, int(camp) & 0xff]) + struct.pack('<H', int(sidx) & 0xffff) \
            + (pilot_name or '').encode('latin1', 'replace')[:31] + b'\x00'
     pkt = build_ingame_pkt(body)
     n = 0
     for p in get_sessions_in_room(room_id):
         if getattr(p, 'entered_game', False):
-            _submit_send(send_rel, p, pkt, f'<- TRIGGER 104 sub {sub} camp {camp} scene {sidx} by {pilot_name!r}', to=3.0); n += 1
-    log('TC', f'room {room_id}: msg 104 {"attack" if sub == 2 else "defence"}_scene({sidx}, camp {camp}, {pilot_name!r}) -> {n} session(s)')
+            _submit_send(send_rel, p, pkt, f'<- TC_EVENT {TC_EVENT_MSG_ID} sub {sub} camp {camp} scene {sidx} by {pilot_name!r}', to=3.0); n += 1
+    log('TC', f'room {room_id}: msg {TC_EVENT_MSG_ID} TC_EVENT {"attack" if sub == 2 else "defence"}_scene({sidx}, camp {camp}, {pilot_name!r}) -> {n} session(s) '
+              f'[client logs "TC_EVENT. {sub} {pilot_name} Scene={sidx}" and, with a mission script loaded, "AttackTrigger(...)"]')
 
 TC_POST_CAPTURE_GRACE_S = 120.0   # v897f5: no trigger on a scene this soon after it changed hands
 _TC_CAPTURED_AT = {}              # (room, scene) -> time of the last capture
@@ -28667,8 +28788,14 @@ def login(s):
                                                          f're-sending the same packet ({s.current_pilot})')
                                 except OSError:
                                     pass
+                        if TIMECHECK_ENABLE and s.entered_game and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S:
+                            send_timecheck_89(s)                                   # v968f7e
                         if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
                             _incr_ms = int((_now_st - s._status_last) * 1000)
+                            _top = int(s.__dict__.pop('_tc89_rebase_ms', 0) or 0)                 # v968f7f
+                            if _top > 0:
+                                _incr_ms += _top
+                                log('CLOCK-REBASE', f'{s.current_pilot}: STATUS seq {(s._status_seq + 1) & 0x1FF} carries base_incr {_incr_ms} ms (+{_top} rebase)')
                             s._status_last = _now_st
                             s._status_seq = (s._status_seq + 1) & 0x1FF
                             # v463f5 CRITICAL: NEVER advertise seq 511 (0x1FF). run_215056:
@@ -29033,6 +29160,9 @@ def handle_compound(s, outer_cmd, pl):
     # in compound (cmd=12434 or cmd=37424). It never sends a direct sub=0x43 in that
     # case, so we MUST respond here with the same 17-byte room status packet.
     # Apply the same 0.5s rate limit as the direct APPSPACE handler.
+    if inner_sub == 0x59:                                   # v968f7e: msg 89 TimeCheck reply, compound-wrapped
+        handle_timecheck_89(s, inner)
+        return
     if inner_sub == 0x43:
         now = time.time()
         if now - s.last_43_ts < 0.5:
@@ -35515,6 +35645,9 @@ def handle_post_auth(s, cmd, pl):
                     else: log('POST-AUTH','APPSPACE-scan sub=0x43 -> no room yet')
                 else: log('POST-AUTH','APPSPACE-scan sub=0x43 -> rate-limited')
                 return
+            if sub == 0x59:                                             # v968f7e: msg 89 TimeCheck reply
+                handle_timecheck_89(s, pl)
+                return
             if sub == 0x43:
                 # 0x43 poll. In lobby mode this is the room-creation confirm; after
                 # VNET::SendEnterToGame (s.entered_game) the client polls it once a second
@@ -36504,7 +36637,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69, 0x37}   # v967f5e: 0x37=msg55 carrier take-off request -> queue reply  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69, 0x37, 0x06, 0x59}   # v968f7e: 0x06 = the client's 3-byte msg 6 (no inbound handler in FA.exe -> 'Unsupported message 6' x91 in the uploaded logs on every echo); 0x59 = msg 89 TimeCheck reply (handled)   # v967f5e: 0x37=msg55 carrier take-off request -> queue reply  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite
