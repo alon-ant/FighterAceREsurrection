@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7f'
+VERSION = 'v968f7g'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10884,7 +10884,19 @@ CHAT_SERVER_COMMANDS = {
     'gunscold': lambda s, a: _cmd_guns(s, a, True),
     'gunshot':  lambda s, a: _cmd_guns(s, a, False),
     'gunsstatus': lambda s, a: ' / '.join(guns_status_text(getattr(s, 'current_room', None))),
+    'clockrebase': lambda s, a: _cmd_clockrebase(s, a),   # v968f7g: ##clockrebase on|off|status (sysops)
 }
+
+def _cmd_clockrebase(s, args):
+    global CLOCK_REBASE
+    if not sess_rights(s):
+        return 'Sysops only.'
+    a = (args[0].lower() if args else 'status')
+    if a in ('on', 'off'):
+        CLOCK_REBASE = (a == 'on')
+        log('CLOCK-REBASE', f'{"ON" if CLOCK_REBASE else "OFF"} by ##clockrebase from {getattr(s, "current_pilot", "?")}')
+    _n = sum(int(x.__dict__.get('_tc89_rebases', 0)) for x in get_all_sessions())
+    return f'NET-clock rebase is {"ON" if CLOCK_REBASE else "OFF"} ({_n} rebase(s) this run). ##clockrebase on|off'
 
 def chat_server_command(s, disp):
     """A '##word' the CLIENT did not recognise (it passes those through as chat). True = consumed."""
@@ -10906,6 +10918,39 @@ def chat_server_command(s, disp):
         for _ln in str(reply).split('\n'):
             send_system_msg(s, _ln.strip())
     return True
+
+def handle_direct_chat_21(s, pl):
+    """v968f7g [IN-ARENA PRIVATE MESSAGE - msg 21 (0x15)]. The client's whisper: when the chat line is
+    aimed at one pilot (DAT_00bfa504 = the selected target's PlayerIndex) and Enter is pressed in-game
+    (FUN_0044d460), VNET::SendDirectChat (FUN_004fc9b0) builds [0x15][target PlayerIndex u16][sender id
+    u32 = own player+0x24][text, <= 0x5a4] and sends it to the HOST. The host must forward it to the
+    target; our server had no handler, so the generic echo bounced it to the SENDER, whose inbound
+    handler (slot 21, 0x4f4700) looked the sender id up, found himself, and printed his own whisper
+    back at him - the target never saw it. Now: find the target by PlayerIndex in the sender's room and
+    forward the record unchanged (the target's handler names the sender from the id and colours it
+    friend/enemy); the sender gets a system line if the target is not there; gag applies."""
+    try:
+        body = bytes(pl)
+        if len(body) < 12 or body[4] != 0x15:
+            return
+        tgt_pi = struct.unpack_from('<H', body, 5)[0]
+        sender_id = struct.unpack_from('<I', body, 7)[0]
+        text = body[11:].split(b'\x00')[0].decode('latin1', 'replace')
+        me = getattr(s, 'current_pilot', None) or '?'
+        room = getattr(s, 'current_room', None)
+        if is_gagged(me, room) and not sess_rights(s):
+            log('CHAT21', f'gagged "{me}" whisper to PI {tgt_pi} swallowed: {text!r}')
+            return
+        dest = next((p for p in get_sessions_in_room(room) if p is not s and getattr(p, 'player_index', None) == tgt_pi
+                     and getattr(p, 'entered_game', False)), None)
+        if dest is None:
+            send_system_msg(s, 'That pilot is no longer in the arena.')
+            log('CHAT21', f'{me} -> PI {tgt_pi}: no such player in room {room} - {text!r}')
+            return
+        _submit_send(send_rel, dest, build_appspace_pkt(body[4:]), f'<- DIRECT CHAT 21 from {me} (id {sender_id}) -> {dest.current_pilot}', to=3.0)
+        log('CHAT21', f'{me} -> {dest.current_pilot} (PI {tgt_pi}): {text!r}')
+    except Exception:
+        logx('CHAT21', 'direct chat relay failed')
 
 def build_chat_display_20(channel, text, player_index=0, squadron_id=0):
     """Build the DISPLAY form of msg 20 so the client renders a chat line."""
@@ -13688,7 +13733,7 @@ TIMECHECK_DRIFT_WARN_PCT = 1.0
 # 'CRAP!!! HUGE backward NET Time' meltdown, so a clock running AHEAD is only logged), at most once per
 # TIMECHECK_REBASE_MIN_S and at most TIMECHECK_REBASE_MAX_MS at a time. Off by default: `clock rebase on`;
 # while off every decision is logged as '(dry)' so the behaviour can be watched first.
-CLOCK_REBASE            = False
+CLOCK_REBASE            = True   # v968f7g: ON by default (Alon 16:45) - ##clockrebase off / console `clock rebase off` to stop it
 TIMECHECK_REBASE_MS     = 300
 TIMECHECK_REBASE_MIN_S  = 30.0
 TIMECHECK_REBASE_MAX_MS = 8000
@@ -29163,6 +29208,9 @@ def handle_compound(s, outer_cmd, pl):
     if inner_sub == 0x59:                                   # v968f7e: msg 89 TimeCheck reply, compound-wrapped
         handle_timecheck_89(s, inner)
         return
+    if inner_sub == 0x15:                                   # v968f7g: msg 21 direct chat, compound-wrapped
+        handle_direct_chat_21(s, inner)
+        return
     if inner_sub == 0x43:
         now = time.time()
         if now - s.last_43_ts < 0.5:
@@ -35648,6 +35696,9 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0x59:                                             # v968f7e: msg 89 TimeCheck reply
                 handle_timecheck_89(s, pl)
                 return
+            if sub == 0x15:                                             # v968f7g: msg 21 direct chat (whisper)
+                handle_direct_chat_21(s, pl)
+                return
             if sub == 0x43:
                 # 0x43 poll. In lobby mode this is the room-creation confirm; after
                 # VNET::SendEnterToGame (s.entered_game) the client polls it once a second
@@ -36637,7 +36688,7 @@ def handle_post_auth(s, cmd, pl):
         # dispatch handler; echoing it makes FA log "NET::MESSAGE with Unknown Type N" and
         # drop the link. messages16.log: the client built TRN02, spawned, took off, then
         # died the instant the server echoed 83/84/24 back. 0x18=24, 0x53=83, 0x54=84.
-        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69, 0x37, 0x06, 0x59}   # v968f7e: 0x06 = the client's 3-byte msg 6 (no inbound handler in FA.exe -> 'Unsupported message 6' x91 in the uploaded logs on every echo); 0x59 = msg 89 TimeCheck reply (handled)   # v967f5e: 0x37=msg55 carrier take-off request -> queue reply  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
+        NO_ECHO_SUBS = {0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19, 0x3b, 0x47, 0x49, 0x07, 0x33, 0x71, 0x6a, 0x69, 0x37, 0x06, 0x59, 0x15}   # v968f7g: 0x15 = msg 21 direct chat, relayed to the target (handle_direct_chat_21). v968f7e: 0x06 = the client's 3-byte msg 6 (no inbound handler in FA.exe -> 'Unsupported message 6' x91 in the uploaded logs on every echo); 0x59 = msg 89 TimeCheck reply (handled)   # v967f5e: 0x37=msg55 carrier take-off request -> queue reply  # v572f5: 0x33=msg51 NetTank HIT report [victim u16][attacker u16][dmg u16] from the shooter's client to the owner station (us) - handled by _handle_tank_hit_51, never echoed. v589f5: 0x71=msg113 ParatroopRequest -> answered with msg 114. v606f5: 0x6a=msg106 CargoRequest -> answered with msg 107. v609f5: 0x69=msg105 GiveRscToScene (air-dropped cargo) -> answered with msg 107. // v442f5: 0x07=msg7 TELEMETRY added - a telemetry frame arriving on the RELIABLE channel (counter-wrapped internet forms, or the client's occasional reliable-channel state frame) fell through to the generic echo and the sender received its OWN telemetry back: the solo 'in 7'84' stream in messages62 (one every few seconds, matching the reliably-sent subset). Telemetry is relay-only (relay_telemetry, peers, re-stamped) - NEVER back to the sender ('the sender never gets its own telemetry back' is a relay invariant, v351). // v437f5: 0x3b=msg59 Ask-resources (handled -> msg-60 reply; an echo feeds the client its own request), 0x47=msg71 production QUERY (handled -> INFO reply; an ECHO is an instant CTD - the receiver asserts (Length-7)%83==0, VNet_Rcv.cpp:1496, messages55 2026-08-14), 0x49=msg73 SendRepairInfo load-state report (fire-and-forget to the server; 2009 relays it to PEERS ('Repair PlnID...' lines), never back to the sender - peer relay TODO). 0x4d=msg77 plane-preload counts (echo -> index>=0 crash); 0x21=msg33 bail/eject report (echo of its 0xFFFF object index -> ARR<NET::OBJECT*,2048>[65535] bounds-error CTD, same class as 0x03); 0x0e=msg14 Reassign (v204: client->server object-owner reassign on respawn; FA has NO inbound in-game handler at 0xcbc1c8 -> an echo logs 'Unsupported message 14' and corrupts the object list. The client's own respawn CreateObject already re-binds the object on peers, so the reassign is redundant for us -> swallow.); 0x19=msg25 ace/rank/score state report (v220: client->server, fire-and-forget; echoing it back makes the client re-ingest its own report as authoritative and re-evaluate ace/rank against garbage/stale stats at a team-change spawn -> bogus 'new Ace Status'/'new Rank' announcements - Test2 log messages46. Consume, never echo.)
         # v222: the same message can arrive with its id in the TYPE byte and sub=0x00, which the
         # sub-byte check above cannot see. msg 33 (0x21) SCORE-EVENT does exactly that
         # ('cmd=0 type=0x21 sub=0x00 -> echo' in run 104546), so it was being blind-echoed despite

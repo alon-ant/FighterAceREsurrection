@@ -1,3 +1,14 @@
+v968f7g (2026-10-30) - clock rebase ON by default + ##clockrebase; in-arena private messages relayed (msg 21)
+- CLOCK_REBASE True (Alon 16:45: 'I can't be there while testing all the time'). Admins turn it off
+  in-game with ##clockrebase off (sysop rights; ##clockrebase shows status and the count), console
+  `clock rebase off`.
+- msg 21 (0x15) DIRECT CHAT: the client's whisper (FUN_0044d460 on Enter with a target pilot selected,
+  VNET::SendDirectChat FUN_004fc9b0): [0x15][target PlayerIndex u16][sender id u32][text <= 0x5a4] to
+  the host. We had no handler, so the generic echo bounced it to the SENDER, whose own handler printed
+  his whisper back at him - the target never got it. handle_direct_chat_21: target by PlayerIndex in the
+  sender's room, record forwarded unchanged (reliable), 'That pilot is no longer in the arena.' when
+  absent, gag honoured, CHAT21 log line. 0x15 added to NO_ECHO_SUBS.
+
 v968f7f (2026-10-30) - rebasing a client's NET clock (Alon 10:36: 'there must be a way to fix slow clocks')
 - There is: the STATUS request's base_incr_ms, which the client ADDS to its NET-time base (vcncNet
   FUN_10007d13, found in v215). v937f5 already described the disease this cures: an increment that
