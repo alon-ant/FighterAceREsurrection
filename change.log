@@ -1,3 +1,47 @@
+v968f7l (2026-10-30) - the 'AI' entry in the player list: the AI station goes nameless (experiment)
+- Every AI object (tank, soldier, lorry, train, ship) needs an owner STATION on the client - the Type-0
+  client record 'Create client 496, (AI)' - or the create asserts o->Client()==0 (Network.cpp:440). The
+  client lists stations by name, so the roster shows 'AI' and a whisper to 'AI' resolves to station 496
+  (local 17:16). The station cannot go; its NAME can: AI_CLIENT_NAME '' (build_client_record keeps the
+  AI station nameless instead of the 'Player' fallback). AI lines come through msg 66 natively and kill
+  lines name the hunter by PPT class, so nothing else reads that name. If the list shows a blank line
+  instead of nothing, set AI_CLIENT_NAME back to 'AI'.
+
+v968f7k (2026-10-30) - TimeCheck in the right base (offset -297 ms, rtt 3 ms); SendTime biased early; whisper to the AI
+- Local v968f7j 17:15 (messages76): offset -297 ms vs ours, rtt 3 ms, reference set - the time base is
+  right. The client still logged 'TimeCheckCB dif=-296' per probe: its check wants dif in -20..2000, i.e.
+  OUR SendTime must not be ahead of ITS clock, and a client's NET clock sits ~0.3 s behind our wall clock
+  by construction. SendTime now goes 500 ms early (TIMECHECK_SEND_BIAS_MS, added back in the reading).
+- CHAT21 17:16: the only roster entry to whisper to on a solo local server was the AI (station 496) -
+  'no such player'. The target field is matched against client_number as well as player_index, and a
+  whisper to the AI answers 'The AI does not read private messages.' Real test still needs two pilots.
+
+v968f7j (2026-10-30) - TimeCheck works; SendTime in the client's time base; slow replies ignored
+- Local v968f7i 17:09 (messages75): 'in 89'17' / 'out 89'9' every 5 s, server read the offset. The
+  client's vcncGetTime() is NTP-era ms ((unix + 2208988800) x 1000 mod 2^32) - its ReceiveTime matched
+  that to within the clock offset - so SendTime is now sent in that base: the client's dif is the true
+  offset and its 'TimeCheckCB ... dif=1375609188' error line (one per probe) goes quiet.
+- A 1.8 s reply (his client loading) read as a +837 ms jump and the next as -896: replies slower than
+  TIMECHECK_RTT_MAX_MS (300 ms) are now logged (once a minute) and otherwise ignored - never a
+  reference, a jump or a rebase.
+
+v968f7i (2026-10-30) - the TimeCheck probe never reached the client: raw sendto without the transport header
+- Local v968f7h 17:04: 'probe #12 sent (6 unanswered pending)', and messages74 shows no 'in 89' at all.
+  send_timecheck_89 wrote the appspace packet with a bare sock.sendto - no vcnc transport header - so
+  the client's transport dropped it before dispatch. Now sent through send_unrel like every other
+  unreliable in-game message (msg 60 and friends).
+- The whisper (CHAT21) was not exercised in this run (no second pilot) - still to test.
+
+v968f7h (2026-10-30) - direct chat and TimeCheck replies were hooked in the wrong place; msg 6 echo closed for good
+- Live v968f7g 14:54 (Alon, messages73 'out 21'12' x6; server: no CHAT21 line; 0 TIMECHECK lines in
+  two hours): the v968f7g handlers sat in the direct 0x43 chain, which these messages never reach. Both
+  now sit in the early sub dispatch block every arrival path passes (beside msg 69/71/59/119).
+- The client logged no 'in 89' at all, so the probe may also have been refused on length: sent as the
+  EXACT 5-byte body (build_appspace_pkt_exact; the client's own reply is exactly 9 bytes). Probe sends
+  #1/#12/#120 are logged per pilot, so 'probes sent, no reply' is visible if the format is still wrong.
+- 'Unsupported message 6' still appeared on v968f7g: the client's msg 6 comes compound-wrapped; 0x06,
+  0x59 and 0x15 added to the compound no-echo tuple as well.
+
 v968f7g (2026-10-30) - clock rebase ON by default + ##clockrebase; in-arena private messages relayed (msg 21)
 - CLOCK_REBASE True (Alon 16:45: 'I can't be there while testing all the time'). Admins turn it off
   in-game with ##clockrebase off (sysop rights; ##clockrebase shows status and the count), console

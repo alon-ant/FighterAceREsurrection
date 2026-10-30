@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7g'
+VERSION = 'v968f7l'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -10941,9 +10941,13 @@ def handle_direct_chat_21(s, pl):
         if is_gagged(me, room) and not sess_rights(s):
             log('CHAT21', f'gagged "{me}" whisper to PI {tgt_pi} swallowed: {text!r}')
             return
-        dest = next((p for p in get_sessions_in_room(room) if p is not s and getattr(p, 'player_index', None) == tgt_pi
-                     and getattr(p, 'entered_game', False)), None)
+        dest = next((p for p in get_sessions_in_room(room) if p is not s and getattr(p, 'entered_game', False)
+                     and (getattr(p, 'player_index', None) == tgt_pi or getattr(p, 'client_number', None) == tgt_pi)), None)
         if dest is None:
+            if tgt_pi == AI_CLIENT_ST:
+                send_system_msg(s, 'The AI does not read private messages.')
+                log('CHAT21', f'{me} -> the AI station ({tgt_pi}): {text!r} (local 17:16 test target)')
+                return
             send_system_msg(s, 'That pilot is no longer in the arena.')
             log('CHAT21', f'{me} -> PI {tgt_pi}: no such player in room {room} - {text!r}')
             return
@@ -13737,18 +13741,35 @@ CLOCK_REBASE            = True   # v968f7g: ON by default (Alon 16:45) - ##clock
 TIMECHECK_REBASE_MS     = 300
 TIMECHECK_REBASE_MIN_S  = 30.0
 TIMECHECK_REBASE_MAX_MS = 8000
+TIMECHECK_RTT_MAX_MS    = 300    # v968f7j: a reply slower than this is logged but not used for reference / jump / rebase
+                                 # (local 17:09: one 1.8 s reply read as a +837 ms 'jump' and the next as -896)
+NTP_UNIX_OFFSET_S       = 2208988800   # v968f7j: the client's vcncGetTime() is NTP-era ms (seconds since 1900 x 1000, mod 2^32)
+TIMECHECK_SEND_BIAS_MS  = 500          # v968f7k: SendTime is sent this much EARLY. The client's check wants its own clock >= SendTime - 20 ms
+                                       # (dif in -20..2000), and a client's NET clock sits ~0.3 s behind our wall clock by construction
+                                       # (local 17:15: offset -297 ms, 'TimeCheckCB dif=-296' on every probe). The bias keeps dif positive;
+                                       # our offset reading is reference-relative, so the constant does not matter to it.
 
 def send_timecheck_89(s):
     try:
-        send_ms = int(time.time() * 1000) & 0xFFFFFFFF
+        # v968f7j: SendTime in the client's own time base (NTP-era ms) - messages75 showed ReceiveTime =
+        # (unix + 2208988800) x 1000 mod 2^32 to within the clock offset, so with this base the client's
+        # dif is the true offset and its 'TimeCheckCB' error line (dif outside -20..2000) stays silent
+        send_ms = (int((time.time() + NTP_UNIX_OFFSET_S) * 1000) - TIMECHECK_SEND_BIAS_MS) & 0xFFFFFFFF
         pend = s.__dict__.setdefault('_tc89_pending', {})
         pend[send_ms] = time.time()
         for k in [k for k in pend if time.time() - pend[k] > 30.0]:
             pend.pop(k, None)
-        sock.sendto(build_appspace_pkt(bytes([0x59]) + struct.pack('<I', send_ms)), s.addr)
+        # v968f7h: EXACT 5-byte form (the client's own reply is exactly 9 bytes; a padded 17-byte body
+        # may be refused by a length check before the handler) and the first probe is logged
+        # v968f7i: through send_unrel - the raw sendto of v968f7e/h lacked the vcnc transport header, so the
+        # client's transport dropped every probe (local 17:04: 12 probes sent, 0 'in 89' on the client)
+        send_unrel(s, build_appspace_pkt_exact(bytes([0x59]) + struct.pack('<I', send_ms)), '<- TIMECHECK 89 probe')
         s._tc89_sent = time.time()
+        s._tc89_tx = s.__dict__.get('_tc89_tx', 0) + 1
+        if s._tc89_tx in (1, 12, 120):
+            log('TIMECHECK', f'{getattr(s, "current_pilot", "?")}: probe #{s._tc89_tx} sent ({len(pend) - 1} earlier probe(s) still unanswered)')
     except Exception:
-        pass
+        logx('TIMECHECK', 'probe send failed')
 
 def handle_timecheck_89(s, pl):
     """[0x59][SendTime u32][ReceiveTime u32] from the client (pl[4] = 0x59)."""
@@ -13762,11 +13783,20 @@ def handle_timecheck_89(s, pl):
         if t0 is None:
             return                                           # not ours (or older than 30 s)
         rtt = now - t0
+        d0 = s.__dict__
+        if rtt * 1000 > TIMECHECK_RTT_MAX_MS:
+            d0['_tc89_slow'] = d0.get('_tc89_slow', 0) + 1
+            if now - d0.get('_tc89_slow_logged', 0.0) >= 60.0:
+                d0['_tc89_slow_logged'] = now
+                log('TIMECHECK', f'{getattr(s, "current_pilot", "?")}: reply after {int(rtt * 1000)} ms - too slow to read his clock from '
+                                 f'({d0["_tc89_slow"]} such this session), sample ignored')
+            return
         # his NET-clock reading minus our send instant, corrected for half the round trip (u32, wrap-aware)
         off = ((recv_ms - send_ms) & 0xFFFFFFFF)
         if off >= 0x80000000:
             off -= 0x100000000
         off -= int(rtt * 500)
+        off -= TIMECHECK_SEND_BIAS_MS                      # v968f7k: SendTime was sent early by this much
         d = s.__dict__
         prev = d.get('_tc89_off')
         hist = d.setdefault('_tc89_hist', [])
@@ -14212,7 +14242,7 @@ def build_client_record(st, player_index, name, squadron=0):
     rec = bytearray(41)
     rec[0] = 0x00                                                # tag 0 -> client-create path
     struct.pack_into('<H', rec, 1, squadron & 0xffff)           # Squadron
-    nb = (name or 'Player').encode('latin1', 'replace')[:31]
+    nb = (name if (name is not None and st == AI_CLIENT_ST) else (name or 'Player')).encode('latin1', 'replace')[:31]   # v968f7l: the AI station may be nameless
     rec[3:3 + len(nb)] = nb                                      # name asciiz (35B header)
     struct.pack_into('<H', rec, 35, st & 0xffff)                # St (client/station number)
     struct.pack_into('<I', rec, 37, player_index & 0xffffffff)  # PlayerIndex
@@ -14259,7 +14289,11 @@ TANK_UPDATE_SIZE  = 26
 TANK_CLASSES      = {131: 2, 132: 3, 133: 1, 134: 2, 135: 2, 136: 2, 137: 3}   # class_id -> gunsnum
 AI_CLIENT_ST      = 0x1f0          # station number for the server's AI objects (< 512)
 AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station (never a real pilot)
-AI_CLIENT_NAME    = 'AI'
+AI_CLIENT_NAME    = ''             # v968f7l (Alon 10-30 17:20: 'the AI player shouldn't be there at all'): the AI objects need an
+                                   # owner STATION (Type-0 client record, else o->Client()==0 -> Network.cpp:440 CTD), and the
+                                   # client lists stations by name - that is the 'AI' entry he whispered to (target 496). The
+                                   # station now carries an EMPTY name: build_client_record keeps it empty (no 'Player' fallback
+                                   # for the AI). Experiment - if the roster shows a blank line instead, set it back to 'AI'.
 RECREATE_CHUNK    = 16             # v604f5: max object records per re-create msg-2 (385 B proven; 1,057 B was dropped)
 SPAWN_TANKS       = True           # master switch for the tank spawn path
 TANKS = {}                         # onumber -> {'room','camp','class','group','pos','peers':set()}
@@ -29355,7 +29389,7 @@ def handle_compound(s, outer_cmd, pl):
     # swallowing a wrapped 59/71 QUERY loses one reply (the client re-asks), which is safe.
     # v442f5: 0x07 ADDED - telemetry must NEVER be echoed to its sender (see NO_ECHO_SUBS).
     if inner_sub in (0x20, 0x03, 0x45, 0x18, 0x53, 0x54, 0x4d, 0x21, 0x0e, 0x19,
-                     0x3b, 0x47, 0x49, 0x07):
+                     0x3b, 0x47, 0x49, 0x07, 0x06, 0x59, 0x15):             # v968f7h: msg 6 / TimeCheck reply / direct chat never echoed
         if inner_sub == 0x03:
             try:                                        # v967f5b trace
                 _ids_dbg3 = [struct.unpack_from('<H', inner, i)[0] for i in range(5, min(len(inner) - 1, 29), 2)]
@@ -35315,6 +35349,14 @@ def handle_post_auth(s, cmd, pl):
                 _handle_mission_delete_100(s, stored)
         except Exception:
             logx('MISSION', 'mission message failed')
+        return
+    if sub == 0x15 and getattr(s, 'entered_game', False):
+        # v968f7h: msg 21 direct chat - this early block is the one every arrival path passes (the
+        # v968f7g hook sat in the direct 0x43 chain and never saw Alon's 'out 21'12': no CHAT21 line)
+        handle_direct_chat_21(s, stored)
+        return
+    if sub == 0x59:
+        handle_timecheck_89(s, stored)                                    # v968f7h: same for the TimeCheck reply
         return
     if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
         # v294: the scene supply query the client fires on every map open / scene select.
