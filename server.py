@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7m'
+VERSION = 'v968f7s'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -872,11 +872,11 @@ MOD_OPCODE_NAMES = {
 # Real command names come from the official "FA 3.6 Sysop Commands" reference (rev 2004-08-06).
 # The 'p' suffix = player-targeted. Mapping of sub-byte -> command is inferred by pairing each
 # handler's confirmation string with the doc's description; still to be confirmed live.
-MOD_80_SUBS = {
-    0x01: 'crumblep? ("will be exploded" / disintegrates plane)',
-    0x02: 'nofuelp?  ("will be out of fuel")',
-    0x03: 'ejectp?   ("will be bailed out")',
-    0x04: 'killp?    (kills pilot)',
+MOD_80_SUBS = {                       # v968f7p: confirmed from FUN_004f4370 + the msg-128 reply strings
+    0x01: 'killp     ("will be exploded" / host reply "killed")',
+    0x02: 'nofuelp   ("will be out of fuel")',
+    0x03: 'ejectp    ("will be bailed out")',
+    0x04: 'crumblep  ("will be crambled" / host reply "crumbled")',
 }
 
 def decode_mod_action(tb, msg):
@@ -1128,6 +1128,61 @@ def _mod_name_and_dur(body):
     a = struct.unpack_from('<i', body, 33)[0] if len(body) >= 37 else -1
     b = struct.unpack_from('<i', body, 37)[0] if len(body) >= 41 else -1
     return name, b, (a == 0)
+
+# --- v968f7p NATIVE SYSOP FEEDBACK (host -> moderator) ------------------------------------------
+# msg 128 (0x80) handler FUN_004f4420: [0x80][type u8][pilot name ASCIIZ] -> channel-10 line
+#   'Pilot "%s" should be killed|out of fuel|bailed out|crumbled.' for type 1..4 (the same numbering
+#   as the command sub), type 10 -> channel-12 'Pilot "%s" is not found !!!'. Any other type prints
+#   'Pilot "%s" should be .' - never send one.
+# msg 91 (0x5b) handler FUN_004f4190: [0x5b][success u32][cmd u32][pilot name ASCIIZ] -> channel-13
+#   'Your last command "GAG|UNGAG|BAN|UNBAN" for pilot "%s" is SUCCESS|NOT SUCCESS' (cmd 1..4; any
+#   other cmd prints "UNKNOWN").
+# msg 74 (0x4a) handler FUN_004f7170: [0x4a][type u8]; type 0 = Texts.str #187 'AI Client has
+#   finished game.\nPlease choose another game.' to the six server-message observers (dialogs) and,
+#   in flight, the system line; other types -> 'Unknown SPECIAL_EVENT_MESSAGE'. Console `special74`
+#   only (test), never sent by game logic - the text tells the pilot to leave the arena.
+MSG_MOD_RESULT_128 = 0x80
+MSG_MOD_CMD_RESULT_91 = 0x5b
+MSG_SPECIAL_EVENT_74 = 0x4a
+MOD_RESULT_NOT_FOUND = 10
+MOD_CMD_GAG, MOD_CMD_UNGAG, MOD_CMD_BAN, MOD_CMD_UNBAN = 1, 2, 3, 4
+MOD_NATIVE_FEEDBACK = True            # the moderator's own client prints the host's verdict lines
+
+def _mod_frame_for(target, body):
+    """In-game clients take the appspace frame at exact length, lobby clients the typed frame."""
+    return build_ingame_pkt(body) if getattr(target, 'entered_game', False) else build_appspace_pkt(body)
+
+def send_mod_result_128(mod, kind, name, label=''):
+    """Host -> the moderator: 'Pilot "<name>" should be <killed|out of fuel|bailed out|crumbled>.'
+    (kind = the command sub 1..4) or 'Pilot "<name>" is not found !!!' (kind = MOD_RESULT_NOT_FOUND)."""
+    if not MOD_NATIVE_FEEDBACK or mod is None or kind not in (1, 2, 3, 4, MOD_RESULT_NOT_FOUND):
+        return False
+    try:
+        body = bytes([MSG_MOD_RESULT_128, kind & 0xff]) + (name or '')[:31].encode('ascii', 'replace') + b'\x00'
+        return send_rel(mod, _mod_frame_for(mod, body),
+                        f'<- MOD RESULT 128 kind={kind} "{name}" {label}', to=3.0)
+    except Exception:
+        logx('MODERATOR', 'msg 128 send failed'); return False
+
+def send_mod_cmd_result_91(mod, cmd, name, success, label=''):
+    """Host -> the moderator: 'Your last command "GAG|UNGAG|BAN|UNBAN" for pilot "<name>" is SUCCESS|NOT SUCCESS'."""
+    if not MOD_NATIVE_FEEDBACK or mod is None or cmd not in (1, 2, 3, 4):
+        return False
+    try:
+        body = (bytes([MSG_MOD_CMD_RESULT_91]) + struct.pack('<II', 1 if success else 0, cmd)
+                + (name or '')[:31].encode('ascii', 'replace') + b'\x00')
+        return send_rel(mod, _mod_frame_for(mod, body),
+                        f'<- MOD CMD RESULT 91 cmd={cmd} "{name}" {"SUCCESS" if success else "NOT SUCCESS"} {label}', to=3.0)
+    except Exception:
+        logx('MODERATOR', 'msg 91 send failed'); return False
+
+def send_special_event_74(target, label=''):
+    """Test only (console `special74 <pilot>`): the host's SPECIAL_EVENT type 0."""
+    try:
+        return send_rel(target, _mod_frame_for(target, bytes([MSG_SPECIAL_EVENT_74, 0x00])),
+                        f'<- SPECIAL_EVENT 74 type 0 {label}', to=3.0)
+    except Exception:
+        logx('MODERATOR', 'msg 74 send failed'); return False
 
 def send_mod_notice(target, op, minutes, label=''):
     """The client's own ban / gag notice: [0x55|0x56][u32 minutes]. In-game clients take the appspace
@@ -2548,17 +2603,21 @@ def enact_mod_action(s, op, body):
             if not name:
                 log('MODERATOR', f'ban-family record without a name from {by} - ignored')
             elif hours < 0:
-                mod_unban(name, by)
+                _ok = mod_unban(name, by)
+                send_mod_cmd_result_91(s, MOD_CMD_UNBAN, name, _ok, '(##UnBan)')          # v968f7p native verdict
             else:
-                mod_ban(name, hours, by, room=room, scope_all=scope_all)
+                _ok = mod_ban(name, hours, by, room=room, scope_all=scope_all)
+                send_mod_cmd_result_91(s, MOD_CMD_BAN, name, _ok, '(##Ban)')
         elif op == 0x56:                       # v950f5: GAG family - Gag / GagAll / UnGag / UnGagAll / GagRoom / UnGagRoom
             name, hours, scope_all = _mod_name_and_dur(body)
             if not name:
                 mod_gag_room(room, hours, by, release=(hours < 0))
             elif hours < 0:
-                mod_ungag(name, by)
+                _ok = mod_ungag(name, by)
+                send_mod_cmd_result_91(s, MOD_CMD_UNGAG, name, _ok, '(##UnGag)')
             else:
-                mod_gag(name, hours, by, room=room, scope_all=scope_all)
+                _ok = mod_gag(name, hours, by, room=room, scope_all=scope_all)
+                send_mod_cmd_result_91(s, MOD_CMD_GAG, name, _ok, '(##Gag)')
         elif op == 0x57:                       # v950f5: ##ResetGame -> the arena reset (announce, countdown, boot, rebuild)
             if room is not None:
                 log('MODERATOR', f'RESETGAME room {room} by {by}')
@@ -2630,7 +2689,12 @@ def enact_mod_action(s, op, body):
 
 # Moderator plane-destroy sub-actions (the 0x7f compact form: 7F <player_index:u16> <sub>).
 # Confirmed on the wire from run_20260722_223331 (2-client): 'out 127'4' = 7f 01 00 0X.
-MOD_DESTROY_SUBS = {0x01: 'crumblep', 0x02: 'nofuelp', 0x03: 'ejectp', 0x04: 'killp'}
+MOD_DESTROY_SUBS = {0x01: 'killp', 0x02: 'nofuelp', 0x03: 'ejectp', 0x04: 'crumblep'}
+# v968f7p: 1 and 4 were swapped since v304 (labels only - the native relay passes the sub through
+# untouched, so the ACTION was always right). Proven three ways: the client's command senders
+# (0x46da40 sub 1 'Player (%s) will be exploded' = killp; 0x46e017 sub 4 'will be crambled'), its
+# inbound 0x7f handler FUN_004f4370 (1 = kill flag 0x10 + +0x1b08, 2 = fuel tanks zeroed, 3 = bail
+# FUN_004a7280, 4 = FUN_004e1d50 crumble) and the host's msg-128 reply strings (1 killed, 4 crumbled).
 # v950f5g Sounds.str indices of the chime block (Chime01 = CHIME_BASE+1 .. Chime22 = CHIME_BASE+22). The .str
 # format is [FirstStringNumber][LastStringNumber] then NUL-terminated names, where a NUL at an entry start
 # followed by byte n skips 1+n indices (Strings.cpp FUN_007d10d0) - Sounds.str has '\0\x75' before Chime01.
@@ -2709,13 +2773,18 @@ def enact_plane_destroy(s, body, by_index=True):
         cmd = MOD_DESTROY_SUBS.get(sub, f'sub0x{sub:02x}')
         target = _session_by_pilot_name(room, name)
         _who = f'name="{name}"'
+    _nm128 = (name if not by_index else None)
     if target is None:
         log('MODERATOR', f'destroy {cmd}: no target ({_who}) in room {room}')
+        send_mod_result_128(s, MOD_RESULT_NOT_FOUND, (_nm128 if _nm128 is not None else f'#{idx}'), f'({cmd}: no such pilot)')   # v968f7p
         return
     onum = getattr(target, 'my_obj_number', None)
     if not onum:
         log('MODERATOR', f'destroy {cmd}: target "{target.current_pilot}" has no live plane object')
+        send_mod_result_128(s, MOD_RESULT_NOT_FOUND, target.current_pilot, f'({cmd}: no live plane)')   # v968f7p
         return
+    if sub in (0x01, 0x02, 0x03, 0x04):
+        send_mod_result_128(s, sub, target.current_pilot, f'({cmd} by {by})')   # v968f7p: 'Pilot "X" should be killed.'
     exit_byte = MOD_DESTROY_EXIT.get(sub)
     _self = (target is s)
     # v527f5 [NATIVE RELAY]: see MOD_DESTROY_RELAY_NATIVE. Forward the action to the TARGET's own
@@ -7467,9 +7536,19 @@ def console_handler():
                 for _s in get_all_sessions():
                     if getattr(_s, 'entered_game', False) and _s.__dict__.get('_tick_lag') is not None:
                         _o = _s.__dict__.get('_tc89_off'); _sl = _s.__dict__.get('_tc89_slope')
+                        _li, _lo = _s.__dict__.get('_lag_in_ms'), _s.__dict__.get('_lag_out_ms')
                         log('CONSOLE', f'  {_s.current_pilot}: D={_s._tick_lag:+.0f} ticks ({_s._tick_lag / TICK_RATE_DEFAULT:+.1f}s) '
                                        f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}'
-                                       + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet'))
+                                       + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
+                                       + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
+            elif cmd == 'special74':                                                    # v968f7p test: msg 74 type 0 to one pilot
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _t = next((x for x in get_all_sessions() if _a and getattr(x, 'current_pilot', None) == _a[0]), None)
+                if _t is None:
+                    log('CONSOLE', 'usage: special74 <pilot>  (sends SPECIAL_EVENT_MESSAGE type 0: "AI Client has finished game. Please choose another game.")')
+                else:
+                    send_special_event_74(_t, '(console test)')
+                    log('CONSOLE', f'special74 -> {_a[0]}: watch what his client does (dialog? back to the arena list?)')
             elif cmd == 'clocks':
                 # v935f5: every in-game session's measured conductor rate (ticks/s against the
                 # server's wall clock), not just the >2% outliers the CLOCK line reports. The
@@ -12496,7 +12575,7 @@ class S:
             self._evts.pop(seq, None)
             r = getattr(self, '_done_ring', None)
             if r is None:
-                r = self._done_ring = deque(maxlen=64)
+                r = self._done_ring = deque(maxlen=512)     # v968f7r: the whole 9-bit seq space (was 64)
             r.append(seq & 0x1FF)
 
 sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
@@ -13001,7 +13080,13 @@ def send_unrel(s, payload, label=''):
     return True
 
 REL_RETX_INTERVAL_S = 0.75   # v359f5: retransmit cadence inside the ACK wait window
-REL_KEEPER_INTERVAL_S = 1.0  # v417f5: background keeper cadence after the blocking window
+REL_KEEPER_INTERVAL_S = 3.0  # v417f5: background keeper cadence after the blocking window
+                             # v968f7o (Alon 10-30 'drop it to 3 s'): was 1.0. Taurus messages29: a client whose
+                             # game thread had stalled (beacon-only, no ACKs) had 12-23 seqs in keepers at once ->
+                             # 15-23 extra pps of retransmits into a frozen socket for 2 minutes (PERF tx 26 -> 44
+                             # pps). At 3 s a held seq still lands within one cadence of the client waking up
+                             # (the head seq is what un-wedges its in-order queue); the 120 s cap is unchanged,
+                             # so a dead downlink now costs 40 retx per seq instead of 120.
 REL_KEEPER_MAX_S = 120.0     # v417f5: keeper hard cap - past this the client is gone anyway
 
 # v442f5 [WIRE/CRITICAL]: RELIABLE TX OUTSTANDING CAP - the seq-runaway wedge.
@@ -13778,6 +13863,64 @@ def send_timecheck_89(s):
     except Exception:
         logx('TIMECHECK', 'probe send failed')
 
+# --- v968f7s PILOT-LAG: WHERE does a slow TimeCheck reply lose its time? -------------------------------
+# Meno 10-30 (messages77): every probe answered 2-4.7 s late from 21:14 on, rtt 35 ms, 0 % loss, his
+# telemetry ticks on time (no CLOCK-LAG D) - and smooth again after a reconnect. The probe carries his
+# NET-clock reading at the moment his game thread PROCESSED it, and we know his clock's offset to ours
+# from the clean samples, so each reply splits into
+#     inbound  = (his ReceiveTime - his offset) - our send instant   (our socket -> his handler)
+#     outbound = round trip - inbound                                  (his reply -> our socket)
+# A client whose receive side is backed up (socket buffer / transport input thread / handler cost)
+# shows a large inbound and a tiny outbound; a client whose SEND side is throttled or stalled shows
+# the reverse. Alongside: what we are actually sending him (packets and bytes per second from the
+# per-session TX counters) so 'overloaded by the server' is a number, not a guess. One PILOT-LAG line
+# per minute while the total exceeds PILOT_LAG_WARN_MS; `clocks` shows the live split for everyone.
+PILOT_LAG_WARN_MS = 1000
+PILOT_LAG_LOG_S   = 60.0
+
+def _pilot_lag_sample(s, send_ms, recv_ms, rtt, now):
+    try:
+        d = s.__dict__
+        ref = d.get('_tc89_ref')
+        if ref is None:
+            ref = d.get('_tc89_off')
+        if ref is None:
+            return
+        raw = (recv_ms - send_ms) & 0xFFFFFFFF
+        if raw >= 0x80000000:
+            raw -= 0x100000000
+        raw -= TIMECHECK_SEND_BIAS_MS
+        in_ms = raw - int(ref)
+        rtt_ms = int(rtt * 1000)
+        out_ms = rtt_ms - in_ms
+        a = 0.3
+        d['_lag_in_ms']  = in_ms  if d.get('_lag_in_ms')  is None else (1 - a) * d['_lag_in_ms']  + a * in_ms
+        d['_lag_out_ms'] = out_ms if d.get('_lag_out_ms') is None else (1 - a) * d['_lag_out_ms'] + a * out_ms
+        d['_lag_rtt_ms'] = rtt_ms
+        # our TX to him since the last sample
+        _pk, _by = getattr(s, 'pkt_tx_n', 0), getattr(s, 'byte_tx_n', 0)
+        _prev = d.get('_lag_tx_prev')
+        d['_lag_tx_prev'] = (now, _pk, _by)
+        if _prev is not None and now - _prev[0] > 0.5:
+            d['_lag_tx_pps'] = (_pk - _prev[1]) / (now - _prev[0])
+            d['_lag_tx_bps'] = (_by - _prev[2]) / (now - _prev[0])
+        if rtt_ms >= PILOT_LAG_WARN_MS and now - d.get('_lag_logged', 0.0) >= PILOT_LAG_LOG_S:
+            d['_lag_logged'] = now
+            _D = d.get('_tick_lag')
+            _net = d.get('_rtt_ms')
+            log('PILOT-LAG', f'{getattr(s, "current_pilot", "?")}: our probe took {rtt_ms} ms to come back - '
+                             f'INBOUND (our send -> his handler) {int(d["_lag_in_ms"])} ms, OUTBOUND (his reply -> us) {int(d["_lag_out_ms"])} ms'
+                             f'{f", network rtt {_net} ms" if _net is not None else ""}; his telemetry ticks '
+                             f'{"on time" if _D is None or abs(_D) < CLOCK_LAG_WARN_TICKS else f"{_D / TICK_RATE_DEFAULT:+.1f} s off"}; '
+                             f'we send him {d.get("_lag_tx_pps", 0.0):.1f} pkt/s = {d.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s '
+                             f'(flying={getattr(s, "flying", False)}, in_game={getattr(s, "entered_game", False)})'
+                             + (' -> his RECEIVE side is backed up (socket/transport/handlers), not his sending'
+                                if d['_lag_in_ms'] > 3 * max(50, d['_lag_out_ms']) else
+                                (' -> his SEND side is delayed (bandwidth limiter / send queue)'
+                                 if d['_lag_out_ms'] > 3 * max(50, d['_lag_in_ms']) else ' -> both directions slow')))
+    except Exception:
+        pass
+
 def handle_timecheck_89(s, pl):
     """[0x59][SendTime u32][ReceiveTime u32] from the client (pl[4] = 0x59)."""
     try:
@@ -13791,6 +13934,7 @@ def handle_timecheck_89(s, pl):
             return                                           # not ours (or older than 30 s)
         rtt = now - t0
         d0 = s.__dict__
+        _pilot_lag_sample(s, send_ms, recv_ms, rtt, now)       # v968f7s: inbound/outbound split, every reply
         if rtt * 1000 > TIMECHECK_RTT_MAX_MS:
             d0['_tc89_slow'] = d0.get('_tc89_slow', 0) + 1
             if now - d0.get('_tc89_slow_logged', 0.0) >= 60.0:
@@ -19092,6 +19236,40 @@ def tc_say(room_id, text, camp=None, to=None):
         n += 1
     log('TC', f'room {room_id} AI{"" if camp is None else f" (camp {camp})"}{" -> " + to.current_pilot if to is not None else ""}: {text}  -> {n}')
 
+# --- v968f7q NATIVE PERSONAL SCENE-EVENT LINES: msg 79 (0x4f) -------------------------------------
+# FA.exe handler FUN_004fbdc0 (table slot 79): [0x4f][type u8][scene u16 for types 1-2]. Printed on
+# channel 13 (the film's 0x0d scene-event colour) from Texts.str, localised by the client:
+#   type 1 (Length must be 4, scene known): #200 'You have triggered tank attack on the %s at %s'
+#          (scene name, grid); otherwise the short #201 'You have triggered tank attack'
+#   type 2 (Length 4, scene known):         #231 'Your hit helps capture scene %s at %s' / #202 short
+#   type 3 (2 bytes):                       #295 'You have delivered supply'
+#   type 4 (2 bytes):                       #296 'Your supply delivery helps to repair building'
+# Each also arms a short client-side display event (0x3d4 ms) - the 2009 flash line. These replace the
+# AI-chat copies of the same wording for the pilot himself; room-wide lines stay on the AI channel.
+MSG_SCENE_EVENT_79 = 0x4f
+TC_NATIVE_79 = True
+
+def send_scene_event_79(sess, etype, sidx=None, label=''):
+    """msg 79 to one in-game pilot. Returns False when it was not sent (caller falls back to chat)."""
+    if not TC_NATIVE_79 or sess is None or not getattr(sess, 'entered_game', False):
+        return False
+    try:
+        if etype in (1, 2):
+            if sidx is None:
+                return False
+            body = bytes([MSG_SCENE_EVENT_79, etype]) + struct.pack('<H', int(sidx) & 0xffff)
+        elif etype in (3, 4):
+            body = bytes([MSG_SCENE_EVENT_79, etype])
+        else:
+            return False
+        _submit_send(send_rel, sess, build_ingame_pkt(body),
+                     f'<- SCENE EVENT 79 type {etype}{"" if sidx is None else f" scene {sidx}"} {label}', to=3.0)
+        log('TC', f'{sess.current_pilot}: native msg-79 type {etype}'
+                  f'{"" if sidx is None else f" (scene {sidx})"} {label}')
+        return True
+    except Exception:
+        logx('TC', 'msg 79 send failed'); return False
+
 def tc_scene_xy(terrain, sidx):
     tt = trn_tables(terrain) or {}
     g = tt.get('gsi') or []
@@ -19508,7 +19686,8 @@ def tc_trigger_scene(room_id, sidx, pilot_sess, reason=''):
     evs_on_trigger(room_id, pilot_sess, sidx, txy[2].strip())           # v958f5 event script
     _kind = tc_scene_kind_word(txy[2])
     # v600f5 film wording: to the pilot, then the broadcast
-    tc_say(room_id, f'You have triggered tank attack on the {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=pilot_sess)
+    if not send_scene_event_79(pilot_sess, 1, sidx, '(trigger)'):                           # v968f7q native line
+        tc_say(room_id, f'You have triggered tank attack on the {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=pilot_sess)
     tc_say(room_id, f'The {_kind} at {tc_grid(txy[0], txy[1])} has been triggered!')
     if GROUND_KILL_SCORE:
         try:
@@ -19812,7 +19991,7 @@ def tc_capture_scene(room_id, sidx, camp, by_pilot=None, assist_pilot=None):
             if _hn == by_pilot:
                 continue                                  # the trigger pilot got the trigger line
             _hs = next((x for x in get_sessions_in_room(room_id) if x.current_pilot == _hn), None)
-            if _hs is not None:
+            if _hs is not None and not send_scene_event_79(_hs, 2, int(sidx), '(capture helper)'):   # v968f7q
                 tc_say(room_id, f'Your hit helps capture scene {txy[2].strip()} at {tc_grid(txy[0], txy[1])}', to=_hs)
     except Exception:
         logx('TC', 'capture helper lines failed')
@@ -20375,6 +20554,10 @@ def _handle_cargo_request_106(s, pl):
                          f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus}'
                          + ('' if _haul_ok else ', same base as the pick-up - no points') + ')')
             s.__dict__.pop('_cargo_origin', None)
+            if gm + gf + ga > 0:
+                send_scene_event_79(s, 3, label='(cargo drop)')                                       # v968f7q 'You have delivered supply'
+            if repaired:
+                send_scene_event_79(s, 4, label='(cargo drop repaired)')                              # v968f7q 'Your supply delivery helps to repair building'
             if _haul_ok:
                 evs_on_supply(rid, s, sidx, gm + gf + ga, len(repaired), False, txy[2].strip())     # v958f5b
             if pts > 0 and GROUND_KILL_SCORE and s.current_pilot:
@@ -20442,6 +20625,7 @@ def _handle_give_rsc_105(s, pl):
         rid = s.current_room
         terrain = _probe_terrain_for_room(rid)
         tot = [0, 0, 0]; deliv = [0, 0, 0]; per_scene = {}; per_scene_raw = {}; missed = 0
+        s.__dict__.pop('_79_drop_sent', None); s.__dict__.pop('_79_repair_sent', None)   # v968f7q: one native line per drop
         for i in range(n):
             e = body[16 + i * 10: 26 + i * 10]
             # v777f5: a parachute is a PLANE-family object - its packed position uses PLANE_POS_SCALE
@@ -20488,6 +20672,10 @@ def _handle_give_rsc_105(s, pl):
             log('CARGO', f'{s.current_pilot} AIR-DROP -> scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
                          f'{", ".join(parts) or "nothing"}, repaired {len(repaired)} obj(s) ({spent} kg metal)')
             evs_on_supply(rid, s, sidx, gm + gf + ga, len(repaired), True, txy[2].strip())           # v958f5b
+            if gm + gf + ga > 0 and not s.__dict__.get('_79_drop_sent'):
+                s.__dict__['_79_drop_sent'] = True; send_scene_event_79(s, 3, label='(air-drop)')     # v968f7q once per drop
+            if repaired and not s.__dict__.get('_79_repair_sent'):
+                s.__dict__['_79_repair_sent'] = True; send_scene_event_79(s, 4, label='(air-drop repaired)')
             if parts:
                 tc_say(rid, f'AI: {s.current_pilot} air-dropped {", ".join(parts)} to {tc_camp_tag(scamp) if scamp is not None else ""} '
                             f'{txy[2].strip()} at {tc_grid(txy[0], txy[1])}' + (f' - {len(repaired)} building(s) rebuilt' if repaired else ''))
@@ -28212,6 +28400,42 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                      f'(AF={af} N={grant_n})', to=5.0),
                      daemon=True).start()
 
+# v968f7r [BLANK LOBBY AFTER A LEAVE - Meno 10-30 21:49 (messages77), Flakmagic 10-29 (messages79)]:
+# Meno left at the arena reset (msg 64 at 21:49:31), his two 0x43 polls stopped (the unreliable 0xDA
+# took), and then NOTHING: no 0xce/0xd2 lobby re-init ever came from his client - the other three who
+# left in the same reset re-initialised within 1.5 s - so he sat on a blank lobby and quit at 21:50:01.
+# The v968f7c reliable 0xDA re-send only fires ON polls, and his had already stopped. This watch runs
+# off the leave itself: if the lobby has not re-initialised (no 0xce/0xcb/0xca/0xd2 since the leave)
+# by +3 s it re-sends the 0xDA reliably; by +8 s it also pushes the arena list with its GAME_DEFs
+# (what the client would have asked for); +15 s one last 0xDA. Each step is skipped the moment the
+# client re-inits, re-enters a game, or the session closes.
+POST_LEAVE_WATCH = True
+POST_LEAVE_WATCH_STEPS_S = (3.0, 8.0, 15.0)
+
+def _post_leave_watch(s, left_at):
+    try:
+        for i, _t in enumerate(POST_LEAVE_WATCH_STEPS_S):
+            time.sleep(max(0.1, left_at + _t - time.time()))
+            if getattr(s, 'closing', False) or getattr(s, 'entered_game', False):
+                return
+            if float(s.__dict__.get('_left_arena_at', 0.0)) != left_at:
+                return                                           # a newer leave owns the watch
+            if float(s.__dict__.get('_lobby_reinit_at', 0.0)) >= left_at or not getattr(s, '_awaiting_reattach', False):
+                if i == 0:
+                    log('LEAVE-WATCH', f'{s.current_pilot}: lobby re-initialised {time.time() - left_at:.1f}s after the leave - fine')
+                return
+            log('LEAVE-WATCH', f'{s.current_pilot}: NO lobby re-init {_t:.0f}s after the leave (polls seen: '
+                               f'{int(s.__dict__.get("_post_leave_polls", 0))}) -> 0xDA re-attach RELIABLY'
+                               + (' + arena list push' if i == 1 else ''))
+            send_rel(s, _da_current(s), f'<- 0xDA lobby re-attach RELIABLE (leave-watch +{_t:.0f}s)', to=5.0)
+            if i == 1:
+                try:
+                    send_arenalist_with_gamedefs(s, db_get_open_rooms(), '<- ArenaList 0xd2 (leave-watch push)')
+                except Exception:
+                    logx('LEAVE-WATCH', 'arena list push failed')
+    except Exception:
+        logx('LEAVE-WATCH', 'watch failed')
+
 def _post_leave_poll(s, where):
     """v968f7c (Flakmagic/Inky 10-29 23:38, messages79): after a capture under canopy his client left the
     arena and then polled 0x43 once a second for 30 s with a blank lobby until he quit ('Timeout').
@@ -28370,6 +28594,8 @@ def handle_leave_arena(s):
         s._post_leave_polls = 0; s._left_arena_at = time.time()          # v968f7c
         send_unrel(s, _da_current(s),
                    '<- 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) - stops post-leave poll')
+        if POST_LEAVE_WATCH:
+            threading.Thread(target=_post_leave_watch, args=(s, s._left_arena_at), daemon=True).start()   # v968f7r
     else:
         threading.Thread(target=lambda: send_rel(s, _da_current(s),
                          '<- 0xDA lobby re-attach (218, Size=15 63-safe) - stops post-leave 0x43 poll',
@@ -29232,6 +29458,7 @@ def handle_compound(s, outer_cmd, pl):
     # 0xd2 = the Arenas-tab room list (real log: out 210 -> in 210'1110). FA.exe
     # often wraps it in a compound. Respond with open rooms, not an echo.
     if inner_sub == 0xd2:
+        s._lobby_reinit_at = time.time(); s._awaiting_reattach = False              # v968f7r
         active_rooms = db_get_open_rooms()
         log('COMPOUND', f'inner sub=0xd2 -> ArenaList ({len(active_rooms)} rooms)')
         # v164: push GAME_DEF (212) per room first so terrain is cached, then the list.
@@ -35312,8 +35539,16 @@ def handle_post_auth(s, cmd, pl):
             _on = struct.unpack_from('<H', stored, 5)[0]
             if _on == getattr(s, 'my_obj_number', None):
                 s.__dict__['_loadout73'] = bytes(stored[4:])     # v849f5: kept for peers who re-create the plane
-                if len(stored) >= 4 + 0x25:
-                    s.__dict__['_payload24'] = bytes(stored[4 + 0xd:4 + 0x25])   # v948f5: latest payload words
+                if len(stored) >= 4 + 0x25 and '_payload24' not in s.__dict__:
+                    # v968f7n: the msg-73 words are the LOADED ordnance that FUN_004c8420 feeds to
+                    # LoadPayload and then throws away - it RESTORES the create-time +0xaf0 words
+                    # afterwards. The create record must carry the owner's out-4 words (pylon
+                    # config); a re-create built from the 73 words put ordnance counts where the
+                    # client expects capacities -> '4 rocks[i] PlnID:101; 5, Barney_Ross; iPLi:0'
+                    # once a second on Taurus (messages29, 16:33:27-16:36:28, after the 16:33:24
+                    # ATOMIC re-create that followed Barney's 16:33:20 msg 73; the 16:36:29 re-create
+                    # right after his out-4 was clean). Fallback only when no out-4 words are held.
+                    s.__dict__['_payload24'] = bytes(stored[4 + 0xd:4 + 0x25])   # v948f5 fallback
                 _pk = build_ingame_pkt(bytes(stored[4:]))          # v847f5: exact length, as the client sent it
                 _nr = 0
                 for _p in get_sessions_in_room(s.current_room):
@@ -35636,6 +35871,7 @@ def handle_post_auth(s, cmd, pl):
                     time.sleep(0.005); send_rel(s,stored,'<- echo 0xde',to=5.0)
                 threading.Thread(target=da_then_echo,daemon=True).start(); return
             if sub in (0xce, 0xca, 0xcb):
+                s._lobby_reinit_at = time.time(); s._awaiting_reattach = False      # v968f7r: the lobby UI is alive again
                 if getattr(s, 'entered_game', False) and sub == 0xce:
                     # v650f5: a lobby (re)init from a session still in-world = the client left the arena
                     # without a msg 64 (the msg-87 reset path) - close its arena state now
@@ -35644,6 +35880,7 @@ def handle_post_auth(s, cmd, pl):
                         handle_leave_arena(s)
                     except Exception:
                         logx('LEAVE', 'implicit leave failed')
+                    s._lobby_reinit_at = time.time(); s._awaiting_reattach = False   # v968f7r: this 0xce IS the re-init
                 if sub == 0xce:
                     # v611f5 [LOBBY RE-INIT]: 0xce (squadron list) is the first request of a lobby
                     # (re)initialisation - the client has just wiped its room table. Drop the
@@ -35697,6 +35934,7 @@ def handle_post_auth(s, cmd, pl):
             if sub == 0xcd:
                 _handle_chat_pl(s, pl); return
             if sub == 0xd2:
+                s._lobby_reinit_at = time.time(); s._awaiting_reattach = False      # v968f7r
                 # 0xd2 = THE ARENA LIST request (real log: out 210'1 -> in 210'1110).
                 # v164: push each room's GAME_DEF (212) FIRST so the client caches the
                 # arena's terrain, then send the list. (Was: list only -> terrain 0 crash.)
@@ -37747,9 +37985,25 @@ def on_pkt(data, addr):
                 # the session down (broadcast leave + session pop) on a live player.
                 s._late_ack_count=getattr(s,'_late_ack_count',0)+1
                 return
-            # v385f5: full cleanup (also frees ClientNumber + tears down in-game presence,
-            # which the old partial path leaked on every ungraceful drop -> ghost slots).
-            _teardown_session(s, why='(disconnect)'); return
+            # v968f7r [STRAY ACK IS NOT A DISCONNECT - Bama 10-30 21:38:51, messages38]: an 8-byte
+            # flags=0x02 frame whose seq was neither pending nor in the 64-deep done ring tore down
+            # Bama's LIVE session mid-flight ('left while AIRBORNE (disconnect)', crash booked, plane
+            # and station deleted on every peer); his client, still connected, received nothing more
+            # and declared FM_LOSTCONNECTION 23 s later, then CTD'd (Main.cpp:2407) - the only such
+            # teardown in four days of logs, so it is rare, but it costs a pilot his sortie every
+            # time. A frame with the ACK flag is an ACK: a client-side stall (his ACKs come out late
+            # and duplicated) or a long RELKEEP can age a seq past the ring. The REAL close has two
+            # explicit forms that never come through here - the app-level cmd=2 'disconnect reply'
+            # exchange and the transport FIN (byte2 0x08, FINACK path above) - plus the idle reap.
+            # So: count it, log it (rate-limited), keep the session.
+            s._stray_ack_count = getattr(s, '_stray_ack_count', 0) + 1
+            _now_sa = time.time()
+            if _now_sa - s.__dict__.get('_stray_ack_logged', 0.0) > 10.0:
+                s._stray_ack_logged = _now_sa
+                log('STRAY-ACK', f'{getattr(s, "current_pilot", "?")}: ACK for seq {aseq} that is neither pending nor '
+                                 f'recently completed (#{s._stray_ack_count} this session) - ignored, session kept '
+                                 f'(was a DISCONNECT teardown before v968f7r)')
+            return
         # CAPTURE (diagnostic): in-game packets that are neither reliable-data (pt=1)
         # nor ack/disconnect (pt=0) - the UNRELIABLE flight-telemetry stream a flying
         # client streams (currently dropped). Rate-limited hex sample of the payload

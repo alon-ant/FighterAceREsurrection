@@ -1,3 +1,136 @@
+v968f7s  2026-10-31  PILOT-LAG: the slow-reply split (inbound vs outbound) + what we send him
+  Alon: Meno has a modern PC and was smooth again right after reconnecting -> 'we must be overloading
+  him'. The TimeCheck reply carries his NET-clock reading at the instant his game thread PROCESSED our
+  probe, and his clock offset is known (-680 ms), so every slow reply splits into the inbound leg (our
+  send -> his handler) and the outbound leg (his reply -> us). Re-computed from his own client log
+  (TimeCheckCB dif) against the server's samples: before 21:14 inbound ~25 ms; from 21:14 inbound
+  2.3-3.5 s, outbound ~0 ms. His RECEIVE side was holding our packets 2-4.7 s; his sending was
+  immediate (that is also why CLOCK-LAG never fired - his telemetry ticks were on time). Onset 21:14:00
+  = 20 s after '!!! Start Record Film !!!' in his log and the first convoy lorries created near him;
+  the lag then stayed 2-4.7 s through a death/respawn, an exit-to-HQ and the film stop at 21:43, until
+  the reconnect. Not yet known: whether his vcncNet.ini logs to file (LogToFile=1 writes every packet
+  with a hex dump from the transport's input thread), and what his FA settings do on receive.
+  Server: _pilot_lag_sample on every reply -> EWMA inbound/outbound ms + our TX to him from the
+  per-session counters (pkt/s, KB/s). PILOT-LAG line once a minute while the round trip >= 1 s,
+  with a verdict (receive side backed up / send side delayed / both); `clocks` shows the split and
+  the send rate for every pilot. The numbers decide the next step: if our pkt/s to a lagging pilot is
+  high, a per-client shed (lower relay/AI update rates to him) is the server-side lever; if it is a
+  few pkt/s, the hold-up is inside his client (transport log file, recorder, AV on the game folder).
+  Verify: `clocks` prints 'probe path in N ms / out N ms, we send X pkt/s Y KB/s' per pilot.
+v968f7r (b)  STRAY ACK NO LONGER TEARS A SESSION DOWN (Bama messages38, live 21:38:51)
+  Bama was flying (cars being re-created around him) when an 8-byte flags=0x02 frame from his client
+  carried a seq that was neither pending nor in the 64-deep recently-completed ring. on_pkt's last
+  resort for that shape was _teardown_session('(disconnect)'): 'Bama left while AIRBORNE (disconnect)
+  -> booked as a crash', plane + station deleted on every peer, slot retired - while his client was
+  alive and kept sending (the very next frame, an ACK for seq 39, was dropped as 'unknown address').
+  His client heard nothing more, declared FM_LOSTCONNECTION 23 s later and CTD'd in the teardown
+  (Main.cpp:2407 access violation). Only such teardown in four days of logs; 27 real closes that day
+  all came as transport FINs. Now the stray ACK is counted and logged (STRAY-ACK, 10 s rate limit) and
+  the session is kept; the genuine close paths (app cmd=2 + transport FIN, idle reap) are unchanged.
+  _done_ring grows from 64 to 512 (the whole seq space) so a late ACK is recognised as late.
+  Verify: no DISCONNECT '(disconnect)' lines any more; STRAY-ACK lines name the pilot and seq instead.
+v968f7r  2026-10-30  POST-LEAVE LOBBY WATCH (blank lobby after leaving / arena reset)
+  Meno (messages77, live 21:49): Bama saw him lagging; he 'got a disconnect' after the TC reset.
+  LAG: his client answered the TimeCheck probe 2-4 s late ALL session (415 'too slow' samples, rtt
+  35 ms, 0.0% loss) = his game thread drains inbound seconds late (heavy TC world: 40 tanks, 14
+  soldiers, 13 trains, 20 cars, crew chutes). Peers see his telemetry stale/bursty -> 'lagging'.
+  Client side, not network, not server (PERF flat).
+  DISCONNECT: at the reset he left (msg 64, 21:49:31), the unreliable 0xDA took (his two 0x43 polls
+  stopped), but his client never sent the lobby re-init (0xce/0xd2) that Luna/Barney/Bama sent within
+  1.5 s of theirs -> blank lobby -> he quit cleanly at 21:50:01 (vcncExitAppSpace + FIN). Same picture
+  as Flakmagic 10-29 (messages79). The v968f7c reliable 0xDA re-send fires only on polls, which had
+  stopped. New: _post_leave_watch thread per leave - +3 s no re-init -> 0xDA reliably; +8 s -> 0xDA +
+  the arena list with GAME_DEFs pushed; +15 s -> 0xDA. Re-init (0xce/0xcb/0xca/0xd2, direct or
+  compound) stamps _lobby_reinit_at and clears _awaiting_reattach; the watch stands down on re-init,
+  re-entry or close. LEAVE-WATCH log lines either way ('re-initialised Ns after the leave - fine').
+  Also seen: a stale in-game reliable (Luna's station delete, sent while he was still in the room)
+  reached his client 10 s later, after his ~GAME_DEF - the v502f5 CTD class; it did not CTD here.
+  Verify: after a leave the log shows LEAVE-WATCH 'fine' for healthy clients; a laggy client shows the
+  +3/+8 lines and then gets an arena list (client log 'in 210'...'), no blank lobby.
+BANK 2026-10-30 (b) - v968f7n .. v968f7q (local build; live server at v968f7l; snapshot _scratch/bank/server.py.v968f7q)
+  Banked: create record carries the out-4 ordnance words only (rocks[i] spam), RELKEEP cadence 3 s,
+  native sysop verdicts msg 128 / msg 91 (+ killp/crumblep label fix, special74 test command),
+  native personal scene-event lines msg 79 (trigger, capture helper, delivered supply, repair).
+  RE notes kept: msg 72 RadarStateCB = single-object msg 30 (not implemented), msg 65 ShipsCB layout.
+  Deploy: server.py only (web_server.py unchanged since v968f7a).
+v968f7q  2026-10-30  NATIVE PERSONAL SCENE-EVENT LINES (msg 79) replace the AI-chat copies for the pilot himself
+  RE: msg 79 (0x4f) FUN_004fbdc0 = [0x4f][type][scene u16 for types 1-2]; channel 13 (the film's 0x0d
+  colour), Texts.str: 1 = #200 'You have triggered tank attack on the %s at %s' (Length must be exactly 4
+  and the scene known, else the short #201), 2 = #231 'Your hit helps capture scene %s at %s' (#202 short),
+  3 = #295 'You have delivered supply', 4 = #296 'Your supply delivery helps to repair building'. Each arms
+  the client's ~1 s flash event. The scene index is the client's raw TRN_OBJECT/scene index we already use
+  for msg 36/41 - no translation needed.
+  Server (TC_NATIVE_79): trigger pilot -> type 1; capture helpers -> type 2; a landed cargo drop that
+  stored anything -> type 3, and type 4 when the delivered metal repaired a building; an air-drop ->
+  the same two, once per drop. Falls back to the AI-chat line when the pilot is not in-game. Room-wide
+  lines ('The airbase at X has been triggered!', supply announcements) stay on the AI channel.
+  Verify: trigger a scene -> the yellow/orange event-colour line in the client's own text (no 'AI:'
+  prefix) and the client log shows 'in 79'4'; drop cargo -> 'in 79'2' with 'You have delivered supply'.
+v968f7p  2026-10-30  NATIVE SYSOP FEEDBACK (msg 128, msg 91), msg 74 test command, killp/crumblep labels
+  RE (FA.exe): msg 128 (0x80) FUN_004f4420 = [0x80][type][name\0] -> 'Pilot "%s" should be killed /
+  out of fuel / bailed out / crumbled.' (type 1..4 = the command sub) or 'Pilot "%s" is not found !!!'
+  (type 10). msg 91 (0x5b) FUN_004f4190 = [0x5b][success u32][cmd u32 1 GAG 2 UNGAG 3 BAN 4 UNBAN][name\0]
+  -> 'Your last command "GAG" for pilot "%s" is SUCCESS|NOT SUCCESS'. msg 90 (0x5a) = debug log only
+  ('Code=%X'), nothing on screen - not used. msg 74 (0x4a) SPECIAL_EVENT type 0 = Texts.str #187
+  'AI Client has finished game. / Please choose another game.' pushed to the six server-message dialog
+  observers + the in-flight system line; what the dialogs do is untested -> console `special74 <pilot>`
+  only, never sent by game logic.
+  Server: after ##killp/##ejectp/##crumblep/##nofuelp the moderator now gets the host's own verdict line
+  (msg 128; 'is not found' when the pilot is not in his arena or has no live plane); after ##Gag/##UnGag/
+  ##Ban/##UnBan the msg-91 SUCCESS / NOT SUCCESS line (MOD_NATIVE_FEEDBACK switch). Lobby moderators get
+  the typed frame, in-game ones the appspace frame (same rule as the ban/gag notices).
+  Labels: MOD_DESTROY_SUBS had 1 and 4 swapped since v304 - sub 1 IS killp ('will be exploded' on the
+  sender, 'killed' in the host reply, kill flag in FUN_004f4370), sub 4 IS crumblep. Log lines and the
+  MOD_80_SUBS table corrected; the action was never wrong (the sub is relayed untouched).
+  Verify: ##killp <pilot> -> your screen prints 'Pilot "<pilot>" should be killed.'; ##Gag <pilot> 1 ->
+  'Your last command "GAG" for pilot "<pilot>" is SUCCESS'; MODERATOR log says killp for sub 1.
+RE NOTE 2026-10-30 (no code change)  msg 72 RadarStateCB investigated for 'enemy planes visible with radar down'
+  FA.exe handler FUN_004f7120 (table slot 72): [0x48][u16 idx | state<<15] -> PARR<TRN_OBJECT*>[idx]
+  (the same 0xc87270 array msg 30 and msg 36 use) -> FUN_00568eb0(obj, state, 0): bit15 set = the
+  msg-30 DESTROY form with value 0 (animated + sound), clear = RESTORE. It is a single-object msg 30,
+  nothing more - no separate radar on/off state exists. The ring goes grey because
+  TRN_OBJECT::SetDestroyed (FUN_00567fd0) also zeroes the attached FA3_RADAR entry (+0x178 -> [2]=0)
+  and removes it from the 32x32 radar-square table; that table serves the map rings and the
+  OnRadar/OnRadarPrompt options ('you are on enemy radar'), NOT peer-plane display - the client draws
+  every plane it holds, which is why planes stayed visible before v949f5 hid them server-side.
+  Conclusion: the 2009 host must have filtered what it relayed, exactly as v949f5 does; sending msg 72
+  would duplicate what our msg 30 already does. Left unimplemented; v949f5 untouched.
+  Side find for the naval chapter: msg 65 ShipsCB (FUN_004fad80, SERVER_SHIPS_COORD_MESSAGE, 10-byte
+  records [type][AFNumber][camp&7|bit4][?][ONumber u16][x s16 <<4][y s16 <<4]) - creates/moves the
+  big-map ship icons AND the ships' FA3_RADAR entries (a carrier's radar coverage moves with it).
+v968f7o  2026-10-30  RELKEEP CADENCE 1 s -> 3 s (Alon: 'drop it to 3 s')
+  A client in the beacon-only stall (game thread frozen, transport alive) accumulates every reliable
+  send of those minutes in keepers - Taurus had 12-23 at once, each retransmitting once a second
+  (107-122 retx per seq) -> +15-23 pps into a socket nobody drains. REL_KEEPER_INTERVAL_S 3.0: the
+  head seq still arrives within 3 s of the client waking (that is all the in-order queue needs), the
+  120 s give-up cap is unchanged. Blocking-window retransmits (REL_RETX_INTERVAL_S 0.75, first 3-5 s)
+  are untouched, so normal lossy-link recovery is as fast as before.
+  Verify: RELKEEP 'GAVE UP after 120s' lines report ~40 retx instead of ~120; PERF tx does not climb
+  while a STALL-WATCH ALIVE-NO-TICKS session is held.
+v968f7n  2026-10-30  PEER PLANE RE-CREATE CARRIED THE msg-73 ORDNANCE WORDS -> 'rocks[i]' error once a second
+  Taurus messages29 (Developer build): '4 rocks[i] PlnID:101; 5, Barney_Ross; iPLi:0' every ~1 s for
+  3 minutes (16:33:27-16:36:28), starting right after our ATOMIC re-create of Barney's plane (16:33:24)
+  that followed his msg 73 (16:33:20); the next re-create (16:36:29, right after his out-4) was clean.
+  FUN_004c8420 (msg-73 apply) loads the 73 words through LoadPayload and then RESTORES the create-time
+  +0xaf0 words, i.e. the two word sets differ: 73 = loaded ordnance, out-4 = pylon configuration. The
+  packer FUN_004ac160 checks loaded rockets against the +0xaf0 capacity fields -> with 73 words in
+  +0xaf0 it complains every send. _payload24 is now taken from the out-4 only; the 73 words are a
+  fallback when no out-4 words are held (never on a live plane). Same family as the v948f5 fix.
+  Taurus's DISCONNECT in that log is a client-side stall: his game thread stopped for 20/70/80 s
+  stretches from 16:36:30 (PseudoMove 951/3453/3953 extra cycles, log stamps on exact 10-s multiples),
+  transport beacons kept flowing (STALL-WATCH ALIVE-NO-TICKS), RELKEEP held 23 seqs 120 s each, the
+  client declared VCNCMD_FATALLOSTCONNECTION itself at 16:39:40, server reaped him 74 s after the
+  last beacon and booked the airborne loss. Server perf flat (disp_max 6 ms). Not server-caused.
+BANK 2026-10-30 - v968f6w .. v968f7m (local build; live server at v968f7l; snapshots in _scratch/bank/*.v968f7m)
+  Banked: infantry rules (no soldier tank kills, hunter messages), clock diagnostics + TimeCheck 89
+  probe + CLOCK-REBASE (default ON, ##clockrebase on|off / console 'clock rebase'), TC_EVENT msg 38,
+  no msg-6 echo, direct chat (msg 21 relay, CHAT21 log), /whosonline + /whosonline/onlineplayers.json,
+  arena minutes stamped at ROOM slot assignment, PlayerIndex floor 1 (whisper list fix).
+  OPEN (Alon 10-30 17:56): the AI station's EMPTY name (v968f7l, AI_CLIENT_NAME='') leaves a BLANK
+  placeholder row in the direct-message list - to be addressed later (options: a name the list
+  tolerates, or find whether the list can be made to skip the AI station).
+  OPEN: station-only msg 2 at join for never-flown pilots (not whisperable until first spawn);
+  convoy pause A/B for jump storms; drawn-but-missing lorries; msg 79/72/74 RE.
 v968f7m  2026-10-30  PRIVATE-MESSAGE LIST: PlayerIndex 0 IS NEVER LISTED -> slots now start at 1
   Report (Alon 10-30 15:30, live): Alon@HQ, Moira@HQ and SpUn in TC. Chat flowed every way, planes and
   roster fine, but SpUn was missing from BOTH Alon's and Moira's direct-message target lists.
