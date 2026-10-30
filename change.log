@@ -1,3 +1,17 @@
+v968f7m  2026-10-30  PRIVATE-MESSAGE LIST: PlayerIndex 0 IS NEVER LISTED -> slots now start at 1
+  Report (Alon 10-30 15:30, live): Alon@HQ, Moira@HQ and SpUn in TC. Chat flowed every way, planes and
+  roster fine, but SpUn was missing from BOTH Alon's and Moira's direct-message target lists.
+  Cause (FA.exe FUN_0044db4f, the whisper-target list builder): it walks the 512-entry NET::CLIENT
+  table (GetClient FUN_004f2560 -> FUN_004f2320), skips the local ClientNumber, and ADDS an entry only
+  when CLIENT+0x24 (= PlayerIndex, stored by FUN_00441110 from the Type-0 client record) is > 0
+  (`test eax,eax / jle skip`). SpUn had entered the empty arena first and got slot 0
+  (ClientNumber=0 PlayerIndex=0, 15:27:29) -> his station existed on every peer but was skipped.
+  Fix: SLOT_INDEX_MIN = 1 - assign_player_slot never hands out 0 (first-free, cooldown fallback,
+  kept slot and retired-slot reuse all honour the floor). St stays < 512.
+  Not the cause (checked): stations ARE created on far/off-radar peers via the plane path (RADAR
+  re-created, INSERT-CULL re-arm lines) - the list is station-based, but SpUn's station was there.
+  Verify: ROOM lines show 'ClientNumber=1 PlayerIndex=1' for the first pilot into an empty arena,
+  and the first pilot in is listed in the others' direct-message list.
 v968f7l (2026-10-30) - the 'AI' entry in the player list: the AI station goes nameless (experiment)
 - Every AI object (tank, soldier, lorry, train, ship) needs an owner STATION on the client - the Type-0
   client record 'Create client 496, (AI)' - or the create asserts o->Client()==0 (Network.cpp:440). The

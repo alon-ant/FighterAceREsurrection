@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7l'
+VERSION = 'v968f7m'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13303,6 +13303,13 @@ def get_sessions_in_room(room_id):
 # fall back to plain first-free and log - a possible misbinding beats an array overrun.
 SLOT_REUSE_COOLDOWN_S = 3600.0   # a freed slot stays reserved this long for its old pilot
 SLOT_INDEX_SOFT_MAX   = 120      # never let the cooldown push allocation past this index
+SLOT_INDEX_MIN        = 1        # v968f7m: NEVER hand out PlayerIndex/ClientNumber 0. The client's private-message
+                                 # target list (FUN_0044db4f) walks the 512-entry NET::CLIENT table and SKIPS every
+                                 # station whose PlayerIndex (CLIENT+0x24) is <= 0 (`test eax,eax / jle`) - so the
+                                 # pilot who entered an empty arena first (slot 0) was invisible in everyone's
+                                 # direct-message list although his chat, plane and roster were fine (live 10-30
+                                 # 15:27: SpUn slot 0, Alon 1, Moira 2 - 'both me and Moira cannot see SpUn').
+                                 # 0 was evidently reserved by the 2009 server too. 1..511 keeps St < 512.
 _SLOT_RETIRED = {}               # (room_id, idx) -> (pilot_name, t_freed)
 _SLOT_RETIRED_PILOT = {}         # v901f5: (room_id, idx) -> last pilot to hold it (for the stale-slot scrub)
 
@@ -13429,14 +13436,14 @@ def assign_player_slot(s, room_id):
         prev = s.__dict__.get('_assigned_slot')
         _pn  = getattr(s, 'current_pilot', None)
         _nowm = time.time()
-        if prev is not None and prev not in taken:
+        if prev is not None and prev >= SLOT_INDEX_MIN and prev not in taken:   # v968f7m: never keep a 0
             idx = prev                   # keep our stable identity across arena changes
         else:
             # v441f5: PREFER a slot this pilot retired earlier in this room - the peers'
             # station already carries their name, so re-taking it restores a CORRECT
             # binding (see the SLOT-REUSE COOLDOWN block above).
             _mine = [i for (rid, i), (pn, _tf) in _SLOT_RETIRED.items()
-                     if rid == room_id and pn == _pn and i not in taken]
+                     if rid == room_id and pn == _pn and i not in taken and i >= SLOT_INDEX_MIN]
             if _mine:
                 idx = min(_mine)
             else:
@@ -13445,13 +13452,13 @@ def assign_player_slot(s, room_id):
                     ent = _SLOT_RETIRED.get((room_id, _i))
                     return (ent is not None and ent[0] != _pn
                             and (_nowm - ent[1]) < SLOT_REUSE_COOLDOWN_S)
-                idx = 0
+                idx = SLOT_INDEX_MIN                       # v968f7m: 0 is never a player index
                 while idx in taken or _cooling(idx):
                     idx += 1
                     if idx > SLOT_INDEX_SOFT_MAX:
                         # safety valve: plain first-free (accept possible misbinding
                         # over overrunning the client's finite station arrays)
-                        idx = 0
+                        idx = SLOT_INDEX_MIN
                         while idx in taken:
                             idx += 1
                         s.__dict__['_slot_fallback_note'] = idx   # logged outside `sl`
