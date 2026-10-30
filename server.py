@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7a'
+VERSION = 'v968f7d'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13465,6 +13465,8 @@ def assign_player_slot(s, room_id):
                     f'join-62 batch to each peer (2009 form; idx not held by a live peer)')
     else:
         s.__dict__.pop('_slot_scrub', None)
+    if s.__dict__.get('_room_entered_room') != room_id or not s.__dict__.get('_room_entered_at'):
+        s._room_entered_at = time.time(); s._room_entered_room = room_id      # v968f7b: one stamp per arena entry, here
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
@@ -13486,7 +13488,8 @@ def _maybe_grant_create_entry(s):
     if s.entered_game or s.client_granted or s.current_room is None:
         return False
     s.entered_game = True
-    s._room_entered_at = time.time()                  # v968f7a: /whosonline 'minutes in arena'
+    if not s.__dict__.get('_room_entered_at'):
+        s._room_entered_at = time.time()              # v968f7a/b: /whosonline 'minutes in arena' (fallback stamp)
     s.__dict__.pop('_motd_room', None)          # v893f5
     s.nation = None                                   # "In Menu" until a side is picked
     assign_player_slot(s, s.current_room)
@@ -13898,15 +13901,36 @@ def _tick_rate_clamped(sess):
     hi = TICK_RATE_DEFAULT * (1.0 + TICK_RATE_CLAMP_PCT / 100.0)
     return lo if r < lo else hi if r > hi else r
 
+def _note_raw_stamp(p, age):
+    """v968f7c: a frame to p left with the SENDER's tick (no usable projection of p's clock: his own
+    telemetry is older than RELAY_TICK_PROJECT_MAX_S or never seen). On his screen such a frame is
+    'sender's conductor minus his conductor' ticks old - an arbitrary CONSTANT, exactly the steady
+    200-470-tick age behind Meno's (messages72) and Inky's (messages79, Boogdog obj 370) Move1/Move2
+    storms. Counted per receiver and logged once per 30 s while it goes on."""
+    try:
+        now = time.time()
+        d = p.__dict__
+        d['_raw_stamp_n'] = d.get('_raw_stamp_n', 0) + 1
+        if now - d.get('_raw_stamp_logged', 0.0) >= 30.0:
+            d['_raw_stamp_logged'] = now
+            log('RAW-STAMP', f'{getattr(p, "current_pilot", "?")}: {d["_raw_stamp_n"]} relayed frame(s) so far carried the sender\'s own tick - '
+                             f'his telemetry is {"unseen" if age is None else "%.1f s old" % age} (flying={getattr(p, "flying", None)}, '
+                             f'in_game={getattr(p, "entered_game", None)}); every frame to him reads a constant number of ticks off on his screen')
+            d['_raw_stamp_n'] = 0
+    except Exception:
+        pass
+
 def _relay_stamp_for(p, onum):
     """v883f5: the tick to write into a frame relayed TO peer p for object onum: p's own clock
     projected to now from his last harvest at his measured rate, minus RELAY_TICK_LEAD, never
     earlier than the previous stamp for this object to p. None = leave the sender's tick."""
     base = getattr(p, 'last_telem_tick', None)
     if base is None:
+        _note_raw_stamp(p, None)
         return None
     age = time.time() - getattr(p, 'last_telem_time', 0.0)
     if age > RELAY_TICK_PROJECT_MAX_S or (age > STALE_TICK_WARN_S and not STALE_TICK_EXTRAP):
+        _note_raw_stamp(p, age)
         return None
     rate = _tick_rate_clamped(p)
     stamp = (int(base) + int(max(0.0, age) * rate) - RELAY_TICK_LEAD + _lag_lead_ticks(p, rate)
@@ -13954,6 +13978,7 @@ def _ai_stamp(sess, onum):
             st = None
         if st is not None:
             return st
+    _note_raw_stamp(sess, (time.time() - getattr(sess, 'last_telem_time', 0.0)) if rt is not None else None)   # v968f7c
     return ((rt if rt is not None else 0) - RELAY_TICK_LEAD) & 0xFFFF
 
 # v485f5 [CREATE-BEFORE-TELEMETRY]: hold a sender's relayed telemetry to a peer until that
@@ -15335,6 +15360,8 @@ def spawn_car(room_id, camp, class_id, pos, heading_deg=0.0, reason=''):
 # every issued number back to the canonical one for inbound hits / hunters / culls.
 CAR_ROTATE_ON_CROSS  = True
 CAR_ROTATE_OVERLAP_S = 0.6
+CAR_ROTATE_MAX_PER_10S = 4    # v968f7d: at most this many rotation creates per CLIENT per 10 s; beyond it a crossing waits
+                              # (the lorry stays on its old number a little longer) rather than flooding his reliable channel
 CAR_LETHAL_SETTLE_S  = 1.0   # v968f6s: a lethal 51 waits until this long (+RTT) after the client's create of the number it names
 CAR_ALIAS = {}            # held number -> canonical CARS key
 
@@ -15940,10 +15967,17 @@ def convoy_escort_for_room(rid):
         v = 'both'
     return v if v in ('both', 'aa', 'flak', 'none') else 'both'
 
+CONVOY_PAUSED = False      # v968f7d: `convoy pause` - no new columns anywhere (scheduled, on-demand or console) until
+                           # `convoy resume`; `convoy pause now` also sends the live ones home. The lever for the
+                           # 'is it the lorries?' test (Alon 10-30 09:11: stable for days until the lorry work).
+
 def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=True):
     """A column from scene src to scene dst overland: AA car in front, the lorries, Flak car at the
     tail, CONVOY_GAP_M apart, each following the vehicle ahead; the lead plans the route."""
     terrain = _probe_terrain_for_room(rid)
+    if CONVOY_PAUSED:
+        log('CONVOY', f'room {rid}: convoy to scene {dst_sidx} NOT dispatched - convoys paused (`convoy resume`) {reason}')
+        return None
     if not CAR_CLASSES or not tank_consts_ok():
         return None
     by_name = {v: k for k, v in CAR_CLASSES.items()}
@@ -16093,6 +16127,8 @@ CONVOY_RECREATE_PERIOD_S     = 3.0
 # and `convoy recreate 3` brings the rolling re-create back.
 CAR_CELL_RECREATE = True
 CAR_CELL_M        = 2048.0
+CAR_CELL_HYST_M   = 60.0      # v968f7c: a crossing counts only once the lorry is this far inside the new cell (run_223710
+                              # 23:31-23:35: lorries on a boundary flipped (-3,-7)<->(-2,-7) every few seconds, a fresh number each time)
 
 def _car_cell(x, y):
     return (int(math.floor(x / CAR_CELL_M)), int(math.floor(y / CAR_CELL_M)))
@@ -16113,6 +16149,11 @@ def car_cell_check(onum, c, now):
     stale = [a for a in c['peers'] if cells.get(a) is not None and cells.get(a) != here]
     if not stale:
         return 0
+    if CAR_CELL_HYST_M > 0:                                                         # v968f7c: boundary hysteresis
+        _fx = c['pos'][0] - math.floor(c['pos'][0] / CAR_CELL_M) * CAR_CELL_M
+        _fy = c['pos'][1] - math.floor(c['pos'][1] / CAR_CELL_M) * CAR_CELL_M
+        if min(_fx, CAR_CELL_M - _fx, _fy, CAR_CELL_M - _fy) < CAR_CELL_HYST_M:
+            return 0
     n = 0
     _rng = room_tag_range_m(c['room'])                                              # v968f6o: the arena's tag range
     _near = []
@@ -16130,6 +16171,20 @@ def car_cell_check(onum, c, now):
         return 0
     held = c.setdefault('held', {})
     if CAR_ROTATE_ON_CROSS:
+        # v968f7d: per-client budget - a client already sent CAR_ROTATE_MAX_PER_10S rotation creates in the
+        # last 10 s waits for the next tick (his copy stays stale a moment longer; it was stale anyway)
+        _keep = []
+        for p, _dist in _near:
+            _hist = p.__dict__.setdefault('_rot_hist', [])
+            while _hist and now - _hist[0] > 10.0:
+                _hist.pop(0)
+            if len(_hist) >= CAR_ROTATE_MAX_PER_10S:
+                _perf['car_rotate_deferred'] = _perf.get('car_rotate_deferred', 0) + 1
+                continue
+            _keep.append((p, _dist))
+        _near = _keep
+        if not _near:
+            return 0
         # v968f6r: one fresh number per cell the lorry is in (shared by every client re-filed in that
         # cell); the client's old copy is deleted only after the new one is surely built.
         _cur = int(c.get('cur_num', onum))
@@ -16146,6 +16201,7 @@ def car_cell_check(onum, c, now):
             _submit_send(send_rel, p, build_msg13(body), f'<- CAR 0x{onum:04x} rotated to 0x{_cur:04x} in cell {here} for {p.current_pilot} ({_dist:.0f} m)', to=3.0)
             held[p.addr] = _cur
             c.setdefault('held_at', {})[p.addr] = time.time()                  # v968f6s
+            p.__dict__.setdefault('_rot_hist', []).append(now)                 # v968f7d
             cells[p.addr] = here
             _olds.append((p, _old))
             n += 1
@@ -16812,6 +16868,18 @@ def convoy_console(args, by='console'):
             if len(args) >= 2:
                 CONVOY_HALT_RECREATE_DELAY_S = max(0.0, float(args[1]))
             return [f'convoy haltdelay = {CONVOY_HALT_RECREATE_DELAY_S:.0f}s (re-create held this long after a halted column settles; 0 = at once)']
+        if v in ('pause', 'resume'):                                 # v968f7d
+            global CONVOY_PAUSED
+            CONVOY_PAUSED = (v == 'pause')
+            out = [f'convoys {"PAUSED - no new columns" if CONVOY_PAUSED else "resumed"}']
+            if CONVOY_PAUSED and len(args) >= 2 and args[1].lower() == 'now':
+                n = 0
+                for cid, cv in list(CONVOYS.items()):
+                    if cv['phase'] in ('out', 'unload'):
+                        cv['phase'] = 'unload'; cv['unload_until'] = time.time(); cv['aborted'] = True; n += 1
+                out.append(f'  {n} live column(s) turned for home')
+            log('CONVOY', out[0] + (' | ' + out[1] if len(out) > 1 else '') + ' (console)')
+            return out
         if v == 'stop' and len(args) >= 2:
             ids = list(CONVOYS) if args[1].lower() == 'all' else [int(args[1])]
             n = 0
@@ -27937,6 +28005,25 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
                      f'(AF={af} N={grant_n})', to=5.0),
                      daemon=True).start()
 
+def _post_leave_poll(s, where):
+    """v968f7c (Flakmagic/Inky 10-29 23:38, messages79): after a capture under canopy his client left the
+    arena and then polled 0x43 once a second for 30 s with a blank lobby until he quit ('Timeout').
+    The 0xDA lobby re-attach that stops that poll goes out UNRELIABLY at the leave and on every poll;
+    whether it ever took is invisible at INFO. Now: the polls after a leave are counted and logged,
+    and on the 3rd and 10th the 0xDA goes RELIABLY as well."""
+    try:
+        n = int(s.__dict__.get('_post_leave_polls', 0)) + 1
+        s._post_leave_polls = n
+        _since = time.time() - float(s.__dict__.get('_left_arena_at', time.time()))
+        if n in (1, 3, 5, 10, 20, 30) or n % 30 == 0:
+            log('LEAVE-POLL', f'{s.current_pilot}: 0x43 poll #{n} {_since:.0f}s after the leave ({where}) - the client has not '
+                              f'accepted the lobby re-attach yet' + (' -> 0xDA sent RELIABLY too' if n in (3, 10) else ''))
+        if n in (3, 10):
+            threading.Thread(target=lambda: send_rel(s, _da_current(s), f'<- 0xDA lobby re-attach RELIABLE (poll #{n})', to=5.0),
+                             daemon=True).start()
+    except Exception:
+        pass
+
 def handle_leave_arena(s):
     """Client pressed 'back to lobby' - msg 64 (0x40). Msg 64 has NO inbound dispatch
     handler -> must NOT be echoed (echo -> "Unknown Type 64").
@@ -28026,6 +28113,7 @@ def handle_leave_arena(s):
                     send_rel(_p, _r, _rl, to=3.0)
                 _submit_send(_leave_send)
     s.entered_game = False
+    s.__dict__.pop('_room_entered_at', None); s.__dict__.pop('_room_entered_room', None)   # v968f7b: the arena clock stops here
     s.__dict__.pop('_motd_room', None)          # v893f5: left the arena -> the next entry gets the MOTD again
     # v260: ARENA ISOLATION - clear current_room on leave so a subsequent arena JOIN resolves the
     # new arena fresh. Previously current_room kept pointing at the OLD room, and the enter handler
@@ -28072,6 +28160,7 @@ def handle_leave_arena(s):
         # 0x43 and we resend it there (resend-on-poll). entered_game is now False, so the
         # resend/echo gates below are armed until the player re-enters a game.
         s._awaiting_reattach = True
+        s._post_leave_polls = 0; s._left_arena_at = time.time()          # v968f7c
         send_unrel(s, _da_current(s),
                    '<- 0xDA lobby re-attach (UNREL, resend-on-0x43-poll) - stops post-leave poll')
     else:
@@ -28953,6 +29042,7 @@ def handle_compound(s, outer_cmd, pl):
         _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT (enters game)
         if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
             send_unrel(s, _da_current(s), '<- 0xDA re-attach RESEND (compound 0x43 poll)')
+            _post_leave_poll(s, 'compound')                                  # v968f7c
         room_slot = getattr(s, 'room_slot', 0)
         rooms = db_get_open_rooms()
         if rooms and (s.current_room or room_slot):
@@ -28991,7 +29081,8 @@ def handle_compound(s, outer_cmd, pl):
             if pname not in existing:
                 db_room_join(s.current_room, pname, s.account or '')
         s.entered_game = True
-        s._room_entered_at = time.time()        # v968f7a: /whosonline 'minutes in arena'
+        if not s.__dict__.get('_room_entered_at'):
+            s._room_entered_at = time.time()    # v968f7a/b: /whosonline 'minutes in arena' (fallback stamp)
         s.__dict__.pop('_motd_room', None)      # v893f5: a new arena entry on this connection
         s.entering_gidx = game_idx
         s.nation = None                       # enters "In Menu" until a side is picked
@@ -35410,6 +35501,7 @@ def handle_post_auth(s, cmd, pl):
                     _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
                     if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
                         send_unrel(s, _da_current(s), '<- 0xDA re-attach RESEND (appspace 0x43 poll)')
+                        _post_leave_poll(s, 'appspace-scan')                 # v968f7c
                     room_slot = getattr(s,'room_slot',0)
                     rooms = db_get_open_rooms()
                     if rooms and (s.current_room or room_slot):
@@ -35436,6 +35528,9 @@ def handle_post_auth(s, cmd, pl):
                     return
                 s.last_43_ts = now
                 _maybe_grant_create_entry(s)   # creator's post-create 0x43 poll -> 201 GRANT
+                if SEND_EXIT_UNRELIABLE and getattr(s,'_awaiting_reattach',False) and not s.entered_game:
+                    send_unrel(s, _da_current(s), '<- 0xDA re-attach RESEND (direct 0x43 poll)')   # v968f7c
+                    _post_leave_poll(s, 'direct')
                 room_slot = getattr(s, 'room_slot', 0)
                 rooms = db_get_open_rooms()
                 if rooms and (s.current_room or room_slot):

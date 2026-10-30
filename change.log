@@ -1,3 +1,42 @@
+v968f7d (2026-10-30) - the 'is it the lorries?' lever: convoy pause + rotation budget (Alon 09:11)
+- Evidence so far is circumstantial: the two jump storms (Meno 10-29 21:02, Inky 10-29 23:29) both
+  happened in arenas with convoys rolling; Meno's began 25 s after his client silence-culled six
+  lorries and sent the delete list; neither storm is explained by the receiver's or the sender's link.
+  The lorry subsystem is the one new heavy source of reliable traffic since the stable days.
+- `convoy pause` - no new columns anywhere (scheduled, on-demand, console request) until
+  `convoy resume`; `convoy pause now` also turns the live columns for home. One evening without lorries
+  with the v968f7c RAW-STAMP / CLOCK-LAG / LEAVE-POLL lines on is the test.
+- CAR_ROTATE_MAX_PER_10S 4: a client gets at most four rotation creates per 10 s; further crossings
+  wait a tick (his copy stays stale a moment longer - it was stale anyway). With the 60 m cell
+  hysteresis of v968f7c this caps the lorry traffic to any one client at a few reliable messages
+  per 10 s even with a column on a boundary. `convoy cell` shows rotations; _perf car_rotate_deferred.
+
+v968f7c (2026-10-30) - Flakmagic's blank lobby + 'Timeout' after a capture (messages79); jumping peers; cell flip-flop
+- 23:37:24-57 live: shot by Cholla, bailed, CAPTURED under canopy (death, aces wiped), the client
+  respawned and left the arena at once (msg 64). Then: 0x43 polled once a second for 30 s, lobby
+  blank ('no info in the arena, lobby or main screen'), FIN at 23:38:30 when he quit = the client's
+  'Timeout'. The 0xDA lobby re-attach that stops that poll is sent UNRELIABLY at the leave and on
+  every poll, and nothing at INFO shows whether it took. Now _post_leave_poll(): the polls after a
+  leave are counted and logged ('LEAVE-POLL #n Ns after the leave'), and on the 3rd and 10th the
+  0xDA also goes RELIABLY. The direct 0x43 handler now resends 0xDA too (only the two others did).
+- 'Boogdog started jumping, then the two GB fighters': Move2 on obj 370 (Boogdog) at a steady
+  200-222 ticks for 30 s (23:29:54-23:30:23) - the same constant-age signature as Meno's storm, and
+  the CLOCK-LAG meter saw nothing for Inky. A frame that leaves with the SENDER's own tick (no usable
+  projection of the receiver's clock: his telemetry > 10 s old or unseen) reads 'sender conductor
+  minus receiver conductor' = an arbitrary constant on his screen - exactly this. RAW-STAMP line
+  (per receiver, once per 30 s while it goes on) counts those frames and says how old his telemetry
+  is, so the next storm names its cause.
+- CAR_CELL_HYST_M 60: run_223710 23:31-23:35 had lorries on a cell boundary flip (-3,-7)<->(-2,-7)
+  every few seconds, a fresh number and a create each time; a crossing now counts only 60 m inside
+  the new cell.
+
+v968f7b (2026-10-30) - /whosonline: minutes shown for every pilot, not only the newest
+- Live 22:41: Meno '3 min', Shadow and Clyde blank. The v968f7a stamp sat on two of the three
+  entered_game sites; the slot-assignment path those two came through did not pass either. The stamp
+  now lives where every arena entry goes - the ROOM slot assignment (one stamp per arena entry, kept
+  across re-flies and field changes) - the two earlier stamps are fallbacks that never restart the
+  clock, and handle_leave_arena clears it.
+
 v968f7a (2026-10-30) - WHO'S ONLINE feed + page for fa-re.net (Alon 00:21)
 - server.py: web_online_players() - every authenticated session with a pilot picked: pilot, arena
   (rooms.room_name, cached 60 s), side tag, state lobby|arena|flying, minutes in the arena
