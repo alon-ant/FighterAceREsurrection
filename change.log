@@ -36,6 +36,10 @@ v968f7z  2026-10-31  LOAD-HOLD: nothing stale into a client that is loading the 
   coord for missing object' in the whole session (trains, the stick, the airfield change). The snapshot
   now runs 0.2 s after the release so INSERT-CULL prunes his peer sets first, and its line says how many
   held objects were culled / beyond the far tier.
+  Run 094934 (messages89, pilot switch Bigalon -> Test13 in one session): zero missing-object lines at the
+  12-soldier + 2-train re-create on Test13's entry; one at the SPAWN of train 260 (07:50:35, 'out 6' ->
+  44 ms -> missing) - the spawn path lacked the v681 create-settle hold the re-create path has; added
+  (TANK_CREATE_SETTLE_S). The msg-6 delay (above) covers the answer; this covers the driver's own frame.
 v968f7y  2026-10-31  SOLDIER CREATE-SETTLE HOLD (the tank v666f5 hold, applied to soldiers)
   First local run of v968f7x (run_030143, messages85): every soldier of the landing stick produced one
   'Get coord for missing object' (288, 290, 294, 296, 299, 301) - the frame reached the client ~50 ms

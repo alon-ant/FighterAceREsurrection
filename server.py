@@ -21532,6 +21532,10 @@ def spawn_train(rid, camp, road_idx, node_idx, n_wagons=3, dist=0.0, reason=''):
         body = bytearray([0x02]) + _ensure_ai_client_on(p)
         body += build_train_record(AI_CLIENT_ST, onum, camp, loco, road_idx, node_idx, dist, wagons)
         TRAINS[onum]['peers'].add(getattr(p, 'addr', None))
+        # v968f7z: the v681 create-settle hold for the SPAWN path too (the re-create path had it) -
+        # messages89 07:50:35: 'out 6' -> 44 ms -> 'Get coord for missing object 260' from the driver's
+        # regular 4 Hz frame, before the client had instantiated the record.
+        TRAINS[onum].setdefault('hold_until', {})[getattr(p, 'addr', None)] = time.time() + TANK_CREATE_SETTLE_S
         _submit_send(send_rel, p, build_msg13(bytes(body)), f'<- CreateObject 2 TRAIN 0x{onum:04x} {reason}', to=3.0)
         n += 1
     log('TRAIN', f'room {rid}: train 0x{onum:04x} camp {camp} loco {loco} + {wagons} on road {road_idx} '
