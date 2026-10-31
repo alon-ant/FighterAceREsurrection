@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7s'
+VERSION = 'v968f7z'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7541,6 +7541,18 @@ def console_handler():
                                        f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}'
                                        + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
                                        + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
+            elif cmd == 'mlist':                                                        # v968f7x: mlist [on|off]  (EMsgList bundling of AI frames)
+                global MSGLIST_BUNDLE
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    MSGLIST_BUNDLE = (_a[0].lower() == 'on')
+                log('CONSOLE', f'MsgList bundling of AI object frames = {"ON" if MSGLIST_BUNDLE else "off"} '
+                               f'(<= {MSGLIST_MAX_BYTES} B / {MSGLIST_MAX_N} frames per list, flush after {MSGLIST_FLUSH_MS} ms; `mlist on|off`)')
+                for _s in get_all_sessions():
+                    if getattr(_s, 'entered_game', False):
+                        _l, _m, _1 = _s.__dict__.get('_ml_lists', 0), _s.__dict__.get('_ml_msgs', 0), _s.__dict__.get('_ml_singles', 0)
+                        log('CONSOLE', f'  {_s.current_pilot}: {_m} AI frames in {_l} lists ({(_m / _l) if _l else 0.0:.1f}/list), '
+                                       f'{_1} sent alone; datagrams saved: {_m - _l}')
             elif cmd == 'special74':                                                    # v968f7p test: msg 74 type 0 to one pilot
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _t = next((x for x in get_all_sessions() if _a and getattr(x, 'current_pilot', None) == _a[0]), None)
@@ -9171,6 +9183,7 @@ def console_handler():
                         '                                  - the event toolbox (tournament clock/lives/winner + weapons lock); see EVENTS.md',
                         '                                  - clock / close joining now / fight now / lives / result',
                         'boot <pilot> [text]               - EShutDown with text (client exits the game)',
+                        'mlist [on|off]                    - v968f7x: bundle AI object frames into EMsgList datagrams; shows per-pilot stats',
                         'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
                         'modact ...                        - moderator-action probes (dev)',
                     ]),
@@ -12516,6 +12529,9 @@ class S:
         self._relkeep_held=0      # v419f5: sends currently held by _rel_keeper (window expired)
         self._stall_warned=False  # STALL-WATCH logs the transition once, not every tick
         self._dseq_lock=threading.Lock()   # v813f5
+        self._ml_lock=threading.Lock()     # v968f7x: MsgList outbox (AI object frames bundled per datagram)
+        self._ml_buf=bytearray(); self._ml_frames=[]; self._ml_n=0; self._ml_t0=None
+        self._ml_lists=0; self._ml_msgs=0; self._ml_singles=0   # stats: lists sent / entries in them / lone frames
         # -- Flight recorder rings (dumped to logs/flightrec/ when STALL-WATCH fires) --
         self._rec_rel=deque(maxlen=FLIGHT_REC_RELMAX)    # reliable msgs both directions
         self._rec_unrel=deque(maxlen=FLIGHT_REC_UNRMAX)  # trailing unreliable telemetry
@@ -12573,6 +12589,9 @@ class S:
         # once the server retransmits) is classified as benign instead of a disconnect.
         with self._lock:
             self._evts.pop(seq, None)
+            _rp = self.__dict__.get('_rel_pkts')
+            if _rp is not None:
+                _rp.pop(seq, None)                                # v968f7w
             r = getattr(self, '_done_ring', None)
             if r is None:
                 r = self._done_ring = deque(maxlen=512)     # v968f7r: the whole 9-bit seq space (was 64)
@@ -13112,6 +13131,48 @@ REL_KEEPER_MAX_S = 120.0     # v417f5: keeper hard cap - past this the client is
 REL_MAX_OUTSTANDING = 160
 REL_CAP_LOG_GAP_S   = 5.0    # rate limit for the TX/RELCAP refusal log, per session
 
+# v968f7w [NAK FAST RETRANSMIT] (vcncNet.dll RE, FUN_10006b0e / FUN_10002b27): every ACK the client
+# sends carries TWO sequence numbers - the packet it acknowledges (bits 20-28) and the next one its
+# strictly in-order reliable receiver is WAITING for (bits 8-16). When that next-expected is a seq we
+# sent earlier and have not seen ACKed, the client is telling us it never arrived: everything behind it
+# is sitting in his QRcv until it does. The client does the mirror of this with OUR acks ('[Input]
+# Packets are missing - resend the expected packet %d' -> immediate resend with flag 0x4000). Until now
+# the server only waited for its own timer (0.75 s in the blocking window, 3 s in the keeper), so every
+# lost reliable packet cost the receiver up to a 3 s freeze of the reliable stream (creates, deletes,
+# roster, chat). Now the hole is re-sent the moment the ACK that names it arrives - one RTT after the
+# loss - at most once per NAK_RETX_MIN_S per seq, and never for a closed session.
+NAK_RETX_MIN_S = 0.15
+
+def _nak_fast_retransmit(s, nexp, aseq):
+    try:
+        if nexp == aseq or getattr(s, 'closing', False):
+            return
+        with s._lock:
+            if nexp not in s._evts:
+                return
+            ent = (s.__dict__.get('_rel_pkts') or {}).get(nexp)
+        if ent is None:
+            return
+        pkt, t_sent = ent
+        now = time.time()
+        _rtt = (s.__dict__.get('_rtt_ms') or 100) / 1000.0
+        if now - t_sent < max(0.1, 1.5 * _rtt):
+            return                        # still in flight behind the acked one - not lost, just pipelined
+        last = s.__dict__.setdefault('_nak_last', {})
+        if now - last.get(nexp, 0.0) < NAK_RETX_MIN_S:
+            return
+        last[nexp] = now
+        for k in [k for k in last if k not in s._evts]:
+            last.pop(k, None)
+        sock.sendto(pkt, s.addr)
+        _perf['tx'] += 1; _perf['txb'] += len(pkt)
+        s._nak_retx = getattr(s, '_nak_retx', 0) + 1
+        if time.time() < s.__dict__.get('_rel_trace_until', 0.0) or s._nak_retx in (1, 10, 100, 1000):
+            log('RELNAK', f'{getattr(s, "current_pilot", "?")}: his ACK of seq {aseq} says he is waiting for seq {nexp} - '
+                          f'resent at once (#{s._nak_retx} this session)')
+    except Exception:
+        pass
+
 def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
     """v417f5: keep an un-ACKed reliable seq ALIVE after send_rel's blocking window expires.
 
@@ -13154,10 +13215,15 @@ def _rel_keeper(s, seq, pkt, e, label, blocking_retx):
         if _left and _left > t0 and not _benign:
             # v903f5: same as send_rel - fill the seq with a benign msg-63 instead of leaving a hole
             pkt = build_rel(_benign_fill_payload(), seq); _benign = True
+            s.__dict__.setdefault('_rel_pkts', {})[seq] = (pkt, time.time())    # v968f7w
             log('RELKEEP', f'{s.current_pilot or s.addr} seq={seq} post-leave: stale in-game payload '
                            f'replaced by a benign filler (keeps the in-order queue moving) ({label})')
         if e.wait(timeout=REL_KEEPER_INTERVAL_S):
+            if getattr(s, 'closing', False):                       # v968f7u: woken by the teardown, not by an ACK
+                outcome = 'session closed'; break
             outcome = f'ACKed after {time.time()-t0:.1f}s'; break
+        if getattr(s, 'closing', False):                           # v968f7u: re-check AFTER the wait - the old code
+            outcome = 'session closed'; break                      # sent one more copy before noticing the close
         if time.time() - t0 > REL_KEEPER_MAX_S:
             outcome = (f'GAVE UP after {REL_KEEPER_MAX_S:.0f}s - downlink for this session is '
                        f'wedged, client almost certainly gone')
@@ -13288,6 +13354,7 @@ def send_rel(s, payload, label='', to=5.0):
         return False
     seq=s.nrel(); e=s.mke(seq)
     pkt=build_rel(payload,seq)
+    s.__dict__.setdefault('_rel_pkts', {})[seq] = (pkt, time.time())            # v968f7w: for the NAK fast-retransmit
     try:
         sock.sendto(pkt,s.addr)
         _perf['tx'] += 1; _perf['txb'] += len(pkt)   # v399f5
@@ -13308,6 +13375,7 @@ def send_rel(s, payload, label='', to=5.0):
         rem=deadline-time.time()
         if rem<=0: break
         ok=e.wait(timeout=min(REL_RETX_INTERVAL_S,rem))
+        if getattr(s, 'closing', False): ok=False; break        # v968f7u: a closed session sends nothing more (see _teardown_session)
         if ok: break
         if deadline-time.time()<=0: break
         # v502f5 [BAIL-EXIT LOBBY CTD]: stop retransmitting a stale in-game reliable once the client
@@ -13323,6 +13391,7 @@ def send_rel(s, payload, label='', to=5.0):
         _left = getattr(s, '_arena_left_at', 0.0)
         if _left and _left > deadline - to and not _benign:
             pkt = build_rel(_benign_fill_payload(), seq); _benign = True
+            s.__dict__.setdefault('_rel_pkts', {})[seq] = (pkt, time.time())    # v968f7w
             log('TX/RELIABLE', f'seq={seq} post-leave: stale in-game payload replaced by a benign '
                                f'filler (keeps the client\'s in-order queue moving) {label}')
         try:
@@ -13829,7 +13898,15 @@ TIMECHECK_DRIFT_WARN_PCT = 1.0
 # 'CRAP!!! HUGE backward NET Time' meltdown, so a clock running AHEAD is only logged), at most once per
 # TIMECHECK_REBASE_MIN_S and at most TIMECHECK_REBASE_MAX_MS at a time. Off by default: `clock rebase on`;
 # while off every decision is logged as '(dry)' so the behaviour can be watched first.
-CLOCK_REBASE            = True   # v968f7g: ON by default (Alon 16:45) - ##clockrebase off / console `clock rebase off` to stop it
+CLOCK_REBASE            = False  # v968f7v: OFF by default again (dry-run lines stay). The one live firing (Booker 10-30 18:24,
+                                 # run_154659) made things worse: his NET clock was already drifting -43 ms/s and jumping
+                                 # (-1.7 s, -3.1 s) when the rebase sent STATUS base increments of +1741 and +5527 ms; the
+                                 # client's time fit (least-squares over 8 samples, vcncNet) read the steps as RATE and ran
+                                 # away: +7.8 s, +48 s, +11.6 s jumps, +61.6 s ahead, 'drifts +541.9 ms/s' - he left to the
+                                 # lobby 14 s later and the session was idle-reaped (CTD/timeout). A step correction is the
+                                 # wrong tool against that fit; a correction has to be a gentle RATE (a few ms per STATUS
+                                 # for many seconds) or nothing. Until that exists: ##clockrebase on / `clock rebase on`
+                                 # for a deliberate experiment only.
 TIMECHECK_REBASE_MS     = 300
 TIMECHECK_REBASE_MIN_S  = 30.0
 TIMECHECK_REBASE_MAX_MS = 8000
@@ -13909,15 +13986,16 @@ def _pilot_lag_sample(s, send_ms, recv_ms, rtt, now):
             _D = d.get('_tick_lag')
             _net = d.get('_rtt_ms')
             log('PILOT-LAG', f'{getattr(s, "current_pilot", "?")}: our probe took {rtt_ms} ms to come back - '
-                             f'INBOUND (our send -> his handler) {int(d["_lag_in_ms"])} ms, OUTBOUND (his reply -> us) {int(d["_lag_out_ms"])} ms'
+                             f'INBOUND (our send -> his handler) {in_ms} ms, OUTBOUND (his reply -> us) {out_ms} ms'
+                             f' (smoothed {int(d["_lag_in_ms"])}/{int(d["_lag_out_ms"])} ms)'   # v968f7y: this sample first - the EWMA alone read 629/10 for a 2107 ms probe
                              f'{f", network rtt {_net} ms" if _net is not None else ""}; his telemetry ticks '
                              f'{"on time" if _D is None or abs(_D) < CLOCK_LAG_WARN_TICKS else f"{_D / TICK_RATE_DEFAULT:+.1f} s off"}; '
                              f'we send him {d.get("_lag_tx_pps", 0.0):.1f} pkt/s = {d.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s '
                              f'(flying={getattr(s, "flying", False)}, in_game={getattr(s, "entered_game", False)})'
                              + (' -> his RECEIVE side is backed up (socket/transport/handlers), not his sending'
-                                if d['_lag_in_ms'] > 3 * max(50, d['_lag_out_ms']) else
+                                if in_ms > 3 * max(50, out_ms) else
                                 (' -> his SEND side is delayed (bandwidth limiter / send queue)'
-                                 if d['_lag_out_ms'] > 3 * max(50, d['_lag_in_ms']) else ' -> both directions slow')))
+                                 if out_ms > 3 * max(50, in_ms) else ' -> both directions slow')))
     except Exception:
         pass
 
@@ -15751,11 +15829,8 @@ def car_broadcast_state(onum):
             continue
         _num = _car_num_for(c, p.addr, onum)                                 # v968f6r
         frame = build_car_update(_ai_stamp(p, _num), _num, pl)
-        seq = p.nundgram()
-        try:
-            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, p.addr); n += 1
-        except OSError:
-            pass
+        if _mlist_queue(p, frame):                                             # v968f7x: bundled
+            n += 1
     return n
 
 def _car_keepalive(onum):
@@ -17392,11 +17467,8 @@ def ship_broadcast_state(onum):
         if not _ai_peer_send_ok(sh, p, x, y, _now, kind='tank', onum=onum):     # v967f5g
             continue
         frame = build_ship_update(_ai_stamp(p, onum), onum, pl)
-        seq = p.nundgram()
-        try:
-            sock.sendto(bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame, p.addr); n += 1
-        except OSError:
-            pass
+        if _mlist_queue(p, frame):                                             # v968f7x: bundled
+            n += 1
     return n
 
 def _ship_keepalive(onum):
@@ -18381,13 +18453,7 @@ def send_tank_update(onum, tick_for, payload26):
     if rt is None:
         return False
     frame = build_tank_update(_ai_stamp(tick_for, onum), onum, payload26)   # v884f5
-    seq = tick_for.nundgram()                                   # v813f5: the one datagram counter
-    pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
-    try:
-        sock.sendto(pkt, tick_for.addr)
-        return True
-    except OSError:
-        return False
+    return _mlist_queue(tick_for, frame)                        # v968f7x: bundled (was one datagram per frame)
 
 # v938f5 [THE CLIENT CULLS EVERY PEER PLANE BEYOND 15 km AT EVERY SPAWN - SILENTLY]. Gibson's log
 # (messages994, 10-19 22:04:24): on his same-field respawn ('InsertPlayer') his client ran
@@ -22806,6 +22872,219 @@ def pack_soldier_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, state=0, throt
     assert len(body) == SOLDIER_UPDATE_SIZE, len(body)
     return body
 
+
+# --- v968f7z [LOAD-HOLD: NO WORLD FRAMES INTO A CLIENT THAT IS LOADING; FRESH SNAPSHOT WHEN IT IS BACK] -
+# Alon 10-31 09:15: "if we accumulate during loading then we need to rebase the clock in game world post
+# loading". The CLOCK does not need it: the vcnc NET clock runs in the DLL's input thread off timeGetTime
+# (vcncGetTime/FUN_1000a2da), FA's conductor is a lossless integer of it (v936f5), and both of tonight's
+# loads left the TIMECHECK offset on its reference (no JUMPED / rebase lines, threshold 300-400 ms). What
+# accumulates is the MESSAGE BACKLOG: while the game thread loads the terrain ('out 77' -> 'Loaded TRN02
+# ... 3766 ms' -> 'out 23', messages85) vcncUpdate is not called, every datagram we send sits in the
+# client's 256-slot input queue (full -> the input thread Sleep(50)s and stops receiving ACKs too), and
+# when the thread returns it chews through seconds-old frames: positions it has to dead-reckon forward
+# (FUN_007e4a20, up to 300 ticks, RESET beyond -> the 'Move1/Move2' teleports Yoda/Bama saw) and our
+# retransmits of reliables it could not ACK. The fix is to rebase the WORLD, not the clock:
+#   * msg 77 (0x4d, plane-preload counts) is the client's first act when it leaves the HQ for the world;
+#     it precedes the terrain load every time (messages81-86: 77 -> Loaded TRN -> 23). From that moment
+#     until his first own telemetry frame of the new life (the v938 _insert_cull_pending hook, i.e. the
+#     world is up and he is flying) every UNRELIABLE world frame to him is held back: AI objects (tanks,
+#     cars, ships, soldiers, trains, chutes via _mlist_queue) and peer planes (relay_telemetry). He
+#     cannot look at them anyway. Reliables (creates, deletes, chat, replies) flow as before.
+#   * At release every object whose frames were held gets ONE fresh frame at once (the snapshot), then
+#     the normal cadence resumes; planes refresh themselves at their 10 Hz. Nothing stale is delivered.
+#   * Safety: the hold expires after LOAD_HOLD_MAX_S (a 77 with no spawn), and is cleared on leave /
+#     death. A same-field respawn after a death sends no 77 and loads nothing -> no hold.
+LOAD_HOLD       = True
+TRAIN_STATE6_DELAY_S = 0.35   # v968f7z: msg-6 state answer for a train waits for the client's instantiate
+LOAD_HOLD_MAX_S = 20.0
+
+def _load_hold_begin(s, why=''):
+    if not LOAD_HOLD:
+        return
+    now = time.time()
+    s.__dict__['_load_hold_until'] = now + LOAD_HOLD_MAX_S
+    s.__dict__['_load_hold_since'] = now
+    s.__dict__['_load_hold_dropped'] = 0
+    s.__dict__['_load_hold_objs'] = set()
+    s.__dict__['_load_hold_planes'] = 0
+    log('LOAD-HOLD', f'{getattr(s, "current_pilot", "?")}: loading the world {why}- holding his AI / peer-plane frames '
+                     f'until his first frame (cap {LOAD_HOLD_MAX_S:.0f} s)')
+
+def _load_holding(s, now=None):
+    """True while s is loading: frames to him are to be dropped (and noted for the snapshot)."""
+    u = s.__dict__.get('_load_hold_until')
+    if u is None:
+        return False
+    if (now or time.time()) >= u:
+        _load_hold_release(s, 'expired')
+        return False
+    return True
+
+def _load_hold_release(s, why=''):
+    d = s.__dict__
+    if d.get('_load_hold_until') is None:
+        return
+    d['_load_hold_until'] = None
+    since = d.get('_load_hold_since', time.time())
+    objs = d.get('_load_hold_objs') or set()
+    log('LOAD-HOLD', f'{getattr(s, "current_pilot", "?")}: released ({why}) after {time.time() - since:.1f} s - '
+                     f'{d.get("_load_hold_dropped", 0)} AI frame(s) of {len(objs)} object(s) and {d.get("_load_hold_planes", 0)} '
+                     f'peer-plane frame(s) held back; sending a fresh frame of each held object now')
+    if objs and why != 'left':
+        def _snap():
+            n = 0; gone = 0
+            for on in list(objs):
+                try:
+                    obj = TANKS.get(on) or CARS.get(on) or SHIPS.get(on) or SOLDIERS.get(on) or TRAINS.get(on)
+                    if obj is None or s.addr not in obj.get('peers', ()):
+                        gone += 1                                     # culled at his spawn (INSERT-CULL) or deleted
+                        continue
+                    (obj.get('_peer_last') or {}).pop(s.addr, None)     # cadence gate open for him
+                    if on in TANKS:
+                        n += tank_broadcast_state(on)
+                    elif on in CARS:
+                        n += car_broadcast_state(on)
+                    elif on in SHIPS:
+                        n += ship_broadcast_state(on)
+                    elif on in SOLDIERS:
+                        obj['last_sent'] = 0.0; n += soldier_broadcast_state(on)
+                    elif on in TRAINS:
+                        n += train_broadcast_state(on, only=s)
+                except Exception:
+                    logx('LOAD-HOLD', 'snapshot frame failed')
+            log('LOAD-HOLD', f'{getattr(s, "current_pilot", "?")}: snapshot sent - {n} frame(s)'
+                             + (f', {gone} object(s) no longer his (culled at the spawn)' if gone else '')
+                             + (f', {len(objs) - n - gone} beyond the far tier (silent)' if len(objs) - n - gone > 0 else ''))
+        # 0.2 s later: the first-frame handler runs INSERT-CULL right after this release (run 093711:
+        # release .408, cull .460) - let it prune his peer sets first, or a frame could follow an
+        # object the cull deletes 50 ms later (one 'Get coord for missing object' on his side).
+        threading.Timer(0.2, _snap).start()
+
+# --- v968f7x [MSGLIST: NATIVE TRANSPORT-LEVEL BUNDLING OF AI OBJECT FRAMES] -------------------------
+# vcncNet.dll (Alon loaded it in Ghidra 10-31) has a RECEIVE path we never used: system command 0xcc
+# 'EMsgList' (OnPacketRecv FUN_1000d7ca -> queued as 0x803c -> vcncUpdate FUN_1000d388 -> FUN_1000d74e).
+# One datagram carries MANY application messages:
+#   app header dword (BE) = (L << 20) | 0x00cc   ->  bytes [L>>4][(L&0xf)<<4][00][cc], type nibble 0
+#   then L bytes of entries, each [cmd u16 BE][len u16 BE][data, padded to a 4-byte boundary]
+# FUN_1000d74e walks the entries and hands EACH one to the game's receive callback exactly as a lone
+# datagram would be handed: callback(cmd, data, len). FA.exe's callback (0x7e7450) ignores cmd below
+# 0x8000 and returns TRUE, so the walk never stops early; the msg-7 handler sees one record per entry
+# (its 'one record per datagram' rule is really 'one record per callback'). The client's own sender
+# (vcncBeginMessageList/AddMessageToList/SendMessageList, FUN_1000bde8/FUN_1000bf84) builds the
+# identical layout - this is the 2009 wire format, not an invention. All three data channels
+# (STANDARD/RELIABLE/URGENT) route through the same OnPacketRecv, so a list is valid on any of them.
+# WHY: every AI frame used to be its own datagram (28 B IP/UDP + 8 B vcnc + 4 B app header for a
+# 26-40 B payload) and its own slot in the client's 256-entry input queue / 720-buffer pool; a dense
+# TC world (Meno 10-30: ~40 tanks, 20 cars, 14 soldiers at 1-2 Hz) is 60-80 datagrams/s per client
+# before the planes. A list folds a whole tick's worth of frames to one client into ONE datagram
+# (<= MSGLIST_MAX_BYTES), so the client does ~10x fewer recvfrom/queue/dequeue cycles for the same
+# content and the queue cannot fill (queue full = the input thread Sleep(50)s and nothing - ACKs
+# included - is received). Latency cost <= MSGLIST_FLUSH_MS, nothing against 0.5-1 s AI cadences.
+# Planes (relay_telemetry) are deliberately NOT bundled: 10 Hz dogfight frames stay single datagrams.
+# A lone frame in the outbox at flush time goes out as the plain datagram it always was (n == 1), so a
+# sparse world sees byte-identical traffic and only the dense case changes.
+MSGLIST_BUNDLE    = True    # master switch (console: mlist on|off|stats)
+MSGLIST_MAX_BYTES = 1200    # entry bytes per list; the client's recv buffer is 0x5dc=1500 incl. headers
+MSGLIST_MAX_N     = 48      # entries per list (12-bit length field allows 4095 B; this is comfort)
+MSGLIST_FLUSH_MS  = 25      # oldest entry age that triggers a flush (flusher thread ticks every 10 ms)
+_ML_PENDING = {}            # id(sess) -> sess with a non-empty outbox
+_ML_PENDING_LOCK = threading.Lock()
+
+def _mlist_send_plain(sess, frame):
+    """The pre-7x single-frame datagram (also the n == 1 flush form)."""
+    seq = sess.nundgram()                                   # v813f5: the one datagram counter
+    _p = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(frame)
+    try:
+        sock.sendto(_p, sess.addr)
+    except OSError:
+        return False
+    _perf['tx'] += 1; _perf['txb'] += len(_p); _perf['aib'] += len(_p)
+    sess.__dict__['_txb_win'] = sess.__dict__.get('_txb_win', 0) + len(_p)
+    return True
+
+def _mlist_queue(sess, frame):
+    """Queue one app frame ([bc][T][00][00][msg...]) for sess. Bundled into an EMsgList datagram with
+    whatever else is queued for him within MSGLIST_FLUSH_MS; sent at once when the list is full."""
+    if sess.__dict__.get('_load_hold_until') is not None and _load_holding(sess):      # v968f7z
+        d = sess.__dict__
+        d['_load_hold_dropped'] = d.get('_load_hold_dropped', 0) + 1
+        if len(frame) >= 9:
+            d.setdefault('_load_hold_objs', set()).add(struct.unpack_from('<H', frame, 7)[0])
+        return True                                     # counted as sent: cadence bookkeeping unchanged
+    if not MSGLIST_BUNDLE or getattr(sess, 'closing', False) or len(frame) < 5:
+        return _mlist_send_plain(sess, frame)
+    n = len(frame) - 4                                      # app payload length (== bc*16 + T>>4)
+    entry = b'\x00\x00' + struct.pack('>H', n) + bytes(frame[4:])
+    if len(entry) & 3:
+        entry += b'\x00' * (4 - (len(entry) & 3))
+    flush_now = None
+    with sess._ml_lock:
+        if sess._ml_n and (len(sess._ml_buf) + len(entry) > MSGLIST_MAX_BYTES or sess._ml_n >= MSGLIST_MAX_N):
+            flush_now = _mlist_take_locked(sess)
+        if not sess._ml_n:
+            sess._ml_t0 = time.time()
+            with _ML_PENDING_LOCK:
+                _ML_PENDING[id(sess)] = sess
+        sess._ml_buf += entry; sess._ml_frames.append(bytes(frame)); sess._ml_n += 1
+    if flush_now is not None:
+        _mlist_emit(sess, *flush_now)
+    return True
+
+def _mlist_take_locked(sess):
+    buf, frames, n = bytes(sess._ml_buf), sess._ml_frames, sess._ml_n
+    sess._ml_buf = bytearray(); sess._ml_frames = []; sess._ml_n = 0; sess._ml_t0 = None
+    with _ML_PENDING_LOCK:
+        _ML_PENDING.pop(id(sess), None)
+    return buf, frames, n
+
+def _mlist_emit(sess, buf, frames, n):
+    if n <= 0:
+        return False
+    if n == 1:
+        sess._ml_singles += 1
+        return _mlist_send_plain(sess, frames[0])
+    L = len(buf)
+    seq = sess.nundgram()
+    pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00,
+                 (L >> 4) & 0xff, (L & 0x0f) << 4, 0x00, 0xcc]) + buf
+    try:
+        sock.sendto(pkt, sess.addr)
+    except OSError:
+        return False
+    _perf['tx'] += 1; _perf['txb'] += len(pkt); _perf['aib'] += len(pkt)
+    sess.__dict__['_txb_win'] = sess.__dict__.get('_txb_win', 0) + len(pkt)
+    sess._ml_lists += 1; sess._ml_msgs += n
+    if sess._ml_lists in (1, 10, 100, 1000) or sess._ml_lists % 10000 == 0:
+        log('MSGLIST', f'{getattr(sess, "current_pilot", "?")}: list #{sess._ml_lists} = {n} frames in {len(pkt)} B '
+                       f'(seq {seq}); so far {sess._ml_msgs} frames in {sess._ml_lists} lists, {sess._ml_singles} sent alone')
+    return True
+
+def _mlist_flush(sess, force=False):
+    """Send sess's outbox if it is older than MSGLIST_FLUSH_MS (or force). Safe from any thread."""
+    with sess._ml_lock:
+        if not sess._ml_n:
+            return False
+        if not force and time.time() - (sess._ml_t0 or 0.0) < MSGLIST_FLUSH_MS / 1000.0:
+            return False
+        taken = _mlist_take_locked(sess)
+    return _mlist_emit(sess, *taken)
+
+def _mlist_flusher():
+    while True:
+        try:
+            time.sleep(0.01)
+            with _ML_PENDING_LOCK:
+                todo = list(_ML_PENDING.values())
+            for s in todo:
+                try:
+                    _mlist_flush(s)
+                except Exception:
+                    logx('MSGLIST', 'flush failed')
+        except Exception:
+            logx('MSGLIST', 'flusher loop error')
+
+threading.Thread(target=_mlist_flusher, name='mlist-flusher', daemon=True).start()
+
 def _send_unrel_frame_to(sess, onum, payload):
     """One object-update frame (any payload size) to one session, tick re-stamped."""
     rt = getattr(sess, 'last_telem_tick', None)
@@ -22815,15 +23094,7 @@ def _send_unrel_frame_to(sess, onum, payload):
     size = 1 + 2 + 2 + len(payload)
     frame = (bytes([size // 16, ((size % 16) << 4) | 0x02, 0, 0, 0x07])
              + struct.pack('<HH', _st, onum & 0xffff) + bytes(payload))
-    seq = sess.nundgram()                                   # v813f5: the one datagram counter
-    try:
-        _p = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + frame
-        sock.sendto(_p, sess.addr)
-        _perf['tx'] += 1; _perf['txb'] += len(_p); _perf['aib'] += len(_p)      # v788f5: AI telemetry was NOT counted
-        sess.__dict__['_txb_win'] = sess.__dict__.get('_txb_win', 0) + len(_p)
-        return True
-    except OSError:
-        return False
+    return _mlist_queue(sess, frame)                        # v968f7x: bundled (was one datagram per frame)
 
 def soldier_broadcast_state(onum):
     sd = SOLDIERS.get(onum)
@@ -22879,6 +23150,17 @@ SOLDIER_STUCK_REST_S = 20.0  # v939f5: ... for this long, then try again with a 
 SOLDIER_STUCK_M  = 1.5   #         'progress' = closing at least this much
 SOLDIER_AIM_CHANGE_DEG = 15.0   # v791f5: an aim swing smaller than this is not worth an update
 
+def _soldier_hold_peer(onum, addr, index=0):
+    """v968f7y: the tank create-settle hold (v666f5) for soldiers. The soldier driver broadcast a new
+    soldier on its very next tick (last_sent=0 -> idle rule), ~50 ms after the msg-2 create, while the
+    client instantiates create records one per ~0.33 s: every stick landing produced one 'Get coord for
+    missing object' per soldier (messages85 03:05, 6/6 soldiers; messages84: 50 lines). Hold the first
+    frame TANK_CREATE_SETTLE_S + TANK_CREATE_PER_REC_S per record position, as for tanks."""
+    sd = SOLDIERS.get(onum)
+    if sd is None or addr is None:
+        return
+    sd.setdefault('hold_until', {})[addr] = time.time() + TANK_CREATE_SETTLE_S + TANK_CREATE_PER_REC_S * int(index)
+
 def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
     """Create up to SOLDIER_MAX_PER_STICK NetSoldiers at the given positions (one msg-2 per
     client). Returns the list of ONumbers."""
@@ -22902,9 +23184,10 @@ def spawn_soldiers(rid, camp, positions, stick_id, reason=''):
         for ci in range(0, len(onums), RECREATE_CHUNK):          # v604f5: size-capped batches
             chunk = onums[ci:ci + RECREATE_CHUNK]
             body = bytearray([0x02]) + (_ensure_ai_client_on(p) if ci == 0 else b'')
-            for on in chunk:
+            for _i, on in enumerate(chunk):
                 body += build_soldier_record(AI_CLIENT_ST, on, camp, cls, stick_id)
                 SOLDIERS[on]['peers'].add(getattr(p, 'addr', None))
+                _soldier_hold_peer(on, getattr(p, 'addr', None), len(chunk) - 1 - _i)   # v968f7y
             _submit_send(send_rel, p, build_msg13(bytes(body)),
                          f'<- CreateObject 2 SOLDIER x{len(chunk)} stick {stick_id} {reason}', to=3.0)
         n += 1
@@ -23856,10 +24139,11 @@ def tank_recreate_for(s, reason='', near_xy=None, radius=None, per_kind=False, a
         sbody = bytearray([0x02])
         if i == 0 and n == 0:
             sbody += _ensure_ai_client_on(s)
-        for onum, sd in chunk:
+        for _i, (onum, sd) in enumerate(chunk):
             sbody += build_soldier_record(AI_CLIENT_ST, onum, sd['camp'], sd['class'], sd['stick'])
             sd['peers'].add(s.addr); sd['last_sent'] = 0.0
             sd.get('_silent_since', {}).pop(s.addr, None)      # v797f5
+            _soldier_hold_peer(onum, s.addr, len(chunk) - 1 - _i)   # v968f7y
             sn += 1
         _submit_send(send_rel, s, build_msg13(bytes(sbody)),
                      f'<- CreateObject 2 SOLDIER x{len(chunk)} (re-create {reason})', to=3.0)
@@ -23950,14 +24234,34 @@ def send_create_object_for(src, dst, with_client=True):
         return True
     preload_squadron_list(dst, ' peer-create')
     _sqn = db_pilot_squadron_id(src.current_pilot) or int(getattr(src, 'squadron_id', 0) or 0)
-    pkt = build_create_object_2(st=src.client_number, onumber=src.my_obj_number,
-                                nation=(src.nation or 0),
-                                player_index=src.player_index,
-                                name=(src.current_pilot or 'Player'),
-                                plane_type=getattr(src, 'plane_type', PLANE_TYPE_ID),
-                                with_client=with_client, squadron=_sqn,
-                                payload24=src.__dict__.get('_payload24'))        # v948f5
+    # v968f7t [DUPLICATE CLIENT+OBJECT CREATE -> Network.cpp:391 CTD] (Taurus 10-30 23:52:07, messages34):
+    # two minutes after his world rebuild had received Crawdad's and 54th_Battle's planes (2'83 at
+    # 23:50:06), the relay sent BOTH again in the full client+object form - the peers' created-sets had
+    # lost his address with no leave, death, teardown, radar hide or cull logged - and his client died on
+    # the second 'Receive create object 542' ('Assertion failed (!Objects[no->Number()])'). The object-only
+    # re-create has been ATOMIC predel+create since v474f5 for exactly this reason; the client+object
+    # form was the last bare create left. Now it rides the same way: [3 delete obj][2 client+object] in
+    # ONE msg-13 - a client that still holds the object clears the slot first (duplicate station = the
+    # harmless 'Client N already exist' log), a client that does not just ignores the delete. The
+    # CREATE-FULL line (INFO) names any client+object create to a peer who has been in the room for a
+    # while, so the next loss of bookkeeping shows WHICH path it took.
+    _obj_body = build_object_record(src.client_number, src.my_obj_number, (src.nation or 0),
+                                    getattr(src, 'plane_type', PLANE_TYPE_ID), (0.0, 0.0, 0.0), DEFAULT_SKIN,
+                                    payload24=src.__dict__.get('_payload24'))
+    _cre_body = bytes([0x02]) + (build_client_record(src.client_number, src.player_index,
+                                                     (src.current_pilot or 'Player'), squadron=_sqn) if with_client else b'') + _obj_body
+    _del_raw2 = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', src.my_obj_number & 0xFFFF)
+    pkt = build_msg13(_del_raw2, _cre_body)
     _form = 'client+object' if with_client else 'object-only'
+    try:
+        _dst_in = time.time() - float(dst.__dict__.get('_room_entered_at') or time.time())
+        _src_fly = time.time() - float(src.__dict__.get('_obj_confirmed_at') or time.time())
+        if with_client and _dst_in > 30.0 and _src_fly > 30.0:
+            log('CREATE-FULL', f'{src.current_pilot} (flying {_src_fly:.0f}s, St={src.client_number} ONumber=0x{src.my_obj_number:04x}) '
+                               f'-> {dst.current_pilot} (in room {_dst_in:.0f}s): CLIENT+OBJECT create long after both were established - '
+                               f'his created-set entry was lost somewhere; sent ATOMIC (predel first) so a duplicate cannot CTD him')
+    except Exception:
+        pass
     send_rel(dst, pkt, f'<- CreateObject 2 ({_form}: {src.current_pilot} St={src.client_number} '
                        f'PI={src.player_index} ONumber={src.my_obj_number} -> {dst.current_pilot})', to=3.0)
     log('CREATE2', f'create-object({_form}) {src.current_pilot} St={src.client_number} '
@@ -24049,8 +24353,7 @@ def send_parachuter_telemetry(src):
         outb = bytearray(relayed)
         if rt is not None:
             struct.pack_into('<H', outb, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
-        seq = getattr(p, '_relay_seq', 0) & 0xFF
-        p._relay_seq = seq + 1
+        seq = p.nundgram()                                     # v968f7x: the v813 single counter (was the stale _relay_seq)
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(outb)
         try:
             sock.sendto(pkt, p.addr)
@@ -24290,10 +24593,8 @@ def _chute_keepalive_loop():
                             rt = p.last_telem_tick
                             if rt is not None and len(b2) >= 9:
                                 struct.pack_into('<H', b2, 5, _ai_stamp(p, int.from_bytes(b2[7:9], 'little')))   # v884f5
-                            seq = p.nundgram()                                      # v813f5
-                            pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(b2)
-                            sock.sendto(pkt, p.addr); n += 1
-                            _perf['tx'] += 1; _perf['txb'] += len(pkt)
+                            if _mlist_queue(p, bytes(b2)):                          # v968f7x: bundled
+                                n += 1
                         except OSError:
                             pass
                     if n:
@@ -27538,6 +27839,8 @@ def relay_telemetry(src, data, _split_obj=None):
                 src._pos_xy = (_ox, _oy); src._pos_z = _oz; src._pos_at = time.time(); src._pos_obj = _co_onum
                 if src.__dict__.pop('_insert_cull_pending', False):          # v938f5
                     _mirror_insert_cull(src, _ox, _oy)
+                if src.__dict__.get('_load_hold_until') is not None:          # v968f7z: world up, he is flying
+                    _load_hold_release(src, 'first frame of the new life')
                 # v863f5: ring of the pilot's own frames for the desync event file
                 _fr = src.__dict__.setdefault('_frame_ring', [])
                 _fr.append((time.time(), int.from_bytes(pl[5:7], 'little'), _ox, _oy, _oz))
@@ -27871,6 +28174,9 @@ def relay_telemetry(src, data, _split_obj=None):
                 # regardless of what future wrapper forms slip past the scans.
                 if len(relayed) >= 9:
                     struct.pack_into('<H', relayed, 5, (rt - RELAY_TICK_LEAD) & 0xFFFF)
+        if p.__dict__.get('_load_hold_until') is not None and _load_holding(p):      # v968f7z: he is loading
+            p.__dict__['_load_hold_planes'] = p.__dict__.get('_load_hold_planes', 0) + 1
+            continue
         seq = p.nundgram()                                  # v813f5: the one datagram counter
         if time.time() < p.__dict__.get('_relay_trace_until', 0.0):
             try:                                             # v861f5: `trace <pilot>`
@@ -28472,6 +28778,8 @@ def handle_leave_arena(s):
     So leaving = re-entering the lobby state machine: clear the in-game state and
     RE-SEND the 0xDA lobby attach answer; the client stops polling and the lobby UI
     takes over (it will then re-request news/arena list itself)."""
+    if s.__dict__.get('_load_hold_until') is not None:          # v968f7z: a 77 with no spawn
+        _load_hold_release(s, 'left')
     log('LEAVE', f'{s.current_pilot} pressed back-to-lobby (msg 64) - leaving game '
                  f'(room {s.current_room}), clearing in-game state, NOT echoed')
     s.__dict__.pop('_dead_snapshot_room', None)   # v556f5: next world gets the dead snapshot again
@@ -28845,6 +29153,35 @@ def _teardown_session(x, why='(session ended)', tag='SESSION', msg=None):
         return
     x._torn_down = True
     x.closing = True   # stops its heartbeat/relay loops (they gate on not s.closing)
+    # v968f7u [STALE-SESSION RELIABLES LAND ON THE RECONNECTED CLIENT -> DUPLICATE CREATE CTD]
+    # Taurus 10-30 23:52:07 and 23:57:16 (messages34/35): his client crashed, he reconnected within a
+    # minute from the SAME address:port, the reap tore the old session down - and the old session's
+    # RELKEEP keepers each sent ONE MORE retransmit after the close (they slept through the wait, then
+    # sent before re-checking `closing`): seqs 233-272 at 23:53:03-04, two seconds after the new SYN.
+    # Every packet carries the same transport id (0x001e), so the NEW client's reliable receiver took
+    # them as future packets of its own connection and queued them in order ('QRcv :: Packet queued
+    # nSequence 252 nExpected 9'). Four minutes later the new session's own sequence reached those
+    # numbers, the hole closed, and the client replayed the stale batch at once: Meno's 23:52 exit,
+    # 'Meno leaving game', 'Meno entering game' and a CLIENT+OBJECT create of a plane it already held
+    # -> 'Client 11 already exist' + 'Receive create object 547' -> Network.cpp:391. The same replay
+    # explains the 23:52:07 crash (stale creates of Crawdad/54th_Battle from the 23:49 session).
+    # Fix: wake every keeper NOW so it exits on `closing` (the keeper loop re-checks before sending),
+    # then wait briefly until none is left before the address is released to the new session.
+    try:
+        with x._lock:
+            _evs = list(x._evts.values())
+        for _e in _evs:
+            try: _e.set()
+            except Exception: pass
+        _t_wait = time.time()
+        while getattr(x, '_relkeep_held', 0) > 0 and time.time() - _t_wait < 0.5:
+            time.sleep(0.02)
+        if _evs:
+            log('RELKEEP', f'{getattr(x, "current_pilot", None) or x.addr}: {len(_evs)} held send(s) cancelled at teardown '
+                           f'({"all keepers stopped" if getattr(x, "_relkeep_held", 0) == 0 else str(getattr(x, "_relkeep_held", 0)) + " still winding down"}) '
+                           f'- nothing of this session may reach a reconnected client')
+    except Exception:
+        pass
     # v784f5 [DISCONNECT WHILE FLYING = CRASH] (user: pilots force-close the client when about to be
     # shot down, keeping their aces and dodging the loss). Any exit that is not the client's own
     # msg-3 - idle reap after a CTD / kill / alt-F4, exit-reply timeout, reconnect-reap, kick -
@@ -29476,6 +29813,8 @@ def handle_compound(s, outer_cmd, pl):
     if inner_sub == 0x59:                                   # v968f7e: msg 89 TimeCheck reply, compound-wrapped
         handle_timecheck_89(s, inner)
         return
+    if inner_sub == 0x4d and getattr(s, 'entered_game', False):
+        _load_hold_begin(s, '(msg 77, compound) ')         # v968f7z
     if inner_sub == 0x15:                                   # v968f7g: msg 21 direct chat, compound-wrapped
         handle_direct_chat_21(s, inner)
         return
@@ -35600,6 +35939,8 @@ def handle_post_auth(s, cmd, pl):
     if sub == 0x59:
         handle_timecheck_89(s, stored)                                    # v968f7h: same for the TimeCheck reply
         return
+    if sub == 0x4d and getattr(s, 'entered_game', False):
+        _load_hold_begin(s, '(msg 77) ')                                  # v968f7z
     if sub == MSG_SCENE_SUPPLY_69 and getattr(s, 'entered_game', False):
         # v294: the scene supply query the client fires on every map open / scene select.
         _handle_scene_supply_query_69(s, stored)
@@ -37001,7 +37342,10 @@ def handle_post_auth(s, cmd, pl):
             try:
                 _onum6 = struct.unpack_from('<H', stored, 5)[0]
                 if _onum6 in TRAINS and getattr(s, 'addr', None) in TRAINS[_onum6]['peers']:
-                    train_broadcast_state(_onum6, only=s)
+                    # v968f7z: the client sends this msg 6 ~0.2 s BEFORE it instantiates the record
+                    # (messages87 07:29:45.975 'out 6' -> .123 'Get coord for missing object 260' ->
+                    # .201 'Create NetTrain 260'); an instant answer stubs the slot. Answer after it.
+                    threading.Timer(TRAIN_STATE6_DELAY_S, train_broadcast_state, args=(_onum6,), kwargs={'only': s}).start()
                 elif _onum6 in TANKS or _onum6 in SOLDIERS or _onum6 in CARS:
                     _o6 = TANKS.get(_onum6) or SOLDIERS.get(_onum6)
                     (_o6.get('hold_until') or {}).pop(getattr(s, 'addr', None), None)   # the create landed
@@ -37976,7 +38320,9 @@ def on_pkt(data, addr):
                 is_late = (not is_ack) and aseq in getattr(s, '_done_ring', ())
             if is_ack:
                 s._ack_in_count=getattr(s,'_ack_in_count',0)+1
-                s.sig(aseq); return
+                s.sig(aseq)
+                _nak_fast_retransmit(s, (dw >> 8) & 0x1FF, aseq)        # v968f7w
+                return
             if is_late:
                 # v359f5: duplicate or late ACK for a seq that already completed. Normal
                 # now that the server retransmits (the client may ACK every copy), and

@@ -1,3 +1,180 @@
+v968f7z  2026-10-31  LOAD-HOLD: nothing stale into a client that is loading the world; fresh snapshot when it is back
+  Alon (09:15): "if we accumulate during loading then we need to rebase the clock in game world post
+  loading". Checked against tonight's two loads (run_030143 / messages85+86): the CLOCK did not move. The
+  vcnc NET clock runs in the DLL's input thread off timeGetTime, FA's conductor is a lossless integer of it
+  (v936f5), and the TIMECHECK offset after both 3.7 s terrain loads stayed on the entry reference (no JUMPED,
+  no rebase (dry) line; thresholds 300/400 ms). A clock step is also the one thing we know breaks the
+  client (Booker, v968f7v). What DOES accumulate is the MESSAGE BACKLOG: 'out 77' (plane-preload counts)
+  is the client's first act when it leaves the HQ for the world, then 'Loaded TRN02 ... 3766 ms' with
+  vcncUpdate not called, then 'out 23'. Everything we sent in those seconds sat in his 256-slot input
+  queue (full -> input thread Sleep(50) loop, ACKs/STATUS unanswered too) and was chewed through afterwards:
+  seconds-old positions dead-reckoned forward (FUN_007e4a20, RESET beyond 300 ticks = the teleports), plus
+  our retransmits. In a dense world at 60-80 datagrams/s a 4-10 s load is 250-800 datagrams - the queue
+  overflows (7x bundling alone brings that under the limit; this removes it).
+  WHAT CHANGED: msg 77 (direct 0x4d in handle_post_auth, compound form in handle_compound) starts a hold on
+  the session: _mlist_queue drops every AI frame to him (tanks/cars/ships/soldiers/trains/chutes) and notes
+  the object number; relay_telemetry skips peer-plane frames to him. Reliables are untouched. The hold ends
+  at his first own telemetry frame of the new life (the v938 _insert_cull_pending point), on leave, or after
+  LOAD_HOLD_MAX_S = 20 s; at release one fresh frame of every held object is sent at once (snapshot thread:
+  cadence gate opened for him, then the object's own broadcast), planes refresh at their 10 Hz. A death
+  respawn on the same field sends no 77 and loads nothing -> no hold. LOAD-HOLD log lines at begin/release/
+  snapshot. VERIFY (local): after pressing Fly from the HQ expect 'LOAD-HOLD ... loading the world (msg 77)',
+  ~3.7 s later 'released (first frame of the new life) after N s - X AI frames of Y objects ... held back'
+  and 'snapshot sent - Y frames'; trains/soldiers in view must be in place immediately, not catching up.
+  If the begin line never appears the 77 arrives on a path these hooks do not see -> tell me.
+  Run 092745 (first test of 7x/7y/7z, messages87): LOAD-HOLD began on the 77 and released 6.2 s later at the
+  first frame - 0 frames held, as expected on a FIRST world entry (his session knew no objects yet; the
+  ServerConfirm re-create brings them with their own holds) - the hold earns its keep on an HQ visit or
+  airfield change mid-session. Soldier hold (7y): 14 soldiers landed, ZERO 'Get coord for missing object'
+  at creation (6/6 the run before). Lists reached 4 frames/148 B. Remaining 'missing object' lines: train
+  260 right after its create - the client sends the msg-6 state request ~0.2 s BEFORE it instantiates the
+  record, so our instant answer stubbed the slot -> the train msg-6 answer now waits TRAIN_STATE6_DELAY_S =
+  0.35 s; and four at 07:31:54 while his client was deleting everything on the way out (benign).
+  Run 093711 (messages88): first real hold - airfield change 0->13 (no terrain reload: 77 -> 23 in 26 ms,
+  hold 0.3 s), 4 AI frames of 4 objects held, snapshot 0 frames because the new field is beyond the far
+  tier of everything he had (INSERT-CULL then deleted 13 soldiers + 2 trains, 52 ms later). Zero 'Get
+  coord for missing object' in the whole session (trains, the stick, the airfield change). The snapshot
+  now runs 0.2 s after the release so INSERT-CULL prunes his peer sets first, and its line says how many
+  held objects were culled / beyond the far tier.
+v968f7y  2026-10-31  SOLDIER CREATE-SETTLE HOLD (the tank v666f5 hold, applied to soldiers)
+  First local run of v968f7x (run_030143, messages85): every soldier of the landing stick produced one
+  'Get coord for missing object' (288, 290, 294, 296, 299, 301) - the frame reached the client ~50 ms
+  after the msg-2 create, the client instantiated the record ~300 ms later. Cause: a new soldier has
+  last_sent = 0, so the soldier driver's idle rule broadcast it on its very next tick; the 0.5 s Timer
+  in spawn_soldiers was never the first frame. Pre-existing (messages84: 50 lines, messages70: 71), not
+  7x. _soldier_hold_peer() now stamps hold_until per peer at both create paths (stick landing and the
+  ServerConfirm re-create), TANK_CREATE_SETTLE_S + TANK_CREATE_PER_REC_S x record position, read by the
+  existing _hold check in soldier_broadcast_state. VERIFY: no 'Get coord for missing object' for soldier
+  numbers at a stick landing; soldiers still appear within ~1.5 s of the chute landing.
+  Also in 7y: the PILOT-LAG line printed the SMOOTHED inbound/outbound (EWMA a=0.3) beside the raw probe
+  time, so run_030143 read 'probe took 2107 ms - INBOUND 629 ms, OUTBOUND 10 ms' for a sample whose real
+  split was 2097 / 10. The line now shows this sample's split first and the smoothed pair in brackets; the
+  verdict uses the sample. Observation from that run (LAN, 4 pkt/s, Alon alone): BOTH world entries showed
+  a ~2 s inbound-only hold-up on the first probe after the spawn (03:02:36, 03:11:22) - the client is busy
+  loading at that moment whatever we send, which is the same shape as Meno's airfield-change lag.
+v968f7x  2026-10-31  EMsgList: AI OBJECT FRAMES BUNDLED INTO ONE DATAGRAM PER CLIENT PER TICK (vcncNet.dll dive)
+  Alon loaded vcncNet.dll in Ghidra ("see if we are missing anything"). What we were missing: the DLL's
+  receive path for system command 0xcc 'EMsgList' (OnPacketRecv FUN_1000d7ca -> input queue as 0x803c ->
+  vcncUpdate/FUN_1000d388 -> FUN_1000d74e), which walks ONE datagram holding MANY application messages and
+  hands each to the game's callback exactly as a lone datagram would. The client's own sender
+  (vcncBeginMessageList / vcncAddMessageToList / vcncSendMessageList, FUN_1000bde8 + FUN_1000bf84) builds
+  the same layout, so this is the 2009 wire format:
+    app header dword (BE) = (L << 20) | 0x00cc  ->  bytes [L>>4][(L&0xf)<<4][00][cc]  (type nibble 0)
+    L bytes of entries: [cmd u16 BE][len u16 BE][data, padded to 4]
+  FA.exe's callback (0x7e7450, installed through 0x4f11c0 at vcncConnect) reads only the low 16 bits of
+  cmd, ignores it below 0x8000, hands (data, len) to the net layer and returns TRUE - so the list walk
+  never stops early and the msg-7 handler still sees one record per callback (its 'one record per
+  datagram' rule is really 'one record per callback'; the v351 CTD was multi-record MESSAGES, which this
+  does not do). Offline check: a 12-frame list parsed with the client's exact arithmetic reproduces the
+  12 payloads; 472 B on the wire instead of 540 B + 308 B of IP/UDP headers.
+  WHY IT MATTERS (Meno 10-30, dense TC world): every tank/car/soldier/train/ship frame was its own
+  datagram - 60-80 datagrams/s per client, each one a recvfrom, one of the client's 720 pool buffers, one
+  of its 256 input-queue slots and one dequeue in vcncUpdate. A full input queue makes the DLL's input
+  thread Sleep(50) in a retry loop during which NOTHING is received, ACKs and STATUS replies included
+  (FUN_1000db1a 'WARNING: Input Queue full'). Bundling folds a tick's frames to one client into one
+  datagram (<= 1200 B of entries / 48 frames), i.e. roughly 10x fewer datagrams for the same content.
+  WHAT CHANGED: per-session outbox (_ml_*); _mlist_queue() replaces the sendto in _send_unrel_frame_to
+  (soldiers/trains), send_tank_update, car_broadcast_state, ship_broadcast_state and the periodic chute
+  frames; a flusher thread (10 ms tick) sends an outbox once its oldest entry is MSGLIST_FLUSH_MS = 25 ms
+  old, or at once when the next entry would overflow it. A lone frame at flush time goes out as the plain
+  datagram it always was (n == 1), so a sparse world is byte-identical to before. PLANES ARE NOT BUNDLED
+  (relay_telemetry unchanged): 10 Hz dogfight frames keep their own datagrams and zero added latency.
+  The legacy parachute relay (PARA, line ~24135) still drew its seq from the pre-v813 _relay_seq counter -
+  moved to nundgram(). Console: `mlist on|off` (live switch) and per-pilot stats (frames in lists, sent
+  alone, datagrams saved); MSGLIST log line at list #1/10/100/1000 per session.
+  VERIFY: client vcncnet log (if enabled) shows 'OnPacketRecv :: EMsgList' and 'ProcessMessages' per
+  entry; server MSGLIST lines; PILOT-LAG / `clocks` pkt/s for a pilot in a dense world should drop from
+  60-80 to ~10-20 while KB/s stays about the same; tanks/cars/soldiers/trains/ships must look as before
+  (same positions, same cadence). If anything odd: `mlist off` returns to one datagram per frame instantly.
+v968f7w  2026-10-31  NAK FAST RETRANSMIT (vcncNet.dll RE, FUN_10006b0e / FUN_10002b27)
+  Every reliable ACK the client sends carries TWO sequence numbers: the acked seq (bits 20-28) and the
+  seq he is waiting for next (bits 8-16). When they differ he has a hole: the packet he names was lost.
+  We used to leave that to the 0.75 s retransmit window / 3 s keeper; now _nak_fast_retransmit() resends
+  the named seq at once from _rel_pkts (seq -> (pkt, t_sent)), provided it has been in flight longer than
+  max(100 ms, 1.5 x RTT) (younger = merely pipelined behind the acked one) and not more than once per
+  NAK_RETX_MIN_S = 0.15 s per seq. RELNAK log at #1/10/100/1000 per session or under reltrace. The
+  client does the mirror of this for OUR acks (it resends immediately when our ACK's expected-seq names a
+  packet it sent), which is why its side rarely stalls on a single loss and ours did.
+RE NOTE 2026-10-31 (vcncNet.dll in Ghidra, base 0x10000000) - what the dive confirmed is ALREADY right:
+  * SYN reply: RecvSYNReply FUN_10003cd3 copies 17 BE dwords from wire byte 24 into cfg 0x10020300..40;
+    FUN_10006e9b maps them: +0x14 max resends, +0x18 max age ms, +0x1c/+0x20 timeout floor/ceiling,
+    +0x24/+0x28 factor min/max(start), +0x30 factor decrement per RTT sample, +0x34 dup-ACKs per step,
+    +0x38 factor step, +0x40 RTT ring capacity; +0x00..+0x10 and +0x2c/+0x3c are copied but never read
+    by the RTT code. build_synack (RTT_CFG_TUNED) writes exactly these at 24+off. Initial RTT = the
+    SYN->SYNACK time capped at 1000 ms (FUN_1000380c); SYN is resent every 1.5 s. Wire bytes 18-19 of
+    the reply = the client's connection id stamped into every packet it sends (DAT_10012bd8; we send
+    0x001e for everyone - the client never filters on it, and that is why a stale session's retransmits
+    could reach a reconnected client, v968f7u).
+  * Sockets: SO_RCVBUF/SO_SNDBUF = 1 MB (FUN_10001611) - the client's socket buffer is not the bottleneck.
+  * Input thread (0x10006357): select up to 125 ms, recvfrom (max 0x5dc), demux FUN_100032da IN THE INPUT
+    THREAD (ACKs, STATUS replies, TIME replies are answered there, independent of the game thread -
+    matching Meno's 35 ms STATUS rtt vs multi-second TimeCheck); every 125 ms it also runs the time-sync
+    state machine (FUN_100091b7) and the resend check (FUN_10006a7a -> FUN_10005783).
+  * Buffers: pool of 720 x 0x5e0 (vcncOpen -> FUN_10002c94(..., 0x2d0)); input queue 256; app data
+    (type nibble 1/2) and the system commands 0xcc/0x67/0x6a/0xc8/0xc9/0xcf/0xd1/0xd3 go to the queue,
+    other nibble-0 commands are the single-slot 'system reply' mailbox (FUN_1000da4f/FUN_1000d32c) that
+    EnterAppSpace & co. wait on. Standard-channel ordering check (DAT_10020150, vcncSystem 0x400) is off
+    in FA (our 8-bit seq would otherwise be dropped for 256 packets after every wrap).
+  * STATUS: FUN_100073a4 'Process Game Status Message' - loss% from our sent/recvd counters, the
+    connection-status struct read by vcncGetConnectionStatus; all already mirrored (v467/v468/v469).
+  * FA.exe uses: Open/Close/Connect/Disconnect/EnterAppSpace/ExitAppSpace/SendMessage/Update/GetTime/
+    GetNetworkTime/GetTimeState/GetConnectionStatus/GetUserName/EnableNotification/System. The grant/
+    event/large-message/file APIs (vcncSyncGrants, vcncSendLargeMessage, vcncSendFile ...) are not
+    imported by FA.exe - nothing to implement there. Driver messages FA knows: VCNCMD_SUSPEND/RESUME
+    (CONTROL channel 5, host-migration pause) and the FATAL* set.
+v968f7v  2026-10-31  CLOCK-REBASE OFF BY DEFAULT - the one live firing ran the client's clock away
+  Booker 10-30 18:24 (run_154659, live): his NET clock was already sick - TICK-JITTER, 'JUMPED -1737 ms',
+  'JUMPED -3074 ms', drift -43 ms/s - when the rebase (ON since v968f7g) sent STATUS base increments of
+  +1741 ms and, 30 s later, +5527 ms. The client's time synchronisation fits server time with a least-
+  squares slope over 8 samples, so each step was read as a RATE: 'JUMPED +7847', '+48046', '+11586 ms',
+  offset +61.6 s ahead, 'drifts +541.9 ms/s (+54%)'. He went back to the lobby 14 s later and the
+  session was idle-reaped 4 minutes after that (CTD or timeout). Other sessions today: no rebase fired
+  (Meno's clock never qualified - offset steady within 10 ms all evening). A step is the wrong shape
+  for that fit; if we ever correct a slow clock it has to be a gentle rate (a few ms per STATUS over
+  many seconds). CLOCK_REBASE = False; the '(dry)' TIMECHECK/CLOCK-REBASE lines keep measuring;
+  ##clockrebase on / `clock rebase on` stays available for a deliberate test.
+v968f7u  2026-10-31  ROOT CAUSE OF THE TAURUS CRASHES: the OLD session's reliable retransmits reached the NEW client
+  Taurus CTD'd at 23:52:07 (messages34) and again at 23:57:16 (messages35, 'on the map'), both on
+  'Assertion failed (!Objects[no->Number()])' after a client+object create of a plane his client already
+  held. Both followed a quick reconnect from the same address:port. Sequence (second case): old session
+  crashed 23:52:07 -> new SYN 23:53:01.96 -> REAP tore the old session down 23:53:02.06 -> the old
+  session's RELKEEP keepers each sent ONE MORE retransmit after `closing` was set (the loop slept
+  through its wait and sent before re-checking) - 'session closed' lines 23:53:03.7-04.9 for seqs
+  233-272, i.e. up to 3 s after the new client connected. All packets carry the same transport id
+  (0x001e), so the new client's in-order reliable receiver queued them as FUTURE packets of its own
+  connection. Four minutes later the new session's own seq reached 252-256, the 'hole' closed and the
+  client replayed the stale batch in one burst (his log 23:57:16.965: delete 494 = Meno's 23:52 exit,
+  'Meno leaving GBR', 'delete client 17', 'Meno leaving game', 'Meno entering game' - all 23:52 events -
+  and a CLIENT+OBJECT create of _Skyyr_'s 547, which the new session had created at 23:53:41 ->
+  'Client 11 already exist' + duplicate 547 -> CTD). Same mechanism at 23:52:07 (stale creates of
+  Crawdad/54th_Battle from the 23:49 session). This is the bookkeeping 'loss' v968f7t could not find:
+  the server's sets were right; the client was replaying another session's packets.
+  Fix: (1) _rel_keeper re-checks `closing` after every wait and never sends after it; (2) send_rel's
+  blocking window stops on `closing` too; (3) _teardown_session wakes every held keeper and waits up to
+  0.5 s for them to exit BEFORE the address is handed to the new session (RELKEEP 'N held send(s)
+  cancelled at teardown'). v968f7t's atomic creates stay as the second line of defence.
+  Verify: after a reconnect-reap the RELKEEP lines read 'cancelled at teardown ... all keepers stopped'
+  and no 'session closed (total N retx)' lines follow the new SYN; no stale 'X leaving game' bursts on
+  the reconnected client minutes later.
+v968f7t  2026-10-31  EVERY PLANE CREATE IS NOW ATOMIC (predel + create) - duplicate client+object create CTD
+  Taurus 10-30 (messages33 'freeze' 23:48:22, messages34 CTD 23:52:07): both are the same event. His
+  client received a CLIENT+OBJECT create (in 2'83) for a plane it already held: 23:52:07 'Client 8
+  already exist' + 'Receive create object 542' -> 'Assertion failed (!Objects[no->Number()])'
+  Network.cpp:391. The 23:48:22 'freeze' is the same assertion with its dialog behind the full-screen
+  game (his log stops on the very create, seq 233, RELKEEP 'CreateObject 2 (client+object: Crawdad ->
+  Taurus)' never ACKed). Both times the peers were Crawdad and 54th_Battle - his own camp (4) - and the
+  server had sent them in full form at 23:50:06 already; two minutes later their created-sets no
+  longer held his address although nothing that clears them was logged (no leave, death, teardown,
+  radar hide, insert-cull or TAB cull for him). Root cause of that bookkeeping loss still open.
+  Fix (by construction): send_create_object_for now sends the client+object form the way the object-
+  only form has gone since v474f5 - [3 delete obj][2 client+object] in ONE msg-13. A client that still
+  holds the object clears the slot first; one that does not ignores the delete; a duplicate STATION is
+  only the harmless 'Client N already exist' log. No bare plane create is left.
+  Diagnostic: CREATE-FULL (INFO) whenever a client+object create goes to a peer who has been in the
+  room > 30 s for a plane flying > 30 s - that is the fingerprint of the lost entry; the surrounding
+  lines will name the path next time.
+  Verify: client logs show 'Server require delete object N' immediately before every 'Receive create
+  object N' from a 2'83 as well; no Network.cpp:391 assertion on a re-create.
 v968f7s  2026-10-31  PILOT-LAG: the slow-reply split (inbound vs outbound) + what we send him
   Alon: Meno has a modern PC and was smooth again right after reconnecting -> 'we must be overloading
   him'. The TimeCheck reply carries his NET-clock reading at the instant his game thread PROCESSED our
