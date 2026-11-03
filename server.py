@@ -7298,12 +7298,15 @@ def perform_restart(actor='console', graceful=False):
     finally:
         _update_lock.release()
 
-def console_handler():
-    log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | cleanup | update | loglevel | logmute | logtags | help')
+def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
                     f'freezewatch={FREEZE_WATCH}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes]')   # v968f8d
+
+def console_handler():
+    log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | cleanup | update | loglevel | logmute | logtags | help')
+    _log_baseline()                                                                       # v968f8d/8f: own function - console_handler declares globals later
     threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
     while running:
         try:
@@ -7571,7 +7574,7 @@ def console_handler():
                                f'load-hold={"ON" if LOAD_HOLD else "off"} | freeze watch={"ON" if FREEZE_WATCH else "off"}  '
                                f'(`timecheck|nak|mlist|loadhold|freezewatch on|off`)')
             elif cmd == 'mlist':                                                        # v968f7x: mlist [on|off]  (EMsgList bundling of AI frames)
-                global MSGLIST_BUNDLE
+                # (MSGLIST_BUNDLE is declared global in the `features` block above - one declaration per function)
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 if _a and _a[0].lower() in ('on', 'off'):
                     MSGLIST_BUNDLE = (_a[0].lower() == 'on')
@@ -19410,6 +19413,11 @@ def tc_say(room_id, text, camp=None, to=None):
     for p in ([to] if to is not None else get_sessions_in_room(room_id)):
         if not getattr(p, 'entered_game', False):
             continue
+        if to is not None and getattr(p, 'current_room', None) != room_id:
+            # v968f8f: a personal line (delayed blast report, trigger/capture credit) must not follow the
+            # pilot into another arena - SpUn 11-02: TC lines in the FFA chat.
+            log('TC', f'room {room_id} AI -> {getattr(p, "current_pilot", "?")}: dropped, he is in room {getattr(p, "current_room", None)} now: {text[:60]}')
+            return
         if camp is not None and getattr(p, 'nation', None) != camp:
             continue
         if not TC_AI_VIA_66:

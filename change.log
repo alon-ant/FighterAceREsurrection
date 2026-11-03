@@ -8,6 +8,19 @@ v968f8f-stable  2026-11-03  CrashOnEnemyRunway IS THE ARENA'S OWN RULE - read fr
   (F3 byte, blob end-59, bit 0x02 - the same tail apply_score_global writes) and the territory rule follows IT:
   on -> any arena, off -> never; blob unreadable -> the old TC-only fallback. With the 8e grace (a scene that
   flipped < 180 s ago is still friendly). The complete MEC-2 fate table is in the 8e entry.
+  Also (SpUn 11-02, GameLog_2026-11-2_10_32_47: "getting event updates from TC arena in the FFA chat"): his
+  chat log shows the TC lines (capture, battalion strategy, trigger) at 10:35/10:38 while he was IN TC Reborn
+  and nothing logged after 'Entering FFA' at 10:44 - the client keeps the chat window's history across an
+  arena change, so old lines stay on screen. Room-wide AI lines are routed by current_room (tc_say ->
+  get_sessions_in_room); the one path that could follow a pilot into another arena - a personal line sent
+  with to=<session> (the delayed 'Your blast hit ...' report, trigger/capture credit) - now checks that he is
+  still in that room and logs a drop otherwise. Server-side confirmation of his 11-02 afternoon session is
+  pending: the live admin endpoint was unreachable at 09:40 (connection reset).
+  09:51 SyntaxError on start ("name 'CLOCK_REBASE' is used prior to global declaration", line 7532): the 8d
+  BASELINE line read the feature flags inside console_handler(), whose later `clock` / `mlist` blocks declare
+  those names global - Python wants the declaration before any use in the function. The line now lives in its
+  own _log_baseline(), and the duplicate `global MSGLIST_BUNDLE` of the mlist block is gone (one declaration per
+  function). Checked with py_compile (ast.parse does not catch this class of error - it is a compile-time check).
 v968f8e-stable  2026-11-03  CRASH-LANDING ON A FIELD THAT FLIPPED SECONDS EARLIER = CAPTURED (Alon 02:19: "if you crash
   land on friendly territory your pilot is safe")
   The rule as implemented was checked against the whole weekend: 95 MEC-2 crash-landings, 94 booked plane lost /
