@@ -1,3 +1,164 @@
+v968f8f-stable  2026-11-03  CrashOnEnemyRunway IS THE ARENA'S OWN RULE - read from the GAME_DEF, every arena type
+  SeanTB1 10-24 15:41:35 (messages32): shot up by GER AA (engine, cockpit, 'Undercarriage is damaged'), came down
+  on the GER base - MEC 2, SE 13, 'GER anti-aircraft forces You to crash land. Score:-1000' - and kept his pilot.
+  That evening's v968f5l added the territory rule (nearest scene's camp, TC arenas only); the same landing today
+  is booked 'CAPTURED in ENEMY territory', plane + pilot + aces. The arena itself says whether that rule applies:
+  the client dump in his log lists [ScoreAndDamage] CrashOnEnemyRunway=yes (and ExitAsCrash=yes, CapturePercent=50
+  under [TC]) - the 2009 host read these. room_crash_on_enemy_runway() now reads the flag from the stored blob
+  (F3 byte, blob end-59, bit 0x02 - the same tail apply_score_global writes) and the territory rule follows IT:
+  on -> any arena, off -> never; blob unreadable -> the old TC-only fallback. With the 8e grace (a scene that
+  flipped < 180 s ago is still friendly). The complete MEC-2 fate table is in the 8e entry.
+v968f8e-stable  2026-11-03  CRASH-LANDING ON A FIELD THAT FLIPPED SECONDS EARLIER = CAPTURED (Alon 02:19: "if you crash
+  land on friendly territory your pilot is safe")
+  The rule as implemented was checked against the whole weekend: 95 MEC-2 crash-landings, 94 booked plane lost /
+  pilot safe (deaths untouched, streak kept, no ACE wipe, '+ 0 (pilot loss)' in every SCORE line), 1 booked
+  captured: VF10_In_2_Deep 11-01 20:03:33 on Front Airfield 43 (0.4 km, camp 3) - the field _Skyyr_'s tanks
+  had captured at 20:03:31.8, 1.2 s before he touched down on the approach he had been flying for a minute.
+  The territory test ('nearest scene belongs to another camp', v968f5l) had no memory of WHEN it changed
+  hands, unlike the trigger rule (TC_POST_CAPTURE_GRACE_S since v897f5).
+  WHAT CHANGED: CRASHLAND_CAPTURE_GRACE_S = 180 s - a nearest scene that flipped inside that window counts as
+  friendly for the landing (DEATH line says so). The pilot's capture codes from his own client (SE 12) and
+  the collision / own-ordnance / cockpit-kill rules are unchanged. Also: the session-side death mirror and
+  kill streak no longer reset on a safe crash-land (the DB never did - cosmetic, `clocks`/KILL lines), and
+  the KILL line reads 'lost the plane, pilot safe' instead of 'died' for a survivor.
+  How a pilot loses the pilot on a MEC-2 exit now, exhaustively: his client says captured (SE 12); nearest
+  scene enemy-owned for > 180 s (TC rooms only); a msg-125 collision inside COLLISION_DEATH_S; his own blast
+  inside SELF_DEATH_S; a cockpit kill (his own MEC-4 report) earlier in the life. Everything else: plane only.
+v968f8d-stable  2026-11-03  THE STABLE BASELINE: the v968f7a wire, keeping only the fixes (Alon 01:42: "we must be able
+  to provide a stable version of the server")
+  Every change that altered what a client RECEIVES since v968f7a (the last build with the old peer-drop rate,
+  10-29 22:37) is OFF by default; the code stays and each has its console switch:
+    TIMECHECK_ENABLE False (msg 89 probes)      NAK_FAST_RETX False (7w)         MSGLIST_BUNDLE False (7x)
+    TC_USE_MSG104 False (msg 38 -> AI chat lines) TC_NATIVE_79 False (chat copies) POST_LEAVE_WATCH False (7r 0xDA re-sends)
+    LOAD_HOLD False (7z)                         MOD_NATIVE_FEEDBACK False (msg 128/91 -> chat lines)
+    SLOT_INDEX_MIN 0 (7m: PlayerIndex 0 handed out again - the whisper-list gap returns until the baseline is confirmed)
+    REL_KEEPER_INTERVAL_S 1.0 (7o made it 3 s)   AI_CLIENT_NAME 'AI' (7l nameless station reverted)   CLOCK_REBASE False (since 7v)
+  KEPT (they only fix or remove): 7n (no msg-73 words in re-creates), 7r(b) stray ACK never tears a session down,
+  7t atomic predel+create, 7u keepers stop at teardown (the 10-30 Taurus CTD root cause), 7y soldier/train
+  create holds, 8a kill credit after the shooter respawned, 8b FREEZE watch (logging only), 7c/7d lorry cell
+  hysteresis + rotation budget (less traffic), the v968f7v rebase default.
+  A BASELINE line at startup prints every switch so the live log states what ran. The alternative, a byte-
+  for-byte v968f7b (= 7a) rollback, is _scratch/server.py.bak_v968f7b - it would bring the 10-30 reconnect
+  CTDs back (7u) and lose the kill-credit fix; not recommended, but it exists.
+  THE MEASURE: PEERDEL per flying-hour (0.2-1.0 before 10-30, 1.2-2.1 since) and the FREEZE lines. If this
+  build sits back in the old band for two evenings, the features come back one at a time (`<name> on`),
+  each for an evening, and the one that moves the number is the one we fix or drop.
+RE NOTE 2026-11-03 (vcncNet.dll, second dive - "is this the right path?")
+  * The game thread can block inside the DLL in exactly two places: FUN_10007028 (packet buffer from the
+    shared 720-buffer pool, blocking flag: Sleep(50) x 1000 = 50 s, then -0x90) reached from every
+    vcncSendMessage via IOCPrepareToSend FUN_10003108; and the channel mutex FUN_10001217
+    (WaitForSingleObject 10 000 ms) that every send and the whole receive demux take - a sendto that
+    blocks in the input thread (ACK, STATUS/TIME reply, resend) stalls the game thread's next send for the
+    same time. A full reliable SEND queue is NOT a block: QSnd full -> 'Queue is FULL' -> the message is
+    dropped (-0x67, no FATAL). vcncUpdate takes no lock at all.
+  * THE TEST AGAINST TAURUS'S FREEZES: in both places the input thread is stuck too (no buffers -> it
+    cannot receive; mutex held -> it is the one holding it), so STATUS replies would stop at the same
+    instant as the frames. In all four freezes they continued for ~43 s. Therefore neither DLL block is
+    the origin of his stalls: the game thread stopped in FA.exe itself (render/load/disk/wait), the DLL
+    kept answering until its 256-slot input queue filled. The server's wire features are two layers away
+    from that.
+  * A real latent DLL bug found on the way: the input queue (QInEnqueue FUN_1000d206 in the input thread,
+    QInDequeue FUN_1000d14b in the game thread) is a ring with a shared count and NO lock; both threads
+    inc/dec the count. A lost update deflates the count -> entries sit undequeued until the tail laps them,
+    whereupon QInEnqueue's 'slot occupied' branch drops the NEW packet without freeing it (count-- then
+    count++): a reliable packet the DLL has already ACKed is silently lost to the game ('created-set entry
+    was lost somewhere' is what that looks like from our side) and one pool buffer leaks for good. Rate of
+    enqueue/dequeue overlap grows with datagrams per second - one more reason EMsgList (10x fewer
+    datagrams) is the right direction, not a suspect. Alon's own DLL logs 10-30/31 show the ring's debug
+    scan lines (QIn{En,De}queue Check idx=.. cmd=32828 = lists pending) and no 'Input Queue full', no
+    'Channel Lock Timeout', no 'Connection Lost'.
+  * Still wanted: ONE vcncnet log from a pilot who freezes (Taurus). During a FA.exe stall it will show the
+    input thread alone: 'WARNING: Input Queue full' ~43 s after the stall and nothing else - that is the
+    fingerprint that separates 'his client' from 'our wire' beyond doubt.
+v968f8c  2026-11-02  THE REGRESSION WINDOW, MEASURED - and `features off` to bisect it
+  Alon 20:49: "we went from having players play for hours freely to players reporting freezes - I think
+  it's the new messages we added". A metric that exists in every run log since September: PEERDEL
+  'X dropped PEER object (Y)' = a client culled pilot Y's plane after ~28 s without his frames = Y's game
+  thread (or link) was silent for half a minute while flying. Per flying-hour:
+     10-23 v961f5b 0.2 | 10-23 v966f5d 0.5 | 10-24 v967f5c 0.4 | 10-28 v968f6i 1.0 | 10-29 v968f6x 0.7 |
+     10-29 v968f7a 0.8 || 10-30 15:46 v968f7m 1.5 | 10-30 22:48 v968f7s 2.1 | weekend v968f7z 1.2
+  A 2-3x step between v968f7a (10-29 22:37) and v968f7m (10-30 15:46), with the same player base. The
+  builds in that window that changed what an IN-GAME client receives: 7e msg 89 TimeCheck probe to every
+  pilot every 5 s + TC_EVENT sent natively as msg 38 (attack AND defence line to every session in the
+  room, AttackTrigger on the client) + msg 6 no longer echoed; 7g clock rebase ON (STATUS base increments
+  topped up - ran on 10-30 only, off since 7v) + msg 21 whispers relayed; 7l nameless AI station; 7m
+  slots start at 1. Then 10-31: 7p/7q msg 128/91/79, 7r post-leave 0xDA re-sends, 7t atomic creates,
+  7w NAK retransmit, 7x bundling, 7z load-hold. Checked and cleared by disassembly: the client's
+  TimeCheckCB (0x4f5290) only logs and keeps two private debounce dwords nobody reads; msg 38 arrivals
+  in Taurus's logs are hours away from his freezes.
+  WHAT CHANGED: console switches for the remaining post-7a wire features - `tcevent on|off` (msg 38),
+  `scene79 on|off` (msg 79), `postleave on|off` (7r) - beside `timecheck`, `nak`, `mlist`; and
+  `features off|on` flips all six at once. `features off` is the v968f7a wire with the 7t/7u/7z fixes
+  kept (those only remove traffic). THE TEST: one evening on `features off`; if the PEERDEL rate and the
+  FREEZE lines fall back to the 0.2-1.0 band the cause is among the six, then `on` one per evening.
+  RE DIVE (Alon 20:58 "before we deploy I want you to dive in and RE") - FA.exe + vcncNet.dll:
+  * Every new inbound message since 7a, read in the client: msg 89 TimeCheckCB 0x4f5290 logs + two private
+    debounce dwords, no clock change, nothing else reads them; msg 38 handler 0x4fa080 is gated on
+    DAT_00c6e8a4 (offline/AI-client mode) - an ONLINE client returns at the first instruction, so 7e's msg 38
+    does nothing at all on players' machines; msg 79 handler 0x4fbdc0 checks len == 4 and a valid scene,
+    formats a chat line (scene name, grid) - no loop, no wait; msg 91/128 handlers 0x4f4190/0x4f4420 format
+    a text; msg 21 0x4f4700 prints the whisper. The EMsgList receive path copies exactly len bytes of each
+    entry into FA's own message queue (0x7e63f0 -> 0x7e7b10, rep movsd), identical to a lone datagram;
+    FA's callback ignores cmd below 0x8000. The 7t predel (msg 3 for an object the client does not hold):
+    handler 0x7e3cf5 -> Objects[N] null -> with a 2-byte entry nothing happens. None of the new messages
+    has a blocking or looping path.
+  * WHERE THE CLIENT CAN FREEZE (vcncNet.dll): (a) vcncSendMessage -> IOCPrepareToSend FUN_10003108 ->
+    FUN_10007028 takes a packet buffer from the SHARED pool (720 x 0x5e0, the same pool that holds every
+    received datagram waiting in the input queue, every reliable packet held behind a hole and every
+    unACKed send) with flags 3 = BLOCKING: no buffer -> Sleep(50) x 1000 = up to 50 s in the GAME thread,
+    then -0x90 -> 'Connection Lost'. (b) Every send and the whole receive demux run under the channel
+    mutex (FUN_10001217, WaitForSingleObject 10 000 ms): if the input thread's own sendto (ACKs, STATUS/
+    TIME replies, resends) blocks because the adapter's send queue is wedged, the game thread's next
+    telemetry send waits on the mutex up to 10 s per attempt -> a freeze exactly as long as the network
+    stall. Taurus is the one pilot with such stalls on record (his replies and 100+ retransmits left his
+    PC in a single burst after 17.9 s on 10-31 17:48, 5.1 s at 17:35): (b) is his freeze, and it is his
+    machine's network path. The server cannot cause (b); it can only make (a) likelier by holding
+    buffers - reliable holes (weekend: keeper-held ACKs median 0.0 s, p90 0.1 s, max 17 s, rel_evts <= 28)
+    and the input queue (fills only once the game thread has already stopped). (a) is therefore the
+    consequence of a stall, not its origin, in everything measured so far.
+  * The flight recorder now also keeps the last 160 unreliable sends per session (AI frames: msg id,
+    object, size; pushes: type, msg, label) so the FREEZE tail shows the 2 s of traffic around the stop
+    in both directions, not only the reliable sends.
+v968f8b  2026-11-02  FREEZE WATCH + live switches for the newest wire features (Alon: "huge step back on reliability")
+  Taurus's four weekend freezes (messages37/39/425/44, 10-31 19:37 & 20:30, 11-01 01:18 & 17:26 UTC) are
+  not crashes - no assertion, the client log just stops (and its tail is lost in the file buffer: in the
+  01:18 case the server saw him fly 84 s past his log's last line). Alon's point stands: a protocol-induced
+  freeze is force-closed and leaves no assertion, so the SERVER has to be the witness. From our side every
+  freeze had one shape: his telemetry frames stop (game thread), his STATUS replies/ACKs continue ~43 s (the
+  DLL's input thread, until its 256-slot queue is full), then silence, idle-reap 60 s later. The weekend's
+  rate of ungraceful ends per flying-hour (0.30) is inside the range of the last ten runs (0.11-1.23), but
+  Taurus (6) and Skyyr (5) cluster since 10-30 - the day the TimeCheck probes (7e-7j), native 128/91/79
+  lines (7p/7q) and the post-leave lobby watch (7r) went live; 7w NAK retransmit, 7x bundling and 7z
+  load-hold followed on 10-31. Taurus is also the only pilot with OUTBOUND stalls (17.9 s and 5.1 s on
+  10-31 - his replies and 100+ retransmits left his PC in one burst), which points at his adapter/stack.
+  WHAT CHANGED: (1) FREEZE watch in the heartbeat: a flying pilot whose own frames are > 6 s old while his
+  transport answered within 4 s -> one 'FREEZE ... GAME THREAD STALLED' line with the last 14 reliable
+  sends to him (seq, label, payload head) and his last 3 frames, plus a flight-recorder dump; 'frames
+  resumed - the stall lasted N s' or 'transport went silent too' closes the episode. (2) Live switches so
+  the newest wire features can be bisected on the live server without a restart: `timecheck on|off`
+  (msg 89 probes), `nak on|off` (7w), `mlist on|off` (7x), `loadhold on|off` (7z), `freezewatch on|off`.
+  Suggested bisect: one evening with timecheck + nak + mlist OFF (load-hold and the 7u keeper stop only
+  remove traffic and stay); if the FREEZE lines stop, turn them back on one per evening.
+v968f8a  2026-11-02  KILL CREDIT LOST WHEN THE SHOOTER HAD RESPAWNED: the retired-Number grace ran from ISSUE
+  Alon 11-02 (Warrior's messages15, live run_154659 10-30): Warrior shot Meno with plane 0x03c0 (issued
+  20:49:14 UTC), was himself downed and respawned as 0x03ea at 20:58:34; Meno limped home and crash-landed
+  at 21:00:33 with hunter 0x03c0 in his exit tail (MEC 2 EEC 13). Warrior's client printed the cyan 'USA
+  Cpt _Warrior_ forces GBR LtC Meno to crash land' from that tail; the server booked 'lost a plane to no
+  creditable shooter' and Warrior got no kill. _peer_owning_object resolved retired Numbers through the
+  session history within OBJ_HISTORY_GRACE_SEC = 300 s measured from the time the Number was ISSUED -
+  679 s here. The same clock made a long-lived plane's Number re-issuable the second it died (the
+  allocator's quarantine ran from issue too).
+  WHAT CHANGED: a per-session _obj_number_retired stamp, set at the death delete (DELETE3) and at the
+  next spawn for everything no longer worn (live canopy kept); _obj_number_recent() measures the grace
+  from retirement (issue time only for a Number still worn / never stamped). Allocator quarantine and
+  the delete re-arm use the 300 s; kill attribution uses KILL_ATTRIB_GRACE_SEC = 900 s (a victim can fly
+  on for minutes after the fatal hit). A Number re-issued meanwhile still resolves to its CURRENT owner
+  first, as before. VERIFY: KILL 'attribution: EXACT ... [resolved via retired-Number history]' instead
+  of 'no creditable shooter' when the shooter has respawned; the shooter's kills counter and score move.
+  Also: the attribution lookups (EXACT, LATCHED, HIT-RECORD) now search every session when the room
+  peers do not own the Number - Barney_Ross 10-30 21:49:29 died and went back to the lobby 80 ms before
+  SpUn's plane (which he had killed) came down: 'latch ... no session owns that object any more'. Deletes
+  and the allocator keep the room-scoped 300 s rule.
 v968f7z  2026-10-31  LOAD-HOLD: nothing stale into a client that is loading the world; fresh snapshot when it is back
   Alon (09:15): "if we accumulate during loading then we need to rebase the clock in game world post
   loading". Checked against tonight's two loads (run_030143 / messages85+86): the CLOCK did not move. The

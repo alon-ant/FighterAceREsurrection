@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f7z'
+VERSION = 'v968f8f-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1146,7 +1146,7 @@ MSG_MOD_CMD_RESULT_91 = 0x5b
 MSG_SPECIAL_EVENT_74 = 0x4a
 MOD_RESULT_NOT_FOUND = 10
 MOD_CMD_GAG, MOD_CMD_UNGAG, MOD_CMD_BAN, MOD_CMD_UNBAN = 1, 2, 3, 4
-MOD_NATIVE_FEEDBACK = True            # the moderator's own client prints the host's verdict lines
+MOD_NATIVE_FEEDBACK = False            # the moderator's own client prints the host's verdict lines  # v968f8d-stable: 7a wire - sysop verdicts as chat lines, no msg 128/91
 
 def _mod_frame_for(target, body):
     """In-game clients take the appspace frame at exact length, lobby clients the typed frame."""
@@ -7300,6 +7300,10 @@ def perform_restart(actor='console', graceful=False):
 
 def console_handler():
     log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | cleanup | update | loglevel | logmute | logtags | help')
+    log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
+                    f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
+                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
+                    f'freezewatch={FREEZE_WATCH}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes]')   # v968f8d
     threading.Thread(target=_stdin_pump, name='stdin-pump', daemon=True).start()
     while running:
         try:
@@ -7541,6 +7545,31 @@ def console_handler():
                                        f'slope {(_s.__dict__.get("_tick_lag_slope") or 0.0):+.1f}/s comp {_s.__dict__.get("_stamp_comp", 0):+d}'
                                        + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
                                        + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
+            elif cmd in ('timecheck', 'nak', 'loadhold', 'freezewatch', 'tcevent', 'scene79', 'postleave', 'features'):   # v968f8b/8c: live switches
+                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _v = (_a[0].lower() == 'on') if _a and _a[0].lower() in ('on', 'off') else None
+                if cmd == 'timecheck' and _v is not None: TIMECHECK_ENABLE = _v
+                if cmd == 'nak' and _v is not None: NAK_FAST_RETX = _v
+                if cmd == 'loadhold' and _v is not None: LOAD_HOLD = _v
+                if cmd == 'freezewatch' and _v is not None: FREEZE_WATCH = _v
+                if cmd == 'tcevent' and _v is not None: TC_USE_MSG104 = _v
+                if cmd == 'scene79' and _v is not None: TC_NATIVE_79 = _v
+                if cmd == 'postleave' and _v is not None: POST_LEAVE_WATCH = _v
+                if cmd == 'features' and _v is not None:
+                    # v968f8c: everything that went onto the wire since v968f7a (10-29) in one switch - the bisect
+                    # baseline. load-hold and the keeper stop only remove traffic and are not part of it.
+                    TIMECHECK_ENABLE = NAK_FAST_RETX = MSGLIST_BUNDLE = TC_USE_MSG104 = TC_NATIVE_79 = POST_LEAVE_WATCH = _v
+                    log('CONSOLE', f'ALL post-7a wire features switched {"ON" if _v else "OFF"} (timecheck, nak, mlist, tcevent, scene79, postleave)')
+                log('CONSOLE', f'wire features: timecheck probes={"ON" if TIMECHECK_ENABLE else "off"} (msg 89 every {TIMECHECK_PERIOD_S:g} s) | '
+                               f'nak fast retransmit={"ON" if NAK_FAST_RETX else "off"} | mlist bundling={"ON" if MSGLIST_BUNDLE else "off"} | '
+                               f'tcevent msg 38={"ON" if TC_USE_MSG104 else "off"} | scene79={"ON" if TC_NATIVE_79 else "off"} | '
+                               f'postleave watch={"ON" if POST_LEAVE_WATCH else "off"} | load-hold={"ON" if LOAD_HOLD else "off"} | '
+                               f'freeze watch={"ON" if FREEZE_WATCH else "off"}  (`<name> on|off`, `features on|off` = all post-7a ones)')
+                log('CONSOLE', f'wire features: timecheck probes={"ON" if TIMECHECK_ENABLE else "off"} (msg 89 every {TIMECHECK_PERIOD_S:g} s) | '
+                               f'nak fast retransmit={"ON" if NAK_FAST_RETX else "off"} | mlist bundling={"ON" if MSGLIST_BUNDLE else "off"} | '
+                               f'load-hold={"ON" if LOAD_HOLD else "off"} | freeze watch={"ON" if FREEZE_WATCH else "off"}  '
+                               f'(`timecheck|nak|mlist|loadhold|freezewatch on|off`)')
             elif cmd == 'mlist':                                                        # v968f7x: mlist [on|off]  (EMsgList bundling of AI frames)
                 global MSGLIST_BUNDLE
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -9184,6 +9213,7 @@ def console_handler():
                         '                                  - clock / close joining now / fight now / lives / result',
                         'boot <pilot> [text]               - EShutDown with text (client exits the game)',
                         'mlist [on|off]                    - v968f7x: bundle AI object frames into EMsgList datagrams; shows per-pilot stats',
+                        'timecheck|nak|mlist|tcevent|scene79|postleave|loadhold|freezewatch [on|off] - v968f8b/8c: live switches; `features off` = every post-7a wire feature off (bisect baseline)',
                         'kickprobe <pilot> <74|87> [text]  - raw kick message probes (dev)',
                         'modact ...                        - moderator-action probes (dev)',
                     ]),
@@ -12926,6 +12956,37 @@ RECYCLE_OBJ_NUMBERS = False
 # is 0x0100..0xFFFF (65,280 Numbers), which at ~120 spawns per session is hundreds of sessions,
 # so the pool is only ever touched on a very long-lived server.
 OBJ_NUMBER_QUARANTINE_SEC = 300.0
+
+KILL_ATTRIB_GRACE_SEC = 900.0   # v968f8a: a victim may fly on for many minutes after the fatal hit before it comes down
+
+def _obj_number_recent(p, num, issued, now, grace=None):
+    """v968f8a: is this retired Number still inside the grace window? Measured from the moment it
+    was RETIRED (death delete / next spawn), falling back to the issue time only while it is still
+    worn. Before, the window ran from ISSUE: Warrior 10-30 21:00:33 shot Meno with plane 0x03c0
+    (issued 20:49:14), died, respawned as 0x03ea at 20:58:34; Meno limped home and crash-landed at
+    21:00:33 naming hunter 0x03c0 - 679 s after issue, 119 s after retirement -> 'no creditable
+    shooter', no kill, while Warrior's client printed the cyan 'forces Meno to crash land' line
+    from the same exit tail. A 10-minute plane also made its Number re-issuable the second it died."""
+    ret = (p.__dict__.get('_obj_number_retired') or {}).get(num)
+    if ret is None:
+        if getattr(p, 'my_obj_number', None) == num or getattr(p, 'para_obj_number', None) == num:
+            return True                                    # still worn
+        ret = issued                                       # never stamped (pre-8a entry) - old rule
+    return (now - ret) <= (grace if grace is not None else OBJ_HISTORY_GRACE_SEC)
+
+def _retire_obj_numbers(s, keep=()):
+    """v968f8a: stamp every Number in s's history that is no longer worn as retired now."""
+    try:
+        now = time.time()
+        _ret = s.__dict__.setdefault('_obj_number_retired', {})
+        for num, _issued in s.__dict__.get('_obj_number_history', ()):
+            if num not in keep and num not in _ret:
+                _ret[num] = now
+        if len(_ret) > 32:
+            for k in sorted(_ret, key=_ret.get)[:-32]:
+                _ret.pop(k, None)
+    except Exception:
+        pass
 # v456f5 [CRITICAL - THE 28-PLAYER COLLECTIVE CTD, 2026-08-22 stress test]: the client's
 # object table is a FIXED 2048-entry array - 'class ARR<char *,2048>[2050] 0..2047 bounds
 # error' killed EVERY client in the room simultaneously the moment the server broadcast
@@ -12955,7 +13016,7 @@ def _obj_numbers_in_use():
             if _n is not None:
                 used.add(_n)
             for num, issued in p.__dict__.get('_obj_number_history', ()):
-                if (now - issued) <= OBJ_HISTORY_GRACE_SEC:
+                if _obj_number_recent(p, num, issued, now):           # v968f8a: grace from retirement
                     used.add(num)
     except Exception:
         pass
@@ -13089,6 +13150,8 @@ def send_unrel(s, payload, label=''):
     except Exception:
         pass
     seq = s.nundgram()
+    if FLIGHT_RECORDER:
+        _rec(s, 'S->C', 'UNREL', f'push type=0x{payload[1] if len(payload) > 1 else 0:02x} msg{payload[4] if len(payload) > 4 else 0} {len(payload)}B {label[:60]}')   # v968f8c
     try:
         _p = build_unrel(payload, seq)
         sock.sendto(_p, s.addr)
@@ -13099,7 +13162,7 @@ def send_unrel(s, payload, label=''):
     return True
 
 REL_RETX_INTERVAL_S = 0.75   # v359f5: retransmit cadence inside the ACK wait window
-REL_KEEPER_INTERVAL_S = 3.0  # v417f5: background keeper cadence after the blocking window
+REL_KEEPER_INTERVAL_S = 1.0  # v417f5: background keeper cadence after the blocking window  # v968f8d-stable: 7a wire - keeper cadence back to 1 s (v968f7o made it 3 s)
                              # v968f7o (Alon 10-30 'drop it to 3 s'): was 1.0. Taurus messages29: a client whose
                              # game thread had stalled (beacon-only, no ACKs) had 12-23 seqs in keepers at once ->
                              # 15-23 extra pps of retransmits into a frozen socket for 2 minutes (PERF tx 26 -> 44
@@ -13142,6 +13205,7 @@ REL_CAP_LOG_GAP_S   = 5.0    # rate limit for the TX/RELCAP refusal log, per ses
 # roster, chat). Now the hole is re-sent the moment the ACK that names it arrives - one RTT after the
 # loss - at most once per NAK_RETX_MIN_S per seq, and never for a closed session.
 NAK_RETX_MIN_S = 0.15
+NAK_FAST_RETX  = False    # v968f8b: console `nak on|off` - the v968f7w fast retransmit as a live switch  # v968f8d-stable: 7a wire (console `nak on`)
 
 def _nak_fast_retransmit(s, nexp, aseq):
     try:
@@ -13457,7 +13521,7 @@ def get_sessions_in_room(room_id):
 # fall back to plain first-free and log - a possible misbinding beats an array overrun.
 SLOT_REUSE_COOLDOWN_S = 3600.0   # a freed slot stays reserved this long for its old pilot
 SLOT_INDEX_SOFT_MAX   = 120      # never let the cooldown push allocation past this index
-SLOT_INDEX_MIN        = 1        # v968f7m: NEVER hand out PlayerIndex/ClientNumber 0. The client's private-message
+SLOT_INDEX_MIN        = 0        # v968f7m: NEVER hand out PlayerIndex/ClientNumber 0. The client's private-message  # v968f8d-stable: 7a wire - PlayerIndex 0 handed out again (the whisper-list gap of v968f7m stays until the baseline is confirmed)
                                  # target list (FUN_0044db4f) walks the 512-entry NET::CLIENT table and SKIPS every
                                  # station whose PlayerIndex (CLIENT+0x24) is <= 0 (`test eax,eax / jle`) - so the
                                  # pilot who entered an empty arena first (slot 0) was invisible in everyone's
@@ -13781,7 +13845,7 @@ SEND_GAMEPLAY_UNRELIABLE = False
 # (exact last reliable msg each way, and the telemetry state at the moment of the stall).
 FLIGHT_RECORDER   = True     # master switch (also toggleable live via `rec` console command)
 FLIGHT_REC_RELMAX = 40       # reliable msgs (each direction) kept per session
-FLIGHT_REC_UNRMAX = 24       # trailing unreliable telemetry packets kept per session
+FLIGHT_REC_UNRMAX = 160      # trailing unreliable packets kept per session (v968f8c: S->C AI frames and pushes too, ~3 s of a dense world)
 FLIGHT_REC_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'flightrec')
 
 def _rec_decode_telem(data):
@@ -13882,7 +13946,7 @@ CLOCK_DRIFT_LOG_S = 300.0       # v912f5: at most one CLOCK line per pilot per 5
 # OFFSET = ReceiveTime - our ms at send = his NET clock against ours. A steady offset is fine whatever its
 # value; a JUMP (TIMECHECK_JUMP_MS) or a drift (slope) is his clock moving - the storm signature, seen
 # without a single frame involved. Sent on the STATUS cadence to in-game sessions; `clocks` shows it.
-TIMECHECK_ENABLE   = True
+TIMECHECK_ENABLE   = False  # v968f8d-stable: 7a wire - msg 89 probes off (console `timecheck on`)
 TIMECHECK_PERIOD_S = 5.0
 TIMECHECK_JUMP_MS  = 400
 TIMECHECK_LOG_S    = 300.0   # a steady summary per pilot this often; jumps and drift are logged as they happen
@@ -13917,6 +13981,58 @@ TIMECHECK_SEND_BIAS_MS  = 500          # v968f7k: SendTime is sent this much EAR
                                        # (dif in -20..2000), and a client's NET clock sits ~0.3 s behind our wall clock by construction
                                        # (local 17:15: offset -297 ms, 'TimeCheckCB dif=-296' on every probe). The bias keeps dif positive;
                                        # our offset reading is reference-relative, so the constant does not matter to it.
+
+# --- v968f8b [FREEZE WATCH: the client's game thread stopped while its transport still answers] -----
+# Alon 11-02: "if the client freezes due to server protocol then he has to force close it and you will
+# not see an assertion in the logs". True - so the server has to be the witness. Taurus's four weekend
+# freezes all had the same shape in our log: his telemetry frames stop (game thread), his STATUS replies
+# and ACKs keep coming for ~43 s (the DLL's input thread, until its 256-slot input queue is full), then
+# silence and an idle-reap 60 s later. Detect that shape the moment it starts and write down what we
+# sent him in the seconds before, so the next freeze names its suspect from our side alone.
+FREEZE_WATCH          = True
+FREEZE_FRAMES_GAP_S   = 6.0     # own frames older than this while flying = the game thread is not running
+FREEZE_TRANSPORT_OK_S = 4.0     # ... while his transport answered within this long = a freeze, not a dead link
+FREEZE_TAIL           = 14      # S->C events listed from the recorder ring (reliable + notable unreliable)
+
+def _freeze_watch(s, now):
+    try:
+        if not FREEZE_WATCH or not getattr(s, 'flying', False) or getattr(s, 'closing', False):
+            return
+        lt = getattr(s, 'last_telem_time', 0.0)
+        d = s.__dict__
+        if lt <= 0.0:
+            return
+        gap = now - lt
+        alive = (now - getattr(s, 'last_rx', 0.0)) <= FREEZE_TRANSPORT_OK_S
+        fz = d.get('_freeze_since')
+        if fz is None:
+            if gap >= FREEZE_FRAMES_GAP_S and alive:
+                d['_freeze_since'] = lt
+                d['_freeze_n'] = d.get('_freeze_n', 0) + 1
+                rel = [e for e in list(getattr(s, '_rec_rel', []) or []) if e[1] == 'S->C' and e[0] <= lt + 1.0]
+                unr = [e for e in list(getattr(s, '_rec_unrel', []) or []) if lt - 2.0 <= e[0] <= lt + 1.0]   # the 2 s of unreliables around the stop, both ways
+                tail = sorted(rel[-FREEZE_TAIL:] + unr, key=lambda e: e[0])
+                log('FREEZE', f'{getattr(s, "current_pilot", "?")}: his frames stopped {gap:.1f} s ago while his transport still '
+                              f'answers (last inbound {now - s.last_rx:.1f} s ago) -> GAME THREAD STALLED (#{d["_freeze_n"]} this session). '
+                              f'Sent to him in the {FREEZE_TAIL} reliable sends before the stop:')
+                for (t, _dir, k, det) in tail:
+                    log('FREEZE', f'  [{t - lt:+6.1f}s] {_dir} {k:6} {det[:150]}')
+                try:
+                    _p = _rec_dump(s, f'FREEZE: frames stopped, transport alive ({gap:.1f} s)')
+                    if _p:
+                        log('FREEZE', f'  recorder dump -> {_p}')
+                except Exception:
+                    pass
+        else:
+            if gap < FREEZE_FRAMES_GAP_S:
+                log('FREEZE', f'{getattr(s, "current_pilot", "?")}: frames resumed - the stall lasted {lt - fz:.1f} s (#{d.get("_freeze_n", 0)})')
+                d['_freeze_since'] = None
+            elif not alive and not d.get('_freeze_dead_logged'):
+                d['_freeze_dead_logged'] = True
+                log('FREEZE', f'{getattr(s, "current_pilot", "?")}: transport went silent too, {now - fz:.0f} s after the frames stopped '
+                              f'(the DLL input queue is full - the client is frozen or force-closed)')
+    except Exception:
+        pass
 
 def send_timecheck_89(s):
     try:
@@ -14518,7 +14634,7 @@ TANK_UPDATE_SIZE  = 26
 TANK_CLASSES      = {131: 2, 132: 3, 133: 1, 134: 2, 135: 2, 136: 2, 137: 3}   # class_id -> gunsnum
 AI_CLIENT_ST      = 0x1f0          # station number for the server's AI objects (< 512)
 AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station (never a real pilot)
-AI_CLIENT_NAME    = ''             # v968f7l (Alon 10-30 17:20: 'the AI player shouldn't be there at all'): the AI objects need an
+AI_CLIENT_NAME    = 'AI'             # v968f7l (Alon 10-30 17:20: 'the AI player shouldn't be there at all'): the AI objects need an  # v968f8d-stable: 7a wire - the AI station named again (v968f7l experiment reverted)
                                    # owner STATION (Type-0 client record, else o->Client()==0 -> Network.cpp:440 CTD), and the
                                    # client lists stations by name - that is the 'AI' entry he whispered to (target 496). The
                                    # station now carries an EMPTY name: build_client_record keeps it empty (no 'Player' fallback
@@ -19313,7 +19429,7 @@ def tc_say(room_id, text, camp=None, to=None):
 # Each also arms a short client-side display event (0x3d4 ms) - the 2009 flash line. These replace the
 # AI-chat copies of the same wording for the pilot himself; room-wide lines stay on the AI channel.
 MSG_SCENE_EVENT_79 = 0x4f
-TC_NATIVE_79 = True
+TC_NATIVE_79 = False  # v968f8d-stable: 7a wire - scene lines as chat copies (console `scene79 on`)
 
 def send_scene_event_79(sess, etype, sidx=None, label=''):
     """msg 79 to one in-game pilot. Returns False when it was not sent (caller falls back to chat)."""
@@ -22898,7 +23014,7 @@ def pack_soldier_state(x, y, z=0.0, fwd=(1.0, 0.0, 0.0), flags=0, state=0, throt
 #     the normal cadence resumes; planes refresh themselves at their 10 Hz. Nothing stale is delivered.
 #   * Safety: the hold expires after LOAD_HOLD_MAX_S (a 77 with no spawn), and is cleared on leave /
 #     death. A same-field respawn after a death sends no 77 and loads nothing -> no hold.
-LOAD_HOLD       = True
+LOAD_HOLD       = False  # v968f8d-stable: 7a wire - frames flow during a load (console `loadhold on`)
 TRAIN_STATE6_DELAY_S = 0.35   # v968f7z: msg-6 state answer for a train waits for the client's instantiate
 LOAD_HOLD_MAX_S = 20.0
 
@@ -22987,7 +23103,7 @@ def _load_hold_release(s, why=''):
 # Planes (relay_telemetry) are deliberately NOT bundled: 10 Hz dogfight frames stay single datagrams.
 # A lone frame in the outbox at flush time goes out as the plain datagram it always was (n == 1), so a
 # sparse world sees byte-identical traffic and only the dense case changes.
-MSGLIST_BUNDLE    = True    # master switch (console: mlist on|off|stats)
+MSGLIST_BUNDLE    = False    # master switch (console: mlist on|off|stats)  # v968f8d-stable: 7a wire - one datagram per AI frame (console `mlist on`)
 MSGLIST_MAX_BYTES = 1200    # entry bytes per list; the client's recv buffer is 0x5dc=1500 incl. headers
 MSGLIST_MAX_N     = 48      # entries per list (12-bit length field allows 4095 B; this is comfort)
 MSGLIST_FLUSH_MS  = 25      # oldest entry age that triggers a flush (flusher thread ticks every 10 ms)
@@ -23009,6 +23125,8 @@ def _mlist_send_plain(sess, frame):
 def _mlist_queue(sess, frame):
     """Queue one app frame ([bc][T][00][00][msg...]) for sess. Bundled into an EMsgList datagram with
     whatever else is queued for him within MSGLIST_FLUSH_MS; sent at once when the list is full."""
+    if FLIGHT_RECORDER and len(frame) >= 9:                       # v968f8c: what we sent him, for the FREEZE tail
+        _rec(sess, 'S->C', 'UNREL', f'AI msg{frame[4]} obj=0x{struct.unpack_from("<H", frame, 7)[0]:04x} {len(frame)}B')
     if sess.__dict__.get('_load_hold_until') is not None and _load_holding(sess):      # v968f7z
         d = sess.__dict__
         d['_load_hold_dropped'] = d.get('_load_hold_dropped', 0) + 1
@@ -23875,7 +23993,7 @@ def _tc_para_capture_tick():
 #        camp, name): the blue mission lines, siren and map markers of the films come from the
 #        script. Needs a script-loaded client (DAT_00c89e80) - the chat fallback stays available.
 TC_USE_MSG41  = True
-TC_USE_MSG104 = True              # v675f5: OFF - no handler in this client build (dispatch slot 104 empty).
+TC_USE_MSG104 = False              # v675f5: OFF - no handler in this client build (dispatch slot 104 empty).  # v968f8d-stable: 7a wire - TC events as AI chat lines only (console `tcevent on`)
                                   # v968f7e: ON again with the RIGHT id - the registration block FUN_004f1300
                                   # puts the TC_EVENT handler (0x4fa080: 'TC_EVENT. %i %s Scene=%i' -> type 1
                                   # defence / type 2 -> AttackTrigger(scene, camp, name)) at slot 0xc8203c -
@@ -25451,6 +25569,7 @@ PARA_SERVER_DELETE  = True   # v256: end the canopy the way a real server does -
                              #   ~28s; with it the client removes it cleanly (bsr=1, server-required)
                              #   when it 'lands'. This is the same delete path we use for planes.
 CRASHLAND_ENEMY_CAPTURE = True   # v968f5l: a MEC 2 crash-landing whose nearest scene is another camp's = captured
+CRASHLAND_CAPTURE_GRACE_S = 180.0  # v968f8e: a scene that flipped this recently does not capture a crash-lander (he was already on approach)
 COLLISION_DEATH_S   = 20.0   # v945f5: a MEC 2 exit this soon after a msg-125 collision on the plane is a collision death
 SELF_DEATH_S        = 30.0   # v945f5: ... or after a msg-28 that names the plane's OWN object as the hunter (own bomb)
 BAIL_CREW_BACK_S    = 3.0    # v943f5: human-bit-clear chutes released this long BEFORE the pilot's own chute are
@@ -26530,7 +26649,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
             # through the per-session retired-Number history (v326), exactly as the collision-125
             # relay and the PEERDEL re-arm already do. 30 'no credit' failures in
             # run_20260803_172220.log alone were this shape.
-            _hp, _hcur = _peer_owning_object(victim, hunter_obj)
+            _hp, _hcur = _peer_owning_object(victim, hunter_obj, grace=KILL_ATTRIB_GRACE_SEC)   # v968f8a: 15 min
             if _hp is not None:
                 killer = _hp
                 log('KILL', f'attribution: EXACT - victim named hunter obj 0x{hunter_obj:04x} '
@@ -26565,7 +26684,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                 # the killer's next respawn by minutes). History resolution keeps the latch's
                 # no-clock promise across the killer's respawns, bounded only by
                 # OBJ_HISTORY_GRACE_SEC once the Number has been retired.
-                _hp, _hcur = _peer_owning_object(victim, _hb)
+                _hp, _hcur = _peer_owning_object(victim, _hb, grace=KILL_ATTRIB_GRACE_SEC)   # v968f8a
                 if _hp is not None:
                     killer = _hp
                     log('KILL', f'attribution: LATCHED ({_pk["why"]}) - obj 0x{_hb:04x} hit '
@@ -26596,7 +26715,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
         _vo = victim_obj if victim_obj is not None else getattr(victim, 'my_obj_number', None)
         _lh = PLANE_LAST_HIT.pop(_vo, None) if _vo is not None else None
         if _lh and time.time() - _lh[1] <= PLANE_HIT_CREDIT_S:
-            _hp2, _ = _peer_owning_object(victim, _lh[0])
+            _hp2, _ = _peer_owning_object(victim, _lh[0], grace=KILL_ATTRIB_GRACE_SEC)   # v968f8a
             if _hp2 is None:
                 _hp2 = next((p for p in get_sessions_in_room(victim.current_room)
                              if p is not victim and getattr(p, 'my_obj_number', None) == _lh[0]), None)
@@ -26670,9 +26789,10 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
             log('KILL', f'attribution: {killer.current_pilot} is on {victim.current_pilot}\'s own side -> '
                         f'TEAM KILL, death booked, no credit [v945f5]')
             killer = None
-    # ---- VICTIM: always dies. Count it and break the ace streak. ----
-    victim.k_deaths = getattr(victim, 'k_deaths', 0) + 1
-    victim.kills_since_death = 0
+    # ---- VICTIM: the plane is always lost; the pilot's death and the streak depend on his fate. ----
+    victim.k_deaths = getattr(victim, 'k_deaths', 0) + (0 if _pilot_survives else 1)   # v968f8e: session mirror follows the DB rule
+    if not _pilot_survives:
+        victim.kills_since_death = 0
 
     # v242: AIRCRAFT CLASS decides which columns this kill feeds - and the two questions have
     # DIFFERENT answers:
@@ -26866,7 +26986,7 @@ def score_on_death(victim, death_payload, hunter_obj=None, victim_obj=None, pilo
                     f'{victim.current_pilot}: score={vs[0]} kills={vs[1]} deaths={vs[2]}')
     else:
         _why = 'no creditable shooter' if scored else 'solo crash/crashland'
-        log('KILL', f'{victim.current_pilot} died ({_why}) | {victim.current_pilot}: '
+        log('KILL', f'{victim.current_pilot} {"lost the plane, pilot safe" if _pilot_survives else "died"} ({_why}) | {victim.current_pilot}: '
                     f'score={vs[0]} kills={vs[1]} deaths={vs[2]}')
 
     # Re-state the authoritative aces/rank to both parties so the change shows immediately.
@@ -27245,6 +27365,11 @@ def broadcast_object_delete_3(s, reason='', clear_peer_created=True,
         _submit_send(_send)
     log('DELETE3', f'{s.current_pilot} ONumber=0x{s.my_obj_number:04x} St={s.client_number} '
                    f'-> peers in room {s.current_room} {reason}')
+    try:
+        if s.my_obj_number is not None:                               # v968f8a: retired at the death, not at the next spawn
+            s.__dict__.setdefault('_obj_number_retired', {}).setdefault(s.my_obj_number, time.time())
+    except Exception:
+        pass
     # v343: re-issue a start-place grant that raced this death (see SP_REGRANT_ON_DEATH).
     # v462f5 RE-GRANT MADE DELAYED + CONDITIONAL (run 21:09: Starfighter hung at 21:27:42 on
     # 'WaitingForStartPlaceList is empty' right after his post-death respawn; Taurus's log shows
@@ -28719,7 +28844,7 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
 # by +3 s it re-sends the 0xDA reliably; by +8 s it also pushes the arena list with its GAME_DEFs
 # (what the client would have asked for); +15 s one last 0xDA. Each step is skipped the moment the
 # client re-inits, re-enters a game, or the session closes.
-POST_LEAVE_WATCH = True
+POST_LEAVE_WATCH = False  # v968f8d-stable: 7a wire - no post-leave 0xDA re-sends (console `postleave on`)
 POST_LEAVE_WATCH_STEPS_S = (3.0, 8.0, 15.0)
 
 def _post_leave_watch(s, left_at):
@@ -29441,6 +29566,7 @@ def login(s):
                                                          f're-sending the same packet ({s.current_pilot})')
                                 except OSError:
                                     pass
+                        _freeze_watch(s, _now_st)                                      # v968f8b
                         if TIMECHECK_ENABLE and s.entered_game and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S:
                             send_timecheck_89(s)                                   # v968f7e
                         if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
@@ -31438,7 +31564,7 @@ def corr_find(room, obj, lo=0, hi=59, gap=4.0):
 # that peer's, and outside it we correctly decline to guess.
 OBJ_HISTORY_GRACE_SEC = OBJ_NUMBER_QUARANTINE_SEC
 
-def _peer_owning_object(s, onum):
+def _peer_owning_object(s, onum, grace=None):
     """Resolve which peer in the room owns object `onum`, for the delete-notify re-arm.
 
     v326: this used to be a one-liner comparing only each peer's CURRENT my_obj_number. That
@@ -31459,9 +31585,14 @@ def _peer_owning_object(s, onum):
         if getattr(p, 'my_obj_number', None) == onum:
             return p, True
     now = time.time()
+    if grace is not None:
+        # v968f8a (attribution): the shooter may have gone back to the lobby in the meantime (Barney_Ross
+        # 10-30 21:49:29 - died, left the room 80 ms before SpUn's plane came down: 'no session owns that
+        # object any more'). A kill is his wherever he sits now, so look at every session, room peers first.
+        peers = peers + [p for p in get_all_sessions() if p is not s and p not in peers]
     for p in peers:
         for num, issued in p.__dict__.get('_obj_number_history', ()):
-            if num == onum and (now - issued) <= OBJ_HISTORY_GRACE_SEC:
+            if num == onum and _obj_number_recent(p, num, issued, now, grace):   # v968f8a: grace from retirement
                 return p, False
     return None, False
 
@@ -31562,6 +31693,7 @@ def _fire_server_confirm(s, via='', ident=None):
     # could not be resolved, the create was never re-armed, and the sender never saw that peer
     # again. See _peer_owning_object().
     _hist = s.__dict__.setdefault('_obj_number_history', [])
+    _retire_obj_numbers(s, keep=(number, getattr(s, 'para_obj_number', None)))   # v968f8a: the previous plane is retired NOW
     _hist.append((number, time.time()))
     if len(_hist) > 16:
         del _hist[:-16]
@@ -32250,7 +32382,8 @@ def _ingame_own_object_removed(s, tb, stored):
                 # ground - the nearest scene's owner (the TC territory rule) - so a MEC 2 down whose
                 # nearest scene belongs to another camp is a capture: plane and pilot lost.
                 _cap_where = ''
-                if mec_nib == 2 and not _cap and CRASHLAND_ENEMY_CAPTURE and room_has_economy(s.current_room):   # TC arenas: territory rule
+                _cer = room_crash_on_enemy_runway(s.current_room)          # v968f8f: GAME_DEF CrashOnEnemyRunway
+                if mec_nib == 2 and not _cap and CRASHLAND_ENEMY_CAPTURE and (_cer if _cer is not None else room_has_economy(s.current_room)):
                     try:
                         _cpos = s.__dict__.get('_pos_xy'); _cnat = getattr(s, 'nation', None)
                         _cterr = _probe_terrain_for_room(s.current_room)
@@ -32258,8 +32391,19 @@ def _ingame_own_object_removed(s, tb, stored):
                         if _near is not None:
                             _ccamp = scene_camp(_cterr, _near[0])
                             if _ccamp is not None and _ccamp <= 6 and _ccamp != _cnat:
-                                _cap = True
-                                _cap_where = f' in ENEMY territory (nearest scene {_near[0]} {tc_scene_xy(_cterr, _near[0])[2]} {_near[1] / 1000:.1f} km, camp {_ccamp})'
+                                # v968f8e [THE FIELD FLIPPED UNDER HIM]: VF10_In_2_Deep 11-01 20:03:33 crash-landed
+                                # on Front Airfield 43 (0.4 km) 1.2 s AFTER _Skyyr_'s tanks captured it (20:03:31.8)
+                                # -> 'captured in enemy territory', pilot + aces lost, on the field he had been
+                                # lining up for a minute. A scene that changed hands inside CRASHLAND_CAPTURE_GRACE_S
+                                # is still his for the landing - the same grace the trigger rule already applies.
+                                _flip = _TC_CAPTURED_AT.get((s.current_room, int(_near[0])))
+                                if _flip is not None and time.time() - _flip < CRASHLAND_CAPTURE_GRACE_S:
+                                    log('DEATH', f'{s.current_pilot}: nearest scene {_near[0]} is camp {_ccamp} but changed hands '
+                                                 f'{time.time() - _flip:.0f} s ago (< {CRASHLAND_CAPTURE_GRACE_S:.0f} s grace) -> '
+                                                 f'crash-landing booked on FRIENDLY ground, pilot safe [v968f8e]')
+                                else:
+                                    _cap = True
+                                    _cap_where = f' in ENEMY territory (nearest scene {_near[0]} {tc_scene_xy(_cterr, _near[0])[2]} {_near[1] / 1000:.1f} km, camp {_ccamp})'
                     except Exception:
                         logx('DEATH', 'crash-land territory check failed')
                 # v945f5 [COLLISIONS AND SELF-INFLICTED DEATHS ARE DEATHS] (user 10-20): MEC 2 is the
@@ -33475,6 +33619,29 @@ def _active_ingame_rooms():
     """Room ids with at least one in-game session (mirrors the console-command idiom)."""
     return {x.current_room for x in get_all_sessions()
             if getattr(x, 'entered_game', False) and x.current_room is not None}
+
+_CRASH_RUNWAY_CFG = {}     # room_id -> (t, flag) cache
+def room_crash_on_enemy_runway(room_id):
+    """v968f8f: the room's GAME_DEF [ScoreAndDamage] CrashOnEnemyRunway flag (F3 bit 1, blob end-59,
+    see apply_score_global) - the 2009 host rule 'a landing on an enemy runway is a crash: plane AND
+    pilot lost'. Read from the stored blob, cached 60 s. None when the blob cannot be read."""
+    try:
+        now = time.time()
+        ent = _CRASH_RUNWAY_CFG.get(room_id)
+        if ent and now - ent[0] < 60.0:
+            return ent[1]
+        conn = sqlite3.connect(DB_PATH)
+        row = conn.execute("SELECT game_def_raw FROM rooms WHERE room_id=?", (room_id,)).fetchone()
+        conn.close()
+        flag = None
+        if row and row[0]:
+            d = decompress_gamedef(bytes(row[0]))
+            if d and len(d) > 80 and d[len(d) - 50] == 0 and d[len(d) - 49] in (0, 1):
+                flag = bool(d[len(d) - 59] & 0x02)
+        _CRASH_RUNWAY_CFG[room_id] = (now, flag)
+        return flag
+    except Exception:
+        return None
 
 def room_has_economy(room_id):
     """v706f5: only TERRITORIAL COMBAT arenas run the supply economy (production tick, trains,
@@ -38325,7 +38492,8 @@ def on_pkt(data, addr):
             if is_ack:
                 s._ack_in_count=getattr(s,'_ack_in_count',0)+1
                 s.sig(aseq)
-                _nak_fast_retransmit(s, (dw >> 8) & 0x1FF, aseq)        # v968f7w
+                if NAK_FAST_RETX:
+                    _nak_fast_retransmit(s, (dw >> 8) & 0x1FF, aseq)    # v968f7w
                 return
             if is_late:
                 # v359f5: duplicate or late ACK for a seq that already completed. Normal
