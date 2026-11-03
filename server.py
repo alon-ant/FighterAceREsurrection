@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8f-stable'
+VERSION = 'v968f8g-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -13749,6 +13749,7 @@ def assign_player_slot(s, room_id):
         s.__dict__.pop('_slot_scrub', None)
     if s.__dict__.get('_room_entered_room') != room_id or not s.__dict__.get('_room_entered_at'):
         s._room_entered_at = time.time(); s._room_entered_room = room_id      # v968f7b: one stamp per arena entry, here
+        chat_clear_on_enter(s)                                   # v968f8g: a NEW arena entry (any join path) starts with a clean chat window
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
@@ -22172,6 +22173,41 @@ def send_system_msg(s, text):
         return ok
     except Exception:
         logx('SYSMSG', 'send failed'); return False
+
+# --- v968f8g [CHAT STARTS CLEAN IN EVERY ARENA] (Alon 11-03 10:08: "chat needs to be separate for all arenas") -
+# The client has no 'clear chat' message and keeps its chat window across an arena change (SpUn 11-02 read
+# TC Reborn lines while sitting in FFA). RE of Msg_Log.cpp (FUN_00496230 / FUN_00496600): the window IS the
+# store - a FRAME_STRING_QUE ring whose capacity is the number of lines that fit on screen - so pushing that
+# many blank lines through it evicts every old line for good. CHAT_CLEAR_LINES blank ESystemMsg lines
+# (class-0 0xc9, yellow, invisible when blank) go out UNRELIABLY right after the arena join settles: no
+# reliable burst into a client that is standing its world up, no effect if one is lost but a stray old line.
+CHAT_CLEAR_ON_ENTER = True
+CHAT_CLEAR_LINES    = 40        # > the tallest chat window (1080p HQ chat shows ~30 lines)
+CHAT_CLEAR_DELAY_S  = 0.6       # after the join grant, before the first blank line
+CHAT_CLEAR_GAP_S    = 0.012     # between lines (40 small datagrams over ~0.5 s)
+
+def chat_clear_on_enter(s):
+    if not CHAT_CLEAR_ON_ENTER:
+        return
+    def _run():
+        try:
+            time.sleep(CHAT_CLEAR_DELAY_S)
+            if getattr(s, 'closing', False) or not getattr(s, 'entered_game', False):
+                return
+            body = bytearray(80)
+            body[0] = 0x00; body[1] = 0x40; body[2] = 0x00; body[3] = 0xc9
+            body[4] = 0x20; body[5] = 0x00                       # ' ' - a blank line, not an empty string
+            n = 0
+            for _ in range(CHAT_CLEAR_LINES):
+                if getattr(s, 'closing', False):
+                    break
+                if send_unrel(s, bytes(body), '<- chat clear (blank SYSMSG)'):
+                    n += 1
+                time.sleep(CHAT_CLEAR_GAP_S)
+            log('CHAT', f'{getattr(s, "current_pilot", "?")}: chat window cleared on arena entry ({n} blank lines, room {getattr(s, "current_room", None)})')
+        except Exception:
+            logx('CHAT', 'chat clear failed')
+    threading.Thread(target=_run, name='chat-clear', daemon=True).start()
 
 def room_banner(room_id, text):
     """v950f5: the ~10 s on-screen banner (msg-20 channel 4, the server announce form) to every in-game

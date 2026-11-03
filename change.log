@@ -1,3 +1,14 @@
+v968f8g-stable  2026-11-03  CHAT STARTS CLEAN IN EVERY ARENA (Alon 10:08: "chat needs to be separate for all arenas")
+  The client keeps its chat window across an arena change and has no 'clear chat' message (SpUn 11-02 read TC
+  Reborn lines while in FFA; the server had sent him nothing - every room-172 AI line in that window went to
+  0 sessions). RE of Msg_Log.cpp (FUN_00496230 / FUN_00496600, FA.exe): the window IS the store - a
+  FRAME_STRING_QUE ring whose capacity is the number of lines that fit on screen - so pushing that many blank
+  lines evicts every old line for good. chat_clear_on_enter(): 40 blank ESystemMsg lines (class-0 0xc9, a
+  single space; yellow = invisible when blank) sent UNRELIABLY 0.6 s after the ROOM slot assignment of a NEW
+  arena entry (the one place all three join paths pass; a re-fly / field change in the same arena does not
+  clear), 12 ms apart. No reliable burst into a client standing its world up. Switch CHAT_CLEAR_ON_ENTER.
+  VERIFY: on entering an arena the chat window is empty; CHAT '<pilot>: chat window cleared on arena entry
+  (40 blank lines, room N)'; the client's GameLog shows 40 'CHAT hh:mm ' lines with a blank text.
 v968f8f-stable  2026-11-03  CrashOnEnemyRunway IS THE ARENA'S OWN RULE - read from the GAME_DEF, every arena type
   SeanTB1 10-24 15:41:35 (messages32): shot up by GER AA (engine, cockpit, 'Undercarriage is damaged'), came down
   on the GER base - MEC 2, SE 13, 'GER anti-aircraft forces You to crash land. Score:-1000' - and kept his pilot.
