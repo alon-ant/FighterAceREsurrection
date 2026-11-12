@@ -13441,3 +13441,51 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     feature bisect not started; AI-line class filtered on Taurus's client (his message filter);
     map attack-line check after the column fix; hit-list records (nHits x 8 B) unused - a native
     source for assist shares.
+
+2026-11-12  v968f8l-stable  MID-AIR REPAIR (Skyyr 11-11, film 'repaired in flight', live v968f8g)
+  WHAT HAPPENED (run_20261106_154327, UTC): 23:05:47 Meno hits _Skyyr_ (obj 0x05f6, damage latch
+    set). 23:06:08.820 'obj 0x05f6 REPAIRED -> damage latch + PENDING_KILL cleared', 'ground-stop
+    pos=(40147, 41450, 9294) -> TC fuel FULL / ammo SHORT +0kg' (the field had no ammo, so repair
+    + 300 kg fuel), REPAIR-VIS re-create on 5 peers 3 s later. No msg-119 from him at that time and
+    no 'poll servicing settled plane' line: a plain POLL grant, 21 s after the last hit (the 5 s
+    under-fire hold-off had passed), in the middle of the dogfight. Meno lost the kill latch.
+  WHY - three holes in a row:
+    1. 22:58:22 his msg-119 was DEFERRED ('special telemetry form') on an EARLIER plane (0x05f3,
+       exited one second later). _repair_119_pending was never cleared - not at that exit, not at
+       the three respawns after it. Eight minutes later the session still read 'asked for repair'.
+    2. ground_stop_eligible's v822f5 'stranded' branch (crater-wrecked plane that asked for repair
+       and sits within 6 m for 2.5 s) tested only that the flag was SET - not its age (the 60 s
+       window was applied only to the 'honor' label) and not which plane had asked.
+    3. the stranded test compares X/Y only. A fighter pulled straight up to a stall and falling
+       back stays inside a 6 m circle for 2.5 s. Altitude was in no ground-stop test at all.
+    (The old line does not say 'parked' or 'stranded'; 'parked' needs bit-identical positions for
+    2 s with a live tick, which a manoeuvring plane cannot produce - the stranded branch is the
+    only one that fits. The new grant line prints the verdict.)
+  FIX:
+    * every own position sample carries the decoded altitude (_pos_hist element [4]);
+    * 'stranded' needs the altitude spread <= 3.0 m over its window and refuses without altitude
+      evidence; 'parked' is refused when the altitude moved > 1.5 m over the identical-XY run;
+    * a deferred msg-119 belongs to ONE plane (_repair_119_obj) and expires after
+      REPAIR_119_PENDING_WINDOW_S (60 s) for every use (_repair_119_live); cleared on every spawn;
+    * each poll grant logs 'poll grant verdict=parked|stranded obj=0x.... altitude a..b m'.
+  CHECKED offline against the new functions: top-of-a-vertical history (x,y fixed, falling under g,
+    11 m spread) -> not stranded; wreck rocking on a runway -> stranded; no altitude -> refused;
+    8-minute-old request of another plane -> not live.
+  VERIFY live: land, stop, get the grant -> 'poll grant verdict=parked ... altitude N..N m' with
+    one constant altitude; roll into a crater and ask (the v822f5 case) -> 'verdict=stranded';
+    no grant line may ever show an altitude range wider than 3 m.
+  Backup: _scratch/server.py.bak_v968f8k.
+
+==================================================================================================
+2026-11-12  BANKED: v968f8l-stable   (user: "bank the mid air repair")
+==================================================================================================
+  Snapshots: _scratch/bank/server.py.v968f8l, web_server.py.v968f8l, fa_logging.py.v968f8l
+  (deploy the three together). Previous bank: v968f8k-stable (same day).
+  Adds to v968f8k exactly one change - the MID-AIR REPAIR fix (entry above): altitude in the
+  ground-stop judgement ('parked' <= 1.5 m, 'stranded' <= 3.0 m and refused without altitude
+  evidence), a deferred msg-119 tied to its plane and expiring after 60 s / cleared on spawn, and
+  the 'poll grant verdict=... altitude a..b m' log line.
+  STATE AT BANK: compiled and checked offline against synthetic histories; NOT yet flown on the
+  live server (live was v968f8g when the report came in). First live check: a normal landing must
+  still be serviced ('verdict=parked', one constant altitude) and a crater-stranded plane that
+  asks must still get 'verdict=stranded'.

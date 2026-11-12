@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8k-stable'
+VERSION = 'v968f8l-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -28110,7 +28110,11 @@ def relay_telemetry(src, data, _split_obj=None):
                     # genuinely parked plane from a frozen conductor re-sending one stale state
                     # (v346's endemic false-static). plane_movement() indexes [0]=t/[1]=pos and is
                     # unaffected by the extra element.
-                    _hist.append((_now, _p, src.last_telem_tick, _opc))
+                    # v968f8l: the decoded ALTITUDE of this same frame rides as element [4] (None when the
+                    # frame's position was not decoded) - the ground-stop judgement needs it (see ground_stop_eligible)
+                    _z5 = src.__dict__.get('_pos_z') if (src.__dict__.get('_pos_obj') == getattr(src, 'my_obj_number', None)
+                                                         and (_now - (src.__dict__.get('_pos_at') or 0.0)) < 0.25) else None
+                    _hist.append((_now, _p, src.last_telem_tick, _opc, _z5))
                     _cut = _now - CRASH_MOVEMENT_WINDOW_S
                     while _hist and _hist[0][0] < _cut:
                         _hist.pop(0)
@@ -31860,6 +31864,7 @@ def _fire_server_confirm(s, via='', ident=None):
     # v243: and a fresh plane hasn't moved yet. Drop the old life's position history so the
     # "was it flying?" crash test can't be fooled by the PREVIOUS sortie's movement.
     s.__dict__.pop('_pos_hist', None)
+    s._repair_119_pending = 0.0; s.__dict__.pop('_repair_119_obj', None)   # v968f8l: a repair request dies with its plane
     # v244: and nobody has hit this plane yet. Clear the last-hit attribution so a hunter from the
     # PREVIOUS life can never be credited with a kill in this one.
     # v247: object numbers are RECYCLED, so a latch left over from a previous plane that happened to
@@ -35014,7 +35019,7 @@ def ground_stop_eligible(s, now):
         # STRANDED_TOL_M for STRANDED_SPAN_S is serviced even if its position jitters - a crater-damaged
         # plane (wrecked gear, dead engine) rocks in place and never reads EXACTLY 0 movement, so the
         # repair never fired and it could not restart its engine or reposition (user 09-24).
-        _st = _stranded_pos(s, now) if getattr(s, '_repair_119_pending', 0.0) else None
+        _st = _stranded_pos(s, now) if _repair_119_live(s, now) else None                 # v968f8l
         if _st is not None:
             return True, 'stranded', _st
         return False, f'movement={_pm}', None
@@ -35033,11 +35038,44 @@ def ground_stop_eligible(s, now):
     if (t_new - run_start_t) < AUTO_RESUPPLY_SETTLE:
         return False, f'span={t_new - run_start_t:.1f}s', None
     if len(ticks) < 2:
-        _st = _stranded_pos(s, now) if getattr(s, '_repair_119_pending', 0.0) else None   # v822f5
+        _st = _stranded_pos(s, now) if _repair_119_live(s, now) else None                 # v822f5 / v968f8l
         if _st is not None:
             return True, 'stranded', _st
         return False, 'conductor-frozen', None
+    # v968f8l: identical X/Y samples with the altitude still moving is not a parked plane
+    _zs = _z_spread([e for e in hist if e[0] >= run_start_t])
+    if _zs is not None and _zs > RESUPPLY_Z_PARKED_M:
+        return False, f'altitude-moving={_zs:.1f}m', None
     return True, 'parked', p_new
+
+# --- v968f8l MID-AIR REPAIR (Skyyr 11-11 23:06:08, film 'repaired in flight') ----------------------
+# He was hit by Meno at 23:05:47, and 21 s later, in the dogfight, the poll granted a 'ground-stop'
+# resupply: damage latch cleared, plane repaired, fuel topped up. Cause, three holes in a row:
+#   1. his msg-119 of 22:58:22 was DEFERRED (special telemetry form) on an EARLIER plane and
+#      _repair_119_pending was never cleared - not at the exit one second later, not at the three
+#      respawns after it - so eight minutes later the session still read 'asked for repair';
+#   2. the v822f5 'stranded' test (a crater-wrecked plane that asked for repair and sits within 6 m
+#      for 2.5 s) only looked at whether that flag was SET, not how old it was or whose plane;
+#   3. it compares X/Y only - a fighter going straight up to a stall and falling back stays inside
+#      a 6 m circle for 2.5 s. Altitude was never part of any ground-stop test.
+# Now: the pending request belongs to ONE plane and expires (REPAIR_119_PENDING_WINDOW_S), it is
+# cleared on every spawn, and both the 'parked' and the 'stranded' verdict need the ALTITUDE to hold
+# still over the same window (a plane cannot hold x, y and z for 2.5 s in the air: at the top of a
+# vertical it falls 7.6 m in 1.25 s). No altitude evidence -> 'stranded' is refused, 'parked' stays
+# as it was (exact identical positions + live tick).
+RESUPPLY_Z_PARKED_M   = 1.5      # altitude spread allowed over the identical-position run
+RESUPPLY_Z_STRANDED_M = 3.0      # ... over the stranded window (a wreck rocking on its gear)
+
+def _repair_119_live(s, now):
+    """A deferred msg-119 that is still honourable: recent, and asked by the plane flying now."""
+    _t = getattr(s, '_repair_119_pending', 0.0)
+    return bool(_t) and (now - _t) <= REPAIR_119_PENDING_WINDOW_S \
+        and s.__dict__.get('_repair_119_obj') == getattr(s, 'my_obj_number', None)
+
+def _z_spread(entries):
+    """Altitude spread (m) over position samples, or None when fewer than two carry an altitude."""
+    zs = [e[4] for e in entries if len(e) >= 5 and e[4] is not None]
+    return (max(zs) - min(zs)) if len(zs) >= 2 else None
 
 STRANDED_TOL_M = 6.0      # v822f5: 'sitting still' for a damaged plane that asked for repair
 STRANDED_SPAN_S = 2.5     #   (_pos_hist keeps CRASH_MOVEMENT_WINDOW_S = 3 s)
@@ -35069,6 +35107,10 @@ def _stranded_pos(s, now):
             dy = min(abs(qy - cy), 0x800000 - abs(qy - cy))
             if math.hypot(dx * sc, dy * sc) > STRANDED_TOL_M:
                 return None
+        # v968f8l: and the ALTITUDE must hold still too; no altitude evidence = not stranded
+        _zs = _z_spread(win)
+        if _zs is None or _zs > RESUPPLY_Z_STRANDED_M:
+            return None
         return p_new
     except Exception:
         return None
@@ -35388,7 +35430,7 @@ def _handle_repair_request_119(s, pl):
         # taxied to the hangar and asked again 40 s later (Bama 09-26 21:09: REFUSED at :13,
         # serviced at :57). Now the request is kept pending and the poll services it as soon as
         # the normal-form stream has been back for the holdoff and the plane reads parked.
-        s._repair_119_pending = now
+        s._repair_119_pending = now; s._repair_119_obj = getattr(s, 'my_obj_number', None)   # v968f8l
         log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - special telemetry form '
                         f'seen {now - _odd:.1f}s ago (bombsight/autopilot window) - poll services it once the normal stream is back')
         return
@@ -35415,7 +35457,7 @@ def _handle_repair_request_119(s, pl):
     if SERVICE_REQUIRES_GROUND_STOP:
         _ok119, _why119, _ = ground_stop_eligible(s, now)
         if not _ok119:
-            s._repair_119_pending = now   # v505f5: remember it so the poll services it once settled
+            s._repair_119_pending = now; s._repair_119_obj = getattr(s, 'my_obj_number', None)   # v968f8l   # v505f5: remember it so the poll services it once settled
             log('RESUPPLY', f'{s.current_pilot} msg-119 request DEFERRED - not settled yet '
                             f'({_why119}) - poll will service once settled [v500f5/v505f5]')
             return
@@ -35424,7 +35466,7 @@ def _handle_repair_request_119(s, pl):
     _ld119 = getattr(s, 'last_damaged_at', 0.0)
     if (REPAIR_UNDER_FIRE_HOLDOFF_S and getattr(s, 'took_damage', False)
             and _ld119 and (now - _ld119) < REPAIR_UNDER_FIRE_HOLDOFF_S):
-        s._repair_119_pending = now
+        s._repair_119_pending = now; s._repair_119_obj = getattr(s, 'my_obj_number', None)   # v968f8l
         log('RESUPPLY', f'{s.current_pilot} msg-119 repair held off - under fire '
                         f'({now - _ld119:.1f}s since last hit) - poll services once fire stops [v507f5]')
         return
@@ -35759,7 +35801,7 @@ def _resupply_poll_loop():
                 # parked engine-off when hit never fires a fresh 119, so the damage itself is the
                 # request (the msg-28 handler re-armed the one-shot above so this isn't skipped).
                 _p119 = getattr(s, '_repair_119_pending', 0.0)
-                _honor119 = bool(_p119) and (now - _p119) <= REPAIR_119_PENDING_WINDOW_S
+                _honor119 = _repair_119_live(s, now)                                       # v968f8l: same plane, still fresh
                 _dmg = bool(getattr(s, 'took_damage', False)) and bool(getattr(s, '_engine_off', False))  # v508f5: engine off only
                 _honor = _honor119 or _dmg
                 if _honor:
@@ -35768,6 +35810,13 @@ def _resupply_poll_loop():
                     log('RESUPPLY', f'{s.current_pilot} poll servicing settled plane '
                                     f'({"deferred 119" if _honor119 else "damaged, no fresh 119"}) '
                                     f'[v505f5/v506f5]')
+                # v968f8l: every poll grant says on which verdict it was given and at what altitude
+                try:
+                    _hz = [e[4] for e in (getattr(s, '_pos_hist', None) or []) if len(e) >= 5 and e[4] is not None]
+                    log('RESUPPLY', f'{s.current_pilot} poll grant verdict={why} obj=0x{(getattr(s, "my_obj_number", 0) or 0):04x} '
+                                    f'altitude {("%.0f..%.0f m" % (min(_hz), max(_hz))) if _hz else "n/a"} over {len(_hz)} sample(s) [v968f8l]')
+                except Exception:
+                    pass
                 _grant_auto_resupply(s, pos, explicit=_honor)
             except Exception:
                 logx('RESUPPLY', f'poll error for {getattr(s, "current_pilot", "?")}')
