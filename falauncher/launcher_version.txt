@@ -1,0 +1,7 @@
+# Fighter Ace REsurrection - launcher update manifest (read by fa_launcher.exe v5.6+)
+# Generated 2026-11-03 for compiled/fa_launcher.exe (1202688 bytes, launcher v5.6 L-FIX-14).
+# Regenerate after every launcher build with:  make_manifest.bat <version> "notes"
+version=5.6
+url=https://raw.githubusercontent.com/alon-ant/FighterAceREsurrection/main/falauncher/compiled/fa_launcher.exe
+sha256=234f7fff93e7d72a72b475c786b215a639aa784931fc7a6ff5f958b02a827527
+notes=Debug mode checkbox and automatic launcher updates.

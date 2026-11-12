@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8g-stable'
+VERSION = 'v968f8k-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14005,6 +14005,12 @@ def _freeze_watch(s, now):
         lt = getattr(s, 'last_telem_time', 0.0)
         d = s.__dict__
         if lt <= 0.0:
+            return
+        # v968f8h: no frames is NORMAL while the pilot hangs in a chute or sits in the hangar after a bail /
+        # crash (Taurus 11-03 13:55: 'GAME THREAD STALLED' 7 s after his ServerConfirm PARACHUTER, frames
+        # 'resumed' at the re-spawn). Only a plane that is actually flying can stall.
+        if getattr(s, 'para_obj_number', None) is not None or d.get('crew_para_objs'):
+            d['_freeze_since'] = None
             return
         gap = now - lt
         alive = (now - getattr(s, 'last_rx', 0.0)) <= FREEZE_TRANSPORT_OK_S
@@ -31989,13 +31995,18 @@ def _ingame_own_object_removed(s, tb, stored):
             _pexit0 = stored[7] if len(stored) > 7 else 0
             log('PARA', f'{s.current_pilot} parachuter 0x{_ponum:04x} removed (exit=0x{_pexit0:02x}) '
                         f'-> relaying delete to peers; settling pilot fate [pre-guard]')
+            # v968f8h: the canopy settles the pilot's fate ONCE - remember it for the empty plane (see the
+            # 'bailed plane down after the canopy' branch in the death path)
+            s.__dict__['_chute_fate'] = (getattr(s, 'bailed_plane_obj', None), (('captured' if (_pexit0 >> 4) == 2 else 'killed (no chute / hit the ground)') if (_pexit0 & 0xf) == 12 else ('killed' if (_pexit0 & 0xf) == 5 else 'landed')), time.time())
             if PILOT_FATE_SCORING and (_pexit0 & 0xf) == 12 and s.current_pilot:
                 _smode0 = scoring_mode_for_room(s.current_room)
                 if _smode0 is not None:
                     db_credit_capture(s.current_pilot, mode=_smode0)
                     if LIVE_ACE_TRACKING:
                         db_set_pilot_aces(s.current_pilot, 0)
-                    log('CAPTURE', f'{s.current_pilot} CAPTURED under canopy (parachuter '
+                    # v968f8j: SE 12 on a parachuter = 'down with no shooter'; the MEC says how: 2 = landed in enemy
+                    # territory and captured (client string 199), 1 = hit the ground (no chute / opened too low)
+                    log('CAPTURE', f'{s.current_pilot} {"CAPTURED under canopy" if (_pexit0 >> 4) == 2 else "KILLED - parachuter hit the ground (no chute / opened too low)"} (parachuter '
                                    f'0x{_ponum:04x} exit=0x{_pexit0:02x} SE=12) -> death +1, streak '
                                    f'broken, aces wiped')
                     if SEND_ACE_RANK_88:
@@ -32196,13 +32207,14 @@ def _ingame_own_object_removed(s, tb, stored):
             # CAPTURED on enemy ground -> the DEFERRED pilot death (the plane was already counted when
             # it came down at the bail). Any other landing = pilot safe, streak/aces intact.
             _pexit = stored[7] if len(stored) > 7 else 0
+            s.__dict__['_chute_fate'] = (getattr(s, 'bailed_plane_obj', None), (('captured' if (_pexit >> 4) == 2 else 'killed (no chute / hit the ground)') if (_pexit & 0xf) == 12 else ('killed' if (_pexit & 0xf) == 5 else 'landed')), time.time())   # v968f8h
             if PILOT_FATE_SCORING and (_pexit & 0xf) == 12 and s.current_pilot:
                 _smode2 = scoring_mode_for_room(s.current_room)
                 if _smode2 is not None:
                     db_credit_capture(s.current_pilot, mode=_smode2)
                     if LIVE_ACE_TRACKING:
                         db_set_pilot_aces(s.current_pilot, 0)
-                    log('CAPTURE', f'{s.current_pilot} CAPTURED under canopy (parachuter '
+                    log('CAPTURE', f'{s.current_pilot} {"CAPTURED under canopy" if (_pexit >> 4) == 2 else "KILLED - parachuter hit the ground (no chute / opened too low)"} (parachuter '
                                    f'0x{_onum:04x} exit=0x{_pexit:02x} SE=12) -> death +1, streak '
                                    f'broken, aces wiped')
                     if SEND_ACE_RANK_88:
@@ -32319,7 +32331,38 @@ def _ingame_own_object_removed(s, tb, stored):
         # him until his next spawn). Peer ids re-arm the relay's create, exactly like a standalone
         # PEERDEL notify.
         try:
-            _tail0 = 5 + _esz0
+            # v968f8h [THE DEATH ENTRY IS ONE BYTE LONGER THAN THE TABLE] (Taurus 11-03 13:29:27, messages55):
+            # his 24-byte death notify was [0x0132][0x53 MEC5/EEC3][10 B] + [0x0137][0x0136][0x0135][0x0134]
+            # [0x0133] - the column he had just triggered, culled by his client in the same message. The
+            # client SENDS its kill-family exit entry (EEC 3..9: 12 in the receive table, 0xd: 13) one byte
+            # longer than the client-side parser consumes (every death notify of run_20261031/1103 measures
+            # 13 / 14 bytes), so the tail was read one byte early (0x3700, 0x3601, ...), nothing matched,
+            # the five tanks kept this session in their peer sets and were never re-created: 'Get coord for
+            # missing object 307..311' on his client for the next 32 minutes and a map box without the
+            # column's attack line. The clean exits (EEC 0/2) carry no extra byte (the 0x90 TAB culls of
+            # the trains 0x0100-0x0102 align at table size). Try the table offset first, then +1, and take
+            # the alignment whose even-length run names the most live objects.
+            # v968f8j [EXACT, from the client's exit writer FUN_0045d930]: the 'one byte longer' of v968f8h is the
+            # HIT-LIST COUNT. For ScoreEvent 3, 9 and 13 the client appends [nHits u8] + nHits x 8 B
+            # ([u16][u32][u16 share] per attacker) behind the 12/13-byte entry; SE 0/1/2/12 and 4/5/7/8 carry
+            # nothing. So the cull ids start at entry + 1 + 8 x nHits - computed first; the two v968f8h
+            # guesses (table, table+1) stay as fallbacks and the alignment naming the most live objects wins.
+            _offs = []
+            if se in (3, 9, 13) and len(stored) > 5 + _esz0:
+                _offs.append(5 + _esz0 + 1 + 8 * stored[5 + _esz0])
+            _offs += [5 + _esz0, 5 + _esz0 + 1]
+            _best = None
+            for _off in _offs:
+                if len(stored) >= _off + 2 and (len(stored) - _off) % 2 == 0:
+                    _cand = [struct.unpack_from('<H', stored, i)[0] for i in range(_off, len(stored) - 1, 2)]
+                    _known = sum(1 for i in _cand if i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS or i in SHIPS
+                                 or (i not in (0, 0xffff) and _peer_owning_object(s, i)[0] is not None))
+                    if _known and (_best is None or _known > _best[2]):
+                        _best = (_off, _cand, _known)
+            _tail0 = _best[0] if _best else _offs[0]
+            if _best and _best[0] != 5 + _esz0:
+                log('CULLRX', f'{s.current_pilot}: cull ids behind his exit entry (exit=0x{exitb:02x}) start at entry+{_best[0] - 5 - _esz0} '
+                              f'({_best[2]} known of {len(_best[1])}): {["0x%04x" % i for i in _best[1]]} [v968f8j]')
             if len(stored) >= _tail0 + 2:
                 _tail_ids = [struct.unpack_from('<H', stored, i)[0] for i in range(_tail0, len(stored) - 1, 2)]
                 if any(i in TANKS or i in SOLDIERS or i in TRAINS or i in CARS or i in SHIPS for i in _tail_ids):
@@ -32363,7 +32406,24 @@ def _ingame_own_object_removed(s, tb, stored):
             # (flying MEC=1), a shot-down, or CAPTURE (SE=12). Exit-to-HQ (MEC=0xa, parked) = clean.
             _move2 = plane_movement(s); _flying2 = _move2 >= CRASH_MOVEMENT_MIN
             _on_chute = getattr(s, 'para_obj_number', None) is not None
-            if _on_chute:
+            # v968f8h [EMPTY PLANE DOWN AFTER THE CANOPY] (Taurus 11-03 13:21:06/13:21:07, 13:23:11/13:23:14,
+            # messages55 'bailing out in enemy - lost 2 pilots'): the canopy was CAPTURED (SE 12 -> death +1,
+            # aces wiped) and ONE second later the abandoned plane hit the ground with MEC 1 - the canopy
+            # was gone by then, so _on_chute was False and the MEC-1 branch booked a SECOND pilot death
+            # (-1000, deaths 1281 -> 1283 for one bail). A chute that already landed (safe) took the same
+            # path: 13:19:30 happened to come down while the canopy was still up and booked right. The
+            # plane a pilot stepped out of carries no pilot whenever it comes down: plane lost + shooter
+            # credited, the pilot's fate stays what the canopy made it.
+            _cf = s.__dict__.get('_chute_fate')
+            _after_chute = (not _on_chute and _cf is not None and _cf[0] is not None and _cf[0] == _onum
+                            and time.time() - _cf[2] < 600.0)
+            if _after_chute:
+                s.__dict__.pop('_chute_fate', None)
+                _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter, victim_obj=_onum, pilot_lost=False)
+                log('DEATH', f'{s.current_pilot} bailed plane down (MEC&0xf={mec_nib}) AFTER the canopy {_cf[1]} '
+                             f'{time.time() - _cf[2]:.0f} s ago -> plane counted + shooter credited; the pilot\'s fate was '
+                             f'settled by the canopy ({"safe" if _cf[1] == "landed" else "death already booked"}), not again [v968f8h]')
+            elif _on_chute:
                 # v498f5: the pilot has BAILED and is under the canopy, so THIS delete is the empty
                 # plane coming down - it reports MEC=1 flying exactly like a cockpit crash, but the
                 # cockpit is empty. Plane lost + shooter credited; the pilot's fate is settled only
@@ -32385,7 +32445,7 @@ def _ingame_own_object_removed(s, tb, stored):
                              f'counted + shooter credited; '
                              + ('pilot was ALREADY KILLED in the cockpit -> pilot lost [v918f5]' if _ck_on_chute
                                 else 'pilot on chute, fate pending [PILOT_FATE]'))
-            elif (scored or mec_nib == 1) and mec_nib not in (5, 2):
+            elif (scored or mec_nib == 1) and mec_nib not in (5, 2, 3):   # v968f8j: MEC 3 (crashed into a ground object) is crash-landing family
                 # v968f5i [FORCED LANDING IS NOT A DEATH] (Alon 10-24 13:45: engine shot out by Bama,
                 # made it back to his own field, crash-landed - exit MEC=2 EEC=13 with the hunter in
                 # the entry): the 13-byte entry made it 'scored' and this branch booked plane AND
@@ -32418,36 +32478,72 @@ def _ingame_own_object_removed(s, tb, stored):
                              f'SE={se}) -> plane AND pilot lost; shooter credited'
                              + (f' (cockpit-kill hunter obj 0x{_ckh:04x})' if _ckh is not None else '')
                              + ' [PILOT_FATE/v532f5]')
-            elif mec_nib in (5, 2):
+            elif mec_nib in (5, 2, 3):
                 _cap = (se == 12)
-                # v968f5l [CRASH-LANDING IN ENEMY TERRITORY = CAPTURED] (Alon 21:20: SeanTB1 15:41:36
-                # crash-landed on an enemy base, MEC 2 SE 13, booked 'pilot safe'). The client's SE 12
-                # is the only capture code it sends and it did not send it here; the server knows the
-                # ground - the nearest scene's owner (the TC territory rule) - so a MEC 2 down whose
-                # nearest scene belongs to another camp is a capture: plane and pilot lost.
+                # v968f8i [THE CRASH-LANDING RULE, as the user stated it 11-03]: a crash-landing ALWAYS loses
+                # the plane; the pilot is safe on friendly ground and LOST (captured, aces gone) on enemy
+                # ground. No arena flag decides it (the v968f8f / v968f5l gates are gone).
+                # v968f8j [THE CLIENT SENDS THE GROUND] (user 11-12: 'could we be missing a bit on the client
+                # side message?' - yes). FA.exe FUN_0045e3c0 (exit) / FUN_0045d930 (exit writer): for
+                # MissExitCode 2 (crash-landed) and 3 (crashed into a ground object) the exit entry's
+                # 'AddData' byte is DAT_00c7e39c, set in the plane-destroy path FUN_004bd880 as
+                #     territory = FUN_0055d290(position)   - the camp of the 2048 m map cell he came down in
+                #                                            (the coloured grid of the map screen; -1 = nobody's)
+                #     AddData   = team game && territory != -1 && territory != own camp && enemies(own, territory)
+                # i.e. 1 = ENEMY TERRITORY, 0 = friendly / neutral / no man's land. It rides at
+                #     SE 2  (no shooter):  [id u16][exit 0x22|0x32][AddData]                    -> stored[8]
+                #     SE 13 (forced down): [id u16][exit 0x2d|0x3d][hunter .. 9 B][AddData]     -> stored[17]
+                # and was never read (the parachuter uses the same flag to decide 'captured', SE 12).
+                # run_20261103/1106: 171 crash-landings with AddData 0, 104 with 1 - Bama 11-06 14:28:51
+                # (reported: enemy ground, pilot kept) = 1; Taurus 11-06 14:25:40 = 1, 14:32:35 = 0.
+                # The bit is the judge. The server's nearest-scene test only speaks when the byte is absent,
+                # and it still grants the v968f8e grace (a scene that flipped < 180 s ago is still his).
                 _cap_where = ''
-                _cer = room_crash_on_enemy_runway(s.current_room)          # v968f8f: GAME_DEF CrashOnEnemyRunway
-                if mec_nib == 2 and not _cap and CRASHLAND_ENEMY_CAPTURE and (_cer if _cer is not None else room_has_economy(s.current_room)):
+                _cl = mec_nib in (2, 3)
+                if _cl and CRASHLAND_ENEMY_CAPTURE:
                     try:
+                        _cbit = None
+                        if se == 2 and len(stored) > 8:
+                            _cbit = stored[8]
+                        elif se == 13 and len(stored) > 17:
+                            _cbit = stored[17]
                         _cpos = s.__dict__.get('_pos_xy'); _cnat = getattr(s, 'nation', None)
                         _cterr = _probe_terrain_for_room(s.current_room)
                         _near = tc_nearest_scene_any(_cterr, _cpos[0], _cpos[1]) if (_cpos and _cnat is not None) else None
-                        if _near is not None:
-                            _ccamp = scene_camp(_cterr, _near[0])
-                            if _ccamp is not None and _ccamp <= 6 and _ccamp != _cnat:
-                                # v968f8e [THE FIELD FLIPPED UNDER HIM]: VF10_In_2_Deep 11-01 20:03:33 crash-landed
-                                # on Front Airfield 43 (0.4 km) 1.2 s AFTER _Skyyr_'s tanks captured it (20:03:31.8)
-                                # -> 'captured in enemy territory', pilot + aces lost, on the field he had been
-                                # lining up for a minute. A scene that changed hands inside CRASHLAND_CAPTURE_GRACE_S
-                                # is still his for the landing - the same grace the trigger rule already applies.
-                                _flip = _TC_CAPTURED_AT.get((s.current_room, int(_near[0])))
-                                if _flip is not None and time.time() - _flip < CRASHLAND_CAPTURE_GRACE_S:
-                                    log('DEATH', f'{s.current_pilot}: nearest scene {_near[0]} is camp {_ccamp} but changed hands '
-                                                 f'{time.time() - _flip:.0f} s ago (< {CRASHLAND_CAPTURE_GRACE_S:.0f} s grace) -> '
-                                                 f'crash-landing booked on FRIENDLY ground, pilot safe [v968f8e]')
+                        _ccamp = scene_camp(_cterr, _near[0]) if _near is not None else None
+                        _sname = (tc_scene_xy(_cterr, _near[0]) or ('', '', '?'))[2].strip() if _near is not None else '?'
+                        _actv = room_active_camp_names(s.current_room) or {}
+                        _srv_enemy = bool(_near is not None and _ccamp is not None and _ccamp <= 6 and _ccamp != _cnat
+                                          and not (_actv and int(_ccamp) not in _actv))
+                        _flip = _TC_CAPTURED_AT.get((s.current_room, int(_near[0]))) if _near is not None else None
+                        _fresh = (_flip is not None and time.time() - _flip < CRASHLAND_CAPTURE_GRACE_S)
+                        _why = ''
+                        if _cap:
+                            _why = 'the client reported CAPTURED (SE 12)'
+                        elif _cbit is not None:
+                            if _cbit & 1:
+                                if _fresh:
+                                    _why = (f'client: ENEMY territory, but scene {_near[0]} changed hands {time.time() - _flip:.0f} s ago '
+                                            f'(< {CRASHLAND_CAPTURE_GRACE_S:.0f} s grace) -> still his')
                                 else:
                                     _cap = True
-                                    _cap_where = f' in ENEMY territory (nearest scene {_near[0]} {tc_scene_xy(_cterr, _near[0])[2]} {_near[1] / 1000:.1f} km, camp {_ccamp})'
+                                    _why = 'client: ENEMY territory (exit AddData=1)'
+                                    _cap_where = (f' in ENEMY territory (client flag; nearest scene {_near[0] if _near else "?"} {_sname} '
+                                                  f'{(_near[1] / 1000.0) if _near else 0:.1f} km, camp {_ccamp})')
+                            else:
+                                _why = 'client: friendly / neutral territory (exit AddData=0)'
+                        elif _srv_enemy and not _fresh:
+                            _cap = True
+                            _why = f'no client flag in this exit -> server ground: ENEMY (camp {_ccamp})'
+                            _cap_where = f' in ENEMY territory (nearest scene {_near[0]} {_sname} {_near[1] / 1000:.1f} km, camp {_ccamp})'
+                        else:
+                            _why = 'no client flag in this exit -> server ground: own / neutral / freshly flipped'
+                        log('DEATH', f'{s.current_pilot} crash-landing (exit 0x{exitb:02x} MEC {mec_nib} SE {se}) at '
+                                     f'{tc_grid(_cpos[0], _cpos[1]) if _cpos else "?"}: client territory flag '
+                                     f'{"-" if _cbit is None else _cbit}, server nearest scene {_near[0] if _near else "?"} {_sname} '
+                                     f'{(_near[1] / 1000.0) if _near else 0:.1f} km camp {_ccamp} (pilot camp {_cnat}'
+                                     f'{", server says enemy" if _srv_enemy else ""}) -> '
+                                     f'{"PILOT LOST" if _cap else "pilot safe"}: {_why} [v968f8j]')
                     except Exception:
                         logx('DEATH', 'crash-land territory check failed')
                 # v945f5 [COLLISIONS AND SELF-INFLICTED DEATHS ARE DEATHS] (user 10-20): MEC 2 is the
@@ -32457,8 +32553,8 @@ def _ingame_own_object_removed(s, tb, stored):
                 # collision on this plane inside COLLISION_DEATH_S, or a self-damage report inside
                 # SELF_DEATH_S, the pilot is lost too. A plain belly landing (neither) stays as it was.
                 _now_d = time.time()
-                _coll = (mec_nib == 2 and _now_d - float(s.__dict__.get('_collision_at') or 0.0) < COLLISION_DEATH_S)
-                _selfd = (mec_nib == 2 and _now_d - float(s.__dict__.get('_self_damaged_at') or 0.0) < SELF_DEATH_S)
+                _coll = (_cl and _now_d - float(s.__dict__.get('_collision_at') or 0.0) < COLLISION_DEATH_S)
+                _selfd = (_cl and _now_d - float(s.__dict__.get('_self_damaged_at') or 0.0) < SELF_DEATH_S)
                 _coll_with = s.__dict__.get('_collision_with') if _coll else None
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
                                                    victim_obj=_onum, pilot_lost=(_cap or _coll or _selfd))
@@ -32471,11 +32567,8 @@ def _ingame_own_object_removed(s, tb, stored):
                                  f'counted + shooter credited; pilot '
                                  f'{"CAPTURED" + _cap_where if _cap else "pending (bail) / safe (crash-land)"} '
                                  f'[PILOT_FATE]')
-                    if _cap_where:
-                        try:
-                            tc_say(s.current_room, msg_prefixed('EVENT', f'{s.current_pilot} crash-landed in enemy territory and was captured'))
-                        except Exception:
-                            pass
+                    # v968f8k (user 11-12): no room line for a capture on a crash-landing - the DEATH log line and the
+                    # score / ace change are enough ('no need for the AI message, please remove it')
             else:
                 log('DEATH', f'{s.current_pilot} clean exit (MEC&0xf={mec_nib} SE={se}) -> no loss '
                              f'[PILOT_FATE]')
@@ -38875,6 +38968,20 @@ def _idle_session_reaper():
                                       'newer connection for this account exists (one per account)'
                                       % (x.sid, x.account, getattr(x, 'current_pilot', None)))
             else:
+                # v968f8h: a client that went silent in the AIR (frames AND transport stopped together) is the
+                # hard-freeze / CTD signature the FREEZE watch cannot catch (it needs the transport alive). The
+                # per-session recorder still holds the last 40 reliable + 160 unreliable events up to the
+                # silence - dump them now so the sends of the final seconds survive (Taurus 11-03 14:01:13).
+                try:
+                    if getattr(x, 'flying', False):
+                        _lt = getattr(x, 'last_telem_time', 0.0) or 0.0
+                        _p = _rec_dump(x, 'DEAD-CLIENT: frames and transport stopped together (idle %.0fs, last frame %.1fs before last inbound)'
+                                          % (silent, (getattr(x, 'last_rx', 0.0) - _lt) if _lt else -1.0))
+                        if _p:
+                            log('IDLE-REAP', '%s: airborne client went silent -> recorder dump %s'
+                                % (getattr(x, 'current_pilot', '?'), _p))
+                except Exception:
+                    pass
                 _teardown_session(x, why='(idle %.0fs - dead client)' % silent, tag='IDLE-REAP',
                                   msg='reaped idle session sid=%s account="%s" pilot=%s - no inbound for '
                                       '%.0fs (ungraceful CTD, no reconnect)'

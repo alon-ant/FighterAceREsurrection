@@ -1,3 +1,19 @@
+LAUNCHER v5.5 (L-FIX-13) + WEB  2026-11-03  Debug mode checkbox; the website's client-path box retired (Alon 10:26)
+  falauncher/fa_launcher.cpp: a native checkbox 'Debug mode (launch FA42D.EXE instead of FA42R.EXE)' in a 26 px
+  strip under the embedded browser (the window grows by the strip; the login page keeps its 460x640). Its state
+  is DebugMode=1/0 in launcher.ini (new generic SaveIniValues() writer - keeps BOM/comments/order, replaces the
+  first active line, appends under a header; SaveInstallToIni now uses it). LaunchGame picks the exe from the
+  LOCAL game folder - GameDir, or InstallTarget when setup wrote only that (Alon's own ini) - debug: FA42D.EXE,
+  ClientExe, FA42R, FA; release: ClientExe (FA42R if ClientExe is FA42D), FA42R, FA, FA42B. The ticket lands in
+  the same folder. The website's X-Game-Client-Path stays as the legacy fallback for a launcher with no local
+  client at all. Stage log: 'V: launcher v5.5 (L-FIX-13)', 'C: debug mode ON/off', 'L2: DEBUG MODE - using
+  FA42D.EXE ...'. Built here with x86_64-w64-mingw32-g++ (-s, static; std::max for the strip arithmetic) ->
+  falauncher/compiled/fa_launcher_v5.5.exe (1.19 MB, unsigned - sign with osslsigncode as before).
+  web_server.py: the 'Your Game Client Path' box + 'Save Path Settings' are gone from the front page; /update_path
+  stores nothing and redirects home; /download still sends X-Game-Client-Path (legacy fallback only).
+  VERIFY: launcher shows the checkbox under the login page; ticking it writes DebugMode=1 to launcher.ini and the
+  next launch starts FA42D.EXE (launcher_stage.txt 'L2: DEBUG MODE'); unticked starts FA42R.EXE; the website
+  front page shows only 'Launch Game'.
 v968f8g-stable  2026-11-03  CHAT STARTS CLEAN IN EVERY ARENA (Alon 10:08: "chat needs to be separate for all arenas")
   The client keeps its chat window across an arena change and has no 'clear chat' message (SpUn 11-02 read TC
   Reborn lines while in FFA; the server had sent him nothing - every room-172 AI line in that window went to
@@ -13223,3 +13239,205 @@ v189: STABLE MILESTONE - 2-player flight + team changes + crash recovery.
 v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF_DEBUG
       flag gates the per-build decompressed-hex dump (default off).
 
+
+2026-11-03  LAUNCHER v5.6 (L-FIX-14) - self-update from the web
+  WHAT: fa_launcher.exe now updates itself. At startup, right after the
+    'V: launcher v5.6' banner and before any download offer, it fetches the
+    manifest at UpdateUrl (launcher.ini; default = GitHub raw
+    falauncher/launcher_version.txt: version=, url=, optional sha256=,
+    notes=). If version= is newer than the compiled LAUNCHER_VERSION it
+    downloads url= to fa_launcher_new.exe (next to itself, WinINet, no
+    mark-of-the-web), validates it (>=64 KB, MZ + PE header, Content-Length,
+    sha256 when given), renames the running exe to fa_launcher_old.exe,
+    moves the new one into place, shows "updated to version X ... will now
+    restart", relaunches itself with the same arguments + /updated and
+    exits. The fresh process skips the check once and deletes
+    fa_launcher_old.exe. Any failure = a 'U:' line in launcher_stage.txt and
+    the current exe continues unchanged (fail-open). AutoUpdate=0 in the ini
+    or /noupdate on the command line disables the check.
+  WHY: the compiled launcher lives on GitHub; pilots should never have to
+    re-run FighterAce42_Setup.exe for a launcher fix.
+  RELEASE PROCEDURE: build -> copy to falauncher\compiled\fa_launcher.exe ->
+    make_manifest.bat <version> "notes" (writes launcher_version.txt with the
+    certutil SHA-256) -> commit/push both. LAUNCHER_VERSION in the source is
+    the only place to bump. raw.githubusercontent.com caches ~5 min.
+  FILES: fa_launcher.cpp (CheckForLauncherUpdate, CompareVersions, Sha256Hex,
+    SelfExePath; Config.updateUrl/autoUpdate; banner from LAUNCHER_VERSION),
+    launcher_version.txt (manifest, version=5.6, sha256 of this build),
+    make_manifest.bat, default_launcher.ini (AutoUpdate/UpdateUrl/DebugMode
+    documented), compiled\fa_launcher.exe + compiled\fa_launcher_v5.6.exe
+    (1,202,688 bytes, mingw, unsigned).
+  VERIFY: launcher_stage.txt shows 'U: up to date (installed 5.6, published
+    5.6)'. Dry-run the swap (UpdateUrl is http(s) only, no file paths):
+    push a manifest with version=5.6.1 pointing at the same exe - the
+    launcher must download, swap, restart with 'V: launcher v5.6' +
+    'U: fresh after update', and fa_launcher_old.exe must vanish on the run
+    after that; then restore version=5.6. Falsify: a url= that serves an
+    HTML page must leave 'U: download is not an exe' and the launcher still
+    reaching the login page. If the exe is signed (osslsigncode) sign FIRST,
+    then run make_manifest.bat - signing changes the hash.
+  NOTE: launchers already in the field (v5.4/v5.5) have no update code; the
+    jump to 5.6 is manual once (setup or copy), every later version is
+    automatic.
+
+2026-11-03  v968f8h-stable  (Taurus's first stable-baseline test, messages55 + run_20261103_081630)
+  1. INVISIBLE ATTACK COLUMN / MAP BOX WITHOUT ITS LINE (Taurus 13:29:27). His death notify was
+     24 B: [0x0132][0x53 MEC5/EEC3][10 B] + [0x0137][0x0136][0x0135][0x0134][0x0133] - five of the
+     eight tanks of the column he had just triggered, culled by his client in the SAME message as
+     his crash. The client's kill-family exit entry (EEC 3..9, 0xd) is one byte LONGER on the wire
+     than the receive-side table the server walks (13/14 B, every death notify of the last two runs
+     measures so); the tail parser started one byte early (0x3700, 0x3601 ...), matched nothing, the
+     five tanks kept his session in their peer sets and were never re-created: 'Get coord for
+     missing object 307..311' once a second on his client for 32 minutes, and the map box bound
+     only the three tanks he still had. FIX: the own-plane tail is tried at table size and at
+     table+1 and the alignment that names the most live objects wins (clean exits EEC 0/2 stay at
+     table size - the 0x90 TAB culls of trains 0x0100-0x0102 align there). Logged as CULLRX
+     '... align at table+1 ...'.
+     NOTE on the map line itself (RE, FA.exe FUN_00491fa0): the line from a unit box to its
+     objective is drawn by the client when the msg-26 record's STRATEGY nibble is non-zero (ours:
+     attack=2, defend=3, goto=1) AND the pilot's map option at 0xbf5d15 (map command id 0x144,
+     default ON) is on; the mission code (bits 12-15) is not involved. The attack record carried
+     strategy 2, so the missing line is either the pilot's map toggle or the half-created column.
+  2. DOUBLE PILOT DEATH ON A CAPTURED BAIL-OUT (Taurus 13:21:06 -> 13:21:07, 13:23:11 -> 13:23:14).
+     Canopy captured (SE 12): death +1, aces wiped - correct. One second later the abandoned plane
+     hit the ground with MEC 1; the canopy was already gone, so the 'on chute' guard did not apply
+     and the MEC-1 branch booked a SECOND pilot death (-1000, deaths 1281 -> 1283 for one bail).
+     A canopy that landed safely before the plane came down would have been booked the same way.
+     FIX: the parachuter's removal records (_chute_fate = plane, captured|landed, t); when that
+     plane comes down afterwards it is plane lost + shooter credited, pilot fate untouched
+     ('bailed plane down AFTER the canopy ...'). 'Bail-out with no chute = 2 deaths' is NOT this:
+     13:33:38 and 13:34:21 are two separate exits 0x11 (he respawned at 13:33:43 between them),
+     one pilot death each - correct.
+  3. CRASH-LANDING RULE VISIBILITY. Taurus's MEC-2 crash-landings (13:18:30, 13:29:53, 13:39:51)
+     and Bama's were all 'pilot safe' with no line saying why. Now every MEC-2 exit logs
+     'crash-landing ... CrashOnEnemyRunway=<flag> nearest scene N <name> d km camp C, pilot camp P'
+     so the arena flag and the ground are visible. The rule itself is unchanged: pilot lost only
+     when the arena's GAME_DEF CrashOnEnemyRunway flag is set (v968f8f) and the nearest scene is
+     another camp's (180 s grace after a flip). If that flag is off in 'Territorial Combat 1' the
+     observed behaviour is the arena's setting, not a bug - check it in the arena editor.
+  4. FREEZE WATCH FALSE POSITIVE (13:55:24 'GAME THREAD STALLED', 'resumed' 8.9 s later): the
+     frames stopped because he was under the canopy / in the hangar after a bail. The watch now
+     stands down while para_obj_number / crew chutes exist.
+  5. HARD FREEZE 14:01:13 (the real one): frames AND transport stopped together (last inbound
+     14:01:13, PEERDEL 14:01:38/43, reaped 14:02:16; his log ends mid-line at 14:01:17 local =
+     process killed) - no FREEZE line because the watch needs the transport alive, and no recorder
+     dump. The last thing his client logged was 'GER Col Bama hit your cockpit / right wing'
+     (server 14:01:09). NEW: a client that goes silent while AIRBORNE gets its flight recorder
+     dumped at the idle reap ('IDLE-REAP ... recorder dump -> flightrec/...'), so next time the
+     last 40 reliable + 160 unreliable events before the silence are on disk.
+  VERIFY: trigger a column and die/crash-land within 30 s -> CULLRX 'align at table+1' line, no
+    'missing object' spam on the client after the respawn, box binds all 8 tanks. Bail over enemy
+    ground and let the plane fall after the capture -> exactly one 'CAPTURED under canopy' death
+    and a 'bailed plane down AFTER the canopy' line with 'pilot safe' scoring (-800, not -1000).
+  Backup: _scratch/server.py.bak_v968f8g.
+
+2026-11-03  v968f8i-stable  CRASH-LANDING / PILOT-AND-PLANE LOSS RULE (user: "the important stuff")
+  THE RULE (user 11-03): a crash-landing ALWAYS loses the plane; the pilot is safe on friendly
+  ground, lost (captured, aces gone) on enemy ground. Implemented without any arena-flag gate:
+  the v968f8f GAME_DEF CrashOnEnemyRunway gate and the v968f5l economy gate are removed (they
+  silently kept the pilot on three of Taurus's enemy crash-landings and on Bama's).
+  Enemy ground = nearest scene of any camp belongs to another camp that is ACTIVE in the arena
+  (Camps=; an inactive camp is nobody's enemy, like the client's alliance table), not flipped
+  within CRASHLAND_CAPTURE_GRACE_S 180 s. The client's own SE 12 still counts as captured.
+  Every MEC-2 exit now logs one line: 'crash-landing (exit SE=n) at <grid>: nearest scene N
+  <name> d km camp C, pilot camp P -> PILOT LOST | pilot safe: <why> [v968f8i]'.
+  THE FULL MATRIX as the server books it now (plane is ALWAYS lost on any of these):
+    MEC 2 crash-landing, friendly/neutral ground ........ pilot safe
+    MEC 2 crash-landing, enemy ground ................... pilot lost (captured)
+    MEC 2 crash-landing after a mid-air collision / own blast (v945f5 windows) ... pilot lost
+    MEC 1 crash / destroyed / bail with no chute ........ pilot lost
+    MEC 1 of the EMPTY plane after a bail ............... plane only; pilot fate = the canopy's
+         (v968f8h: canopy captured -> death already booked once; canopy landed -> safe)
+    MEC 5 bail, canopy lands friendly ................... pilot safe
+    MEC 5 bail, canopy SE 12 (enemy ground) ............. pilot lost (captured), once
+    cockpit kill then any exit .......................... pilot lost
+    shot down with a named hunter, no bail .............. pilot lost, kill to the hunter
+    MEC 9/10 clean exit / ESC to HQ ..................... nothing lost
+  VERIFY (one flight each, read the DEATH line): belly-land next to an own field -> 'pilot safe:
+  own or neutral ground'; belly-land next to an enemy field -> 'PILOT LOST: ENEMY ground', -1000,
+  aces 0, EVENT line '<pilot> crash-landed in enemy territory and was captured'; bail over enemy
+  ground and let the plane fall after the capture -> ONE death.
+
+2026-11-12  v968f8j-stable  THE CLIENT TELLS US THE GROUND  (Bama messages74, Taurus messages78, 11-06)
+  FIRST: the live server is still v968f8g-stable (run_20261103_081630 and run_20261106_154327 both
+  print it). v968f8h (double death on a bail) and v968f8i (crash-landing rule without the arena
+  flag) were never deployed - Bama's and Taurus's 11-06 tests ran on the old rules:
+    Bama 14:28:51  exit 0x22 -> 'lost the plane, pilot safe'  (the CrashOnEnemyRunway gate)
+    Taurus 14:22:19 parachuter exit 0x1c (no chute, hit the ground) -> death +1, then 14:22:24 the
+    empty plane exit 0x10 -> a SECOND death (1323 -> 1325) = the v968f8h bug, 'bail no chute = 2'.
+  RE (user: 'could we be missing a bit on the client side message?' - yes):
+    FA.exe FUN_0045e3c0 = exit processing, FUN_0045d930 = exit-entry writer (the client log line
+    'ExitEvent(n). IsDelete, MissExitCode, ScoreEvent, AddData, Hits').
+    * For MissExitCode 2 (crash-landed) and 3 (crashed into a ground object) AddData = DAT_00c7e39c,
+      set in the plane-destroy path FUN_004bd880:  territory = FUN_0055d290(pos) = the camp of the
+      2048 m map cell (the coloured map grid, rebuilt on captures; -1 = nobody's);
+      AddData = team game && territory != -1 && territory != own camp && enemies(own, territory)
+      -> 1 = ENEMY TERRITORY, 0 = friendly / neutral.
+    * Wire: SE 2  [id u16][exit][AddData]                       (FUN_0045cb60, 4 B)
+            SE 13 [id u16][exit][hunter u16][u16][u32][u8][AddData]  (FUN_0045cbf0, 13 B)
+      The server never read it. Logs: 171 crash-landings with 0, 104 with 1 in the two runs;
+      Bama 14:28:51 = 1, Taurus 14:25:40 = 1 / 14:32:35 = 0 (his enemy / friendly test pair).
+    * The parachuter uses the same flag: MEC 2 + flag + rand(100) < 96 -> SE 12 'bailed out in
+      enemy territory and captured' (string 199). SE 12 on a parachuter only means 'down, no
+      shooter': exit 0x2c = captured, exit 0x1c = MEC 1 = hit the ground (no chute / too low).
+    * The client itself prints only 'You have crash landed' (string 0x21) for a plane - the capture
+      wording exists for the parachuter only; the pilot's fate on a crash-landing was the HOST's.
+    * Hit list: for SE 3, 9, 13 the entry is followed by [nHits u8] + nHits x 8 B - that is the
+      'one byte longer' of v968f8h. Cull ids start at entry + 1 + 8 x nHits (exact now).
+  CHANGES:
+    1. Crash-landing (MEC 2 or 3): the client's territory flag decides - 1 -> plane AND pilot lost
+       (captured, aces wiped, EVENT line), 0 -> plane lost, pilot safe. 180 s grace for a scene
+       that just flipped stays. The server's nearest-scene test is the fallback only when the byte
+       is absent. One DEATH line per crash-landing shows flag, server ground and verdict [v968f8j].
+    2. MEC 3 (crashed into a ground object) was booked 'clean exit -> no loss' (dinsmore1 11-07
+       00:02:03): now crash-landing family - plane lost, pilot by the same flag.
+    3. Cull-id tail behind a death entry located exactly (nHits), guesses kept as fallback.
+    4. Parachuter log wording: 'CAPTURED under canopy' only for MEC 2; MEC 1 = 'KILLED - parachuter
+       hit the ground'. _chute_fate label follows (captured / killed / landed).
+  EXPECTED after deploy (plane always lost):  crash-land friendly -> pilot safe; crash-land enemy
+    -> pilot lost; bail friendly -> safe; bail enemy -> lost ONCE; bail no chute -> lost ONCE;
+    crash -> lost.  VERIFY in the log: 'crash-landing (exit 0x22 ...) client territory flag 1 ...
+    -> PILOT LOST', and for a no-chute bail 'KILLED - parachuter hit the ground' followed by
+    'bailed plane down ... AFTER the canopy ... not again' with -560 (plane only), deaths +1.
+  Backup: _scratch/server.py.bak_v968f8i.
+
+2026-11-12  v968f8k-stable  (user: v968f8j 'tested, looks correct')
+  Removed the room line '<pilot> crash-landed in enemy territory and was captured' (user: not
+  needed). The verdict stays in the DEATH log line, the score delta and the ace reset; nothing
+  else changed. Backup: _scratch/server.py.bak_v968f8j.
+
+==================================================================================================
+2026-11-12  BANKED: v968f8k-stable   (user: "you can bank this" - crash-landing / pilot-loss rules
+                                      tested by the user on v968f8j: "Tested looks correct")
+==================================================================================================
+  Snapshots: _scratch/bank/server.py.v968f8k, web_server.py.v968f8k, fa_logging.py.v968f8k
+  (deploy the three together). Previous bank: v968f7q (2026-10-30).
+  CHAPTER v968f7r .. v968f8k:
+    STABLE BASELINE (v968f8d): the v968f7a wire with every later wire feature OFF by default behind
+      console switches - timecheck | nak | mlist | loadhold | tcevent | scene79 | postleave |
+      features on|off - BASELINE line at start. Kept ON: fixes only. Bisect plan: one feature per
+      evening, judged by PEERDEL per flying-hour (0.2-1.0 band) and FREEZE lines.
+    DIAGNOSTICS: FREEZE watch (frames stop, transport alive; stands down under a canopy), flight
+      recorder dump on FREEZE and on an airborne dead-client reap, PILOT-LAG raw samples.
+    KILL CREDIT (v968f8a): retired object numbers keep attribution 900 s, all-sessions search.
+    PILOT / PLANE LOSS RULES (v968f8e .. v968f8k) - the plane is always lost:
+      crash-landing (exit MEC 2, or MEC 3 crashed into a ground object): the CLIENT's territory
+        flag in the exit entry decides (AddData: SE 2 -> byte 3, SE 13 -> byte 12; FA.exe
+        FUN_0045e3c0 / FUN_0045d930 / FUN_004bd880 / FUN_0055d290) - 1 = enemy territory -> pilot
+        lost, aces wiped; 0 -> pilot safe; 180 s grace for a scene that just changed hands; the
+        server's nearest-scene test only when the byte is absent; no arena flag, no room message
+      bail-out: the parachuter settles the pilot ONCE (exit 0x2c captured, 0x1c hit the ground,
+        SE 5 killed, 0x20 landed safe); the empty plane coming down afterwards costs the plane only
+      crash (MEC 1), cockpit kill, shot down without bailing: pilot lost
+      collision / own blast before a crash-landing (v945f5 windows): pilot lost
+      clean exit / ESC to HQ: nothing
+    TC: cull ids behind a death entry are read at entry + 1 + 8 x nHits (invisible column after a
+      death, v968f8h/j); personal TC lines never follow a pilot into another arena (v968f8f).
+    CHAT: blank-line flush on arena entry (v968f8g) - chat windows are separate per arena.
+    LAUNCHER (separate files, falauncher\): v5.5 Debug mode checkbox + local exe choice, web path
+      box removed; v5.6 self-update from the GitHub manifest (launcher_version.txt,
+      make_manifest.bat) - built, not yet field-tested.
+  OPEN after this bank: hard-freeze cause (Taurus 11-03 14:01:13, waits for a recorder dump);
+    feature bisect not started; AI-line class filtered on Taurus's client (his message filter);
+    map attack-line check after the column fix; hit-list records (nHits x 8 B) unused - a native
+    source for assist shares.
