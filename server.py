@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8l-stable'
+VERSION = 'v968f8q-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1552,7 +1552,7 @@ def tournament_state(room_id, create=True):
     e = TOURNAMENTS.get(room_id)
     if e is None and create:
         e = {'start': None, 'participants': set(), 'deaths': {}, 'ghosts': set(), 'finished': False,
-             'winner': None, 'by': '', 'cfg': None}
+             'winner': None, 'by': '', 'cfg': None, 'join_closed': False, 'told': set()}
         TOURNAMENTS[room_id] = e
     return e
 
@@ -1585,7 +1585,7 @@ def tournament_start(room_id, by='console', at=None, announce=True):
         return None
     e = tournament_state(room_id)
     e.update({'start': float(at or time.time()), 'participants': set(), 'deaths': {}, 'ghosts': set(),
-              'finished': False, 'winner': None, 'by': by, 'cfg': dict(cfg)})
+              'finished': False, 'winner': None, 'by': by, 'cfg': dict(cfg), 'join_closed': False, 'told': set()})
     pkt = build_tournament_start_5c(e['start'])
     n = 0
     for p in get_sessions_in_room(room_id):
@@ -1594,8 +1594,9 @@ def tournament_start(room_id, by='console', at=None, announce=True):
             if getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
                 e['participants'].add(p.current_pilot)
     if announce:
-        room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining open for {cfg["tn_start_delay"]} min, shooting '
-                                  f'{cfg["tn_shoot_delay"]} min later; lives: '
+        room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining open '
+                                  + (f'for {cfg["tn_start_delay"]} min' if cfg['tn_start_delay'] else 'until the host closes it')
+                                  + f', shooting {cfg["tn_shoot_delay"]} min later; lives: '
                                   f'{cfg["tn_lives"] or "unlimited"}'
                                   + (', ghosting' if cfg['tn_ghosting'] else '')
                                   + (', last one flying wins' if cfg['tn_last_is_winner'] else '')))
@@ -2419,6 +2420,7 @@ def tournament_close_joining(room_id, by='console'):
     e, cfg = _tournament_rebase(room_id, by, 0.0, 'close-joining')
     if e is None:
         return None
+    e['join_closed'] = True                                    # v968f8m
     # the start is 'now'; make the joining window already elapsed
     e['start'] = time.time() - cfg['tn_start_delay'] * 60.0 - 1.0
     pkt = build_tournament_start_5c(e['start'])
@@ -2439,6 +2441,7 @@ def tournament_go(room_id, by='console'):
     e, cfg = _tournament_rebase(room_id, by, (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, 'go')
     if e is None:
         return None
+    e['join_closed'] = True                                    # v968f8m
     room_system_msg(room_id, 'TOURNAMENT: joining closed - the competition starts NOW. Good luck!')
     try:
         room_banner(room_id, 'FIGHT!')
@@ -2453,6 +2456,24 @@ def tournament_on_spawn(s):
     if not cfg:
         return
     e = tournament_state(rid)
+    if e['start'] is None and event_mode(rid):
+        # v968f8m [ASSEMBLY] (Taurus 11-06, Death Bowl: 'only 1-2 people could join ... Joining has ended, even
+        # with 0 join timer'): the FIRST spawn started the tournament clock - with a joining window of 0 the
+        # joining was over the instant Bama spawned (15:44:12: SpUn and Skipper refused 8 s later), with 2 min
+        # it closed two minutes after the first pilot while the others were still loading, and a pilot who
+        # went back to HQ before the host had even started the event lost his only life (15:46:41). In an
+        # arena whose weapons are locked until the host starts the event, the HOST starts the tournament too:
+        # until then there is no clock - everybody may spawn, nobody spends a life. ##StartEvent / `event
+        # fight` takes the pilots who are in a plane at that moment as the participants and closes joining;
+        # `event open <room>` starts the clock with the joining window instead.
+        who = s.current_pilot
+        if who and not sess_rights(s):
+            e['participants'].add(who)
+            if who not in e.setdefault('told', set()):
+                e['told'].add(who)
+                send_system_msg(s, 'TOURNAMENT: you are in. Weapons are locked - the fight begins when the host starts the event.')
+                log('TOURNAMENT', f'room {rid}: {who} assembled (no clock yet - waiting for the host); in the arena: {sorted(e["participants"])}')
+        return
     if e['start'] is None:
         # first pilot in a tournament arena starts the clock (console `tournament start` restarts it)
         tournament_start(rid, by=f'first spawn ({s.current_pilot})')
@@ -2486,7 +2507,11 @@ def tournament_fly_allowed(s):
     if e['finished']:
         return False, 'The tournament is finished - wait for the host to restart it.'
     phase, _left = tournament_phase(rid, cfg)
-    if phase != 'joining' and who not in e['participants']:
+    # v968f8m: a joining window of 0 does not mean 'closed at once' (that locked out everybody but the first
+    # pilot) - it means no clock closes it: joining stays open until the host closes it (`event close`) or
+    # starts the fight (##StartEvent / `event fight`)
+    _open = (phase == 'joining') or (not cfg['tn_start_delay'] and not e.get('join_closed'))
+    if not _open and who not in e['participants']:
         return False, 'Joining has ended for this tournament.'
     lives = cfg['tn_lives']
     if lives and e['deaths'].get(who, 0) >= lives:
@@ -2511,7 +2536,7 @@ def tournament_on_plane_exit(s, mec_nib, se):
     phase, _ = tournament_phase(rid, cfg)
     if phase != 'competition':
         return
-    lost = (se != 0) or (mec_nib in (1, 2, 5)) or (not cfg['tn_allow_tabbing'])
+    lost = (se != 0) or (mec_nib in (1, 2, 3, 5, 6, 7, 8, 0xb, 0xc)) or (not cfg['tn_allow_tabbing'])   # v968f8p: every destruction code
     if not lost:
         return
     e['participants'].add(who)
@@ -16383,6 +16408,15 @@ def _car_drive_step(onum, c, dt, now):
     x, y, z = c['pos']
     ahead = CARS.get(c.get('ahead')) if c.get('ahead') is not None else None
     follower = ahead is not None and not ahead.get('dead')
+    if follower and c.get('_wait_pass'):
+        # v968f8n: homebound, the leader starts from deeper in the scene - hold until it is nearer home than
+        # this vehicle by half an interval (it has come past), then follow as usual
+        _hx = c.get('_home_xy')
+        if _hx and (now - c['_wait_pass']) < CONVOY_WAIT_PASS_MAX_S and \
+                math.hypot(ahead['pos'][0] - _hx[0], ahead['pos'][1] - _hx[1]) > math.hypot(x - _hx[0], y - _hx[1]) - CONVOY_GAP_M * 0.5:
+            c['_throttle'] = 0.0; c['_steer'] = 0.0; c['_speed_mps'] = 0.0
+            return False                    # parked: the idle cadence keeps it alive, no 4 Hz stream
+        c['_wait_pass'] = None
     if follower:
         afx, afy, _ = ahead.get('fwd', (1.0, 0.0, 0.0))
         goal = (ahead['pos'][0] - afx * CONVOY_GAP_M, ahead['pos'][1] - afy * CONVOY_GAP_M)
@@ -16608,6 +16642,27 @@ def convoy_spawn(rid, camp, src_sidx, dst_sidx, cargo_names, reason='', escort=T
     _convoy_say(cv, f'{tc_camp_tag(camp)} supply convoy of {nl} lorries left {s[2]} {tc_grid(s[0], s[1])} '
                     f'for {d[2]} {tc_grid(d[0], d[1])}')
     return cid
+
+CONVOY_ESCORT_KEEPS_PLACE = True   # v968f8n: the head escort leads BOTH ways, the tail escort trails both ways
+CONVOY_WAIT_PASS_MAX_S    = 180.0  #          a follower waits at most this long for its leader to come past
+
+def _convoy_order(cv):
+    """v968f8n: the column's vehicles, LEAD FIRST. Outbound = as spawned (AA car, lorries, Flak car).
+    Homebound the lorries run in reverse (the last one in is the first one out) but the escorts keep
+    their places: the AA car leads again, the Flak car closes the column again. Until v968f8n the whole
+    column simply reversed, which put the machine-gun car at the BACK on every return trip (Taurus
+    11-12 15:26, convoy 1369 going home: he destroyed the three ammo lorries and a Furgon at the front
+    and was shot up by the AA car from the rear - 'set to a single machine gun car leading, has escorts
+    front and back': one gun car, in front on the way out and at the back on the way home)."""
+    v = list(cv['vehicles'])
+    if cv.get('phase') != 'back':
+        return v
+    if not CONVOY_ESCORT_KEEPS_PLACE or len(v) < 2:
+        return list(reversed(v))
+    head = [v[0]] if CARS.get(v[0], {}).get('name') == CONVOY_ESCORT_HEAD and not CARS.get(v[0], {}).get('dead') else []
+    tail = [v[-1]] if CARS.get(v[-1], {}).get('name') == CONVOY_ESCORT_TAIL and not CARS.get(v[-1], {}).get('dead') else []
+    mid = [on for on in v if on not in head and on not in tail]
+    return head + list(reversed(mid)) + tail
 
 def _convoy_relink(cv, alive):
     """Keep the follow chain intact when a vehicle dies: each survivor follows the previous survivor;
@@ -16946,7 +17001,7 @@ def _convoy_halt_step(cid, cv, alive, lead, now):
 def convoy_tick():
     now = time.time()
     for cid, cv in list(CONVOYS.items()):
-        order = cv['vehicles'] if cv['phase'] != 'back' else list(reversed(cv['vehicles']))
+        order = _convoy_order(cv)                                           # v968f8n
         alive = [on for on in order if on in CARS and not CARS[on].get('dead')]
         if not alive:
             CONVOYS.pop(cid, None)
@@ -16984,10 +17039,15 @@ def convoy_tick():
         elif cv['phase'] == 'unload' and now >= cv.get('unload_until', 0):
             cv['phase'] = 'back'
             prev = None
-            for on in reversed(alive):                           # the tail car leads the way home
+            # v968f8n: home order from _convoy_order - the AA car leads again (it sits deepest in the scene, so
+            # it drives out past the parked lorries), the lorries fall in behind it last-in-first-out, the Flak
+            # car closes the column. A vehicle whose leader is still DEEPER in the scene than itself waits
+            # where it stands until that leader has come past (_wait_pass) instead of driving in to meet it.
+            for on in [o for o in _convoy_order(cv) if o in alive]:
                 c = CARS[on]
                 c['ahead'] = prev; c['arrived'] = False; c['_wps'] = None; c['mps'] = CONVOY_MPS
                 c['goal'] = cv['src_xy'] if prev is None else tuple(c['pos'][:2])
+                c['_home_xy'] = cv['src_xy']; c['_wait_pass'] = (now if prev is not None else None)
                 prev = on
             cv.pop('lead_arrived_at', None)
             log('CONVOY', f'convoy {cid}: heading home ({len(alive)} vehicles)')
@@ -22685,7 +22745,7 @@ def room_group_records(room_id, viewer_camp=None):
         for cid, cv in list(CONVOYS.items()):
             if cv.get('room') != room_id:
                 continue
-            alive = [o for o in (cv['vehicles'] if cv['phase'] != 'back' else reversed(cv['vehicles']))
+            alive = [o for o in _convoy_order(cv)                               # v968f8n
                      if o in CARS and not CARS[o].get('dead')]
             _in_convoy.update(cv['vehicles'])
             if not alive:
@@ -25847,7 +25907,18 @@ REPAIR_CLEARS_DAMAGE_LATCH = True  # v433f5 [KILL/SCORE]: a msg-60 repair grant 
 # 0xa STAYS in the set - leaving the game while airborne should still cost you the plane.
 # Adding 0x1 routes crashes into the is_death branch, which still applies the
 # "exited UNDAMAGED and PARKED -> clean exit" test, so a land-and-swap reporting 0x11 stays out.
-DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6, 0x1}   # MEC & 0xf values that mean the pilot actually died
+DEATH_MEC_NIBBLES = {0xa, 0x5, 0x6, 0x1, 0x7, 0x8, 0xb, 0xc}   # MEC & 0xf values that mean the pilot actually died (v968f8p: +7, 8, 0xb, 0xc)
+# v968f8p [THE CRASH FAMILY] (Alon 11-12 22:26: bombed himself, then crashed - client 'ExitEvent MissExitCode=7
+# ScoreEvent=1', 'You have killed yourself'; server 'clean exit (MEC&0xf=7 SE=1) -> no loss'). The client's exit
+# code (FA.exe FUN_0045e3c0) RENAMES a destruction when the plane carries damage but no creditable killer:
+#     1 crashed                      -> 7  'You have killed yourself'   (crashed with damage, no killer)
+#     6 destroyed in the air         -> 8  destroyed, no killer         (AA / own blast / unattributed fire)
+#     6 / 8 with the ordnance going up -> 0xb (killer named) / 0xc (no killer)
+# The server knew 1, 5, 6 and the crash-landing family 2/3; 7, 8 and 0xc arrive with a 3-byte entry (SE 1),
+# were therefore not 'scored', and fell through to the clean-exit branch: no plane, no pilot, aces kept -
+# 5 times in the two live runs of 11-03..11-12 as well. A crash is a crash wherever and however damaged:
+# plane AND pilot lost; a hunter still holding the damage latch (PENDING_KILL) gets the kill as before.
+CRASH_MEC_NIBBLES = (0x1, 0x7, 0x8, 0xc)
 PILOT_FATE_SCORING = True   # v497f5 [PILOT SAFE/CAPTURED] master switch. OFF -> scoring unchanged.
                              # ON -> a downed plane ALWAYS counts the plane and credits the shooter,
                              # but the PILOT death is settled by WHERE HE LANDS: parachuter/plane
@@ -32450,7 +32521,7 @@ def _ingame_own_object_removed(s, tb, stored):
                              f'counted + shooter credited; '
                              + ('pilot was ALREADY KILLED in the cockpit -> pilot lost [v918f5]' if _ck_on_chute
                                 else 'pilot on chute, fate pending [PILOT_FATE]'))
-            elif (scored or mec_nib == 1) and mec_nib not in (5, 2, 3):   # v968f8j: MEC 3 (crashed into a ground object) is crash-landing family
+            elif (scored or mec_nib in CRASH_MEC_NIBBLES) and mec_nib not in (5, 2, 3):   # v968f8j: MEC 3 is crash-landing family; v968f8p: 7 / 8 / 0xc are crashes
                 # v968f5i [FORCED LANDING IS NOT A DEATH] (Alon 10-24 13:45: engine shot out by Bama,
                 # made it back to his own field, crash-landed - exit MEC=2 EEC=13 with the hunter in
                 # the entry): the 13-byte entry made it 'scored' and this branch booked plane AND
@@ -32468,6 +32539,9 @@ def _ingame_own_object_removed(s, tb, stored):
                 if mec_nib == 1 and not _flying2:
                     log('DEATH', f'{s.current_pilot} destroyed while PARKED (MEC 1, movement {_move2:.0f}) -> '
                                  f'plane AND pilot lost (self-destruction unless a shooter is named) [v909f5]')
+                elif mec_nib in (7, 8, 0xc):
+                    log('DEATH', f'{s.current_pilot} {"CRASHED with damage" if mec_nib == 7 else "DESTROYED"} and no creditable killer '
+                                 f'(exit 0x{exitb:02x} MEC {mec_nib} SE {se}) -> plane AND pilot lost [v968f8p]')
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
                                                    victim_obj=_onum, pilot_lost=True)
             elif s.__dict__.pop('_cockpit_kill_t', None) is not None:
@@ -32561,16 +32635,60 @@ def _ingame_own_object_removed(s, tb, stored):
                 _coll = (_cl and _now_d - float(s.__dict__.get('_collision_at') or 0.0) < COLLISION_DEATH_S)
                 _selfd = (_cl and _now_d - float(s.__dict__.get('_self_damaged_at') or 0.0) < SELF_DEATH_S)
                 _coll_with = s.__dict__.get('_collision_with') if _coll else None
+                # v968f8q [EXIT 0x53 IS NOT A BAIL - 'X HAS DESTROYED YOU'] (Taurus 11-12, live v968f8k, messages24:
+                # seven exits 0x53 between 19:46 and 20:20, each '-560 ... pilot pending (bail) / safe' while his
+                # client printed 'SU 1Lt MONSTERDOGG has destroyed You': '70+% damage crash land enemy - no lost
+                # pilot', '100% damage, collision, crashed in friendly - no lost pilot', '40%+ damage, crashed in
+                # enemy - no lost pilot'). FA.exe FUN_0045e3c0: MissExitCode 5 is what the client makes of a
+                # CRASH (code 1), or of leaving the plane (exit flag 0x10), when the plane is damaged past the
+                # threshold and a killer is on record - the plane went down with the pilot IN it. A bail is a
+                # different thing on the wire: the kill is booked at the bail and the empty husk comes down
+                # later with ScoreEvent 0 (exit 0x50 / 0x10 - plane+0x1afc 'pilot gone' zeroes the SE).
+                # So MEC 5 with SE != 0 = destroyed with the pilot aboard: plane AND pilot lost, kill to the
+                # hunter. One case keeps the pilot: the plane had come to a STOP (no movement over the 3 s
+                # window), nobody hit it in the last GROUND_DEATH_FRESH_HIT_S, and it stands on friendly
+                # ground - a damaged plane landed and left before the repair came is a forced landing, not
+                # a crash (on enemy ground the pilot is captured, like a crash-landing there).
+                _d5 = False; _d5_why = ''
+                if mec_nib == 5 and se != 0:
+                    try:
+                        _hit_age = _now_d - float(getattr(s, 'last_damaged_at', 0.0) or 0.0)
+                        if _flying2:
+                            _d5 = True; _d5_why = f'went down moving (movement {_move2:.0f})'
+                        elif _hit_age <= GROUND_DEATH_FRESH_HIT_S:
+                            _d5 = True; _d5_why = f'destroyed standing still, hit {_hit_age:.0f} s ago'
+                        else:
+                            _cpos5 = s.__dict__.get('_pos_xy'); _cnat5 = getattr(s, 'nation', None)
+                            _cterr5 = _probe_terrain_for_room(s.current_room)
+                            _near5 = tc_nearest_scene_any(_cterr5, _cpos5[0], _cpos5[1]) if (_cpos5 and _cnat5 is not None) else None
+                            _cc5 = scene_camp(_cterr5, _near5[0]) if _near5 is not None else None
+                            _act5 = room_active_camp_names(s.current_room) or {}
+                            _fl5 = _TC_CAPTURED_AT.get((s.current_room, int(_near5[0]))) if _near5 is not None else None
+                            if (_near5 is not None and _cc5 is not None and _cc5 <= 6 and _cc5 != _cnat5
+                                    and not (_act5 and int(_cc5) not in _act5)
+                                    and not (_fl5 is not None and _now_d - _fl5 < CRASHLAND_CAPTURE_GRACE_S)):
+                                _d5 = True; _d5_why = f'left a stopped damaged plane on ENEMY ground (scene {_near5[0]}, camp {_cc5}) - captured'
+                            else:
+                                _d5_why = (f'left a damaged plane that had come to a stop (no movement, last hit {_hit_age:.0f} s ago) '
+                                           f'on friendly / neutral ground - forced landing, pilot safe')
+                    except Exception:
+                        _d5 = True; _d5_why = 'destroyed (ground check failed)'
+                        logx('DEATH', 'MEC-5 pilot fate failed')
+                    log('DEATH', f'{s.current_pilot} DESTROYED with the pilot aboard (exit 0x{exitb:02x} MEC 5 SE {se}'
+                                 + (f', hunter 0x{_hunter:04x}' if _hunter is not None else '') + f'): {_d5_why} -> '
+                                 f'{"plane AND pilot lost" if _d5 else "plane lost, pilot safe"} [v968f8q]')
                 _killer, _kbailed = score_on_death(s, stored, hunter_obj=_hunter,
-                                                   victim_obj=_onum, pilot_lost=(_cap or _coll or _selfd))
+                                                   victim_obj=_onum, pilot_lost=(_cap or _coll or _selfd or _d5))
                 if _coll or _selfd:
                     log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) by '
                                  f'{("COLLISION with " + getattr(_coll_with, "current_pilot", "?")) if _coll else "HIS OWN ORDNANCE / BLAST"}'
                                  f' -> plane AND pilot lost [v945f5]')
+                elif mec_nib == 5 and se != 0:
+                    pass                                                # v968f8q: its own DEATH line above
                 else:
                     log('DEATH', f'{s.current_pilot} plane lost (MEC&0xf={mec_nib} SE={se}) -> plane '
                                  f'counted + shooter credited; pilot '
-                                 f'{"CAPTURED" + _cap_where if _cap else "pending (bail) / safe (crash-land)"} '
+                                 f'{"CAPTURED" + _cap_where if _cap else ("not aboard (empty plane)" if mec_nib == 5 else "safe (crash-landing on friendly ground)")} '
                                  f'[PILOT_FATE]')
                     # v968f8k (user 11-12): no room line for a capture on a crash-landing - the DEATH log line and the
                     # score / ace change are enough ('no need for the AI message, please remove it')
@@ -32628,7 +32746,7 @@ def _ingame_own_object_removed(s, tb, stored):
             # land-and-swap case (also 0x11) stays out via the existing movement test: a
             # parked plane reports movement 0.
             _exit_crash = _exit_is_crash_for_room(s.current_room)
-            _crashed = _flying and mec_nib == 1
+            _crashed = _flying and mec_nib in CRASH_MEC_NIBBLES              # v968f8p
             _flying_kills = _flying and (_crashed or _exit_crash)
             if _damaged or _flying_kills or COUNT_EXIT_TO_HQ_AS_DEATH:
                 _why = ('DAMAGED' if _damaged else '') + ('+' if _damaged and _flying_kills else '') \
@@ -34177,6 +34295,7 @@ SUPPLY_QUERY_REPLY = True     # answer msg 69 scene-supply queries (v294)
 # once per PANEL_DEBOUNCE seconds per session, re-pushing immediately if the hovered scene-set
 # changes. v430f5's per-poll 42->40->71 sequence flooded the wire and made the panel flicker.
 # Set PANEL_OPEN_SEQUENCE=False to revert to reply-only (the pre-v430 behaviour).
+PRODINFO_CAP_FULL   = True    # v968f8o: msg-71 capacity (G) = undamaged capacity, storage % (C) = stored / undamaged capacity
 PANEL_OPEN_SEQUENCE = True
 PANEL_DEBOUNCE      = 3.0     # seconds; min gap between panel-data pushes for the same scene-set
 PANEL_SEND_SNAPSHOT = True    # v431f5b: send msg-42 ONCE per session before the first panel push,
@@ -34333,6 +34452,18 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
         # client uses for 'this scene does not track that resource' = unlimited. The map now carries the
         # UNDAMAGED capacity with 0 stored and 'capacity intact' (H) 0% - which reads as what it is.
         caps = tuple(c if c > 0 else fc for c, fc in zip(caps, _fcaps))
+        # v968f8o [THE FILL LEVEL FOLLOWED THE SHRINKING CAPACITY] (Alon 11-12 21:50, scene 46 Front Airfield:
+        # 'capacity for fuel dropped to 40% but the stored supply did not drop to 40% until all fuel was
+        # destroyed'). Six fuel buildings, 150 000 kg, full. Each one destroyed took its fuel with it
+        # (150 -> 120 -> 105 -> 90 -> 60 -> 30 -> 0 t, the SUPPLY lines) - but the panel got the EFFECTIVE
+        # capacity (G: 60 000 after four) next to 60 000 stored, and the storage % (C) as stored / effective
+        # capacity: 100 %, 100 %, 100 % ... and 0 % only when the last tank went (then v968f6u swapped the
+        # undamaged capacity in). The stock was right; every ratio the pilot could read was 'full'.
+        # Now the capacity number (G) is always the UNDAMAGED capacity, H stays 'capacity intact' (40 %), and
+        # the storage % (C) is stored / undamaged capacity (40 %) - the wiki's 'percentage of the storage
+        # capacity of the scene overall'. PRODINFO_CAP_FULL=False restores the effective-capacity form.
+        if PRODINFO_CAP_FULL:
+            caps = tuple(fc if fc > 0 else c for c, fc in zip(caps, _fcaps))
     else:
         eff_pct = pct; cap_pct = pct
     # v659f5 THE MAPPING, READ BACK FROM THE PANEL (09-12 screenshots, Support Factory 5 + Bomber
@@ -34352,6 +34483,17 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
     cstored, ccaps, cunits = complex_totals(room_id, scene_id)
     c_stored = tuple(int(cstored.get(r, 0)) for r in order)
     c_caps = tuple(int(ccaps.get(r, 0)) for r in order)
+    if PRODINFO_PCT_OWN_ROW and PRODINFO_CAP_FULL:                               # v968f8o: against the UNDAMAGED capacity
+        try:
+            _cf = {'metal': 0, 'fuel': 0, 'ammo': 0}
+            for _sid in complex_members_geometric(room_id, terrain, scene_id):
+                _pf = scene_profile(terrain, _sid)
+                if _pf:
+                    for _r in order:
+                        _cf[_r] += int((_pf.get('caps') or {}).get(_r, 0))
+            c_caps = tuple(_cf[_r] if _cf[_r] > 0 else _c for _r, _c in zip(order, c_caps))
+        except Exception:
+            logx('PROD71', 'undamaged complex capacity failed')
     c_pct = tuple(0 if c <= 0 else max(0, min(100, s * 100 // c)) for s, c in zip(c_stored, c_caps))
     c_units = tuple(int(cunits.get(k, 0)) * int(avg.get(k, 0)) for k in ukinds)   # kept for the log only
     # B stays PER-SCENE: the client's 60 s camp task sums B over all scene nodes for the HQ / Ctrl-L

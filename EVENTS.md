@@ -12,7 +12,7 @@ form are in MODERATION.md.
 | Tournament | Tournament mode enabled | the game's tournament clock: joining window -> shooting countdown -> competition |
 | Tournament | Number of lives | 0 = unlimited; the server keeps the count |
 | Tournament | Ghosting | out of lives = the pilot flies on as a ghost (no fire, no collisions) |
-| Tournament | Joining window (min) | how long pilots may still enter after the start |
+| Tournament | Joining window (min) | how long pilots may still enter after the clock starts; **0 = no clock closes it** - open until `event close` or the fight (v968f8m) |
 | Tournament | Shooting starts (min) | countdown after joining closes; no guns, no collisions until then |
 | Tournament | Allow tabbing out | exiting to HQ does not cost a life |
 | Tournament | Last one flying wins | the server announces the winner ("X has won") |
@@ -46,7 +46,7 @@ clock, weapons lock, or both). `##StartEvent` in game equals `event fight`.
 
 | Command | Tournament arena | Event-mode arena (weapons lock) |
 | --- | --- | --- |
-| `event open <room> [in <s>]` | clock starts: joining window, then shooting countdown (the first spawn does this by itself) | weapons locked, waiting for `fight` |
+| `event open <room> [in <s>]` | clock starts: joining window, then shooting countdown (in an arena WITHOUT event mode the first spawn does this by itself; WITH event mode nothing starts until the host does - pilots assemble freely, no life at stake, v968f8m) | weapons locked, waiting for `fight` |
 | `event close <room>` | joining closed now; the shooting countdown runs | - |
 | `event fight <room> [in <s>]` | competition now: guns, collisions, lives | weapons free (`in <s>` = native countdown on the clients) |
 | `event hold <room>` | - | weapons locked again |

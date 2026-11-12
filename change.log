@@ -13489,3 +13489,149 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
   live server (live was v968f8g when the report came in). First live check: a normal landing must
   still be serviced ('verdict=parked', one constant altitude) and a crater-stranded plane that
   asks must still get 'verdict=stranded'.
+
+2026-11-12  v968f8m-stable  TOURNAMENT JOINING (Taurus 11-06, 'Death Bowl Test', room 189, live log)
+  REPORT: 'only 1-2 people could join whatever the join timer; others got "Joining has ended",
+    even with 0; sysop had no issue; last-one-flying ended the event correctly'.
+  LOG: 15:44:12 'START by first spawn (Bama)' with joining 0 / shooting 0 -> joining was over the
+    instant he spawned: SpUn refused 15:44:20, Skipper 15:44:44 (13 refusals in the session; a sysop
+    is never refused). 15:46:41 'Bama lost a life (MEC 10 SE 0)' - he went back to HQ before the
+    host had started anything and that cost his only life. With joining 2 min (15:50:35) four
+    pilots got in, ##StartEvent at 15:52:30, 'Bama has won' at 15:59:52 - the victory logic is fine.
+  CAUSE: the tournament clock was started by the FIRST SPAWN in every tournament arena, also in an
+    event-mode arena where the host is supposed to start things; and a joining window of 0 meant
+    'closed at once'.
+  CHANGE (server.py):
+    * ASSEMBLY - in a tournament arena WITH event mode the first spawn no longer starts the clock.
+      Until the host starts, everybody may spawn (weapons are locked by event mode anyway), nobody
+      spends a life, each pilot is told 'TOURNAMENT: you are in ...'. ##StartEvent / `event fight`
+      takes the pilots who are in a plane at that moment as the participants, closes joining and
+      starts the competition (unchanged from there). `event open <room>` still starts the clock
+      with the joining window for a timed start.
+    * JOINING WINDOW 0 = no clock closes it: joining stays open until `event close` or the fight
+      (join_closed flag). Applies to arenas without event mode too (first spawn starts the clock,
+      later pilots can still join).
+    * Announcement says 'joining open until the host closes it' for a window of 0.
+  web_server.py: Events tab help text + the Joining window hint describe this. EVENTS.md updated.
+  UNCHANGED: lives, ghosting, last-one-flying, the event length timer, moderators exempt.
+  NEXT ROUND: after 'has won' the arena stays 'finished' (as before) - `event reset <room>` opens
+    it again (now into assembly), then ##StartEvent.
+  CHECKED offline (the real functions with stubbed I/O): event-mode + window 0 -> three pilots in,
+    HQ exit before the start costs nothing, GO -> participants = the three, a late pilot refused,
+    two losses -> winner declared; plain arena window 0 -> late pilot in until `event close`;
+    window 2 min -> refused after the window.
+  Backups: _scratch/server.py.bak_v968f8l, web_server.py.bak_v968f8l, EVENTS.md.bak_v968f8l.
+
+2026-11-12  v968f8n-stable  CONVOY ESCORT ORDER ON THE WAY HOME (Taurus 11-12, messages21, room 195)
+  REPORT: 'TC Reborn III set to a single machine gun car leading, has escorts front and back -
+    not honoring this setting'.
+  WHAT THE LOGS SAY: the setting IS stored and applied. Arena 195 has convoy_escort='aa' (saved by
+    Sinistarr 11-09 21:21 and 22:26); since 11-06 the live log has 1092 AA-car spawns and ZERO
+    Flak-car spawns in room 195 (all 306 Flak cars are room 165, which is on the default 'both').
+    Taurus's client created only caraa / car4ammo / car4fuel / furgon objects - no flak car.
+    Every convoy has exactly ONE gun car. But a column that went home simply REVERSED: 'the tail
+    car leads the way home', so the AA car that led the way out trailed on the way back.
+    15:22:36 convoy 1369 'heading home (6 vehicles)'; 15:26:01-28 Taurus destroys the three ammo
+    lorries and a Furgon at its FRONT; 15:26:45-49 'USA car ripped up your right wing / shredded
+    your engine' - the AA car, from the REAR. Outbound columns (1370, 1371) had it in front.
+    One gun car, in front going out and at the back going home = 'escorts front and back'.
+    (Also seen at the time: three small 'urgent follow-up' columns to scene 52 within five
+    minutes, each with its own AA car - more guns on one road than the setting suggests.)
+  CHANGE: _convoy_order(cv) - homebound the lorries still run last-in-first-out, but the escorts
+    keep their places: the AA car LEADS again and the Flak car (setting 'both'/'flak') closes
+    again. The AA car sits deepest in the scene at the turn-round, so it drives out past the
+    parked lorries; a vehicle whose leader is still deeper in the scene than itself waits where it
+    stands until the leader has come past (_wait_pass, max 180 s), then follows at the usual 60 m.
+    The tick, the relink after a loss and the map box all use the same order.
+    CONVOY_ESCORT_KEEPS_PLACE = False restores the plain reversal.
+  CHECKED offline: order for aa / both / flak / none and with the AA car destroyed; a straight-road
+    kinematic run of the wait-for-pass rule (5 vehicles): AA car first home, lorries behind it,
+    Flak car last, nobody stuck.
+  NOT CHANGED: one escort set per column (follow-up columns still bring their own AA car).
+  VERIFY: watch a column unload and leave - the machine-gun car pulls out first and leads it home;
+    log 'heading home' unchanged. Backup: _scratch/server.py.bak_v968f8m.
+
+2026-11-12  v968f8o-stable  STORED % FOLLOWED THE SHRINKING CAPACITY (Alon, local run 21:44, scene 46)
+  REPORT: 'had to wipe out the entire fuel supply of the target airfield before it reflected on
+    the status page; capacity for fuel dropped to 40% but the stored supply did not drop to 40% or
+    below until all fuel was destroyed'.
+  SERVER SIDE WAS RIGHT (run_20261112_214414, Front Airfield 46, 6 fuel buildings = 150 000 kg, full):
+      21:50:27 Fuel Storage 1270  lost 30 000 of cap 30 000  -> 120 000 stored / 120 000 capacity
+      21:50:28 Fuel tanks  1284   lost 12 000 of cap 15 000  -> 105 000 / 105 000
+      21:50:28 Fuel tanks  1282   lost 10 500 of cap 15 000  ->  90 000 /  90 000
+      21:50:38 Fuel tanks  1283   lost 18 000 of cap 30 000  ->  60 000 /  60 000   (40 % of 150 000)
+      21:53:36 Fuel tanks  1281   lost 12 000 of cap 30 000  ->  30 000 /  30 000
+      21:53:40 Fuel tanks  1280   lost  6 000 of cap 30 000  ->       0 /       0
+    (each building takes its share of the stock, and the stock is clamped to what is still standing)
+  THE DISPLAY WAS WRONG: msg 71 carried the EFFECTIVE capacity (G) and the storage % (C) as
+    stored / effective capacity. A full store that loses tanks is still '100 % of what is left':
+    C read 100, 100, 100, 100, 100 and then 0 when the last tank went (v968f6u then swapped the
+    undamaged capacity in for the 'unlimited' fix). H (capacity intact) correctly showed 80/70/60/40.
+  CHANGE (scene_prodinfo_arrays, PRODINFO_CAP_FULL=True):
+    G 'storage capacity' = the UNDAMAGED capacity, always (H next to it = how much of it stands);
+    C 'storage %'        = stored / undamaged capacity of the scene's complex.
+    Same test now reads C = 100, 80, 70, 60, 40, 20, 0 with H = 100, 80, 70, 60, 40, 20, 0.
+    F (stored kg) and the stock model are unchanged. PRODINFO_CAP_FULL=False restores the old form.
+  VERIFY: bomb fuel tanks on a full field one at a time with the scene panel open - the storage %
+    must step down with every tank, not jump at the last one. `panelprobe` still shows which array
+    feeds which column. Backup: _scratch/server.py.bak_v968f8n.
+
+2026-11-12  v968f8p-stable  CRASHING WITH DAMAGE COST NOTHING (Alon, local run 22:17, messages96)
+  REPORT: 'crashing with damage doesn't cost a plane or a pilot. If you crash you die and lose a
+    plane too, no matter where it happens.'
+  LOGS: client 22:26:27 own bomb damages his plane (elevator, rudder, wings, fuselage); 22:26:37
+    'ExitEvent(280). IsDelete=1, MissExitCode=7, ScoreEvent=1'; 'You have killed yourself'.
+    Server 22:26:37 'clean exit (MEC&0xf=7 SE=1) -> no loss', exit 0x71 relayed, nothing booked.
+  CAUSE (FA.exe FUN_0045e3c0): when the plane carries damage and there is no creditable killer the
+    client renames the exit code - crash 1 -> 7, destroyed-in-the-air 6 -> 8, and 6/8 with the
+    ordnance exploding -> 0xb/0xc. The server handled 1, 5, 6 and the crash-landing family (2, 3);
+    codes 7, 8 and 0xc come with a 3-byte entry, are not 'scored', and fell into the clean-exit
+    branch. On the live server too: MEC 7 once in the 11-03 run and four times in the 11-06 run.
+  CHANGE: CRASH_MEC_NIBBLES = (1, 7, 8, 0xc) - all four are a crash/destruction: plane AND pilot
+    lost, aces wiped, exactly like MEC 1; a hunter who still holds the damage latch gets the kill
+    as before; an empty plane after a bail stays plane-only (the canopy decided the pilot).
+    DEATH_MEC_NIBBLES gains 7, 8, 0xb, 0xc (soft-boot / legacy path); the tournament life counter
+    counts every destruction code. New log line 'CRASHED with damage / DESTROYED and no creditable
+    killer (exit 0x71 MEC 7 SE 1) -> plane AND pilot lost [v968f8p]'.
+  EXIT CODES NOW COVERED (MissExitCode & 0xf): 1 crash, 2 crash-landing, 3 crashed into a ground
+    object, 4 collision, 5 shot down / bailed, 6 destroyed by a named killer, 7 crashed damaged,
+    8 destroyed without a killer, 9 TAB, 10 exit to HQ, 0xb / 0xc = 6 / 8 with ordnance explosion.
+  VERIFY: damage yourself (own bomb blast) and fly into the ground -> the DEATH line above, the
+    plane and pilot penalty in SCORE, 'died' in the KILL line, deaths +1.
+  Backup: _scratch/server.py.bak_v968f8o.
+
+2026-11-12  v968f8q-stable  EXIT 0x53 'X HAS DESTROYED YOU' KEPT THE PILOT (Taurus, live v968f8k, messages24)
+  TAURUS'S NINE TESTS against run_20261112_190807 (UTC) and his client log:
+    1 29% damage, crash-land enemy - lost pilot      19:44:21 exit 0x2d flag 1 -> PILOT LOST      correct
+    2 100% damage, bail enemy - lost pilot           19:41 bail, canopy 0x2c captured, once       correct
+    3 100% damage, bail enemy no chute - lost pilot  20:10 husk 0x50, chute 0x1c KILLED, once     correct
+    4 70+% damage, 'crash land' enemy - no pilot lost   exit 0x53 -> '-560, pilot pending/safe'   WRONG
+    5 100% damage, collision, crashed friendly - none   exit 0x53 (19:47:57) -> same             WRONG
+    6 40%+ damage, crashed in enemy - no pilot lost     exit 0x53 -> same                        WRONG
+    7 50%+ self-inflicted, crash - no pilot or plane    exit 0x71 'clean exit'                   WRONG (fixed v968f8p)
+    8 50% damage, crash-land friendly - no pilot lost   19:50:38 exit 0x2d flag 0 -> safe        correct
+    9 50% damage, crash-land enemy - lost pilot         20:02/20:05/20:24 exit 0x2d flag 1       correct
+    Seven exits 0x53 in the session (19:46:09, 19:47:57, 19:52:45, 20:07:58, 20:12:02, 20:17:28,
+    20:20:27): the client printed 'SU 1Lt MONSTERDOGG has destroyed You', the server booked the
+    plane only.
+  CAUSE: the server read MissExitCode 5 as 'bail-out plane' (v497f5 / v968f5i) and left the pilot to
+    the bail / crash-landing branch. FA.exe FUN_0045e3c0: code 5 is a CRASH (1), or leaving the
+    plane (exit flag 0x10), with damage past the threshold and a killer on record - the pilot is in
+    it. A bail books the kill AT the bail and the husk comes down later with ScoreEvent 0 (0x50).
+  CHANGE: MEC 5 with SE != 0 = destroyed with the pilot aboard -> plane AND pilot lost, aces wiped,
+    kill to the hunter (unchanged). Exception: the plane had STOPPED (no movement over the 3 s
+    window), no hit in the last 15 s, friendly/neutral ground -> a damaged plane landed and left
+    before the repair = forced landing, pilot safe (enemy ground: captured). Own DEATH line:
+    'DESTROYED with the pilot aboard (exit 0x53 MEC 5 SE 3, hunter 0x....): <why> -> ... [v968f8q]'.
+    The old 'pilot pending (bail) / safe (crash-land)' wording is gone from the log.
+  THE RULES AS BOOKED NOW (plane always lost):
+    crash, any code (1, 7, 8, 0xc), anywhere ............................ pilot lost
+    destroyed / shot down with the pilot aboard (5 with SE, 6, 0xb) ...... pilot lost
+    collision (4), cockpit kill ......................................... pilot lost
+    crash-landing (2, 3): enemy territory (client flag) ................. pilot lost
+                          friendly territory ............................ pilot safe
+    damaged plane landed, stopped, left: friendly safe / enemy captured
+    bail: canopy lands friendly safe / captured or hits the ground lost, ONCE; empty plane = plane only
+  VERIFY (Taurus's tests 4-7 again): each must log a DEATH line ending 'plane AND pilot lost' and a
+    SCORE line with the pilot-loss term (-760 at his rank, not -560).
+  Backup: _scratch/server.py.bak_v968f8p.

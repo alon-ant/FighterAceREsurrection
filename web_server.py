@@ -1469,11 +1469,6 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            conn = sqlite3.connect(SRV['db_path'])
-            client_path = conn.execute("SELECT client_path FROM accounts WHERE account_name=?", (user,)).fetchone()[0]
-            conn.close()
-            
-            display_path = client_path if client_path else DEFAULT_CLIENT_PATH
             admin_link = '<a href="/admin" style="color:#28a745;">Admin Panel</a> |' if is_user_admin(user) else ''
 
             content = f"""
@@ -1490,11 +1485,9 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 
                 <div class="card">
                     <h2 style="margin-top:0;">Play Fighter Ace</h2>
-                    <form method="POST" action="/update_path" style="margin-bottom: 15px;">
-                        <label>Your Game Client Path:</label>
-                        <input type="text" name="client_path" value="{display_path}" required>
-                        <button type="submit" style="background: #6c757d;">Save Path Settings</button>
-                    </form>
+                    <!-- 2026-11-03: the client-path box and its 'Save Path Settings' are gone - the launcher
+                         (v5.5, L-FIX-13) chooses the exe from the LOCAL launcher.ini game folder, and the
+                         Debug mode checkbox in the launcher picks FA42D.EXE. -->
                     <form method="GET" action="/download">
                         <button type="submit" class="btn-green">Launch Game</button>
                     </form>
@@ -2533,7 +2526,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _tnnum('tn_lives', 'Number of lives', 0, 99, '(0 = unlimited)')
                 + _tnchk('tn_ghosting', 'Ghosting', '(out of lives = fly on as a ghost)')
                 + '</div>' + _row
-                + _tnnum('tn_start_delay', 'Joining window', 0, 240, 'min from the start')
+                + _tnnum('tn_start_delay', 'Joining window', 0, 240, 'min from the start (0 = open until the host closes it / starts the fight)')
                 + _tnnum('tn_shoot_delay', 'Shooting starts', 0, 240, 'min after joining closes')
                 + _tnchk('tn_allow_tabbing', 'Allow tabbing out', '(exiting to HQ does not cost a life)')
                 + _tnchk('tn_last_is_winner', 'Last one flying wins', '(the server announces the winner)')
@@ -2932,9 +2925,15 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                     <div class="tabpane" id="tab-events">
                     <h3>Tournament</h3>
                     <p style="color:#888; font-size:0.85em; max-width:640px;">The Tournament group of the game&#39;s
-                    arena-creation dialog. The clock starts when the first pilot spawns (or with the console
+                    arena-creation dialog. <b>With Event mode ticked</b> (below) the host runs it: pilots enter and
+                    spawn freely with weapons locked and no life at stake, and ##StartEvent / <code>event fight</code>
+                    starts the fight with everybody who is in a plane at that moment - joining closes then.
+                    <b>Without Event mode</b> the clock starts when the first pilot spawns (or with the console
                     <code>event open &lt;room&gt;</code>): pilots may join during the joining window, then
-                    everybody flies unarmed until shooting starts (the cockpit shows both countdowns). Each pilot has
+                    everybody flies unarmed until shooting starts (the cockpit shows both countdowns). A joining
+                    window of <b>0</b> means no clock closes it - joining stays open until the host closes it
+                    (<code>event close</code>) or starts the fight. After a finished round <code>event reset
+                    &lt;room&gt;</code> opens the arena for the next one. Each pilot has
                     the given number of lives; out of lives he is either grounded or, with ghosting, flies on as a
                     ghost. With &quot;last one flying wins&quot; the server declares the winner when one pilot is left.
                     Event mode is the game&#39;s own weapons lock: the arena starts locked (nobody can start engines,
@@ -3940,14 +3939,9 @@ tick();setInterval(tick,5000);
                 self.send_html("<h2 style='color:red;'>Login Failed</h2><p>Invalid credentials or account does not exist.</p><a href='/login'>Back</a>")
 
         elif self.path == '/update_path':
+            # 2026-11-03: retired - the client path is the launcher's local launcher.ini business now
+            # (an old page still posting here just lands back on the front page; nothing is stored).
             if not user: return self.send_error(401)
-            new_path = qs.get('client_path', [''])[0].strip()
-            
-            conn = sqlite3.connect(SRV['db_path'])
-            conn.execute("UPDATE accounts SET client_path=? WHERE account_name=?", (new_path, user))
-            conn.commit()
-            conn.close()
-            
             self.send_response(302)
             self.send_header('Location', '/')
             self.end_headers()
