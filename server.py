@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8t-stable'
+VERSION = 'v968f8u-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5285,7 +5285,64 @@ WEATHER_PRESETS = {              # console `weather <room> <preset>`
     'clear':     0, 'scattered': 1, 'broken': 2, 'overcast': 3, 'rain': 4, 'storm': 5,
 }
 
+# --- v968f8u [LIVE WEATHER ONLY OVER A CONSTANT WIND] (Alon 11-15 12:48: 'CTD on changing weather') --------
+# Two local CTDs, both 'Assertion failed (!TrnWorld->pObjectsScene->IsPresentObject(pObject))' TrnWorld.cpp:325
+# = FUN_0056b460, the scene's AddObject, handed an object pointer that is already in the scene list:
+#   messages00: at the first re-spawn (InsertPlayer, the new plane's effects) after three msg 137
+#   messages01: in the msg-7 handler of train 326 (state 2 = moving -> its smoke is added, FUN_00692370 ->
+#               FUN_00632ca0), 1.7 s after the spawn-time msg 137 - the DLL log shows the callback never returning
+# 21 earlier sessions took up to 15 msg 137 each (trains present, Cumulus and Stratus rungs) with no assertion.
+# The one thing new: room 49 was saved with WindName=Rotate ('Speed(Min=2,Max=10,Time=17),Rotate(Time=17)');
+# every clean session had WindName=Constant. The msg-137 handler (0x4f4af0) deletes the client's wind object
+# (0xc7e3e4) and builds a new one on every message; with a rotating wind in place that teardown is the only
+# step those 21 sessions never ran. NOT proven in the binary (which object stays in the scene list is not
+# identified) - the rule below is the server-side way to keep the client on the path that is known good:
+#   - an arena whose weather cycle is on is SERVED a Constant wind in its GAME_DEF (the cycle replaces the
+#     wind with a constant one at its first step anyway), so the client never builds a rotating wind there
+#   - every msg 137 carries a Constant wind
+#   - no msg 137 at all into an arena that serves a rotating wind (cycle off): logged, not sent
+# Console: `weather constwind on|off` (off = the pre-8u behaviour, for a deliberate test).
+WEATHER_CONSTANT_WIND_ONLY = True
+
+def weather_constant_wind(wtype, wparam):
+    """The Constant-wind equivalent (0, '(Speed=..,Dir=..)') of any wind setting: an oscillating wind
+    becomes its mean speed, a rotating one keeps its speed; direction 0 unless the text carries one."""
+    try:
+        wt = int(wtype or 0)
+    except (TypeError, ValueError):
+        wt = 0
+    if wt == 0:
+        return 0, (wparam or '(Speed=2,Dir=0)')
+    r = parse_wind_param(WIND_TYPE_NAMES[wt] if 0 <= wt < len(WIND_TYPE_NAMES) else 'Constant', wparam or '')
+    spd = (r['min'] + r['max']) / 2.0 if (r['type'] == 2 and (r['min'] or r['max'])) else r['speed']
+    return 0, '(Speed=%g,Dir=%d)' % (float(spd), int(r.get('dir', 0)) % 360)
+
+def gamedef_force_constant_wind(d):
+    """In-place: rewrite a non-Constant [Weather] wind of a decompressed GAME_DEF to its Constant
+    equivalent. Returns 'old -> new' or None (already Constant / fields not located)."""
+    o = _gamedef_reality_offsets(d)
+    if o is None:
+        return None
+    s1, e1 = o['wind_name']; s0, e0 = o['wind_param']
+    wn = bytes(d[s1:e1]).decode('latin1'); wp = bytes(d[s0:e0]).decode('latin1')
+    if wn == 'Constant' or wn not in WIND_TYPE_NAMES:
+        return None
+    _t, new_param = weather_constant_wind(WIND_TYPE_NAMES.index(wn), wp)
+    d[s0:e0] = new_param.encode('ascii')                 # the later string first: the earlier offsets stay valid
+    d[s1:e1] = b'Constant'
+    return f'{wn} {wp!r} -> Constant {new_param!r}'
+
+def weather_room_serves_constant(room_id):
+    """True when a client that joined this arena holds a Constant wind (cycle on = forced, or the forecast is one)."""
+    if weather_cycle_minutes(room_id) > 0:
+        return True
+    b = weather_base_for_room(room_id)
+    return b is None or int(b.get('wind_type', 0) or 0) == 0
+
 def build_weather_137(w):
+    if WEATHER_CONSTANT_WIND_ONLY and int(w.get('wind_type', 0) or 0) != 0:      # v968f8u
+        _wt, _wp = weather_constant_wind(w.get('wind_type', 0), w.get('wind_param'))
+        w = dict(w, wind_type=_wt, wind_param=_wp)
     wp = str(w.get('wind_param') or '(Speed=2,Dir=0)').encode('latin1', 'replace')[:120]
     body = (bytes([WEATHER_OPCODE, int(w.get('wind_type', 0)) & 0xff, int(w.get('clouds_type', 0)) & 0xff,
                    max(0, min(100, int(w.get('density', 0)))) & 0xff, 1 if w.get('rain') else 0])
@@ -5326,6 +5383,11 @@ def weather_text(w):
     return f'{ct} {w["density"]}% at {w["cmin"]}-{w["cmax"]} m' + (', rain' if w.get('rain') else '') + f', wind {w.get("wind_param", "")}'
 
 def weather_push(room_id, w, to=None, reason=''):
+    if WEATHER_CONSTANT_WIND_ONLY and not weather_room_serves_constant(room_id):     # v968f8u
+        log('WEATHER', f'room {room_id}: msg 137 NOT sent {reason} - the arena serves a rotating wind and a live weather '
+                       f'change over it is the 11-15 CTD (TrnWorld.cpp:325). Set the arena wind to Constant, or turn the '
+                       f'weather cycle on (it serves a Constant wind) [v968f8u]')
+        return 0
     pkt = build_weather_137(w)
     n = 0
     for p in ([to] if to is not None else get_sessions_in_room(room_id)):
@@ -5450,6 +5512,12 @@ def weather_command(room_id, args, by='console'):
     cur = WEATHER.get(room_id) or weather_base_for_room(room_id) or {'wind_type': 0, 'wind_param': '(Speed=2,Dir=0)',
                                                                    'clouds_type': 0, 'density': 0, 'rain': 0, 'cmin': 0, 'cmax': 0}
     try:
+        if v == 'constwind':                                  # v968f8u: weather <room> constwind [on|off]
+            if len(args) >= 2 and args[1].lower() in ('on', 'off'):
+                globals()['WEATHER_CONSTANT_WIND_ONLY'] = (args[1].lower() == 'on')
+            return (f'live weather only over a Constant wind = {"ON" if WEATHER_CONSTANT_WIND_ONLY else "off"} '
+                    f'(this arena serves a {"Constant" if weather_room_serves_constant(room_id) else "ROTATING"} wind; '
+                    f'weather <room> constwind on|off)')
         if v == 'status':
             return '\n'.join(weather_status_text(room_id))
         if v == 'rain' and len(args) >= 2 and args[1].lower() in ('on', 'off', '1', '0', 'yes', 'no'):
@@ -6458,6 +6526,19 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             log('GAMEDEF212', 'reality/weather: ' + '; '.join(_rw))
     except Exception:
         logx('GAMEDEF212', 'reality/weather patch failed')
+    # v968f8u: a dynamic-weather arena is served a Constant wind (see WEATHER_CONSTANT_WIND_ONLY)
+    try:
+        _wc = 0
+        try:
+            _wc = int(float((arena_settings or {}).get('weather_cycle', 0) or 0))
+        except (TypeError, ValueError):
+            _wc = 0
+        if WEATHER_CONSTANT_WIND_ONLY and _wc > 0:
+            _cw = gamedef_force_constant_wind(d)
+            if _cw:
+                log('GAMEDEF212', f'weather cycle on -> wind served as {_cw} [v968f8u]')
+    except Exception:
+        logx('GAMEDEF212', 'constant-wind patch failed')
     # v949f5 RADAR (web editor): [Radar] AlwaysVisibleRange / RangeMultiplier / ShowRange /
     # AboveTerrainLevel / Works / ApplyToLocalObjects - length-preserving, tail-anchored.
     try:

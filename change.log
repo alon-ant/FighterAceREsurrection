@@ -13841,3 +13841,38 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     time; no 'in 71'671' every 10 s; 'in 26' only after 'out 26'.
   Tested offline: _scratch/test_lagperf.py (rows / columns / rates), py_compile of both files. Not run live.
   Backups: _scratch/server.py.bak_v968f8s, _scratch/web_server.py.bak_v968f8s.
+
+2026-11-15  v968f8u-stable  CTD ON CHANGING WEATHER: LIVE WEATHER ONLY OVER A CONSTANT WIND (Alon 12:48, local, messages00/01)
+  WHAT HAPPENED (local run_20261115_110332, room 49 'Territorial Combat 1', weather cycle 2 min):
+    12:40:23 arena saved with wind 'Rotate' Speed(Min=2,Max=10,Time=17),Rotate(Time=17), Cumulus 85% 1000-2000 m.
+    Session 1 (messages00): msg 137 at the spawn (wind type 2), then the cycle at 12:42:23 / 12:44:23 / 12:46:23
+      (wind type 0 each); exit to HQ 12:46:37; new spawn 12:47:08 -> CTD inside InsertPlayer.
+    Session 2 (messages01): join 12:47:56, spawn 12:48:01.5, msg 137 at 12:48:01.68 (wind type 0), trains 326/327
+      created 12:48:02 -> CTD 12:48:03.3.
+    Both: 'Assertion failed (!TrnWorld->pObjectsScene->IsPresentObject(pObject))', TrnWorld.cpp:325.
+  WHAT THE ASSERTION IS: FUN_0056b460 = the terrain scene's AddObject; it fires when the object being added is
+    already in the scene's list. Reached from effect code (FUN_00632ca0 'add my particle system once', 60+ callers:
+    plane effects FUN_004ce8c0, train state FUN_00692370 ...).
+    Session 2 is exact: the DLL log has two msg-7 callbacks that never returned, both for train 326 with flag byte
+    0x21 = camp 1, STATE 2 (moving - its smoke); train 327 (state 0, stopped) passed. Session 1: the new plane.
+  WHY TODAY: 21 earlier client logs (10-23 .. 11-12) carry up to 15 msg 137 each, with trains, through the Cumulus
+    and the Stratus rungs - no assertion. All of them had WindName=Constant in the arena. Today's arena is the
+    first with a rotating wind. The msg-137 handler (0x4f4af0) deletes the client's wind object and builds a new
+    one on every message; over a rotating wind that teardown had never been run before.
+    NOT PROVEN in FA.exe: which object stays behind in the scene list after that teardown is not identified.
+  CHANGED (server.py) - WEATHER_CONSTANT_WIND_ONLY = True:
+    - a GAME_DEF served for an arena whose weather cycle is on gets a Constant wind (Rotate / RotateConstant ->
+      '(Speed=<mean or speed>,Dir=..)'); logged as GAMEDEF212 'weather cycle on -> wind served as ...'.
+    - build_weather_137: every msg 137 carries wind type 0.
+    - weather_push: no msg 137 into an arena that serves a rotating wind with the cycle off - WEATHER line
+      'msg 137 NOT sent ...'. (The editor's stored wind is untouched; only what is served changes.)
+    - `weather <room> constwind on|off` (off = the old behaviour, to reproduce).
+  LIMIT: a pilot who was already inside the arena when its wind was switched from rotating to dynamic still
+    holds the rotating wind until he re-enters.
+  VERIFY (same arena, same settings, cycle 2 min): server log at the join 'GAMEDEF212 weather cycle on -> wind
+    served as Rotate ... -> Constant (Speed=6,Dir=0)'; client log [Weather] WindName=Constant; fly through three
+    weather steps with trains moving, exit to HQ and re-spawn after each - no assertion. Then
+    `weather 49 constwind off`, re-join: if the CTD returns, the rotating wind is confirmed as the trigger.
+  Tested offline (_scratch/test_constwind.py) on room 49's stored GAME_DEF: Rotate -> Constant, later fields
+    (clouds) still parse, struct 2 bytes shorter; msg 137 body carries type 0. Not run against a client.
+  Backup: _scratch/server.py.bak_v968f8t.
