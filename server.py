@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8u-stable'
+VERSION = 'v968f8v-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7408,7 +7408,7 @@ def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
-                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe] lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
+                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
 def console_handler():
@@ -7656,7 +7656,7 @@ def console_handler():
                                        + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
                                        + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
             elif cmd in ('timecheck', 'nak', 'loadhold', 'freezewatch', 'tcevent', 'scene79', 'postleave', 'features'):   # v968f8b/8c: live switches
-                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE
+                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE, MSGLIST_SINGLE_WHEN_LATE
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _v = (_a[0].lower() == 'on') if _a and _a[0].lower() in ('on', 'off') else None
                 if cmd == 'timecheck' and _v is not None: TIMECHECK_ENABLE = _v
@@ -7728,13 +7728,20 @@ def console_handler():
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 if _a and _a[0].lower() in ('on', 'off'):
                     MSGLIST_BUNDLE = (_a[0].lower() == 'on')
+                elif len(_a) >= 2 and _a[0].lower() == 'late' and _a[1].lower() in ('on', 'off'):      # v968f8v
+                    MSGLIST_SINGLE_WHEN_LATE = (_a[1].lower() == 'on')
                 log('CONSOLE', f'MsgList bundling of AI object frames = {"ON" if MSGLIST_BUNDLE else "off"} '
-                               f'(<= {MSGLIST_MAX_BYTES} B / {MSGLIST_MAX_N} frames per list, flush after {MSGLIST_FLUSH_MS} ms; `mlist on|off`)')
+                               f'(<= {MSGLIST_MAX_BYTES} B / {MSGLIST_MAX_N} frames per list, flush after {MSGLIST_FLUSH_MS} ms; `mlist on|off`); '
+                               f'single datagrams for a pilot the lag watch has confirmed late = '
+                               f'{"ON" if MSGLIST_SINGLE_WHEN_LATE else "off"} (`mlist late on|off`)')
                 for _s in get_all_sessions():
                     if getattr(_s, 'entered_game', False):
                         _l, _m, _1 = _s.__dict__.get('_ml_lists', 0), _s.__dict__.get('_ml_msgs', 0), _s.__dict__.get('_ml_singles', 0)
+                        _ls = _s.__dict__.get('_ml_late_singles', 0)
                         log('CONSOLE', f'  {_s.current_pilot}: {_m} AI frames in {_l} lists ({(_m / _l) if _l else 0.0:.1f}/list), '
-                                       f'{_1} sent alone; datagrams saved: {_m - _l}')
+                                       f'{_1} sent alone; datagrams saved: {_m - _l}'
+                                       + (f'; {_ls} sent singly while he was late' if _ls else '')
+                                       + (' [LATE NOW: singles]' if (MSGLIST_SINGLE_WHEN_LATE and _s.__dict__.get('_rl_on')) else ''))
             elif cmd == 'special74':                                                    # v968f7p test: msg 74 type 0 to one pilot
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _t = next((x for x in get_all_sessions() if _a and getattr(x, 'current_pilot', None) == _a[0]), None)
@@ -14139,7 +14146,9 @@ SEND_GAMEPLAY_UNRELIABLE = False
 # (exact last reliable msg each way, and the telemetry state at the moment of the stall).
 FLIGHT_RECORDER   = True     # master switch (also toggleable live via `rec` console command)
 FLIGHT_REC_RELMAX = 40       # reliable msgs (each direction) kept per session
-FLIGHT_REC_UNRMAX = 160      # trailing unreliable packets kept per session (v968f8c: S->C AI frames and pushes too, ~3 s of a dense world)
+FLIGHT_REC_UNRMAX = 6000     # trailing unreliable packets kept per session (v968f8c: S->C AI frames and pushes too). v968f8v: 160 -> 6000
+                             # = about a minute of a dense world. The LAG-WATCH verdict needs three late answers, so its dump
+                             # of 11-15 13:15:05 (4 s of ring) began 15-30 s AFTER Meno's onset. ~1.3 MB per session at most.
 FLIGHT_REC_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs', 'flightrec')
 
 def _rec_decode_telem(data):
@@ -14296,6 +14305,12 @@ def _freeze_watch(s, now):
         d = s.__dict__
         if lt <= 0.0:
             return
+        # v968f8v: `flying` turns True at ServerConfirm while last_telem_time still belongs to the PREVIOUS plane.
+        # A heartbeat landing between the confirm and the first frame of the new plane read the whole
+        # death -> respawn (or HQ) time as a stall: live 11-15, 18 of 19 'GAME THREAD STALLED' lines (9 s after a
+        # crash with an immediate re-fly, 75 s / 107 s for Taurus after a stay in HQ), each with a recorder dump.
+        # A plane cannot have stalled before it existed: count from the newer of the two.
+        lt = max(lt, d.get('_obj_confirmed_at', 0.0) or 0.0)
         # v968f8h: no frames is NORMAL while the pilot hangs in a chute or sits in the hangar after a bail /
         # crash (Taurus 11-03 13:55: 'GAME THREAD STALLED' 7 s after his ServerConfirm PARACHUTER, frames
         # 'resumed' at the re-spawn). Only a plane that is actually flying can stall.
@@ -14470,6 +14485,7 @@ RINGLAG_SILENT_N        = 6        # this many probes in a row unanswered while 
 # and the verdict is taken from them, not from a theory.
 RINGLAG_CLK_REF_N       = 3        # prompt answers that set his NET-clock reference
 RINGLAG_CLK_MOVED_MS    = 300      # NET clock this far from the reference = 'moved'
+RINGLAG_CLK_MOVED_N     = 3        # v968f8v: ... on this many prompt answers in a row before the line is written
 
 def _ringlag_period(s):
     d = s.__dict__
@@ -14543,11 +14559,19 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
         _clk_txt = 'NET clock ref not set' if shift is None else f'NET clock {shift:+d} ms vs entry'
         if lag_ms < RINGLAG_MIN_MS:
             d['_rl_streak'] = 0; d['_rl_prev_late'] = None
-            # a clock that walks off while the answers are still prompt is worth a line of its own
-            if shift is not None and abs(shift) >= RINGLAG_CLK_MOVED_MS and now - d.get('_rl_clk_logged', 0.0) >= 300.0:
+            # a clock that walks off while the answers are still prompt is worth a line of its own.
+            # v968f8v: on RINGLAG_CLK_MOVED_N answers in a row. The reading compares his stamp with our clock at
+            # the moment the answer ARRIVES, so one answer held up 400 ms on its way back reads as -400 ms of
+            # clock (live 11-15: SeanTB1 13:43, Mrs_ButtersWorth 14:36 and 14:57 - one answer each of 452-468 ms,
+            # the next ones back at -2 / 0 ms). A clock that has moved stays moved.
+            if shift is not None and abs(shift) >= RINGLAG_CLK_MOVED_MS:
+                d['_rl_clk_streak'] = d.get('_rl_clk_streak', 0) + 1
+            else:
+                d['_rl_clk_streak'] = 0
+            if d['_rl_clk_streak'] >= RINGLAG_CLK_MOVED_N and now - d.get('_rl_clk_logged', 0.0) >= 300.0:
                 d['_rl_clk_logged'] = now
                 log('LAG-WATCH', f'{name}: answers prompt ({app_ms} ms, transport {net_ms} ms) but his NET clock has moved {shift:+d} ms '
-                                 f'against ours since entry (flying={getattr(s, "flying", False)})')
+                                 f'against ours since entry, {d["_rl_clk_streak"]} answers in a row (flying={getattr(s, "flying", False)})')
             if d.get('_rl_on'):
                 d['_rl_okn'] = d.get('_rl_okn', 0) + 1
                 if d['_rl_okn'] >= RINGLAG_CLEAR_N:
@@ -14589,6 +14613,9 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
                              f'{_ringlag_verdict(lag_ms, shift)}. Late since ~{_since} UTC, {d["_rl_streak"]} spaced late answers '
                              f'(episode #{d["_rl_episodes"]} this session, flying={getattr(s, "flying", False)}, '
                              f'{"pilot told" if RINGLAG_NOTIFY else "pilot not told"})')
+            if MSGLIST_BUNDLE and MSGLIST_SINGLE_WHEN_LATE:                # v968f8v
+                log('LAG-WATCH', f'  {name}: his AI frames go out as single datagrams from now until the episode closes '
+                                 f'(he is behind by a count of datagrams - more per second = fewer seconds late)')
             try:
                 _p = _rec_dump(s, f'LAG-WATCH: {lag_ms} ms late, {pk} datagrams, NET clock shift {shift} ms (late since ~{_since})')
                 if _p:
@@ -14728,6 +14755,9 @@ STAMP_LAG_COMP         = False   # console `clock comp on|off` - compensation is
 #   - CLOCK reports only a sustained deviation of that long rate (a real clock problem); the
 #     short-window dips get their own TICK-JITTER line, because THAT is what Bama saw as 'Taurus
 #     jumping': frames arriving late/bunched -> FUN_007e4a20 catch-up, not a slow clock.
+TICK_UNWRAP_GAP_S     = 120.0   # v968f8v: a silence this long is unwrapped by the expected advance (see _harvest_tick)
+TICK_UNWRAP_TOL_TICKS = 250     #          5 s of slack ...
+TICK_UNWRAP_TOL_FRAC  = 0.002   #          ... plus 0.2 % of the silence (a real rate difference stays visible as D)
 TICK_RATE_LONG_MIN_S = 30.0     # v936f5: seconds of baseline before the long rate is trusted for projection
 TICK_RATE_CLOCK_MIN_S = 120.0   # v936f5: seconds of baseline before a CLOCK (real drift) line can be logged
 TICK_JITTER_PCT = 15.0          # v936f5: a 1 s window this far off 50/s = a late/bunched frame burst
@@ -14820,7 +14850,32 @@ def _harvest_tick(src, pl):
     between frames 77 ms apart and so almost never updated)."""
     t = int.from_bytes(pl[5:7], 'little'); now = time.time()
     prev = getattr(src, 'last_telem_tick', None)
-    if prev is not None:
+    _long_adv = None
+    _gap = (now - getattr(src, 'last_telem_time', now)) if prev is not None else 0.0
+    if prev is not None and _gap >= TICK_UNWRAP_GAP_S:
+        # v968f8v [LONG SILENCE]: the tick is 16 bits = 21.8 min per wrap, and a pilot in HQ sends no frames.
+        # _s16() can only see +-10.9 min, so a longer stay lost whole wraps: SpUn 11-15 (41 min flown in a
+        # 203 min session) read as 'frames +2621.4 s behind' and 'clock SLOW, 16.72/s' - exactly 2 x 65536
+        # ticks - while his msg-89 probes had his NET clock within 6 ms of ours. His conductor tick follows
+        # the NET clock through HQ, so the advance over a silence of G seconds is the multiple-of-65536
+        # completion of (t - prev) nearest to G x 50. If that does not land within the tolerance the counter
+        # did not continue (a conductor restart): new origin, as for any reset.
+        _m = (t - prev) & 0xFFFF
+        _exp = _gap * TICK_RATE_DEFAULT
+        _adv = _m + 65536 * max(0, int(round((_exp - _m) / 65536.0)))
+        if abs(_adv - _exp) <= TICK_UNWRAP_TOL_TICKS + TICK_UNWRAP_TOL_FRAC * _exp:
+            _long_adv = _adv
+            src.__dict__.pop('_tick_anchor', None)             # the 1 s rate window restarts
+            src.__dict__.pop('_tick_lag_hist', None)           # ... and so does the slope window
+        else:
+            log('TICK-RESYNC', f'{getattr(src, "current_pilot", "?")}: conductor tick {prev} -> {t} after {_gap:.0f} s without '
+                               f'frames does not continue the old count ({_adv - _exp:+.0f} ticks off the nearest wrap) - new origin')
+            src.__dict__.pop('_tick_anchor', None)
+            src.__dict__.pop('_tick_origin', None)
+            src.__dict__.pop('_tick_lag_hist', None)
+            src.__dict__.pop('_stamp_last', None)
+            prev = None
+    elif prev is not None:
         d = _s16(t - prev)
         if d == 0:
             return False                      # same frame (several objects share one conductor tick)
@@ -14858,7 +14913,7 @@ def _harvest_tick(src, pl):
         src._tick_origin = (now, 0)                             # (origin wall time, unwrapped ticks since)
         src._tick_rate_long = None
     else:
-        _un = _o[1] + _s16(t - prev)
+        _un = _o[1] + (_long_adv if _long_adv is not None else _s16(t - prev))     # v968f8v: whole wraps of a long silence included
         src._tick_origin = (_o[0], _un)
         _span = now - _o[0]
         # v968f6y: tick lag D (see CLOCK_LAG_*)
@@ -16023,42 +16078,52 @@ def column_delete(group_id, reason=''):
 def _columns_tick():
     """Refresh follower goals from the leader's pose (called each driver tick)."""
     for gid, col in list(COLUMNS.items()):
-        # v670f5: a DEAD leader (still in TANKS as a wreck, goal cleared by the kill) is 'gone' too -
-        # the column used to freeze in its tracks (user 09-12). Promote the first live member and
-        # hand it the column's destination so the advance continues.
-        col['members'] = [o for o in col['members'] if o in TANKS]
-        live = [o for o in col['members'] if not TANKS[o].get('dead')]
-        if not live:
-            COLUMNS.pop(gid, None); continue
-        if col['leader'] not in TANKS or TANKS[col['leader']].get('dead'):
-            old = TANKS.get(col['leader'])
-            dest = col.get('dest') or (old.get('_col_dest') if old else None) or (old.get('goal') if old else None)
-            col['leader'] = live[0]
-            lead = TANKS[col['leader']]
-            lead['_col_park'] = None
-            if dest is not None and not col.get('deployed'):
-                lead['goal'] = (float(dest[0]), float(dest[1]))
-                lead['_wps'] = None
-                if old and old.get('mps'):
-                    lead['mps'] = old['mps']
-            log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted'
-                        f'{" -> continues to (%.0f,%.0f)" % (dest[0], dest[1]) if dest is not None else ""}')
+        try:
+            _column_tick(gid, col)
+        except KeyError:
+            # v968f8v: TANKS is also emptied from other threads. Live 11-15 15:00:08, the arena reset after
+            # Great Britain won: column 21 promoted 0x022f to leader and the reset deleted it before the next
+            # line read it -> KeyError 559 took the whole driver step (trains included) with it. The column
+            # is simply seen without that tank on the next tick.
+            pass
+
+def _column_tick(gid, col):
+    # v670f5: a DEAD leader (still in TANKS as a wreck, goal cleared by the kill) is 'gone' too -
+    # the column used to freeze in its tracks (user 09-12). Promote the first live member and
+    # hand it the column's destination so the advance continues.
+    col['members'] = [o for o in col['members'] if o in TANKS]
+    live = [o for o in col['members'] if not TANKS[o].get('dead')]
+    if not live:
+        COLUMNS.pop(gid, None); return
+    if col['leader'] not in TANKS or TANKS[col['leader']].get('dead'):
+        old = TANKS.get(col['leader'])
+        dest = col.get('dest') or (old.get('_col_dest') if old else None) or (old.get('goal') if old else None)
+        col['leader'] = live[0]
         lead = TANKS[col['leader']]
-        if col.get('deployed'):
-            continue                                  # v594f5: on a perimeter - per-tank goals, no formation
-        moving = lead.get('goal') is not None
-        slot = 0
-        for on in col['members']:
-            if on == col['leader'] or TANKS[on].get('dead'):
-                continue
-            slot += 1
-            t = TANKS[on]
-            sx, sy = _col_slot(lead, slot)
-            if moving:
-                t['goal'] = (sx, sy)
-            elif t.get('_col_park') != (round(sx), round(sy)):
-                t['goal'] = (sx, sy)                # leader halted: close up once, then rest
-                t['_col_park'] = (round(sx), round(sy))
+        lead['_col_park'] = None
+        if dest is not None and not col.get('deployed'):
+            lead['goal'] = (float(dest[0]), float(dest[1]))
+            lead['_wps'] = None
+            if old and old.get('mps'):
+                lead['mps'] = old['mps']
+        log('TANK', f'column {gid}: leader gone, 0x{col["leader"]:04x} promoted'
+                    f'{" -> continues to (%.0f,%.0f)" % (dest[0], dest[1]) if dest is not None else ""}')
+    lead = TANKS[col['leader']]
+    if col.get('deployed'):
+        return                                    # v594f5: on a perimeter - per-tank goals, no formation
+    moving = lead.get('goal') is not None
+    slot = 0
+    for on in col['members']:
+        if on == col['leader'] or TANKS[on].get('dead'):
+            continue
+        slot += 1
+        t = TANKS[on]
+        sx, sy = _col_slot(lead, slot)
+        if moving:
+            t['goal'] = (sx, sy)
+        elif t.get('_col_park') != (round(sx), round(sy)):
+            t['goal'] = (sx, sy)                # leader halted: close up once, then rest
+            t['_col_park'] = (round(sx), round(sy))
 
 def _tank_driver_loop():
     """v560f5/v566f5: drive each tank toward its goal as a throttle/steer controller (the
@@ -23724,7 +23789,19 @@ def _load_hold_release(s, why=''):
 # Planes (relay_telemetry) are deliberately NOT bundled: 10 Hz dogfight frames stay single datagrams.
 # A lone frame in the outbox at flush time goes out as the plain datagram it always was (n == 1), so a
 # sparse world sees byte-identical traffic and only the dense case changes.
-MSGLIST_BUNDLE    = False    # master switch (console: mlist on|off|stats)  # v968f8d-stable: 7a wire - one datagram per AI frame (console `mlist on`)
+MSGLIST_BUNDLE    = True     # master switch (console: mlist on|off|stats)  # v968f8d-stable: off (7a wire); v968f8v: ON, see below
+# v968f8v [BUNDLING ON BY DEFAULT] (Alon 11-15 'make it so'): live 11-15, `mlist on` at 14:05:38 UTC after Meno's
+# third lag episode in four days (onset 13:14:30-47, 28 min after login, 60-82 datagrams behind until he
+# re-logged). The recorder dump of that onset: 141 of 160 datagrams to him were AI frames, fired in volleys of
+# 4-15 datagrams within 3 ms, four volleys a second - each datagram one INC and one DEC of the vcncNet input
+# queue counter the two client threads share without a lock. Bundled, the same frames are 4.2 datagrams/s.
+# 14:05-19:03 with it on: 9.5 flying pilot-hours (8 pilots; Taurus 2.4 h, Meno 1.7 h), no late pilot, probe
+# answers 11-17 ms median; before it that day 3.3 flying pilot-hours and one 29-minute episode.
+# ONE EXCEPTION, MSGLIST_SINGLE_WHEN_LATE: a pilot the lag watch HAS confirmed is behind by a fixed number of
+# DATAGRAMS (seconds late = datagrams behind / datagrams per second: Meno 11-15 was 1.6 s late at 43/s and
+# 5.5 s at 13/s). Bundling would make his delay longer, so his AI frames go out singly until the watch closes
+# the episode. Console: `mlist late on|off`.
+MSGLIST_SINGLE_WHEN_LATE = True
 MSGLIST_MAX_BYTES = 1200    # entry bytes per list; the client's recv buffer is 0x5dc=1500 incl. headers
 MSGLIST_MAX_N     = 48      # entries per list (12-bit length field allows 4095 B; this is comfort)
 MSGLIST_FLUSH_MS  = 25      # oldest entry age that triggers a flush (flusher thread ticks every 10 ms)
@@ -23755,6 +23832,11 @@ def _mlist_queue(sess, frame):
             d.setdefault('_load_hold_objs', set()).add(struct.unpack_from('<H', frame, 7)[0])
         return True                                     # counted as sent: cadence bookkeeping unchanged
     if not MSGLIST_BUNDLE or getattr(sess, 'closing', False) or len(frame) < 5:
+        return _mlist_send_plain(sess, frame)
+    if MSGLIST_SINGLE_WHEN_LATE and sess.__dict__.get('_rl_on'):          # v968f8v: confirmed late -> singles
+        if sess._ml_n:
+            _mlist_flush(sess, force=True)                                 # what was queued before the verdict, first
+        sess.__dict__['_ml_late_singles'] = sess.__dict__.get('_ml_late_singles', 0) + 1
         return _mlist_send_plain(sess, frame)
     n = len(frame) - 4                                      # app payload length (== bc*16 + T>>4)
     entry = b'\x00\x00' + struct.pack('>H', n) + bytes(frame[4:])

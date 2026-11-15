@@ -13876,3 +13876,71 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
   Tested offline (_scratch/test_constwind.py) on room 49's stored GAME_DEF: Rotate -> Constant, later fields
     (clouds) still parse, struct 2 bytes shorter; msg 137 body carries type 0. Not run against a client.
   Backup: _scratch/server.py.bak_v968f8t.
+
+2026-11-15  v968f8v-stable  AI FRAMES BUNDLED BY DEFAULT (single for a pilot who is late) + THREE FALSE ALARMS + THE RESET EXCEPTION
+  LIVE 11-15 (run_20261115_114230, v968f8u):
+    - Meno went late at 13:14:30-47 UTC, 28 min after his login: first answer 11.3 s late (the first lap), then a
+      constant 60-82 datagrams behind for 29 min - 1.6 s at 43 datagrams/s, 5.5 s at 13/s; NET clock within +-7 ms
+      of entry, rtt 33-40 ms, loss 0, his own frames 0.0-0.2 s old. A respawn at ~13:23 did not clear it; his
+      re-login at 13:45 did. Alon flying beside him: "he reports that I'm jumping ... his incoming bytes 3100,
+      mine 2200 ... his client is being blasted with packets".
+    - The byte gap was real for two minutes (13:31:30-13:33:30: Meno 36-40 datagrams/s 2.8-3.25 kB/s, Alon 25-28
+      and 2.1-2.45 while his ground objects were still coming into range after the 13:31 take-off) and gone from
+      13:34 (14.0 vs 13.9 datagrams/s at 13:39). Volume does not set the delay (he was worst when traffic was
+      lowest). THE SHAPE of the traffic is the suspect: recorder dump Meno_20261115_131505 - 141 of 160 datagrams
+      to him were AI frames of 33 objects, 35 B each, in volleys of 4-15 datagrams inside 3 ms, four a second.
+      Not shown for THIS onset: the ring held 4 s and the onset was 15-30 s before the dump.
+    - `mlist on` typed at 14:05:38 (web console). To 19:03: 9.5 flying pilot-hours, 8 pilots (Taurus 2.4 h, Meno
+      1.7 h), NO late pilot, probe answers 11-17 ms median / <= 47 ms p95; before it the same day 3.3 flying
+      pilot-hours and the one episode. Meno: 99,929 AI frames in 22,347 datagrams (-78 %); Diver -77 %, SeanTB1
+      and Taurus -66 %. Flying pilots received 6-14 datagrams/s median (24-33 before; the world differs). One
+      evening - encouraging, not proof.
+  CHANGED (server.py):
+    1. MSGLIST_BUNDLE = True (was False since the 8d stable baseline; the console switch did not survive a
+       restart). MSGLIST_SINGLE_WHEN_LATE = True: a pilot the lag watch has confirmed is behind by a count of
+       DATAGRAMS, so bundling would lengthen his delay - _mlist_queue sends his AI frames singly (after flushing
+       what was already queued, order kept) until the watch closes the episode. The onset writes a second
+       LAG-WATCH line saying so; `mlist` lists per pilot how many frames went singly and who is late now;
+       `mlist late on|off`; BASELINE shows mlist_late_single=. `mlist off` is still the instant way back.
+    2. FREEZE watch: the frame gap is counted from the newer of his last frame and his last ServerConfirm.
+       `flying` turns True at the confirm while last_telem_time still belongs to the previous plane, so a
+       heartbeat landing before the new plane's first frame read the whole death->respawn or HQ time as a stall:
+       18 of the 19 'GAME THREAD STALLED' lines of 11-15 (9 s after a crash with an immediate re-fly; Taurus 75 s
+       and 107 s after HQ), each with a junk recorder dump. (Diver 14:51, 48 s, has no death beside it - not
+       examined.) A real stall, and a stall right after a spawn, are still reported.
+    3. Conductor tick over a long silence (_harvest_tick): the tick is 16 bits = 21.8 min a wrap and a pilot in HQ
+       sends no frames; _s16() sees +-10.9 min, so a longer stay lost whole wraps. SpUn 11-15 16:46-17:17 (41 min
+       flown of 203): 31 x 'CLOCK-LAG frames run +2621.4 s behind' + 'CLOCK conductor 16.72/s, his clock is SLOW'
+       = exactly 2 x 65536 ticks, while his probes had his NET clock within 6 ms of ours. Nothing was sent
+       differently (compensation is off). Now a silence >= TICK_UNWRAP_GAP_S (120 s) is unwrapped by the expected
+       advance (the multiple-of-65536 completion of t - prev nearest to gap x 50); if that misses by more than
+       250 ticks + 0.2 % the counter did not continue -> 'TICK-RESYNC ... does not continue the old count - new
+       origin'. A clock that really runs off still shows (test: 0.1 % slow over a 30 min stay reads D=+121).
+    4. LAG-WATCH 'NET clock has moved' needs RINGLAG_CLK_MOVED_N = 3 prompt answers in a row. The reading
+       compares his stamp with our clock when the answer ARRIVES, so one answer held up ~400 ms on its way back
+       reads as -400 ms of clock: SeanTB1 13:43, Mrs_ButtersWorth 14:36 and 14:57 (one answer of 452-468 ms each,
+       the next at -2 / 0 ms). Why those three were all ~400 ms is not known.
+    5. Tank columns: _columns_tick runs each column through _column_tick() under 'except KeyError'. 15:00:08, the
+       arena reset after Great Britain won (Soviet Union eliminated 14:59:33): column 21 promoted 0x022f and the
+       reset deleted it before the next line -> 'driver step failed ... KeyError: 559', one driver step (trains
+       included) lost. Logic unchanged otherwise.
+    6. FLIGHT_REC_UNRMAX 160 -> 6000 (about a minute of a dense world, ~1.3 MB per session at most): a dump taken
+       at the LAG-WATCH verdict now reaches back past the onset. Dumps are up to ~6000 lines.
+  NOT CHANGED: nothing client-side; vcncNet.ini untouched; the pilot notice stays off; planes (10 Hz relay) are
+    still single datagrams; PUSH_2009, LAGPERF, the weather guard as in 8u. No filler traffic for a late pilot -
+    no message has been proven to be a silent no-op in the client.
+  VERIFY after the push:
+    - start: BASELINE '... mlist=True ... mlist_late_single=True'; MSGLIST 'list #1 = N frames' for each pilot
+      who spawns near ground objects; web console `mlist` shows frames/lists per pilot.
+    - a crash followed by an immediate re-fly, and a long HQ stay then a spawn: no FREEZE line.
+    - a pilot who sits 25+ min in HQ and flies again: no CLOCK / CLOCK-LAG line (a TICK-RESYNC line only if his
+      counter really restarted).
+    - a war won with columns on the road: no 'driver step failed'.
+    - lagperf_YYYYMMDD.csv: lagging stays 0; if a pilot is ever confirmed, the LAG-WATCH onset is followed by
+      'his AI frames go out as single datagrams', his tx_pps rises, and the recorder dump covers the minute before.
+    - the comparison that matters: LAG-WATCH onsets per flying pilot-hour over the coming evenings against
+      11-09/11-10 (six onsets, four pilots) and 11-15 before 14:05.
+  Tested offline (_scratch/test_8v.py old-vs-new: tick unwrap 5 cases, FREEZE 4, clock line, column race, bundling
+    incl. a verdict landing mid-volley; _scratch/test_ringlag.py and test_lagperf.py still pass). Compiles. NOT run
+    as a whole server and not against a client - the EMsgList path itself is unchanged from what ran live today.
+  Backup: _scratch/server.py.bak_v968f8u. Patch: _scratch/patch_8v.py.
