@@ -13635,3 +13635,209 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
   VERIFY (Taurus's tests 4-7 again): each must log a DEATH line ending 'plane AND pilot lost' and a
     SCORE line with the pilot-loss term (-760 at his rank, not -560).
   Backup: _scratch/server.py.bak_v968f8p.
+
+2026-11-12  v968f8r-stable  THE LAG IS A SLIPPED INPUT QUEUE IN THE CLIENT (Flakmagic, Taurus, Meno, Bama 11-09/11-10; live v968f8g)
+  REPORTS: "others laggy, ~5 s delay on damage to a scene, twice in 30 min, backed out: menus with no
+    information, timed out" (Flakmagic) / "hits all at once after the plane has passed, planes jumping,
+    cars warping 2-3 truck lengths" (Taurus) / "lag after about 20 min flying" (Meno) / "delay on
+    objects destroyed, 2nd flight" (Bama). Client logs messages86/87 (Flakmagic), 09 (Taurus), 99/00
+    (Meno), 06 (Bama) against run_20261106_154327.
+  NOT THE SERVER, NOT THE LINK: rx thread busy <= 2.2 %, dispatch 0.4 ms, 20-280 datagrams/s for the
+    whole server, loss ~0, transport rtt 28-145 ms, every reliable ACKed at once, the pilots' own
+    frames on time (no CLOCK-LAG).
+  WHAT IT IS: vcncNet.dll hands received datagrams from its input thread to the game thread through a
+    256-slot ring (QInEnqueue 0x1000d206 / QInDequeue 0x1000d14b). The fill counter (0x1001f438) is
+    changed by BOTH threads with a plain INC / DEC - the enqueue under the channel mutex, the dequeue
+    (ProcessMessages 0x1000d388) under no lock at all. On a multi-core PC an overlapping INC and DEC
+    lose one of the two. A lost DEC -> the game reads one empty slot -> its read position is one slot
+    ahead of the write position. One lap of the ring later everything the game is given is a fixed
+    number of datagrams old (100-255) for the rest of the connection; the ring is only reset by a new
+    login (connect routine 0x1000b084). Seconds late = datagrams behind / datagrams per second sent to him.
+  EVIDENCE:
+    - Onset, same picture in every log: the five back-to-back msg-40 datagrams we send every 10 s
+      arrive in one frame until the onset, then ONCE as four (the first of a batch is skipped - exactly
+      what a read position one slot ahead does), then late and spread out for good:
+        Meno 21:35:30 (x4), Bama 21:53:27 (x4), Meno 21:57:01 (x4), Taurus 22:41:29 (x4),
+        Flakmagic 22:34:05 (late), Flakmagic ~23:22.  Six onsets, six different moments.
+    - Meno 11-10, chat against our send times: +0.10 s, +0.10 s, then +11.7 s (first lap, also his
+      'Move1 n=585' object stamps = 11.7 s), then +3.5, +3.5, +2.1, +3.0 s to the end of the session.
+    - Constant in DATAGRAMS, not in seconds - PILOT-LAG lines of run_20261031_075644, RGP_JOLLY
+      00:27-01:01: inbound 16.4 / 15.1 / 10.0 / 8.1 / 6.5 / 5.7 / 4.7 s at 16.7 / 18.1 / 26.5 / 30.6 /
+      39.4 / 43.9 / 54.3 pkt/s = 274 / 273 / 266 / 249 / 256 / 249 / 255 datagrams: the ring size.
+      Others in that run: Inky ~60, Meno ~35, Snoman ~25, Medusa ~10 datagrams, each constant.
+    - A model of the DLL's two routines with one lost DEC reproduces all of it (4-of-5 burst, a mixed
+      first lap with ~125 datagrams thrown away, then a steady delay): _scratch/ringsim_vcnc_inputqueue.py.
+    - In the lobby we send 1-2 datagrams/s, so 150 behind = minutes: the blank menus and the 'Timeout'.
+  WHAT THE SERVER CAN AND CANNOT DO: it cannot realign a client's ring (nothing we send moves his read
+    position; on the model the backlog never shrinks). It can see the state within seconds and say so.
+  CHANGED (server.py):
+    - RING-LAG watch, ON by default. The msg-89 TimeCheck probe (answered by the client's game thread,
+      i.e. after the ring) goes to every in-game session every 10 s (3 s while answers are late),
+      first one 20 s after entry. Late = round trip >= 800 ms over the transport rtt. Three late
+      answers that come back SPACED like the probes went out confirm (a game thread stalled in a load
+      answers them all at once - not counted). We also count the datagrams sent to him while the
+      probe was out = how far behind his ring is.
+    - On confirmation: a 'RING-LAG <pilot>: ... N datagrams behind ... OUT OF STEP' line, a recorder
+      dump (what we sent him before the onset), one line a minute while it lasts (datagram range and
+      seconds range of the episode), and a yellow system line to the pilot, repeated every 5 min:
+        'NETWORK: your game is showing everything about N s late - its incoming message queue has
+         slipped out of step (a fault in the game client, not the server and not your connection).
+         Exit Fighter Ace and log in again to clear it.'
+    - Six probes in a row unanswered while the transport answers: a log line only (tabbed out, long
+      load, or a queue more than a minute behind).
+    - With `timecheck` off (the stable default) the probe answers feed ONLY this watch: no clock
+      reading, no TIMECHECK / CLOCK-REBASE lines.
+    - Console: `ringlag` (who is out of step, by how much), `ringlag on|off`, `ringlag notify on|off`.
+      BASELINE line shows ringlag=.../notify=....
+  NOT CHANGED: mlist / timecheck / clock rebase defaults (stable baseline). `mlist on` is the server-
+    side lever against the trigger (a tick of AI frames becomes ONE datagram = one INC/DEC instead of
+    10-40); try it for an evening and count RING-LAG onsets per pilot-hour against an evening without.
+  THE CURE IS A CLIENT SETTING (not applied - Alon's call): vcncNet.ini, [CLIENT], ProcessAffinityMask=1.
+    The stock DLL reads it at start and calls SetProcessAffinityMask (0x10001ec8); the default -1 fails
+    with error 87 ('Could not set process affinity mask to 0xFFFFFFFF' is the first line of every
+    vcncnet log). On one core an INC and a DEC cannot overlap, so the counter cannot be lost.
+  VERIFY: start -> BASELINE line carries 'ringlag=True/10s notify=True'. `ringlag` on the console lists
+    every in-game pilot as 'ok - last probe back in NN ms'. On the next lag report: grep RING-LAG -
+    the onset line gives the time, the datagram count and the recorder dump; the pilot must have
+    seen the yellow NETWORK line and be smooth after the re-login.
+  Tested offline (_scratch/test_ringlag.py): healthy = silent; 18 s load stall = silent; ring 150
+    behind = confirmed on the 3rd answer, notice sent, per-minute lines 3.1 s @ 50 pkt/s -> 10.1 s @
+    15 pkt/s with the datagram count unchanged; no answers = log line only.
+  Backup: _scratch/server.py.bak_v968f8q.
+
+2026-11-15  v968f8s-stable  LAG WATCH MEASURES THE CLOCK TOO; PILOT NOTICE OFF (Alon 11-15; Meno messages05 / messages15, live v968f8q)
+  ALON: "I don't think this [telling the pilot to re-login] is the correct way to address the issue. We
+    must have some sort of way of detecting lag. It's a clock base issue. Have a look at Meno for the
+    last weekend: 05 lag after 45 minutes, 15 lag after 5 minutes."
+  LIVE was v968f8q (started 11-12 20:40 UTC) for both sessions - the 8r watch was not running, so
+    there is no probe data; everything below is from his two client logs and run_20261112_204018.
+  MENO 11-12 (messages05, login 21:15:50 UTC), onset 22:08:26-22:08:35 (53 min in):
+    - StartPlace replies (request reaches us on time, reply sent at once): read by his game after
+      45-61 ms until 21:58, after 1143 ms at 22:11, 1016 / 956 ms at 22:36, 7581 ms as he left.
+    - The five msg-40 datagrams we send every 10 s, against the server's total send rate:
+        22:04-22:06  on time        45-52 pkt/s
+        22:08-22:18  0.8-1.2 s late  45-103 pkt/s
+        22:20        1.6 s           40
+        22:22-22:26  7.7 / 5.6 / 4.7 s   15 / 18 / 21 pkt/s   (two pilots left)
+        22:28-22:30  4.1 / 2.9 s     32 / 40
+        22:32-22:34  1.1 / 1.0 s     87 / 114
+      Late x pkt/s stays 50-130 while the delay itself swings 1.0 -> 7.7 -> 1.0 s with the traffic.
+    - His game clock, read from his own log ('ERROR: n=.. Object->nMoveCycles=..' gives the cycle
+      counter): against his wall clock it moved 10 cycles (0.2 s) between 21:39:45 and 22:36:27,
+      6 of them before 22:11:40 - no step at the onset.
+  MENO 11-14 (messages15, login 21:40:29 UTC), onset 22:38:16-22:38:28 (58 min in, not 5 - the '5
+    minutes' must be another session): bursts on time to 22:38:15, then 2.1-2.8 s late to the end at
+    135-184 pkt/s, 5.0 s as he left; StartPlace 43-63 ms until 22:37:35, then 2039 / 4967 ms.
+  READING: a clock-base error is a fixed number of seconds and would show in his cycle counter; this
+    delay is a fixed number of DATAGRAMS (it stretches and shrinks with what we send) and his clock
+    did not move. That is still the 8r picture. But it is two sessions without a probe - so the watch
+    now measures both explanations on every answer instead of assuming one.
+  CHANGED (server.py):
+    - Tag LAG-WATCH (was RING-LAG). Every answered probe also yields HIS NET CLOCK AGAINST OURS
+      (ReceiveTime in the answer - our clock when it lands + rtt/2; reference = median of his first
+      3 prompt answers). Onset line, per-minute line and the console list now carry both numbers:
+        'LAGGING - ... 3.1 s late; 155 datagrams went to him meanwhile (50 pkt/s); transport rtt
+         45 ms; his own frames on time; his NET clock is where it was at entry (+0 ms) -> not the
+         clock; the delay sits in his INPUT QUEUE'
+      or '... his NET CLOCK moved -3000 ms against ours since entry -> a CLOCK-BASE fault'.
+    - A NET clock that walks >= 300 ms from its reference while the answers are still prompt gets
+      its own line (every 5 min): 'answers prompt ... but his NET clock has moved +NNN ms'.
+    - Pilot notice OFF by default (`lagwatch notify on` to enable). Nothing is sent to the pilot.
+    - Console: `lagwatch` (alias `ringlag`), `lagwatch on|off`, `lagwatch notify on|off`.
+  VERIFY: BASELINE shows 'ringlag=True/10s notify=False'. `lagwatch` lists every in-game pilot with
+    'last probe back in NN ms ..., NET clock +N ms vs entry'. At the next lag: the LAG-WATCH onset
+    line names the time, the seconds, the datagrams and the clock shift; the per-minute lines show
+    which of the two stays constant.
+  Tested offline (_scratch/test_ringlag.py): queue 150 behind with a steady clock -> 'INPUT QUEUE';
+    late 3 s with the clock moved 3 s -> 'CLOCK-BASE fault'; clock stepped 2.5 s with prompt answers
+    -> the clock line, no LAGGING; healthy / load stall -> silent.
+  Backup: _scratch/server.py.bak_v968f8r.
+
+2026-11-15  ANALYSIS (no code change)  MENO'S LAG LOGS AGAINST THE 2009 LIVE-SERVICE LOG (messages04, 2009-05-16 01:23-04:33)
+  Alon: "compare his logs with the 2009 logs". 2009 client v.258 / protocol 119; Meno v.261 / protocol 120.
+  CLOCK - the same in both eras:
+    - Every spawn logs 'Seconds= Fraction= CurrentTick= StartTime='. In all three logs CurrentTick ==
+      floor(NET_ms / 20) mod 2^32 exactly (10 of 10, 4 of 4, 6 of 6 lines): the game clock IS the vcnc NET
+      clock, no separate base; StartTime == NET_ms mod 2^32.
+    - NET clock minus the PC's own clock at each spawn:
+        2009      +154 +156 | +206 +208 | +250 +252 | +260 +250 | +326 +328 ms  (01:32 .. 04:06, +19 ppm, smooth)
+        Meno 05   -4511 -4509 (21:17) | -4702 -4702 (22:11:40, 3 min AFTER the onset)      (-58 ppm)
+        Meno 15   -4659 (21:41) | -4708 (21:54) | -4852 (22:37:35, 45 s before the onset)   (-57 ppm)
+      Meno's PC clock against OUR clock (StartPlace request times) moved -189 ms / -182 ms over the same
+      spans, so his NET clock against the server moved -2 ms (05, across the onset) and -11 ms (15).
+      The slope is his PC crystal, the NET clock follows the server - as it did in 2009.
+  DELAY:
+    - 2009 request -> reply (69/71/57/23/70): 650-800 ms median for the whole 3 h (300 ms 02:45-03:15), no
+      step. Meno 05: 50-55 ms until 22:00, ~1000 ms (p90 4.5 s) after the onset.
+    - 2009 has ONE stale-object episode: 03:55:23-03:55:30, 190 'Move2 201..352' lines for five planes, gone
+      after 7 s (plus four 'Perform PseudoMove for PPlayer for 109..218 Extra Cycles' = his own PC hitching).
+      Meno's never ends and follows the traffic (1.0 -> 7.7 -> 1.0 s on 11-12).
+  TRAFFIC - the real difference (logged, i.e. non-flight, inbound messages per hour, 2009 / Meno 05 / Meno 15):
+        total        2940 / 6840 / 7390
+        msg 40         58 / 2294 / 2278   2009: one 38-byte message every 60 s, never two together;
+                                          ours: five 58-byte back to back every 10 s (PROD40_UNITS_PERIOD_S)
+        msg 71         52 / 1046 / 1149   2009: only as the answer to 'out 71' (52 out, 52 in); ours pushes ~640/h
+        msg 26          0 /  607 /  634   2009: never received; ours pushes every 5 s
+        msg 43        115 /  227 /  227   2009: one every ~29 s; ours five at 1 s spacing
+        same-ms groups of 5+ messages:  42 / 313 per hour
+    2009 also carries what we do not send: msg 56 (45/h, 4 B), msg 1 (18/h, 600-1450 B), msg 136, 33, 77.
+  NOT ESTABLISHED: that the bursts are the trigger - the logs cannot place an onset inside a burst.
+
+2026-11-15  v968f8t-stable  STANDING LAG/PERFORMANCE RECORD + THE 2009 PUSH CONTRACT + RE OF MSGS 56 / 136 / 77 / 33 / 1
+  ALON: "1. we need a constant server log for lag and performance, so that we always have data to compare when a
+    player reports lag. 2. try and match the data as you suggested. Also RE: 56, 1, 136, 33, 77."
+  1. LAGPERF (server.py, web_server.py)
+    - logs/lagperf_YYYYMMDD.csv, one file per UTC day, written every PERF window (30 s), ALWAYS: one SERVER row
+      + one row per connected pilot (lobby, HQ, flying, under a canopy). 44 columns:
+        link      rtt_ms, rtt_last_ms, loss_dl_pct, loss_ul_pct
+        game      probe_ms, probe_age_s, late_ms, late_max_ms (worst answer in the window), behind_dgrams,
+                  netclock_ms (his NET clock vs entry), lagging, lag_min, probes_ans, probes_out
+        traffic   tx_pps, tx_kbs (to him), rx_pps, rx_kbs (from him)
+        frames    frames_age_s, tick_lag_s
+        SERVER    sessions, in_game, flying, srv_rx_pps, srv_tx_pps, srv_tx_kbs, ai_tx_kbs, rxthread_busy_pct,
+                  disp_avg_ms, disp_max_ms, rx_late_pct, gc_ms, sendq, threads, rss_mb, tanks, soldiers, trains
+    - Listed and downloadable like a run log (web_server.py: LOG_EXT_OK accepts .csv). Kept 60 days.
+    - Console: `lagperf` (file, rows written, write errors), `lagperf on|off`. BASELINE shows lagperf=.
+    - The game columns come from the 8r/8s probe, so `lagwatch` must stay on (default).
+  2. THE 2009 PUSH CONTRACT (server.py) - PUSH_2009 = True
+    - msg 40: one camp per send, camps in rotation, each camp once per 60 s (was: all five back to back
+      every 10 s). 1800/h -> 300/h, never two together.
+    - msg 71: the unsolicited 8-scene chunk every 10 s is gone (-360 x 671 B per hour); every out 69 / out 71
+      is still answered, the panel-open push and the join-time state are unchanged.
+    - msg 26: the 5 s push after a map poll is gone; the client's own poll (~30 s) is answered.
+    - msg 43: one camp score per 30 s in rotation (was five at 1 s spacing every 80 s). 227/h -> 120/h.
+    - Expected: logged non-flight messages 6840/h -> ~3600/h (2009: 2940/h); ~0.12 KB/s less per pilot.
+      The larger gain is ~2900 fewer datagrams an hour and no five-at-once groups.
+    - COST: HQ / Ctrl-L unit counts are corrected once a minute per camp (the client overwrites them every
+      60 s - v663f5); map unit boxes move on the client's 30 s poll; a camp's Ctrl-L score refreshes every 150 s.
+    - Console: `push2009` (state), `push2009 on|off`, `push2009 40|71|26|43 on|off` (each back to the old cadence).
+    - NOT done: 2009 packed 47 % of these messages into msg-13 compounds (474/h, 2.4 messages each: 43+56,
+      40+chat ...). Ours: 7-15 %. Bundling same-tick pushes per client is the next step toward 1780 datagrams/h.
+  3. RE (FA.exe; handlers found from the dispatch-table writes at 0xc81ed8 + id*4)
+    - msg 56 (0x38) -> 0x4fa140, 4 bytes [0x38][u16 scene][u8 state]: scene[+0x58] = state. It is the single-
+      scene form of the State field that msg 42 carries in bits 3-7 of every scene byte (Trn.cpp FUN_0055d100:
+      camp = b & 7, state = (s8)b >> 3). Sibling of msg 41 CaptureScene (0x4fa110, same [u16 scene][u8]).
+      2009: 45/h, often in one compound with msg 43. We send state 0 in msg 42 and never msg 56. What the
+      values mean is NOT pinned (no reader of scene+0x58 found yet; the client's printer only shows the number).
+    - msg 136 (0x88) -> 0x4f8ce0, 6 bytes [0x88][a][plane 0..127][b][c][d] -> FUN_004f7360 on the GAME_DEF:
+      PLANE[idx] (ARR<GAME_DEF_BASE::PLANE,128>, 0x1c each, at +0x558): +0 = a, +4 = 1, +8 = b, +0xc = c,
+      +0x10 = d; b = c = d = 0 clears +4..+0x10. A live edit of one plane type's entry in the arena's plane
+      set (2009: 36 in 3 h, in pairs, in a limited-plane 'Battle' event). Field meanings not pinned.
+    - msg 77 (0x4d) -> 0x4f4080 -> FUN_0047a6f0(counts, 0x80): [0x4d] + 128 x u16 = how many of each plane
+      type are in the game (2009: in 77'257 right after every out 23 spawn request: 'There are 56 of B-17G
+      in game now. Preload it'). The client preloads those models before the flight. We swallow the client's
+      out 77 and send nothing, so every new plane type is loaded at first sight in flight (Meno 11-14:
+      59 x 'LOAD OBJECT ... CN_Lod' at 22:28:51). A wrong type index asserts (Pln_Info.cpp:192) - not sent yet.
+    - msg 33 (0x21) -> 0x4f9ad0: the kill-credit / ExitEvent message we already build (build_bail_credit_33 /
+      build_kill_banner_33, v541f5); 2009 14 B. None in Meno's two logs because no such bail happened.
+    - msg 1: not in the game dispatch table (slot 0xc81edc is never written). All 57 are in the lobby
+      (01:24-01:29, 03:04), in runs of 1452 B pieces followed by one large message (in 206'4949, in 202'3350):
+      the pieces of a message too big for one datagram. We send those lists in small messages instead.
+  ALSO SEEN: Meno 11-12 from 22:11:40 - 'in 67'17 / out 67'17' answering each other for 25 min; 60 a minute
+    while he was ~1 s late, 10 a minute while ~6 s late: one cycle per trip through his delayed queue.
+  VERIFY: BASELINE line ends 'lagperf=True push2009=True (40=True 71=True 26=True 43=True)'. After a minute
+    with a pilot online: LAGPERF line names the csv; `lagperf` shows rows growing. Client log of a TC session:
+    away from the map / production panel (no 'out 69' nearby) 'in 40'58' comes about 5 a minute, one at a
+    time; no 'in 71'671' every 10 s; 'in 26' only after 'out 26'.
+  Tested offline: _scratch/test_lagperf.py (rows / columns / rates), py_compile of both files. Not run live.
+  Backups: _scratch/server.py.bak_v968f8s, _scratch/web_server.py.bak_v968f8s.

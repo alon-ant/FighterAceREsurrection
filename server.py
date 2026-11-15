@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8q-stable'
+VERSION = 'v968f8t-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7327,7 +7327,8 @@ def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
-                    f'freezewatch={FREEZE_WATCH}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes]')   # v968f8d
+                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe] lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
+                    f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
 def console_handler():
     log('CONSOLE', 'Ready. Commands: say | gen | list | mod | unmod | mods | ban | unban | bans | gags | destroy | cleanup | update | loglevel | logmute | logtags | help')
@@ -7598,6 +7599,49 @@ def console_handler():
                                f'nak fast retransmit={"ON" if NAK_FAST_RETX else "off"} | mlist bundling={"ON" if MSGLIST_BUNDLE else "off"} | '
                                f'load-hold={"ON" if LOAD_HOLD else "off"} | freeze watch={"ON" if FREEZE_WATCH else "off"}  '
                                f'(`timecheck|nak|mlist|loadhold|freezewatch on|off`)')
+            elif cmd == 'push2009':                                                     # v968f8t: push2009 [on|off] | push2009 40|71|26|43 on|off
+                _a = [x.lower() for x in (parts[1].split() if len(parts) > 1 else [])]
+                if _a and _a[0] in ('on', 'off'):
+                    globals()['PUSH_2009'] = (_a[0] == 'on')
+                elif len(_a) >= 2 and _a[0] in ('40', '71', '26', '43') and _a[1] in ('on', 'off'):
+                    globals()['PUSH2009_' + _a[0]] = (_a[1] == 'on')
+                log('CONSOLE', f'2009 push contract = {"ON" if PUSH_2009 else "off"}: '
+                               + ', '.join(f'msg {k} {"2009" if _p2009(k) else "old"}' for k in ('40', '71', '26', '43'))
+                               + f'  (40: one camp per send, each camp every {PUSH2009_40_CAMP_S:g} s | 71/26: on request only | '
+                                 f'43: one camp per {PUSH2009_43_S:g} s; `push2009 on|off`, `push2009 40|71|26|43 on|off`)')
+            elif cmd == 'lagperf':                                                      # v968f8t: lagperf [on|off]
+                _a = [x.lower() for x in (parts[1].split() if len(parts) > 1 else [])]
+                if _a and _a[0] in ('on', 'off'):
+                    globals()['LAGPERF_LOG'] = (_a[0] == 'on')
+                log('CONSOLE', f'lag/performance record = {"ON" if LAGPERF_LOG else "off"}: {_lagperf_state["path"] or _lagperf_path(time.time())} '
+                               f'({_lagperf_state["rows"]} row(s) this run, {_lagperf_state["err"]} write error(s), every {PERF_STATS_INTERVAL:g} s, '
+                               f'kept {LAGPERF_KEEP_DAYS} days; `lagperf on|off`)')
+            elif cmd in ('ringlag', 'lagwatch'):                                        # v968f8r/8s: lagwatch [on|off] | lagwatch notify on|off
+                global RINGLAG_WATCH, RINGLAG_NOTIFY
+                _a = [x.lower() for x in (parts[1].split() if len(parts) > 1 else [])]
+                if _a and _a[0] in ('on', 'off'):
+                    RINGLAG_WATCH = (_a[0] == 'on')
+                elif len(_a) >= 2 and _a[0] == 'notify' and _a[1] in ('on', 'off'):
+                    RINGLAG_NOTIFY = (_a[1] == 'on')
+                log('CONSOLE', f'lag watch = {"ON" if RINGLAG_WATCH else "off"}, pilot notice = {"ON" if RINGLAG_NOTIFY else "off"} '
+                               f'(msg-89 probe every {RINGLAG_PROBE_S:g} s / {RINGLAG_FAST_PROBE_S:g} s while late; late = round trip >= {RINGLAG_MIN_MS} ms '
+                               f'over the transport rtt; {RINGLAG_CONFIRM_N} spaced late answers confirm; `ringlag on|off`, `ringlag notify on|off`)')
+                _now_rl = time.time()
+                for _s in get_all_sessions():
+                    if not getattr(_s, 'entered_game', False):
+                        continue
+                    _d = _s.__dict__; _l = _d.get('_rl_last')
+                    if _l is None:
+                        log('CONSOLE', f'  {_s.current_pilot}: no probe answered yet ({len(_d.get("_rl_pend") or {})} out)')
+                    elif _d.get('_rl_on'):
+                        log('CONSOLE', f'  {_s.current_pilot}: LAGGING - {(_l[1] - _l[2]) / 1000.0:.1f} s late = {_l[3]} datagrams, '
+                                       f'NET clock {"ref not set" if _l[4] is None else f"{_l[4]:+d} ms vs entry"}, '
+                                       f'for {(_now_rl - _d["_rl_on"]) / 60.0:.0f} min (episode {_d.get("_rl_ms_min", 0) / 1000.0:.1f}-{_d.get("_rl_ms_max", 0) / 1000.0:.1f} s, '
+                                       f'{_d.get("_rl_pk_min")}-{_d.get("_rl_pk_max")} datagrams); last answer {_now_rl - _l[0]:.0f} s ago, transport rtt {_l[2]} ms')
+                    else:
+                        log('CONSOLE', f'  {_s.current_pilot}: ok - last probe back in {_l[1]} ms (transport rtt {_l[2]} ms), '
+                                       f'NET clock {"ref not set" if _l[4] is None else f"{_l[4]:+d} ms vs entry"}, '
+                                       f'{_d.get("_rl_n", 0)} answered, {_d.get("_rl_episodes", 0)} episode(s) this session')
             elif cmd == 'mlist':                                                        # v968f7x: mlist [on|off]  (EMsgList bundling of AI frames)
                 # (MSGLIST_BUNDLE is declared global in the `features` block above - one declaration per function)
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -12825,6 +12869,145 @@ try:
 except Exception:
     pass
 
+# --- v968f8t [LAGPERF: THE STANDING LAG / PERFORMANCE RECORD] (Alon 11-15: 'a constant server log for lag and
+# performance, so that we always have data to compare when a player reports lag') ------------------------
+# One CSV per UTC day in the logs dir (lagperf_YYYYMMDD.csv, downloadable from the admin Logs tab / the log
+# API like any run log). Every PERF window (30 s) writes one SERVER row and one row per connected pilot -
+# always, whether or not anybody is lagging, so a report made a day later has the minutes before, during
+# and after it for the pilot AND for everyone else in the room. Columns:
+#   utc, kind (SERVER|PILOT), pilot, sid, room, state (lobby|hq|fly|chute)
+#   -- his link:      rtt_ms (transport, STATUS), rtt_last_ms, loss_dl_pct, loss_ul_pct
+#   -- his game:      probe_ms (last msg-89 round trip), probe_age_s, late_ms (probe - rtt), late_max_ms (worst in
+#                     the window), behind_dgrams (datagrams sent to him while that probe was out),
+#                     netclock_ms (his NET clock vs entry), lagging (1 = LAG-WATCH episode open), lag_min,
+#                     probes_ans (answers in the window), probes_out (unanswered > 5 s)
+#   -- traffic:       tx_pps, tx_kbs (to him), rx_pps, rx_kbs (from him)
+#   -- his frames:    frames_age_s (since his last flight frame), tick_lag_s (frames late vs wall clock)
+#   -- SERVER row:    sessions, in_game, flying, srv_rx_pps, srv_tx_pps, srv_tx_kbs, ai_tx_kbs, rxthread_busy_pct,
+#                     disp_avg_ms, disp_max_ms, rx_late_pct, gc_ms, sendq, threads, rss_mb, tanks, soldiers, trains
+# Console: `lagperf` (file + state), `lagperf on|off`. Files older than LAGPERF_KEEP_DAYS are removed.
+LAGPERF_LOG       = True
+LAGPERF_KEEP_DAYS = 60
+_LAGPERF_COLS = ['utc', 'kind', 'pilot', 'sid', 'room', 'state',
+                 'rtt_ms', 'rtt_last_ms', 'loss_dl_pct', 'loss_ul_pct',
+                 'probe_ms', 'probe_age_s', 'late_ms', 'late_max_ms', 'behind_dgrams', 'netclock_ms', 'lagging', 'lag_min',
+                 'probes_ans', 'probes_out',
+                 'tx_pps', 'tx_kbs', 'rx_pps', 'rx_kbs', 'frames_age_s', 'tick_lag_s',
+                 'sessions', 'in_game', 'flying', 'srv_rx_pps', 'srv_tx_pps', 'srv_tx_kbs', 'ai_tx_kbs',
+                 'rxthread_busy_pct', 'disp_avg_ms', 'disp_max_ms', 'rx_late_pct', 'gc_ms', 'sendq', 'threads', 'rss_mb',
+                 'tanks', 'soldiers', 'trains']
+_lagperf_lock = threading.Lock()
+_lagperf_state = {'path': None, 'rows': 0, 'err': 0}
+
+def _lagperf_path(now):
+    return os.path.join(LOG_DIR, 'lagperf_' + time.strftime('%Y%m%d', time.gmtime(now)) + '.csv')
+
+def _lagperf_prune(now):
+    try:
+        for nm in os.listdir(LOG_DIR):
+            if nm.startswith('lagperf_') and nm.endswith('.csv'):
+                fp = os.path.join(LOG_DIR, nm)
+                if now - os.path.getmtime(fp) > LAGPERF_KEEP_DAYS * 86400.0:
+                    os.remove(fp)
+    except Exception:
+        pass
+
+def _lagperf_write(w, iv):
+    """One SERVER row + one row per connected pilot for the PERF window that just closed."""
+    if not LAGPERF_LOG:
+        return
+    try:
+        now = time.time()
+        with sl:
+            sess = list(sids.values())
+        if not sess:
+            return
+        ts = time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(now))
+        rows = []
+        srv = {'utc': ts, 'kind': 'SERVER',
+               'sessions': len(sess),
+               'in_game': sum(1 for x in sess if getattr(x, 'entered_game', False)),
+               'flying': sum(1 for x in sess if getattr(x, 'flying', False)),
+               'srv_rx_pps': f'{w["rx"] / iv:.1f}', 'srv_tx_pps': f'{w["tx"] / iv:.1f}',
+               'srv_tx_kbs': f'{w["txb"] / iv / 1024.0:.1f}', 'ai_tx_kbs': f'{w.get("aib", 0) / iv / 1024.0:.1f}',
+               'rxthread_busy_pct': f'{100.0 * w["disp_t"] / iv:.1f}',
+               'disp_avg_ms': f'{(1000.0 * w["disp_t"] / w["disp_n"]) if w["disp_n"] else 0.0:.2f}',
+               'disp_max_ms': f'{1000.0 * w["disp_max"]:.1f}',
+               'rx_late_pct': f'{100.0 * w["rx_backlog"] / max(1, w["rx"]):.1f}',
+               'gc_ms': f'{1000.0 * w["gc_t"]:.0f}',
+               'threads': threading.active_count(),
+               'tanks': len(TANKS), 'soldiers': len(SOLDIERS), 'trains': len(TRAINS)}
+        try:
+            srv['sendq'] = _send_pool._work_queue.qsize()
+        except Exception:
+            pass
+        try:
+            _m = _process_rss_mb()
+            if _m is not None:
+                srv['rss_mb'] = f'{_m:.0f}'
+        except Exception:
+            pass
+        rows.append(srv)
+        for s in sess:
+            d = s.__dict__
+            name = getattr(s, 'current_pilot', None) or getattr(s, 'account', None)
+            if not name:
+                continue
+            r = {'utc': ts, 'kind': 'PILOT', 'pilot': str(name).replace(',', ';'), 'sid': getattr(s, 'sid', ''),
+                 'room': getattr(s, 'current_room', '') if getattr(s, 'current_room', None) is not None else '',
+                 'state': ('fly' if getattr(s, 'flying', False) else
+                           'chute' if getattr(s, 'para_obj_number', None) is not None else
+                           'hq' if getattr(s, 'entered_game', False) else 'lobby')}
+            if d.get('_rtt_ms') is not None:
+                r['rtt_ms'] = d['_rtt_ms']
+            if d.get('_rtt_last_s') is not None:
+                r['rtt_last_ms'] = int(d['_rtt_last_s'] * 1000)
+            if getattr(s, '_statreply_n', 0):
+                r['loss_dl_pct'] = f'{getattr(s, "_loss_dl_ewma", 0.0) * 100:.1f}'
+                r['loss_ul_pct'] = f'{getattr(s, "_loss_ul_ewma", 0.0) * 100:.1f}'
+            _l = d.get('_rl_last')
+            if _l is not None:
+                r['probe_ms'] = _l[1]; r['probe_age_s'] = f'{now - _l[0]:.0f}'
+                r['late_ms'] = max(0, _l[1] - _l[2]); r['behind_dgrams'] = _l[3]
+                if len(_l) > 4 and _l[4] is not None:
+                    r['netclock_ms'] = _l[4]
+            _wm = d.pop('_rl_win_max', None)
+            if _wm is not None:
+                r['late_max_ms'] = max(0, _wm)
+            r['probes_ans'] = d.pop('_rl_win_n', 0)
+            r['probes_out'] = sum(1 for (t, _n) in list((d.get('_rl_pend') or {}).values()) if now - t > 5.0)
+            r['lagging'] = 1 if d.get('_rl_on') else 0
+            if d.get('_rl_on'):
+                r['lag_min'] = f'{(now - d["_rl_on"]) / 60.0:.1f}'
+            cur = (now, getattr(s, 'pkt_tx_n', 0), getattr(s, 'byte_tx_n', 0), getattr(s, 'pkt_rx_n', 0), getattr(s, 'byte_rx_n', 0))
+            prev = d.get('_lp_prev'); d['_lp_prev'] = cur
+            if prev is not None and now - prev[0] > 1.0:
+                dt = now - prev[0]
+                r['tx_pps'] = f'{(cur[1] - prev[1]) / dt:.1f}'; r['tx_kbs'] = f'{(cur[2] - prev[2]) / dt / 1024.0:.2f}'
+                r['rx_pps'] = f'{(cur[3] - prev[3]) / dt:.1f}'; r['rx_kbs'] = f'{(cur[4] - prev[4]) / dt / 1024.0:.2f}'
+            lt = getattr(s, 'last_telem_time', 0.0)
+            if lt and getattr(s, 'flying', False):
+                r['frames_age_s'] = f'{now - lt:.1f}'
+            if d.get('_tick_lag') is not None and getattr(s, 'flying', False):
+                r['tick_lag_s'] = f'{d["_tick_lag"] / TICK_RATE_DEFAULT:+.2f}'
+            rows.append(r)
+        path = _lagperf_path(now)
+        with _lagperf_lock:
+            new = not os.path.exists(path)
+            with open(path, 'a', encoding='utf-8', newline='') as f:
+                if new:
+                    f.write(','.join(_LAGPERF_COLS) + '\n')
+                for r in rows:
+                    f.write(','.join(str(r.get(c, '')) for c in _LAGPERF_COLS) + '\n')
+            if new or _lagperf_state['path'] != path:
+                log('LAGPERF', f'standing lag/performance record -> {path} (one SERVER row + one row per pilot every {iv:.0f} s)')
+                _lagperf_prune(now)
+            _lagperf_state['path'] = path; _lagperf_state['rows'] += len(rows)
+    except Exception:
+        _lagperf_state['err'] += 1
+        if _lagperf_state['err'] in (1, 10, 100):
+            logx('LAGPERF', 'write failed')
+
 def _perf_stats_loop():
     while running:
         time.sleep(PERF_STATS_INTERVAL)
@@ -12832,6 +13015,7 @@ def _perf_stats_loop():
             continue
         w = dict(_perf)
         for k in _perf: _perf[k] = 0 if isinstance(_perf[k], int) else 0.0
+        _lagperf_write(w, PERF_STATS_INTERVAL)               # v968f8t: before the idle-window skip - pilots in a quiet lobby are rows too
         if w['rx'] == 0 and w['tx'] == 0:
             continue                      # idle window - keep the log clean
         iv = PERF_STATS_INTERVAL
@@ -14077,6 +14261,11 @@ def send_timecheck_89(s):
         send_ms = (int((time.time() + NTP_UNIX_OFFSET_S) * 1000) - TIMECHECK_SEND_BIAS_MS) & 0xFFFFFFFF
         pend = s.__dict__.setdefault('_tc89_pending', {})
         pend[send_ms] = time.time()
+        _rlp = s.__dict__.setdefault('_rl_pend', {})                          # v968f8r: ring-lag watch - when, and how many datagrams he had been sent
+        _rlp[send_ms] = (pend[send_ms], getattr(s, 'pkt_tx_n', 0))
+        for k in [k for k in _rlp if pend[send_ms] - _rlp[k][0] > RINGLAG_PEND_KEEP_S]:
+            _rlp.pop(k, None)
+        _ringlag_silence_check(s, pend[send_ms])
         for k in [k for k in pend if time.time() - pend[k] > 30.0]:
             pend.pop(k, None)
         # v968f7h: EXACT 5-byte form (the client's own reply is exactly 9 bytes; a padded 17-byte body
@@ -14150,6 +14339,204 @@ def _pilot_lag_sample(s, send_ms, recv_ms, rtt, now):
     except Exception:
         pass
 
+# --- v968f8r [RING-LAG: THE CLIENT'S INPUT QUEUE IS OUT OF STEP] ------------------------------------------
+# The lag reports of 11-09/11-10 (Flakmagic, Taurus, Meno, Bama: "hits land all at once", "cars warp",
+# "5 s delay on damage", "menus with no information - timed out") are ONE client fault, not load, not
+# the link, not a clock. vcncNet.dll keeps the datagrams its input thread has received in a 256-slot
+# ring until the game thread collects them (vcncUpdate -> ProcessMessages 0x1000d388):
+#     QInEnqueue 0x1000d206 (input thread, under the channel mutex):  tail++, slot[tail] = pkt, count++
+#     QInDequeue 0x1000d14b (game thread, NO lock):                    pkt = slot[head], head++, count--
+# 'count' is one dword (0x1001f438) both threads change with a plain INC / DEC (FF 05 / FF 0D, no LOCK
+# prefix). On a single-core PC that is safe; on a multi-core PC an INC and a DEC that overlap lose one
+# of the two. A lost DEC leaves count one too high: the game thread reads one EMPTY slot and from then
+# on its read position is one slot ahead of the write position. For one lap of the ring the first
+# datagram of every batch is skipped (a 5-datagram burst arrives as 4 - seen at every onset in the
+# client logs), the skipped ones come out a lap late and each pushes a fresh datagram out ('slot
+# occupied' branch); after that lap the ring carries a fixed backlog of N datagrams and EVERYTHING is
+# handed to the game exactly N datagrams late, for the rest of the connection (the ring is only
+# re-initialised in the connect routine 0x1000b084, i.e. by a new login). Late in SECONDS = N / (datagrams per second
+# we send him): 2-5 s in a busy fight, 10-30 s in a quiet arena, minutes in the lobby (blank menus,
+# 'Timeout'). The transport is untouched (the input thread ACKs at once: rtt 30-140 ms, 0 % loss), his
+# own frames reach us on time - which is why none of our meters saw it.
+# PROOF in our own logs: the v968f7s PILOT-LAG lines (run_20261031_075644, RGP_JOLLY 00:27-01:01):
+# inbound delay 16.4 / 15.1 / 10.0 / 8.1 / 6.5 / 5.7 / 4.7 s while we sent him 16.7 / 18.1 / 26.5 /
+# 30.6 / 39.4 / 43.9 / 54.3 pkt/s - the product is 274 / 273 / 266 / 249 / 256 / 249 / 255: the ring size.
+# The server cannot repair a client's ring. It CAN see the state at once and tell the pilot the one
+# thing that clears it. Msg 89 (TimeCheck, v968f7e) is answered by the game thread, so its round trip
+# is transport rtt + his queue backlog; we also count the datagrams we sent him while the probe was
+# out - that is N. Three late answers that come back SPACED like the probes went out = a slipped ring
+# (a game thread that was merely stalled in a load answers them all at once, and is not counted).
+# Console: `ringlag` (status), `ringlag on|off`, `ringlag notify on|off`.
+RINGLAG_WATCH           = True     # msg-89 probe to every in-game session (1 small unreliable datagram per RINGLAG_PROBE_S)
+RINGLAG_NOTIFY          = False    # v968f8s: OFF (Alon 11-15: a 're-login' line to the pilot is not the way to address it). `ringlag notify on`
+RINGLAG_PROBE_S         = 10.0
+RINGLAG_FAST_PROBE_S    = 3.0      # while late answers are coming in / an episode is open
+RINGLAG_FIRST_PROBE_S   = 20.0     # after entering: let the arena load first
+RINGLAG_MIN_MS          = 800      # (probe round trip - transport rtt) above this = a late answer
+RINGLAG_CONFIRM_N       = 3        # spaced late answers in a row
+RINGLAG_CLEAR_N         = 3        # prompt answers in a row that close an episode
+RINGLAG_LOG_S           = 60.0
+RINGLAG_NOTIFY_REPEAT_S = 300.0
+RINGLAG_PEND_KEEP_S     = 600.0    # an answer is accepted this long after its probe (lobby-rate backlogs take minutes)
+RINGLAG_SILENT_N        = 6        # this many probes in a row unanswered while his transport answers = log line (paused game or deaf queue)
+# v968f8s [BOTH EXPLANATIONS MEASURED BY THE SAME PROBE] (Alon 11-15: 'it's a clock base issue'). The answer
+# carries ReceiveTime = his vcnc NET clock at the instant his game thread handled the probe, and it leaves at
+# once on an uplink that is prompt - so (ReceiveTime - our clock when the answer lands + rtt/2) is HIS NET CLOCK
+# AGAINST OURS, whatever happened to the probe on the way in. The first prompt answers set the reference; every
+# line then shows two numbers side by side:
+#     late N s = D datagrams sent meanwhile      (a slipped input queue: D stays put, N follows the traffic)
+#     NET clock moved M ms since entry            (a clock-base fault: M is of the order of N, D is anything)
+# and the verdict is taken from them, not from a theory.
+RINGLAG_CLK_REF_N       = 3        # prompt answers that set his NET-clock reference
+RINGLAG_CLK_MOVED_MS    = 300      # NET clock this far from the reference = 'moved'
+
+def _ringlag_period(s):
+    d = s.__dict__
+    return RINGLAG_FAST_PROBE_S if (d.get('_rl_streak', 0) > 0 or d.get('_rl_on')) else RINGLAG_PROBE_S
+
+def _ringlag_due(s, now):
+    """True when the ring-lag watch wants a probe sent to s now."""
+    if not RINGLAG_WATCH or getattr(s, 'closing', False):
+        return False
+    d = s.__dict__
+    if now - d.setdefault('_rl_enter', now) < RINGLAG_FIRST_PROBE_S:
+        return False
+    return now - d.get('_tc89_sent', 0.0) >= _ringlag_period(s)
+
+def _ringlag_notice(s, lag_s):
+    try:
+        _txt = (f'NETWORK: your game is showing everything about {max(1, int(round(lag_s)))} s late - its incoming message queue '
+                f'has slipped out of step (a fault in the game client, not the server and not your connection). '
+                f'Exit Fighter Ace and log in again to clear it.')
+        _submit_send(send_system_msg, s, _txt)
+    except Exception:
+        logx('LAG-WATCH', 'notice failed')
+
+def _ringlag_clock(d, recv_ms, now, net_ms, prompt):
+    """His NET clock against ours from one answer (ms, signed); returns (reading, shift vs reference or None)."""
+    if recv_ms is None:
+        return None, None
+    clk = (int(recv_ms) - (int((now + NTP_UNIX_OFFSET_S) * 1000) & 0xFFFFFFFF)) & 0xFFFFFFFF
+    if clk >= 0x80000000:
+        clk -= 0x100000000
+    clk += net_ms // 2
+    ref = d.get('_rl_clk_ref')
+    if ref is None and prompt:
+        _f = d.setdefault('_rl_clk_first', [])
+        _f.append(clk)
+        if len(_f) >= RINGLAG_CLK_REF_N:
+            ref = d['_rl_clk_ref'] = sorted(_f)[len(_f) // 2]
+    d['_rl_clk'] = clk
+    return clk, (None if ref is None else clk - ref)
+
+def _ringlag_verdict(lag_ms, shift):
+    if shift is None:
+        return 'no NET-clock reference yet (he was already late when the first answers came)'
+    if abs(shift) >= max(RINGLAG_CLK_MOVED_MS, 0.5 * lag_ms):
+        return f'his NET CLOCK moved {shift:+d} ms against ours since entry -> a CLOCK-BASE fault'
+    if abs(shift) >= RINGLAG_CLK_MOVED_MS:
+        return f'his NET clock moved {shift:+d} ms since entry, far less than the delay -> mostly his INPUT QUEUE'
+    return f'his NET clock is where it was at entry ({shift:+d} ms) -> not the clock; the delay sits in his INPUT QUEUE'
+
+def _ringlag_sample(s, send_ms, now, recv_ms=None):
+    """One answered msg-89 probe: round trip against the transport rtt, the datagrams sent meanwhile, and
+    (v968f8s) his NET clock against ours."""
+    try:
+        if not RINGLAG_WATCH:
+            return
+        d = s.__dict__
+        rec = (d.get('_rl_pend') or {}).pop(send_ms, None)
+        if rec is None:
+            return
+        t_sent, tx0 = rec
+        app_ms = int((now - t_sent) * 1000)
+        net_ms = int(d.get('_rtt_ms') or 0)
+        lag_ms = app_ms - net_ms
+        pk = max(0, getattr(s, 'pkt_tx_n', 0) - tx0)
+        clk, shift = _ringlag_clock(d, recv_ms, now, net_ms, lag_ms < RINGLAG_MIN_MS)
+        d['_rl_last'] = (now, app_ms, net_ms, pk, shift)
+        d['_rl_n'] = d.get('_rl_n', 0) + 1
+        d['_rl_win_n'] = d.get('_rl_win_n', 0) + 1                    # v968f8t: for the LAGPERF row of this window
+        d['_rl_win_max'] = max(d.get('_rl_win_max', lag_ms), lag_ms)
+        name = getattr(s, 'current_pilot', '?')
+        _clk_txt = 'NET clock ref not set' if shift is None else f'NET clock {shift:+d} ms vs entry'
+        if lag_ms < RINGLAG_MIN_MS:
+            d['_rl_streak'] = 0; d['_rl_prev_late'] = None
+            # a clock that walks off while the answers are still prompt is worth a line of its own
+            if shift is not None and abs(shift) >= RINGLAG_CLK_MOVED_MS and now - d.get('_rl_clk_logged', 0.0) >= 300.0:
+                d['_rl_clk_logged'] = now
+                log('LAG-WATCH', f'{name}: answers prompt ({app_ms} ms, transport {net_ms} ms) but his NET clock has moved {shift:+d} ms '
+                                 f'against ours since entry (flying={getattr(s, "flying", False)})')
+            if d.get('_rl_on'):
+                d['_rl_okn'] = d.get('_rl_okn', 0) + 1
+                if d['_rl_okn'] >= RINGLAG_CLEAR_N:
+                    log('LAG-WATCH', f'{name}: answers are prompt again ({app_ms} ms, transport {net_ms} ms, {_clk_txt}) - episode closed after '
+                                     f'{(now - d["_rl_on"]) / 60.0:.1f} min')
+                    d['_rl_on'] = None; d['_rl_okn'] = 0
+            return
+        d['_rl_okn'] = 0
+        prev = d.get('_rl_prev_late')                       # (answer time, probe time) of the previous late answer
+        d['_rl_prev_late'] = (now, t_sent)
+        # answers that come back bunched = his game thread was stalled (a load) and answered them all at once
+        spaced = prev is not None and (now - prev[0]) >= 0.6 * max(0.5, t_sent - prev[1])
+        if prev is None or not spaced:
+            d['_rl_streak'] = 1; d['_rl_first_late'] = t_sent
+        else:
+            d['_rl_streak'] = d.get('_rl_streak', 0) + 1
+        pps = pk / max(0.2, app_ms / 1000.0)
+        if d.get('_rl_on'):
+            d['_rl_pk_min'] = min(d.get('_rl_pk_min', pk), pk); d['_rl_pk_max'] = max(d.get('_rl_pk_max', pk), pk)
+            d['_rl_ms_min'] = min(d.get('_rl_ms_min', lag_ms), lag_ms); d['_rl_ms_max'] = max(d.get('_rl_ms_max', lag_ms), lag_ms)
+            if now - d.get('_rl_logged', 0.0) >= RINGLAG_LOG_S:
+                d['_rl_logged'] = now
+                log('LAG-WATCH', f'{name}: still {lag_ms / 1000.0:.1f} s late = {pk} datagrams at {pps:.0f} pkt/s; {_clk_txt} '
+                                 f'(this episode {d["_rl_ms_min"] / 1000.0:.1f}-{d["_rl_ms_max"] / 1000.0:.1f} s, {d["_rl_pk_min"]}-{d["_rl_pk_max"]} datagrams), '
+                                 f'{(now - d["_rl_on"]) / 60.0:.0f} min so far, transport rtt {net_ms} ms '
+                                 f'(flying={getattr(s, "flying", False)})')
+            if RINGLAG_NOTIFY and now - d.get('_rl_told', 0.0) >= RINGLAG_NOTIFY_REPEAT_S:
+                d['_rl_told'] = now
+                _ringlag_notice(s, lag_ms / 1000.0)
+            return
+        if d['_rl_streak'] >= RINGLAG_CONFIRM_N:
+            d['_rl_on'] = now; d['_rl_logged'] = now; d['_rl_episodes'] = d.get('_rl_episodes', 0) + 1
+            d['_rl_pk_min'] = d['_rl_pk_max'] = pk; d['_rl_ms_min'] = d['_rl_ms_max'] = lag_ms
+            _since = time.strftime('%H:%M:%S', time.gmtime(d.get('_rl_first_late', now)))
+            _D = d.get('_tick_lag')
+            log('LAG-WATCH', f'{name}: LAGGING - his game handles what we send {lag_ms / 1000.0:.1f} s late; {pk} datagrams went to him meanwhile '
+                             f'({pps:.0f} pkt/s); transport rtt {net_ms} ms; his own frames '
+                             f'{"on time" if _D is None or abs(_D) < CLOCK_LAG_WARN_TICKS else f"{_D / TICK_RATE_DEFAULT:+.1f} s off"}; '
+                             f'{_ringlag_verdict(lag_ms, shift)}. Late since ~{_since} UTC, {d["_rl_streak"]} spaced late answers '
+                             f'(episode #{d["_rl_episodes"]} this session, flying={getattr(s, "flying", False)}, '
+                             f'{"pilot told" if RINGLAG_NOTIFY else "pilot not told"})')
+            try:
+                _p = _rec_dump(s, f'LAG-WATCH: {lag_ms} ms late, {pk} datagrams, NET clock shift {shift} ms (late since ~{_since})')
+                if _p:
+                    log('LAG-WATCH', f'  recorder dump -> {_p}')
+            except Exception:
+                pass
+            if RINGLAG_NOTIFY:
+                d['_rl_told'] = now
+                _ringlag_notice(s, lag_ms / 1000.0)
+    except Exception:
+        logx('LAG-WATCH', 'sample failed')
+
+def _ringlag_silence_check(s, now):
+    """Probes that never come back while his transport answers: a paused game thread (alt-tab, a long
+    load) or a queue that is fully deaf. Log only - a pilot who is tabbed out needs no message."""
+    try:
+        if not RINGLAG_WATCH:
+            return
+        d = s.__dict__
+        _old = [t for (t, _n) in (d.get('_rl_pend') or {}).values() if now - t > 5.0]
+        if len(_old) >= RINGLAG_SILENT_N and (now - getattr(s, 'last_rx', 0.0)) <= 4.0 \
+                and now - d.get('_rl_silent_logged', 0.0) >= 300.0:
+            d['_rl_silent_logged'] = now
+            log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: {len(_old)} probes unanswered for up to {now - min(_old):.0f} s while his transport '
+                            f'still answers (last inbound {now - s.last_rx:.1f} s ago) - his game thread is paused (alt-tab / long load) '
+                            f'or his input queue is more than {now - min(_old):.0f} s behind (flying={getattr(s, "flying", False)})')
+    except Exception:
+        pass
+
 def handle_timecheck_89(s, pl):
     """[0x59][SendTime u32][ReceiveTime u32] from the client (pl[4] = 0x59)."""
     try:
@@ -14160,9 +14547,13 @@ def handle_timecheck_89(s, pl):
         pend = s.__dict__.get('_tc89_pending') or {}
         t0 = pend.pop(send_ms, None)
         if t0 is None:
+            _ringlag_sample(s, send_ms, now, recv_ms)        # v968f8r/8s: an answer older than 30 s still measures his queue and clock
             return                                           # not ours (or older than 30 s)
         rtt = now - t0
         d0 = s.__dict__
+        _ringlag_sample(s, send_ms, now, recv_ms)            # v968f8r / v968f8s (his NET clock too)
+        if not TIMECHECK_ENABLE:
+            return                                           # v968f8r: the probes fly for the ring-lag watch only - no clock reading, no TIMECHECK lines
         _pilot_lag_sample(s, send_ms, recv_ms, rtt, now)       # v968f7s: inbound/outbound split, every reply
         if rtt * 1000 > TIMECHECK_RTT_MAX_MS:
             d0['_tc89_slow'] = d0.get('_tc89_slow', 0) + 1
@@ -22549,6 +22940,7 @@ def _camp_scores_loop():
     score per PACE_43_S; msg 40 is left to its own 5 s loop. Every scene is still refreshed within
     ~CAMPSCORE_PERIOD_S."""
     chunk_i = {}
+    _p43_last = {}; _p43_rr = {}                                      # v968f8t
     while running:
         try:
             rooms = sorted(_economy_rooms())                          # v706f5: TC arenas only
@@ -22562,9 +22954,20 @@ def _camp_scores_loop():
                     i = chunk_i.get(rid, 0) % max(1, (len(sids) + PRODINFO_MAX_SCENES - 1) // PRODINFO_MAX_SCENES)
                     chunk = sids[i * PRODINFO_MAX_SCENES:(i + 1) * PRODINFO_MAX_SCENES]
                     chunk_i[rid] = i + 1
-                    if chunk:
+                    if chunk and not _p2009('71'):                    # v968f8t: 2009 never sent 71 unasked
                         broadcast_production_info_71(rid, scene_ids=chunk, reason='(paced refresh)', unrel=True)
-                    if i == 0:
+                    if _p2009('43'):
+                        # v968f8t: one camp score per PUSH2009_43_S, camps in rotation (2009: one 43 every ~29 s)
+                        _n43 = time.time()
+                        if _n43 - _p43_last.get(rid, 0.0) >= PUSH2009_43_S - 1.0:
+                            _p43_last[rid] = _n43
+                            _c43 = sorted({c for c in camps.values() if c is not None and c <= 7})
+                            if _c43:
+                                _k = _p43_rr.get(rid, 0) % len(_c43); _p43_rr[rid] = _k + 1
+                                pkt = build_camp_score_43(rid, _c43[_k])
+                                for s in [x for x in get_sessions_in_room(rid) if getattr(x, 'entered_game', False)]:
+                                    send_unrel(s, pkt, f'<- CAMPSCORE 43 camp {_c43[_k]} (2009 cadence, unrel)')
+                    elif i == 0:
                         # start of a cycle: the camp scores, one camp per PACE_43_S in a side thread
                         def _scores(rid=rid):
                             tkey = _probe_terrain_for_room(rid)
@@ -22577,6 +22980,31 @@ def _camp_scores_loop():
         except Exception:
             logx('CAMPSCORE', 'paced broadcast failed')
         time.sleep(PACE_71_S)
+
+# --- v968f8t [THE 2009 PUSH CONTRACT] (Alon 11-15: 'match the data ... it will reduce the incoming bytes') ----
+# messages04 (2009 live service) against Meno 11-12 / 11-14, logged non-flight messages per hour:
+#     msg 40   58 single, one a minute          vs 2290: five back to back every 10 s
+#     msg 71   52, only as the answer to out 71 vs 1050: ~640 pushed unasked (one 671 B chunk / 10 s)
+#     msg 26    0                               vs  610: pushed every 5 s after a map poll
+#     msg 43  115, one every ~29 s              vs  227: five at 1 s spacing
+#     datagrams carrying such messages: 1780/h  vs 6400/h
+# With PUSH_2009 on the periodic pushes follow the 2009 pattern; everything asked for is still answered
+# (out 69 / 71 / 26 / 57 replies, the panel-open push, join-time state):
+#   40: ONE camp per send, camps in rotation, each camp once per PUSH2009_40_CAMP_S - never two together
+#   71: no unsolicited refresh
+#   26: no unsolicited refresh (the client polls every ~30 s while its map is open)
+#   43: one camp score per PUSH2009_43_S, camps in rotation
+# Console: `push2009` (state), `push2009 on|off`, `push2009 40|71|26|43 on|off`.
+PUSH_2009          = True
+PUSH2009_40        = True
+PUSH2009_71        = True
+PUSH2009_26        = True
+PUSH2009_43        = True
+PUSH2009_40_CAMP_S = 60.0    # each camp's msg 40 once a minute (2009: one msg 40 a minute in all)
+PUSH2009_43_S      = 30.0    # 2009: one msg 43 every ~29 s
+
+def _p2009(which):
+    return bool(PUSH_2009 and globals().get('PUSH2009_' + which, False))
 
 PACE_71_S = 10.0     # v672f5: one 8-scene msg-71 packet every 10 s (60 scenes -> ~80 s per full pass);
                      # the panel still gets scene data ON DEMAND (hover / panel open) as before
@@ -22810,6 +23238,8 @@ def _group26_push_loop():
         time.sleep(GROUP26_PUSH_S)
         try:
             now = time.time()
+            if _p2009('26'):
+                continue                                              # v968f8t: answers to the client's own poll only
             for s in list(get_all_sessions()):
                 if not getattr(s, 'entered_game', False) or getattr(s, 'current_room', None) is None:
                     continue
@@ -29692,7 +30122,8 @@ def login(s):
                                 except OSError:
                                     pass
                         _freeze_watch(s, _now_st)                                      # v968f8b
-                        if TIMECHECK_ENABLE and s.entered_game and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S:
+                        if s.entered_game and ((TIMECHECK_ENABLE and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S)
+                                               or _ringlag_due(s, _now_st)):          # v968f8r: the ring-lag watch flies the same probe
                             send_timecheck_89(s)                                   # v968f7e
                         if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
                             _incr_ms = int((_now_st - s._status_last) * 1000)
@@ -34575,7 +35006,25 @@ SEND_PRODUCTION_40 = False
 PROD40_UNITS_PERIOD_S = 10.0   # v672f5: 5 -> 10 s
 
 def _prod40_fast_loop():
+    _rr = {}
     while running:
+        if _p2009('40'):
+            # v968f8t: the 2009 cadence - ONE camp per send, camps in rotation, each camp once per
+            # PUSH2009_40_CAMP_S; a client never gets two msg 40 together
+            _ncamp = 1
+            try:
+                for rid in _economy_rooms():
+                    _trn = _probe_terrain_for_room(rid)
+                    _camps = sorted({c for c in (SCENE_CAMP_BY_TERRAIN.get(_trn) or {}).values() if c is not None and c <= 7})
+                    if not _camps:
+                        continue
+                    _ncamp = max(_ncamp, len(_camps))
+                    _k = _rr.get(rid, 0) % len(_camps); _rr[rid] = _k + 1
+                    broadcast_production_40(rid, reason='(2009 cadence)', force=True, quiet=True, unrel=True, only_camp=_camps[_k])
+            except Exception:
+                logx('PROD40', '2009-cadence loop failed')
+            time.sleep(max(2.0, PUSH2009_40_CAMP_S / _ncamp))
+            continue
         time.sleep(max(1.0, PROD40_UNITS_PERIOD_S) if PROD40_UNITS_PERIOD_S > 0 else 30.0)
         if PROD40_UNITS_PERIOD_S <= 0:
             continue
@@ -34640,7 +35089,7 @@ def camp_economy_totals(room_id, terrain, camp):
     return stored, capacity
 
 
-def broadcast_production_40(room_id, reason='', force=False, quiet=False, unrel=False):
+def broadcast_production_40(room_id, reason='', force=False, quiet=False, unrel=False, only_camp=None):
     """Send one msg 40 per active camp to everyone in-game in a room.
     `force=True` bypasses SEND_PRODUCTION_40 (the ambient-broadcast gate) so an explicit
     operator command / diagnostic always fires; the per-tick caller leaves it False."""
@@ -34658,6 +35107,8 @@ def broadcast_production_40(room_id, reason='', force=False, quiet=False, unrel=
     sent = []
     for camp in sorted(set(camps.values())):
         if camp > 7:
+            continue
+        if only_camp is not None and camp != only_camp:               # v968f8t: one camp per send (2009 cadence)
             continue
         stored, capacity = camp_economy_totals(room_id, trn, camp)
         if not any(capacity.values()):

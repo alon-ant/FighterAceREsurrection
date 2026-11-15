@@ -876,7 +876,7 @@ def _rename_everywhere(conn, refs, old, new):
 #                                 genuinely inside the logs directory
 # Plus: it must exist and be a regular file (never a directory or device node).
 LOG_NAME_OK = re.compile(r'^[A-Za-z0-9._-]+$')
-LOG_EXT_OK  = re.compile(r'\.(log(\.\d+)?|txt|err)$', re.IGNORECASE)
+LOG_EXT_OK  = re.compile(r'\.(log(\.\d+)?|txt|err|csv)$', re.IGNORECASE)   # v968f8t: lagperf_YYYYMMDD.csv
 
 def _log_dir():
     d = SRV.get('log_dir')
