@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8v-stable'
+VERSION = 'v968f8x-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7871,8 +7871,15 @@ def console_handler():
                 # v772f5: cargo order <fam|mfa|...>  - the resource each 107 answer field carries
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 try:
-                    global CARGO_ANSWER_ORDER, CARGO_DROP_SILENT_ON_FULL
-                    if _a and _a[0] == 'silent' and len(_a) > 1:
+                    global CARGO_ANSWER_ORDER, CARGO_DROP_SILENT_ON_FULL, CARGO_REFUSAL_LINE, CARGO_STORAGE_FIRST
+                    if len(_a) >= 2 and _a[0].lower() in ('explain', 'storagefirst') and _a[1].lower() in ('on', 'off'):   # v968f8w
+                        if _a[0].lower() == 'explain':
+                            CARGO_REFUSAL_LINE = (_a[1].lower() == 'on')
+                        else:
+                            CARGO_STORAGE_FIRST = (_a[1].lower() == 'on')
+                        log('CONSOLE', f'cargo: refused-drop line to the pilot = {"ON" if CARGO_REFUSAL_LINE else "off"}; '
+                                       f'a pilot\'s metal rebuilds destroyed storage first = {"ON" if CARGO_STORAGE_FIRST else "off"}')
+                    elif _a and _a[0] == 'silent' and len(_a) > 1:
                         CARGO_DROP_SILENT_ON_FULL = _a[1].lower() in ('on', '1', 'true', 'yes')
                         log('CONSOLE', f'cargo: silent on fully delivered drop = {CARGO_DROP_SILENT_ON_FULL}')
                     elif _a and _a[0] == 'order' and len(_a) > 1 and sorted(_a[1]) == ['a', 'f', 'm']:
@@ -7881,7 +7888,9 @@ def console_handler():
                     else:
                         raise IndexError
                 except (IndexError, ValueError):
-                    log('CONSOLE', f'usage: cargo order <three of f,a,m>   (now {CARGO_ANSWER_ORDER})')
+                    log('CONSOLE', f'usage: cargo order <three of f,a,m>   (now {CARGO_ANSWER_ORDER}) | cargo silent on|off | '
+                                   f'cargo explain on|off (now {"on" if CARGO_REFUSAL_LINE else "off"}) | '
+                                   f'cargo storagefirst on|off (now {"on" if CARGO_STORAGE_FIRST else "off"})')
             elif cmd == 'groups':
                 # v715f5: groups <pilot>  (send the live records) | groups probe <pilot> f0 f1 f2 f3 mission uc n
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -9059,6 +9068,15 @@ def console_handler():
                 for _rid in _rooms:
                     broadcast_production_info_71(_rid, scene_ids=_ids, probe=_probe,
                                                  reason='(console prodinfo)')
+            elif cmd == 'panelcap':                                                     # v968f8x: panelcap [standing|undamaged]
+                global PRODINFO_CAP_STANDING
+                _pc = parts[1].lower().strip() if len(parts) > 1 else ''
+                if _pc in ('standing', 'undamaged'):
+                    PRODINFO_CAP_STANDING = (_pc == 'standing')
+                log('CONSOLE', f"panel 'Storage Capacity' (msg 71 G) = "
+                               f"{'the storage STANDING now (all destroyed = %d kg)' % max(1, int(PRODINFO_CAP_DOWN_KG)) if PRODINFO_CAP_STANDING else 'the UNDAMAGED capacity (v968f8o)'}"
+                               f"; 'Resource Storage' % = stored / undamaged complex capacity. `panelcap standing|undamaged` - "
+                               f"panels refresh at their next push")
             elif cmd == 'panelprobe':
                 # panelprobe [on|off]  - toggle msg-71 PROBE markers in the panel push. With it ON,
                 # opening the Production Complex panel in-game shows the PRODINFO_PROBE marker
@@ -21296,6 +21314,100 @@ def cargo_repair_scene(room_id, sidx, metal_kg, reason='', from_delivery=False, 
         return _pre_done + done, _pre_spent + _paid
     return _pre_done, _pre_spent
 
+# --- v968f8w [A REFUSED CARGO DROP SAYS WHY; FLOWN-IN METAL REBUILDS THE STORAGE FIRST] ---------------------
+# Scraps 11-14/15 (live run_20261112_204018, room 195): "Brought ammo into field that had no ammo but full
+# storage available. Hit Alt C to unload ammo and it dropped AND loaded ammo into transport. Could not get it
+# to just unload ammo."
+#   23:47:06 / 23:47:32  CHARGER destroys both Ammo Storages of scene 39 (JP Airfield 76,BT): ammo capacity
+#                        200 000 -> 0, stock 0.   23:54:05 the field is captured by the US.
+#   23:49:55  Scraps loads 2750 kg ammo at Bomber Airfield 38, flies 63.4 km (396 s), lands at 39.
+#   00:00:29 .. 00:07:09  17 unloads, each 'stored m0/f0/a0' and answered '+2750 stays on board' (the v777
+#                        rule: cargo a dead or full storage cannot take is kept, not thrown away) - the client
+#                        shows that as dropped-and-loaded again. The field itself rearmed him 'ammo SHORT +0kg,
+#                        pool now ammo 0'. 00:07:10 the repair clock rebuilt the first Ammo Storage - one second
+#                        after his last try.
+# The refusal follows the rule set for the convoys on 10-29 ('if fuel storage is destroyed and no storage is
+# available to store the delivered fuel then we wasted fuel' - metal first, then the fuel). What was wrong:
+#   1. the pilot was told nothing - not that it was refused, not why, not what would help;
+#   2. the panel (v968f8o) lists the UNDAMAGED capacity, so the field read as empty with room for 200 000;
+#   3. the remedy did not work for a pilot: his metal went to craters and the CHEAPEST dead objects first
+#      (trees, tents), while a convoy's metal rebuilds the destroyed storage first (v968f6t). An Ammo or Fuel
+#      Storage is value 50 = 250 kg of metal.
+# Now: a drop that is refused or only partly taken sends the pilot ONE personal AI line with the reason per
+# resource (rate-limited - he pressed 17 times), and a pilot's metal (landed unload and air-drop) rebuilds the
+# scene's destroyed storage first, the storage of a resource the scene can no longer hold at all before the rest.
+CARGO_REFUSAL_LINE  = True      # console: cargo explain on|off
+CARGO_REFUSAL_GAP_S = 120.0     # one line per pilot, scene and reason in this long
+CARGO_STORAGE_FIRST = True      # console: cargo storagefirst on|off
+
+def _cargo_storage_first(room_id, terrain, sidx):
+    """The scene's destroyed storage/producer buildings as a repair priority list: those of a resource the
+    scene can no longer store at all first, the biggest volume first. None when nothing is lost."""
+    if not CARGO_STORAGE_FIRST:
+        return None
+    try:
+        lost = dict(_SCENE_CAP_LOSS_OBJ.get((room_id, int(sidx))) or {})
+        if not lost:
+            return None
+        r = supply_state(room_id, terrain, sidx)
+        caps = (r[1] or {}).get('caps', {}) if (r and r[1]) else {}
+        return sorted(lost, key=lambda o: (0 if int(caps.get(lost[o][0], 0)) <= 0 else 1, -int(lost[o][1]), int(o)))
+    except Exception:
+        return None
+
+def _cargo_refusal_reason(room_id, terrain, sidx, kind):
+    """Why the scene took less of `kind` than was brought: 'none' (it has no such storage), 'destroyed'
+    (all of it is down), 'damaged' (full, and part of the storage is down) or 'full'."""
+    r = supply_state(room_id, terrain, sidx)
+    if not r or r[0] is None or not r[1]:
+        return 'none'
+    cap = int(r[1]['caps'].get(kind, 0))
+    loss = int((_SCENE_CAP_LOSS.get((room_id, int(sidx))) or {}).get(kind, 0))
+    if cap <= 0:
+        return 'destroyed' if loss > 0 else 'none'
+    return 'damaged' if loss > 0 else 'full'
+
+def _cargo_explain_refusal(s, room_id, terrain, sidx, txy, asked, got, lost_cargo=False):
+    """asked / got = {'metal': kg, 'fuel': kg, 'ammo': kg}. Returns the reason text for the log ('' when
+    everything was taken) and sends the pilot one personal AI line, at most once per CARGO_REFUSAL_GAP_S for
+    the same scene and reasons. lost_cargo: an air-drop - what the scene cannot take is gone, not kept."""
+    why = []; kept = []; took = []
+    for kind in ('metal', 'fuel', 'ammo'):
+        a, g = int(asked.get(kind, 0)), int(got.get(kind, 0))
+        if g > 0:
+            took.append(f'{g}kg {kind}')
+        if a - g <= 0:
+            continue
+        rs = _cargo_refusal_reason(room_id, terrain, sidx, kind)
+        why.append({'none': f'no {kind} storage here', 'destroyed': f'{kind} storage destroyed',
+                    'damaged': f'{kind} store full (part of its storage is destroyed)', 'full': f'{kind} store full'}[rs])
+        kept.append((kind, a - g, rs))
+    if not kept:
+        return ''
+    reason = '; '.join(why)
+    try:
+        if not CARGO_REFUSAL_LINE:
+            return reason
+        now = time.time()
+        told = s.__dict__.setdefault('_cargo_refusal_told', {})
+        sig = (int(sidx), tuple((k, rs) for k, _kg, rs in kept), bool(took))
+        if now - told.get(sig, 0.0) < CARGO_REFUSAL_GAP_S:
+            return reason
+        told[sig] = now
+        for k in [k for k, t in told.items() if now - t > 10 * CARGO_REFUSAL_GAP_S]:
+            told.pop(k, None)
+        _kg = ', '.join(f'{kg}kg {k}' for k, kg, _rs in kept)
+        _one = len(kept) == 1
+        _tail = (f'{_kg} {"was" if _one else "were"} lost' if lost_cargo else f'{_kg} {"stays" if _one else "stay"} on board')
+        _hint = ''
+        if any(rs in ('destroyed', 'damaged') for _k, _kgx, rs in kept) and int(asked.get('metal', 0)) <= 0:
+            _hint = ' Metal rebuilds the storage.'
+        tc_say(room_id, f'AI: {txy[2].strip()} at {tc_grid(txy[0], txy[1])}: '
+                        + (f'took {", ".join(took)}; ' if took else '') + f'{reason} - {_tail}.{_hint}', to=s)
+    except Exception:
+        logx('CARGO', 'refusal line failed')
+    return reason
+
 def _handle_cargo_request_106(s, pl):
     if not CARGO_MODEL:
         return
@@ -21334,10 +21446,17 @@ def _handle_cargo_request_106(s, pl):
             # whatever is left is stocked up to the (possibly restored) capacity.
             repaired, spent = ([], 0)
             if metal > 0:
-                repaired, spent = cargo_repair_scene(rid, sidx, metal, reason=f'by {s.current_pilot}', from_delivery=True)
+                repaired, spent = cargo_repair_scene(rid, sidx, metal, reason=f'by {s.current_pilot}', from_delivery=True,
+                                                     priority=_cargo_storage_first(rid, terrain, sidx))      # v968f8w: storage first, as for a convoy
             gm, gf, ga = _scene_store_add(rid, terrain, sidx, max(0, metal - spent), fuel, ammo)
             gm += spent                                     # the repair metal counts as delivered
             short = [metal - gm, fuel - gf, ammo - ga]
+            _why = ''
+            if any(v > 0 for v in short):                   # v968f8w: tell him why (once), and put it in the log
+                _why = _cargo_explain_refusal(s, rid, terrain, sidx, txy, {'metal': metal, 'fuel': fuel, 'ammo': ammo},
+                                              {'metal': gm, 'fuel': gf, 'ammo': ga})
+            else:
+                s.__dict__.pop('_cargo_refusal_told', None)
             # v774f5: no points for unloading where you loaded (or within CARGO_MIN_HAUL_M of it)
             _origin = s.__dict__.get('_cargo_origin')
             _haul_ok = (_origin is None or (_origin[0] != int(sidx)
@@ -21346,7 +21465,8 @@ def _handle_cargo_request_106(s, pl):
             log('CARGO', f'{s.current_pilot} DROP at scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
                          f'm{metal}/f{fuel}/a{ammo} kg -> stored m{gm - spent}/f{gf}/a{ga}, repaired {len(repaired)} obj(s) '
                          f'({spent} kg metal), bonus {pts} pts (dist {dist * 100} m, {ftime}s, bonus-flag {bonus}'
-                         + ('' if _haul_ok else ', same base as the pick-up - no points') + ')')
+                         + ('' if _haul_ok else ', same base as the pick-up - no points') + ')'
+                         + (f' | NOT TAKEN m{short[0]}/f{short[1]}/a{short[2]}: {_why} - kept on board' if _why else ''))
             s.__dict__.pop('_cargo_origin', None)
             if gm + gf + ga > 0:
                 send_scene_event_79(s, 3, label='(cargo drop)')                                       # v968f7q 'You have delivered supply'
@@ -21452,7 +21572,14 @@ def _handle_give_rsc_105(s, pl):
             # metal storage can be rebuilt by air; the stock was added above, so undo the repaired
             # part from the store to keep the metal single-counted
             _dm = per_scene_raw.get(sidx, [0, 0, 0])[0]
-            repaired, spent = cargo_repair_scene(rid, sidx, _dm, reason=f'air-drop by {s.current_pilot}', from_delivery=True)
+            repaired, spent = cargo_repair_scene(rid, sidx, _dm, reason=f'air-drop by {s.current_pilot}', from_delivery=True,
+                                                 priority=_cargo_storage_first(rid, terrain, sidx))          # v968f8w
+            _raw = per_scene_raw.get(sidx, [0, 0, 0])
+            _gm_eff = max(int(gm), min(int(_raw[0]), int(spent)))          # metal spent on repairs was delivered too
+            _why = ''
+            if _raw[0] > _gm_eff or _raw[1] > gf or _raw[2] > ga:            # v968f8w
+                _why = _cargo_explain_refusal(s, rid, terrain, sidx, txy, {'metal': _raw[0], 'fuel': _raw[1], 'ammo': _raw[2]},
+                                              {'metal': _gm_eff, 'fuel': gf, 'ammo': ga}, lost_cargo=True)
             if spent:
                 try:
                     _st2, _p2 = supply_state(rid, terrain, sidx)
@@ -21464,7 +21591,8 @@ def _handle_give_rsc_105(s, pl):
             pts += int(round(gm * CARGO_SCORE_PER_KG_METAL + gf * CARGO_SCORE_PER_KG_FUEL + ga * CARGO_SCORE_PER_KG_AMMO))
             parts = [f'{v}kg {k}' for k, v in (('metal', gm), ('fuel', gf), ('ammo', ga)) if v]
             log('CARGO', f'{s.current_pilot} AIR-DROP -> scene {sidx} "{txy[2].strip()}" (camp {scamp}): '
-                         f'{", ".join(parts) or "nothing"}, repaired {len(repaired)} obj(s) ({spent} kg metal)')
+                         f'{", ".join(parts) or "nothing"}, repaired {len(repaired)} obj(s) ({spent} kg metal)'
+                         + (f' | NOT TAKEN: {_why} - lost' if _why else ''))
             evs_on_supply(rid, s, sidx, gm + gf + ga, len(repaired), True, txy[2].strip())           # v958f5b
             if gm + gf + ga > 0 and not s.__dict__.get('_79_drop_sent'):
                 s.__dict__['_79_drop_sent'] = True; send_scene_event_79(s, 3, label='(air-drop)')     # v968f7q once per drop
@@ -34889,7 +35017,23 @@ SUPPLY_QUERY_REPLY = True     # answer msg 69 scene-supply queries (v294)
 # once per PANEL_DEBOUNCE seconds per session, re-pushing immediately if the hovered scene-set
 # changes. v430f5's per-poll 42->40->71 sequence flooded the wire and made the panel flicker.
 # Set PANEL_OPEN_SEQUENCE=False to revert to reply-only (the pre-v430 behaviour).
-PRODINFO_CAP_FULL   = True    # v968f8o: msg-71 capacity (G) = undamaged capacity, storage % (C) = stored / undamaged capacity
+PRODINFO_CAP_FULL   = True    # v968f8o: storage % (C) = stored / UNDAMAGED capacity of the complex (and G too, unless ...STANDING below)
+# v968f8x [THE PANEL'S 'STORAGE CAPACITY' IS WHAT CAN BE STORED NOW] (Alon 11-15 22:10, after Scraps's cargo report:
+# 'we also need to fix the panel to reflect the correct storage capacity ... there is resource storage and stored
+# supplies and also storage capacity'). The three rows and the array behind each (v659f5 read-back):
+#   Resource Storage  Metal 62%            C  complex: stored / capacity               -> stays 'of the UNDAMAGED capacity'
+#   Stored Supplies   Ammo 22,050          F  this scene: kg in store                  -> unchanged
+#   Storage Capacity  Ammo 44,100 (100%)   G  this scene: capacity, kg   (H) % intact  -> G = the storage STANDING NOW
+# Since v968f8o G was the undamaged capacity at all times, so a field with both Ammo Storages down read
+# 'Stored 0 / Capacity 200,000 (0%)' - Scraps: 'no ammo but full storage available'. Now G is the capacity that
+# still stands (200,000 -> 100,000 (50%) with one storage down) and F can never exceed it.
+# ONE LIMIT, the client's: a 0 in G is the stock client's 'this scene does not track that resource' and the map
+# prints 'unlimited' (v968f6u, BJ 71 on 10-29). A resource whose storage is ALL destroyed therefore carries
+# PRODINFO_CAP_DOWN_KG = 1: 'Ammo: 1 (0%)'. A scene that never had storage for a resource still sends 0.
+# The 11-12 fix is kept: the complex % (C) is measured against the undamaged capacity, so it steps down with
+# every tank lost. Console: `panelcap standing|undamaged`.
+PRODINFO_CAP_STANDING = True
+PRODINFO_CAP_DOWN_KG  = 1
 PANEL_OPEN_SEQUENCE = True
 PANEL_DEBOUNCE      = 3.0     # seconds; min gap between panel-data pushes for the same scene-set
 PANEL_SEND_SNAPSHOT = True    # v431f5b: send msg-42 ONCE per session before the first panel push,
@@ -35045,6 +35189,7 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
         # ALL destroyed has an effective capacity of 0, and a 0 in the capacity array (G) is what the stock
         # client uses for 'this scene does not track that resource' = unlimited. The map now carries the
         # UNDAMAGED capacity with 0 stored and 'capacity intact' (H) 0% - which reads as what it is.
+        _ecaps = caps                                                           # v968f8x: the capacity standing now
         caps = tuple(c if c > 0 else fc for c, fc in zip(caps, _fcaps))
         # v968f8o [THE FILL LEVEL FOLLOWED THE SHRINKING CAPACITY] (Alon 11-12 21:50, scene 46 Front Airfield:
         # 'capacity for fuel dropped to 40% but the stored supply did not drop to 40% until all fuel was
@@ -35056,7 +35201,9 @@ def scene_prodinfo_arrays(room_id, terrain, scene_id, probe=False):
         # Now the capacity number (G) is always the UNDAMAGED capacity, H stays 'capacity intact' (40 %), and
         # the storage % (C) is stored / undamaged capacity (40 %) - the wiki's 'percentage of the storage
         # capacity of the scene overall'. PRODINFO_CAP_FULL=False restores the effective-capacity form.
-        if PRODINFO_CAP_FULL:
+        if PRODINFO_CAP_STANDING:                                               # v968f8x (see PRODINFO_CAP_STANDING)
+            caps = tuple(c if c > 0 else (max(1, int(PRODINFO_CAP_DOWN_KG)) if fc > 0 else 0) for c, fc in zip(_ecaps, _fcaps))
+        elif PRODINFO_CAP_FULL:
             caps = tuple(fc if fc > 0 else c for c, fc in zip(caps, _fcaps))
     else:
         eff_pct = pct; cap_pct = pct

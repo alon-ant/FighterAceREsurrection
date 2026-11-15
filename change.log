@@ -13944,3 +13944,81 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     incl. a verdict landing mid-volley; _scratch/test_ringlag.py and test_lagperf.py still pass). Compiles. NOT run
     as a whole server and not against a client - the EMsgList path itself is unchanged from what ran live today.
   Backup: _scratch/server.py.bak_v968f8u. Patch: _scratch/patch_8v.py.
+
+2026-11-15  v968f8w-stable  A REFUSED CARGO DROP SAYS WHY; A PILOT'S METAL REBUILDS THE STORAGE FIRST (Scraps, film 11-15)
+  REPORT (Scraps): "Brought ammo into field that had no ammo but full storage available. Hit Alt C to unload ammo
+    and it dropped AND loaded ammo into transport. Could not get it to just Unload ammo."
+  LIVE LOG (run_20261112_204018, room 195, UTC):
+    23:47:06 / 23:47:32  CHARGER destroys both Ammo Storages (obj 1037, 1033) of scene 39, the JP Airfield at
+                         76,BT: ammo capacity 200 000 -> 0, 95 039 kg of ammo lost with them.
+    23:54:05             the field is captured by the United States (CHARGER's trigger, flak's paratroops).
+    23:49:55             Scraps loads 2750 kg of ammo at Bomber Airfield 38; 63.4 km, 396 s of flight.
+    00:00:29 - 00:07:09  17 unloads at 39, every one 'stored m0/f0/a0' and answered '+2750 stays on board'.
+                         00:00:56 the field rearms him: 'ammo SHORT +0kg, pool now ammo 0'.
+    00:07:10             the repair clock rebuilds Ammo Storage 1037 - one second after his last try (his exit).
+  WHAT HAPPENED: nothing was lost and nothing was double-counted. The field could not hold ammo, the server
+    refused it and told the client to keep it on the plane (v777f5) - on his screen: dropped and loaded again.
+    The refusal is the convoy rule of 10-29 ('if fuel storage is destroyed and no storage is available to store
+    the delivered fuel then we wasted fuel' - metal first). Three things were wrong around it:
+      1. the pilot was told nothing: not that it was refused, not why, not what helps;
+      2. the scene panel shows the UNDAMAGED capacity since v968f8o (so that the stored % steps down with every
+         tank lost) - 'no ammo, full storage available' is exactly what it read;
+      3. the remedy did not work for a pilot: flown-in metal went to craters and then the CHEAPEST dead objects
+         (trees, firs, tents) while a convoy's metal rebuilds the destroyed storage first (v968f6t).
+         An Ammo / Fuel Storage is value 50 = 250 kg of metal; his transport carried 2750 kg.
+  CHANGED (server.py):
+    - _cargo_explain_refusal: a landed unload (msg 106) that is refused or only partly taken sends THE PILOT one
+      AI line: 'Airfield at 76,BT: ammo storage destroyed - 2750kg ammo stays on board. Metal rebuilds the
+      storage.' Reasons per resource: '<kind> storage destroyed' / 'no <kind> storage here' / '<kind> store
+      full' / '<kind> store full (part of its storage is destroyed)'; a part delivery starts 'took 1200kg ammo;'.
+      At most one line per pilot, scene and reason in CARGO_REFUSAL_GAP_S = 120 s (he pressed 17 times in
+      6 min 40 s - that would have been 4 lines). Nothing goes to the room.
+    - the CARGO log line of a refused drop ends '| NOT TAKEN m0/f0/a2750: ammo storage destroyed - kept on board'.
+    - _cargo_storage_first: a pilot's metal - landed unload and air-drop (msg 105) - is spent on the scene's
+      destroyed storage/producer buildings FIRST (those of a resource the scene can no longer hold at all, then
+      by volume), then craters, then the cheapest-first rest; REPAIR line '(metal repair by <pilot>, storage
+      first)'. Because the repair runs before the stock is added, metal + ammo in one unload now works.
+    - air-drop: what a dead or full storage cannot take is lost (chutes do not come back); the pilot gets the
+      same line ending '... was lost', the log '| NOT TAKEN: ... - lost'.
+    - console: `cargo explain on|off`, `cargo storagefirst on|off`.
+  NOT CHANGED: the rule itself (a field with no standing storage stores nothing), the 107 answers, scores, the
+    room's 'delivered' line, the panel. OPEN (Alon's decision): whether a field with its storage down should
+    still take a small emergency stock from a transport.
+  VERIFY: destroy both ammo storages of a friendly field (or capture one that lost them), land a transport with
+    ammo, Alt-C: the personal AI line appears once, the cargo is still aboard, the server CARGO line ends
+    '| NOT TAKEN ...'. Land with metal: REPAIR '... storage first' lists the Ammo Storage(s) before trees and
+    tents, the panel's capacity-intact % rises; then the ammo unloads and the room sees the 'delivered' line.
+  Tested offline (_scratch/test_8w.py, old vs new, on the 11-15 state of scene 39: refused x4 -> 2 lines 130 s
+    apart, metal -> storages first, ammo then stored, full store, part delivery). Compiles. Not run against a client.
+  Backup: _scratch/server.py.bak_v968f8v. Patch: _scratch/patch_8w.py.
+
+2026-11-15  v968f8x-stable  THE PANEL'S 'STORAGE CAPACITY' IS WHAT CAN BE STORED NOW (Alon, after the cargo fix)
+  REQUEST: "we also need to fix the panel to reflect the correct storage capacity ... there is resource storage and
+    stored supplies and also storage capacity" (screenshot: Front Airfield 52 at 71,BJ).
+  THE THREE ROWS and the msg-71 array behind each (order metal / fuel / ammo):
+    Resource Storage   'Ammo: 60%'             C   the scene's complex: stored / capacity
+    Stored Supplies    'Ammo: 22,050'          F   this scene: kg in store
+    Storage Capacity   'Ammo: 44,100 (100%)'   G   this scene: capacity in kg, (H) = % of the storage intact
+  WHAT WAS WRONG: since v968f8o G carried the UNDAMAGED capacity at all times. A field with both Ammo Storages
+    destroyed read 'Stored Supplies 0' next to 'Storage Capacity 200,000 (0%)' - Scraps 11-15: "no ammo but full
+    storage available" - and flew 63 km to a field that could not take a kilogram.
+  CHANGED (scene_prodinfo_arrays, PRODINFO_CAP_STANDING = True):
+    G = the capacity STANDING NOW (undamaged minus the destroyed storage buildings); H unchanged. One of two Ammo
+        Storages down: 200,000 (100%) -> 100,000 (50%). Stored Supplies can never exceed it.
+    G for a resource whose storage is ALL destroyed = PRODINFO_CAP_DOWN_KG = 1 -> 'Ammo: 1 (0%)'. It cannot be 0:
+        a 0 in G is the stock client's 'untracked resource' and the map prints 'unlimited' (v968f6u, BJ 71 10-29).
+        A scene that never had storage of a resource still sends 0, as before.
+    C and F unchanged: the complex % stays stored / UNDAMAGED capacity (the 11-12 fix - it steps 100, 80, 70, 60,
+        40, 20, 0 as six fuel tanks go), stored kg is the stock.
+    Console `panelcap standing|undamaged` (undamaged = the v968f8o form).
+  Offline (_scratch/test_8x.py, old vs new): six fuel tanks one by one, then the two Ammo Storages, then one rebuilt
+    with 2,750 kg flown in -> capacity 150,000 / 120,000 / 105,000 / 90,000 / 60,000 / 30,000 / 1 with (H) 100..0 %,
+    complex % identical to v968f8o.
+  NOT VERIFIED ON A CLIENT: (1) that 1 kg prints as '1 (0%)' and not as 'unlimited' - the 10-29 observation was
+    made with exactly 0; (2) that Alt-C at a field showing '1 (0%)' still sends the whole load in msg 106 (so that
+    flown-in metal can rebuild the storage) - every DROP in the logs so far carried the full load whatever the
+    panel showed, but none was made with a 1 kg capacity on the panel.
+  VERIFY: bomb fuel tanks of a full field one by one with the panel open - Storage Capacity kg AND its % step down
+    together, Resource Storage % steps with them; bomb the last one - 'Fuel: 1 (0%)', not unlimited; land metal
+    there, Alt-C - server CARGO line shows the full m2750 and REPAIR '... storage first'; the capacity returns.
+  Backup: _scratch/server.py.bak_v968f8w. Patch: _scratch/patch_8x.py.
