@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8y-stable'
+VERSION = 'v968f8z-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1708,6 +1708,7 @@ def event_start(room_id, by='console', at=None, _delayed=False):
     _future = (at is not None and float(at) > time.time() + 1.0)
     e['start'] = float(at) if _future else time.time() - EVENT_UNLOCK_BACKDATE_S
     e['fly'] = True; e['by'] = by
+    globals().get('_EVENT_HOLD_CACHE', {}).pop(room_id, None)      # v968f8z: ... and ends now
     n = event_push(room_id, 'start')
     if not tournament_cfg_for_room(room_id):          # v956f5: the tournament arms its own clock at the competition start
         event_arm_end(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)
@@ -1736,6 +1737,7 @@ def event_stop(room_id, by='console'):
         try: _old.cancel()
         except Exception: pass
     e['start'] = None; e['by'] = by; e['timer'] = None
+    globals().get('_EVENT_HOLD_CACHE', {}).pop(room_id, None)      # v968f8z: the server-side hold starts now
     if not tournament_cfg_for_room(room_id):
         event_end_cancel(room_id)                       # v956f5: a plain event arena on hold has no clock
     n = event_push(room_id, 'stop')
@@ -4691,6 +4693,19 @@ def arena_settings_apply(d, settings):
                 struct.pack_into('<f', d, off, float(v) / _M2FT)   # feet -> metres
             except (ValueError, TypeError):
                 pass
+    # v968f8z: the with-mask ceiling below the no-mask one makes no sense and fails the tail check that gates
+    # every tail-anchored writer after this point - serve the no-mask value for both and say so
+    try:
+        _dl = {k: dl for k, dl, _lb in ARENA_TAIL_FIELDS}
+        _o1, _o2 = bend + _dl['height_no_mask'], bend + _dl['height_mask']
+        if _o2 + 4 <= len(d):
+            _c1, _c2 = struct.unpack_from('<f', d, _o1)[0], struct.unpack_from('<f', d, _o2)[0]
+            if 100.0 <= _c1 <= 30000.0 and 100.0 <= _c2 < _c1:
+                struct.pack_into('<f', d, _o2, _c1)
+                log('ARENA-SET', f'oxygen ceilings entered the wrong way round (no mask {_c1 * _M2FT:.0f} ft > mask {_c2 * _M2FT:.0f} ft) '
+                                 f'- served as {_c1 * _M2FT:.0f} ft for both')
+    except Exception:
+        pass
 
 # --- EvP: enemy anti-aircraft / flak (client-side, driven by GAME_DEF AA quality) ---------
 # EvP flak is simulated CLIENT-SIDE: the AA batteries loaded with the terrain fire at the
@@ -4926,8 +4941,15 @@ def _gamedef_tail_ok(d):
         off = n - 72
         ccd, pmt, get_, cvd, cvn = d[off - 3], d[off - 2], d[off - 1], d[off], d[off + 1]
         ox1, ox2 = struct.unpack_from('<ff', d, off - 11)
+        # v968f8z: ox1 <= ox2 (was ox1 < ox2). Both ceilings are web-editable and arena_settings_apply writes them
+        # BEFORE the tail-anchored writers run; 'Death Bowl Test' (room 189) has both at 9800 ft, so this
+        # returned False for the blob being served and EVERY tail writer skipped it without a visible line:
+        # [Tournament] Active, [Event] DelaysActive, the delays, rain, radar, show-ground-objects, craters.
+        # Live 11-16 21:01: `##GunsCold` in that arena took the event path ('weapons locked on the clients'),
+        # the clients had been served DelaysActive=no and went on shooting (Alon's messages09:
+        # 'OxygenLevel1=2987m OxygenLevel2=2987m ... [Tournament] Active=no ... [Event] DelaysActive=no').
         return (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
-                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 < ox2)
+                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 <= ox2)
     except Exception:
         return False
 
@@ -5017,7 +5039,7 @@ def apply_craters_vanish(d, minutes=None, number=None):
         ccd, pmt, get_, cvd, cvn = d[off - 3], d[off - 2], d[off - 1], d[off], d[off + 1]
         ox1, ox2 = struct.unpack_from('<ff', d, off - 11)
         if not (ccd <= 120 and pmt <= 120 and get_ <= 120 and 1 <= cvd <= 240 and 1 <= cvn <= 250
-                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 < ox2):
+                and 100.0 <= ox1 <= 30000.0 and 100.0 <= ox2 <= 30000.0 and ox1 <= ox2):       # v968f8z: <= (see _gamedef_tail_ok)
             log('CRATERS', f'tail check failed: delays {ccd}/{pmt}/{get_} craters {cvd}/{cvn} oxygen {ox1}/{ox2} '
                            f'(len {n}) - blob layout differs; not patched')      # v786f5: say why
             return None
@@ -6558,6 +6580,11 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
         _tn = apply_tournament_settings(d, arena_settings)
         if _tn is None:
             log('GAMEDEF212', 'tournament: fields not located in this GAME_DEF - left as-is')
+            _warn = globals().setdefault('_TN_NOT_SERVED_WARNED', {})          # v968f8z: once per room per 10 min, on a tag that is not muted
+            if time.time() - _warn.get(room_id, 0.0) >= 600.0:
+                _warn[room_id] = time.time()
+                log('EVENT', f'room {room_id}: the arena\'s tournament / event settings are NOT in the GAME_DEF served to the clients '
+                             f'(its tail layout is not recognised) - the clients run it as an ordinary arena: no weapons lock, no client countdowns')
         elif _tn:
             log('GAMEDEF212', 'tournament: ' + '; '.join(_tn))
     except Exception:
@@ -11120,7 +11147,8 @@ def guns_set(room_id, cold, by='console'):
         return 'no room'
     if event_mode(room_id):
         if cold:
-            event_stop(room_id, by=by); return 'event-mode arena: weapons locked on the clients (event hold)'
+            event_stop(room_id, by=by)
+            return 'event-mode arena: event hold - weapons locked on the clients, and hits are dropped by the server until the start'
         event_start(room_id, by=by);  return 'event-mode arena: weapons free (event fight)'
     if cold:
         if room_id in GUNS_COLD:
@@ -11140,22 +11168,50 @@ def guns_set(room_id, cold, by='console'):
     log('GUNS', f'room {room_id}: GUNS HOT by {by}')
     return 'guns hot'
 
+# v968f8z [AN EVENT HOLD IS ENFORCED HERE TOO] (Alon 11-16 23:08: 'we have just tested ##gunscold. the server responds
+# but the damage still reflects'). In an event-mode arena ##GunsCold = the event hold: msg 0x83 with start 0, and
+# the CLIENTS lock their weapons - if their GAME_DEF says DelaysActive. A client that does not lock (served
+# without the flag as on 11-16, joined before the arena was switched to event mode, or simply not honouring it)
+# went on shooting and every hit was relayed and scored: Bigalon -> Taurus_HQ 21:02:12 and 21:07:32, 34 s and
+# 22 s after 'EVENT: HOLD', kill booked 21:03:19. While an event-mode arena is on hold (no start known) the
+# server now drops the damage reports exactly as it does for a cold ordinary arena. Switch: EVENT_HOLD_DROPS_DAMAGE.
+EVENT_HOLD_DROPS_DAMAGE = True
+_EVENT_HOLD_CACHE = {}      # room -> (checked at, on hold) - event_mode() reads the room's settings, so 3 s of cache
+
+def event_hold_cold(room_id):
+    if not EVENT_HOLD_DROPS_DAMAGE or room_id is None:
+        return False
+    now = time.time()
+    ent = _EVENT_HOLD_CACHE.get(room_id)
+    if ent and now - ent[0] < 3.0:
+        return ent[1]
+    try:
+        hold = bool(event_mode(room_id)) and event_state(room_id).get('start') is None
+    except Exception:
+        hold = False
+    _EVENT_HOLD_CACHE[room_id] = (now, hold)
+    return hold
+
 def guns_drop(s, what):
     """Called for a damage report from a cold room: swallow it, remind the shooter now and then.
     True = dropped."""
     rid = getattr(s, 'current_room', None)
+    _ev = False
     if not guns_cold(rid):
-        return False
+        _ev = event_hold_cold(rid)                               # v968f8z
+        if not _ev:
+            return False
     now = time.time()
     if now - getattr(s, '_guns_notice_t', 0.0) >= GUNS_NOTICE_S:
         s._guns_notice_t = now
         try:
-            send_system_msg(s, 'GUNS COLD - weapons hold: your hits do not register.')
+            send_system_msg(s, 'EVENT HOLD - weapons are locked: your hits do not register.' if _ev
+                               else 'GUNS COLD - weapons hold: your hits do not register.')
         except Exception:
             pass
     n = s.__dict__.get('_guns_dropped', 0) + 1; s._guns_dropped = n
     if n in (1, 10, 100) or n % 500 == 0:
-        log('GUNS', f'room {rid}: dropped {what} from {s.current_pilot} (guns cold, {n} so far this session)')
+        log('GUNS', f'room {rid}: dropped {what} from {s.current_pilot} ({"event hold" if _ev else "guns cold"}, {n} so far this session)')
     return True
 
 def guns_on_spawn(s):

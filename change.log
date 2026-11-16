@@ -14152,3 +14152,86 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     probe ~20 s after entering), with 'in 89'17' still arriving every 10 s; server log has one
     'TIMECHECK <pilot>: probe stamp now follows his clock' per session; lagperf probe_ms / late_ms as before.
   Backup: _scratch/server.py.bak_v968f8x. Patch: _scratch/patch_8y.py.
+
+2026-11-16  BANKED: v968f8y-stable   (user: "bank")   previous bank: v968f8l-stable (11-12)
+  SNAPSHOT: _scratch/bank/server.py.v968f8y + web_server.py.v968f8y + fa_logging.py.v968f8y (byte-identical to
+    the working files at 15:17 UTC; against the last bank web_server.py differs by the 8m tournament help texts
+    and .csv in the log listing, fa_logging.py is unchanged).
+    Deploy the three together.
+  IN THIS BANK (v968f8m .. v968f8y, entries above):
+    8m tournament joining            8n convoy escort order home      8o panel stored % against undamaged capacity
+    8p crash with damage = a crash   8q exit 0x53 keeps no pilot      8r lag = slipped client input queue; lag watch
+    8s lag watch reads the NET clock too, pilot notice off            8t LAGPERF csv + the 2009 push contract
+    8u weather: constant wind only   8v bundling ON by default (singles for a late pilot), FREEZE / CLOCK /
+       clock-moved false alarms, columns-tick exception, recorder ~1 min
+    8w refused cargo drop says why; a pilot's metal rebuilds storage first
+    8x panel 'Storage Capacity' = the storage standing now           8y lag probe stamp per pilot
+  STATE AT BANK - what has flown:
+    - LIVE runs v968f8y since 11-16 15:06:52 UTC (BASELINE: mlist=True, probe_stamp=per-pilot). In the first ten
+      minutes three pilots' stamps were set (clock + way in -122 / -583 / -878 ms - the last two were outside the
+      old fixed window and would have logged the ERROR on every probe); Alon's client log messages08: 34 probes,
+      one 'ERROR: TimeCheckCB', dif=+4963 at a spawn load - the genuine kind.
+    - Bundling (8v's default, typed by hand on v968f8u 11-15 14:05 UTC): 34.5 flying pilot-hours, 17 pilots, to
+      11-16 08:07 UTC with no slipped-queue episode (3.3 h and one 29-min episode before it that day).
+    - 8x: standing capacity seen on the panel offline (Front Airfield 46: fuel 66,150 lb (20%), ammo 220,500 (50%)).
+  STATE AT BANK - NOT yet seen working:
+    - 8v: the three false-alarm fixes and the arena-reset guard have only minutes of live time.
+    - 8w: the refused-drop AI line and storage-first metal - not flown.
+    - 8x: a resource with ALL its storage destroyed (1 kg = '2 (0%)' on the panel, must not read 'unlimited'),
+      and a metal unload at such a field.
+  KNOWN AND OPEN AT BANK:
+    - DYNAMIC WEATHER MUST STAY OFF on the live arena: two client CTDs (Meno 11-15 21:17 and 21:43,
+      TrnWorld.cpp:325 / InterObj.cpp:248) with the 8u guard active and a Constant wind served - the guard does
+      not prevent it. Cycle off = no msg 137 at all.
+    - Error map of 11-16 (ANALYSIS entries): still to do - ace/rank msg 88 sent at every spawn and for players the
+      receiver holds no plane for; lorries reported dropped by the client (msg 3) or never built (no msg 6) are
+      still counted as delivered; 'Client 496 already exist' left as is on purpose; 'N elements remains' at exit
+      not identified.
+    - Meno's second login 11-15 21:18 (Enter greyed out, nicks gone): server side normal, needs his messages21.log.
+    - Rulings recorded since the last bank: no emergency stock at a field with no standing storage (11-15);
+      re-login is not an acceptable answer to lag (11-15).
+
+2026-11-16  v968f8z-stable  ##GunsCold IN AN EVENT ARENA DID NOT STOP THE DAMAGE (Alon / Taurus, live v968f8y, room 189 'Death Bowl Test')
+  REPORT (Alon 23:08): "we have just tested ##gunscold. the server responds but the damage still reflects."
+  LIVE LOG (UTC): 21:01:38 '##gunscold' by Taurus@HQ -> 'event-mode arena: weapons locked on the clients (event
+    hold)', 'EVENT: HOLD' to 3 pilots. 21:02:12 Bigalon hits Taurus_HQ (DAMAGE28 relayed), 21:03:19 kill booked
+    (+1400). Again 21:07:10 hold -> 21:07:32 hits.
+  CLIENT (Alon's messages09, the GAME_DEF he was served for that arena at 20:55:05 and 20:57:45):
+    'OxygenLevel1=2987m  OxygenLevel2=2987m ... [Tournament] Active=no StartDelay=5 ShootDelay=2 ...
+    [Event] DelaysActive=no' - while the server's own reading of the same arena is tn_enabled 1, start 2, shoot 0,
+    ev_enabled 1. 'in 131'6 ... GameEventStartTime=0' arrived each time: the hold message was delivered, the
+    client had no DelaysActive to lock on.
+  CAUSE 1 - the served GAME_DEF never got the arena's tournament / event settings. Every writer that addresses
+    the tail of the GAME_DEF first runs _gamedef_tail_ok(), and that test demanded OxygenLevel1 < OxygenLevel2.
+    Both ceilings are web settings, written by arena_settings_apply BEFORE those writers; this arena has both at
+    9800 ft. Equal -> test False -> [Tournament], [Event], rain, radar, show-ground-objects and the crater
+    settings were all skipped for that arena, each with a line on a tag the live log does not show.
+    Reproduced offline on a stored GAME_DEF through the real functions (_scratch/test_tn_gamedef.py):
+      ceilings 9800 / 32000 ft -> patch applied;  9800 / 9800 ft -> NOT APPLIED;  16000 / 9800 ft -> NOT APPLIED.
+    The server's own logic reads the stored GAME_DEF + settings without that step, so it believed 'event mode'.
+  CAUSE 2 - in an event-mode arena the hold relied on the clients alone; the server-side drop of damage reports
+    (the guns-cold mechanism of ordinary arenas) was not used there.
+  CHANGED (server.py):
+    - _gamedef_tail_ok and the crater writer's own check: OxygenLevel1 <= OxygenLevel2.
+    - arena_settings_apply: a with-mask ceiling entered BELOW the no-mask one is served as the no-mask value for
+      both (line 'ARENA-SET oxygen ceilings entered the wrong way round ...') - it would fail the same test.
+    - when an arena's tournament / event settings still cannot be written into the served GAME_DEF: one line on
+      the EVENT tag per room per 10 min ('... NOT in the GAME_DEF served to the clients ...').
+    - event_hold_cold(): while an event-mode arena is on HOLD (no start known - also its initial state and a
+      tournament's assembly) guns_drop() swallows msg 28 / 29 / 31 from it, exactly as for a cold ordinary arena;
+      shooter told 'EVENT HOLD - weapons are locked: your hits do not register.' every 8 s; GUNS line
+      'dropped ... (event hold, N so far)'. Starts and ends with event_stop / event_start at once.
+      EVENT_HOLD_DROPS_DAMAGE = True. The ##GunsCold reply in an event arena says both locks.
+  WHAT CHANGES FOR ARENAS WITH EQUAL CEILINGS after the push (room 189 at least): their clients get
+    [Tournament] Active / [Event] DelaysActive and the other tail settings for the first time since the ceilings
+    were made equal - 'Event not started yet!' on entry, engines and weapons locked until the host starts,
+    the client's own tournament countdowns.
+  NOT CHANGED: guns cold in ordinary arenas; hits on tanks / lorries / trains / soldiers (msg 51) are still not
+    covered by either hold.
+  VERIFY: enter Death Bowl Test - client log '[Tournament] Active=yes', '[Event] DelaysActive=yes', and the
+    cockpit refuses to fire before the start. ##GunsHot, then ##GunsCold in flight: no damage on the target, the
+    shooter sees 'EVENT HOLD ...', server log 'GUNS room 189: dropped plane damage (28) from <pilot> (event hold'.
+    ##GunsHot: hits count again.
+  Tested offline (_scratch/test_tn_gamedef.py and _scratch/test_8z_guns.py, old vs new). Compiles. Not run as a
+    whole server and not against a client.
+  Backup: _scratch/server.py.bak_v968f8y. Patch: _scratch/patch_8z.py.
