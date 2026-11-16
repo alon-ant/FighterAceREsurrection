@@ -251,8 +251,12 @@ Joiners receive the room's live weather at spawn; an arena reset returns to the 
 `##GunsCold` and `##GunsHot`, typed in the arena chat by a sysop, are SERVER-SIDE `##` commands: the
 client passes a `##` word it does not know through as plain chat (its own table is fixed, FUN_0044d180),
 the server recognises the word, acts and answers the sender only - the line is never reflected to the
-room, and a non-sysop gets `Sysops only.` In an event-mode arena they are `event hold` / `event fight`
-(the client-enforced lock). In any other arena the hold is server-side: the clients keep firing but the
+room, and a non-sysop gets `Sysops only.` Since v968f9a they are the weapons hold in EVERY arena and
+never touch the event state: engines stay on, the event and tournament clocks keep running. The event
+lock (engines and weapons locked on the clients) is a separate word, `##EventHold` (console `event hold
+<room>`), lifted by `##StartEvent` / `event fight <room>` - which also ends a guns-cold hold. While an
+event is on hold the server drops the room's damage reports too (v968f8z).
+The guns-cold hold is server-side: the clients keep firing but the
 server drops every damage report that leaves the room (msg 28 plane hits, msg 29 canopy hits, msg 31
 ground damage - bombs and rockets included), so nothing registers and no kill is booked; collisions
 remain. Broadcast + cockpit banner on each change, a spawn notice for joiners, a reminder to a shooter

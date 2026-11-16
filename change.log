@@ -14235,3 +14235,29 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
   Tested offline (_scratch/test_tn_gamedef.py and _scratch/test_8z_guns.py, old vs new). Compiles. Not run as a
     whole server and not against a client.
   Backup: _scratch/server.py.bak_v968f8y. Patch: _scratch/patch_8z.py.
+
+2026-11-16  v968f9a-stable  ##GunsCold IS ONLY A WEAPONS HOLD - SEPARATE FROM THE EVENT HOLD (Alon, live v968f8z)
+  REPORT (Alon 23:33): "Better but now ##gunscold pauses the event and kills the engine control. it's now tied to
+    eventhold or something like that - they should be separate."
+  WHY: since v960f5 an event-mode arena turned ##GunsCold into `event hold` (msg 0x83 with start 0) and ##GunsHot
+    into `event fight`. With v968f8z the clients of 'Death Bowl Test' finally receive [Event] DelaysActive, so the
+    hold now does what the client's event lock does: engines AND weapons locked, the event waiting for its start.
+  CHANGED (server.py):
+    - guns_set(): no event branch. ##GunsCold / ##GunsHot / `guns <room> cold|hot` are the server-side weapons
+      hold in every arena (damage reports msg 28 / 29 / 31 dropped; banner, spawn notice, 8 s reminder) and never
+      send 0x83: engines stay on, the event and tournament clocks keep running.
+    - ##EventHold (also ##HoldEvent), sysops: the event lock, as `event hold <room>` on the console. In an arena
+      without event mode it answers that ##GunsCold is the hold there.
+    - event_start() (##StartEvent, `event fight`, a tournament GO) ends a guns-cold hold in that room - one
+      direction only; guns cold never touches the event.
+    - ##GunsStatus / `guns status` show both: 'room 189: GUNS COLD since .. by .. | event: started'.
+    - Kept from v968f8z: while an event IS on hold the server drops the room's damage too.
+  MODERATION.md: the guns-cold paragraph says the same.
+  NOT CHANGED: the native ##StartEvent / ##EnableFlyButton, the tournament verbs, guns cold in ordinary arenas;
+    hits on tanks / lorries / trains / soldiers (msg 51) are still outside both holds.
+  VERIFY in Death Bowl Test with the event started: ##GunsCold -> engines keep running, 'GUNS COLD - WEAPONS HOLD'
+    banner, hits do not register (server 'GUNS room 189: dropped plane damage (28) ... (guns cold'); ##GunsHot ->
+    hits count; ##EventHold -> engines and weapons lock ('EVENT: HOLD'); ##StartEvent -> free again.
+  Tested offline (_scratch/test_9a_guns.py old vs new; test_8z_guns.py still passes). Compiles. Not run as a whole
+    server and not against a client.
+  Backup: _scratch/server.py.bak_v968f8z, _scratch/MODERATION.md.bak_v968f8z. Patch: _scratch/patch_9a.py.

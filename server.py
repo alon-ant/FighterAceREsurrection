@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8z-stable'
+VERSION = 'v968f9a-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1709,6 +1709,11 @@ def event_start(room_id, by='console', at=None, _delayed=False):
     e['start'] = float(at) if _future else time.time() - EVENT_UNLOCK_BACKDATE_S
     e['fly'] = True; e['by'] = by
     globals().get('_EVENT_HOLD_CACHE', {}).pop(room_id, None)      # v968f8z: ... and ends now
+    try:
+        if room_id in GUNS_COLD:                                   # v968f9a: the fight is on - a guns-cold hold ends with it
+            guns_set(room_id, False, by=by)
+    except Exception:
+        logx('GUNS', 'guns hot at the event start failed')
     n = event_push(room_id, 'start')
     if not tournament_cfg_for_room(room_id):          # v956f5: the tournament arms its own clock at the competition start
         event_arm_end(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)
@@ -11134,6 +11139,7 @@ def chat_filter(text, who=''):
 # lock (event_stop / event_start), so moderators have ONE pair of words everywhere:
 #   in game (sysop):  ##GunsCold / ##GunsHot   (server-side chat commands - the client passes an
 #                     unknown ## word through as chat, FUN_0044d180, so no client change is needed)
+#                     v968f9a: these are the weapons hold in EVERY arena now; the event lock is ##EventHold
 #   console:          guns <room> cold|hot|status      (also: event hold / event fight fall back to it)
 GUNS_COLD = {}            # room_id -> {'by': name, 'since': t}
 GUNS_NOTICE_S = 8.0       # per-shooter reminder interval while cold
@@ -11142,14 +11148,19 @@ def guns_cold(room_id):
     return room_id is not None and room_id in GUNS_COLD
 
 def guns_set(room_id, cold, by='console'):
-    """Returns a description of what was done. Event-mode arenas use the client-enforced lock."""
+    """Returns a description of what was done.
+    v968f9a [GUNS COLD IS ONLY A WEAPONS HOLD, IN EVERY ARENA] (Alon 11-16 23:33, after v968f8z made the event
+    lock reach the clients: '##gunscold pauses the event and kills the engine control ... tied to eventhold ...
+    they should be separate'). Until now an event-mode arena turned ##GunsCold into `event hold` (msg 0x83 start 0:
+    engines AND weapons locked on every client, 'Event not started yet') and ##GunsHot into `event fight`. Now the
+    two never touch each other:
+      ##GunsCold / ##GunsHot  (console `guns <room> cold|hot`)  the server drops the damage reports of the room -
+                              pilots keep their engines, the event and tournament clocks keep running;
+      ##EventHold             (console `event hold <room>`)     the event lock: engines and weapons, on the clients;
+      ##StartEvent            (console `event fight <room>`)    the event start - which also ends a guns-cold hold,
+                              because 'the fight is on' with dropped damage would only look broken."""
     if room_id is None:
         return 'no room'
-    if event_mode(room_id):
-        if cold:
-            event_stop(room_id, by=by)
-            return 'event-mode arena: event hold - weapons locked on the clients, and hits are dropped by the server until the start'
-        event_start(room_id, by=by);  return 'event-mode arena: weapons free (event fight)'
     if cold:
         if room_id in GUNS_COLD:
             return 'already cold'
@@ -11230,7 +11241,13 @@ def guns_status_text(room_id=None):
         if g:
             out.append(f'room {r}: GUNS COLD since {time.strftime("%H:%M:%S", time.gmtime(g["since"]))} UTC by {g["by"]}')
         else:
-            out.append(f'room {r}: guns hot' + (' (event-mode arena: see event status)' if event_mode(r) else ''))
+            out.append(f'room {r}: guns hot')
+        try:                                                        # v968f9a: the event lock is a separate thing - show it beside
+            if event_mode(r):
+                out[-1] += (' | event: ON HOLD (engines and weapons locked on the clients; hits dropped here too)'
+                            if event_state(r).get('start') is None else ' | event: started')
+        except Exception:
+            pass
     return out
 
 # server-side '##' chat commands (sysops): name -> handler(s, args) -> reply text (sent to the sender)
@@ -11242,7 +11259,17 @@ def _cmd_weather(s, args):
     if not sess_rights(s):
         return 'Sysops only.'
     return weather_command(getattr(s, 'current_room', None), args or ['status'], by=getattr(s, 'current_pilot', None) or 'sysop')
+def _cmd_event_hold(s, args):
+    """v968f9a: ##EventHold - the event lock (engines + weapons, client-side), apart from ##GunsCold."""
+    if not sess_rights(s):
+        return 'Sysops only.'
+    rid = getattr(s, 'current_room', None)
+    if event_stop(rid, by=getattr(s, 'current_pilot', None) or 'sysop'):
+        return 'event hold: engines and weapons are locked until the event is started (##StartEvent). For a weapons-only hold use ##GunsCold.'
+    return 'this arena is not in event mode - ##GunsCold gives a weapons hold here.'
 CHAT_SERVER_COMMANDS = {
+    'eventhold': _cmd_event_hold,                    # v968f9a
+    'holdevent': _cmd_event_hold,
     'mark':     lambda s, a: _cmd_mark(s, a),            # v968f5d: ##mark <label> - named mark at the plane's spot
     'pos':      lambda s, a: _cmd_mark(s, []),           # v968f5d: ##pos - where am I
     'weather':  _cmd_weather,                       # v962f5b: ##Weather storm / ##Weather rain off / ##Weather status ...
