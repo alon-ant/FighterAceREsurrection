@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f8x-stable'
+VERSION = 'v968f8y-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7408,7 +7408,7 @@ def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
-                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
+                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
 def console_handler():
@@ -7656,8 +7656,17 @@ def console_handler():
                                        + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
                                        + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
             elif cmd in ('timecheck', 'nak', 'loadhold', 'freezewatch', 'tcevent', 'scene79', 'postleave', 'features'):   # v968f8b/8c: live switches
-                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE, MSGLIST_SINGLE_WHEN_LATE
+                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE, MSGLIST_SINGLE_WHEN_LATE, TIMECHECK_STAMP_PER_PILOT
                 _a = (parts[1].split() if len(parts) > 1 else [])
+                if cmd == 'timecheck' and len(_a) >= 2 and _a[0].lower() == 'stamp' and _a[1].lower() in ('on', 'off'):     # v968f8y
+                    TIMECHECK_STAMP_PER_PILOT = (_a[1].lower() == 'on')
+                if cmd == 'timecheck':
+                    log('CONSOLE', f'probe stamp (msg 89 SendTime) = {"per pilot, his dif aimed at +%d ms" % TIMECHECK_DIF_TARGET_MS if TIMECHECK_STAMP_PER_PILOT else "fixed: our clock - %d ms for everyone" % TIMECHECK_SEND_BIAS_MS}'
+                                   f' (`timecheck stamp on|off`)')
+                    for _s in get_all_sessions():
+                        if getattr(_s, 'entered_game', False) and _s.__dict__.get('_tc89_skew') is not None:
+                            log('CONSOLE', f'  {_s.current_pilot}: his clock + way in {_s.__dict__["_tc89_skew"]:+d} ms against ours '
+                                           f'(last {len(_s.__dict__.get("_tc89_skew_hist") or [])} prompt answers)')
                 _v = (_a[0].lower() == 'on') if _a and _a[0].lower() in ('on', 'off') else None
                 if cmd == 'timecheck' and _v is not None: TIMECHECK_ENABLE = _v
                 if cmd == 'nak' and _v is not None: NAK_FAST_RETX = _v
@@ -14367,14 +14376,77 @@ def _freeze_watch(s, now):
     except Exception:
         pass
 
+# --- v968f8y [THE PROBE STAMP FOLLOWS EACH PILOT'S OWN CLOCK] (Alon 11-16: 'lets start with the TimeCheckCB') ----
+# Client log messages05 (online 11-15, 1.08 h): 373 x 'ERROR: TimeCheckCB. SendTime=.., ReceiveTime=.., dif=-206'
+# - one for every lag-watch probe. The handler (FA.exe 0x4f5290) answers [0x59][SendTime][ReceiveTime = its NET
+# clock], takes dif = ReceiveTime - SendTime and prints that ERROR when dif is outside -20..2000 ms; it does
+# nothing else with the value. We stamped SendTime = our clock - TIMECHECK_SEND_BIAS_MS (500), which fits a
+# client whose NET clock sits ~0.3 s behind ours (the local case, v968f7k). Online Alon's reads ~0.7 s behind
+# (rtt 155 ms): dif -185..-218 on 372 of 373 probes. Meno (rtt 36 ms): inside the window, one line at a load.
+# 2009 never carries msg 89 at all (0 in / 0 out in 3.17 h), so there is no original stamp to copy.
+# Now the stamp is set per pilot: every prompt answer gives skew = his ReceiveTime - our true send instant (his
+# clock offset + the way in), the median of the last TIMECHECK_SKEW_N is kept, and the next probe is stamped
+# our clock + skew - TIMECHECK_DIF_TARGET_MS, so his dif lands near +300 with -320 / +1700 ms of room. Until
+# the first answer of a session the stamp uses the skew his pilot had last time, else the old fixed bias (one
+# ERROR line at most). The lag watch times a probe by OUR clock at the send and reads his clock from
+# ReceiveTime - neither uses the stamp, so nothing it measures moves. A pilot whose queue is seconds behind
+# will still print the ERROR (dif > 2000): in his own log that line now means something.
+# Console: `timecheck stamp on|off` (off = the fixed bias for everyone).
+TIMECHECK_STAMP_PER_PILOT = True
+TIMECHECK_DIF_TARGET_MS   = 300
+TIMECHECK_SKEW_N          = 5
+TIMECHECK_SKEW_PROMPT_MS  = 400     # an answer later than this beyond the transport rtt is no clock reading
+_TC89_SKEW_SEED = {}                # pilot name -> his last skew (ms): the first stamp of his next session
+
+def _tc89_true_ms(t):
+    return int((t + NTP_UNIX_OFFSET_S) * 1000) & 0xFFFFFFFF
+
+def _tc89_stamp(s, t_sent):
+    """The SendTime field for a probe leaving at t_sent."""
+    skew = None
+    if TIMECHECK_STAMP_PER_PILOT:
+        skew = s.__dict__.get('_tc89_skew')
+        if skew is None:
+            skew = _TC89_SKEW_SEED.get(getattr(s, 'current_pilot', None))
+    if skew is None:
+        return (_tc89_true_ms(t_sent) - TIMECHECK_SEND_BIAS_MS) & 0xFFFFFFFF
+    return (_tc89_true_ms(t_sent) + int(skew) - TIMECHECK_DIF_TARGET_MS) & 0xFFFFFFFF
+
+def _tc89_note_skew(s, t_sent, recv_ms, now):
+    """One answer: his NET clock when his game handled the probe, against our clock when it left."""
+    try:
+        d = s.__dict__
+        if t_sent is None or (now - t_sent) * 1000.0 - int(d.get('_rtt_ms') or 0) >= TIMECHECK_SKEW_PROMPT_MS:
+            return
+        sk = (int(recv_ms) - _tc89_true_ms(t_sent)) & 0xFFFFFFFF
+        if sk >= 0x80000000:
+            sk -= 0x100000000
+        h = d.setdefault('_tc89_skew_hist', [])
+        h.append(sk)
+        del h[:-TIMECHECK_SKEW_N]
+        first = d.get('_tc89_skew') is None
+        d['_tc89_skew'] = sorted(h)[len(h) // 2]
+        name = getattr(s, 'current_pilot', None)
+        if name:
+            if len(_TC89_SKEW_SEED) > 4000:
+                _TC89_SKEW_SEED.clear()
+            _TC89_SKEW_SEED[name] = d['_tc89_skew']
+        if first and TIMECHECK_STAMP_PER_PILOT:
+            log('TIMECHECK', f'{name or "?"}: probe stamp now follows his clock - his NET clock + the way in read {sk:+d} ms against '
+                             f'ours at the first answer (the fixed stamp fits {-TIMECHECK_SEND_BIAS_MS - 20:+d}..{2000 - TIMECHECK_SEND_BIAS_MS:+d}); '
+                             f'his client sees dif near +{TIMECHECK_DIF_TARGET_MS} from the next probe')
+    except Exception:
+        logx('TIMECHECK', 'skew note failed')
+
 def send_timecheck_89(s):
     try:
         # v968f7j: SendTime in the client's own time base (NTP-era ms) - messages75 showed ReceiveTime =
         # (unix + 2208988800) x 1000 mod 2^32 to within the clock offset, so with this base the client's
         # dif is the true offset and its 'TimeCheckCB' error line (dif outside -20..2000) stays silent
-        send_ms = (int((time.time() + NTP_UNIX_OFFSET_S) * 1000) - TIMECHECK_SEND_BIAS_MS) & 0xFFFFFFFF
+        _t_sent = time.time()
+        send_ms = _tc89_stamp(s, _t_sent)                    # v968f8y: per-pilot stamp (was our clock - 500 ms for everyone)
         pend = s.__dict__.setdefault('_tc89_pending', {})
-        pend[send_ms] = time.time()
+        pend[send_ms] = _t_sent
         _rlp = s.__dict__.setdefault('_rl_pend', {})                          # v968f8r: ring-lag watch - when, and how many datagrams he had been sent
         _rlp[send_ms] = (pend[send_ms], getattr(s, 'pkt_tx_n', 0))
         for k in [k for k in _rlp if pend[send_ms] - _rlp[k][0] > RINGLAG_PEND_KEEP_S]:
@@ -14417,10 +14489,9 @@ def _pilot_lag_sample(s, send_ms, recv_ms, rtt, now):
             ref = d.get('_tc89_off')
         if ref is None:
             return
-        raw = (recv_ms - send_ms) & 0xFFFFFFFF
+        raw = (recv_ms - send_ms) & 0xFFFFFFFF             # v968f8y: send_ms here = our true send instant in his time base
         if raw >= 0x80000000:
             raw -= 0x100000000
-        raw -= TIMECHECK_SEND_BIAS_MS
         in_ms = raw - int(ref)
         rtt_ms = int(rtt * 1000)
         out_ms = rtt_ms - in_ms
@@ -14677,10 +14748,12 @@ def handle_timecheck_89(s, pl):
             return                                           # not ours (or older than 30 s)
         rtt = now - t0
         d0 = s.__dict__
+        _tc89_note_skew(s, t0, recv_ms, now)                 # v968f8y: his clock + the way in, for the next stamp
+        _true_ms = _tc89_true_ms(t0)                         # v968f8y: our clock when the probe left (the stamp no longer is)
         _ringlag_sample(s, send_ms, now, recv_ms)            # v968f8r / v968f8s (his NET clock too)
         if not TIMECHECK_ENABLE:
             return                                           # v968f8r: the probes fly for the ring-lag watch only - no clock reading, no TIMECHECK lines
-        _pilot_lag_sample(s, send_ms, recv_ms, rtt, now)       # v968f7s: inbound/outbound split, every reply
+        _pilot_lag_sample(s, _true_ms, recv_ms, rtt, now)      # v968f7s: inbound/outbound split, every reply (v968f8y: true send instant)
         if rtt * 1000 > TIMECHECK_RTT_MAX_MS:
             d0['_tc89_slow'] = d0.get('_tc89_slow', 0) + 1
             if now - d0.get('_tc89_slow_logged', 0.0) >= 60.0:
@@ -14689,11 +14762,10 @@ def handle_timecheck_89(s, pl):
                                  f'({d0["_tc89_slow"]} such this session), sample ignored')
             return
         # his NET-clock reading minus our send instant, corrected for half the round trip (u32, wrap-aware)
-        off = ((recv_ms - send_ms) & 0xFFFFFFFF)
+        off = ((recv_ms - _true_ms) & 0xFFFFFFFF)          # v968f8y: against the true send instant (was the stamp + the fixed bias)
         if off >= 0x80000000:
             off -= 0x100000000
         off -= int(rtt * 500)
-        off -= TIMECHECK_SEND_BIAS_MS                      # v968f7k: SendTime was sent early by this much
         d = s.__dict__
         prev = d.get('_tc89_off')
         hist = d.setdefault('_tc89_hist', [])

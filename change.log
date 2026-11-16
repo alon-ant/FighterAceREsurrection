@@ -13982,8 +13982,9 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
       same line ending '... was lost', the log '| NOT TAKEN: ... - lost'.
     - console: `cargo explain on|off`, `cargo storagefirst on|off`.
   NOT CHANGED: the rule itself (a field with no standing storage stores nothing), the 107 answers, scores, the
-    room's 'delivered' line, the panel. OPEN (Alon's decision): whether a field with its storage down should
-    still take a small emergency stock from a transport.
+    room's 'delivered' line, the panel. DECIDED (Alon 11-15 22:35, asked whether a field with its storage down
+    should still take a small emergency stock from a transport): "it shouldn't" - no storage standing, nothing
+    stored; metal or the repair clock first.
   VERIFY: destroy both ammo storages of a friendly field (or capture one that lost them), land a transport with
     ammo, Alt-C: the personal AI line appears once, the cargo is still aboard, the server CARGO line ends
     '| NOT TAKEN ...'. Land with metal: REPAIR '... storage first' lists the Ammo Storage(s) before trees and
@@ -14022,3 +14023,132 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     together, Resource Storage % steps with them; bomb the last one - 'Fuel: 1 (0%)', not unlimited; land metal
     there, Alt-C - server CARGO line shows the full m2750 and REPAIR '... storage first'; the capacity returns.
   Backup: _scratch/server.py.bak_v968f8w. Patch: _scratch/patch_8x.py.
+
+2026-11-16  ANALYSIS  CLIENT ERROR MAP: 2026 messages05 (online 11-15 19:14-20:18 UTC, live v968f8u + mlist on) AGAINST 2009 messages01-04
+  REQUEST (Alon): "I noticed all sorts of errors in the current file (05). I want a mapping of the errors present in
+    the new files compared to the real historic files 01-04 ... I also saw a pseudo move action in the historic
+    files, this could be the action we are missing."
+  METHOD: every line carrying ERROR / missing / not found / Move1 / Move2 / PseudoMove ... normalised (numbers and
+    names out) and counted. 2009 = messages01-04 in the game root, 3.57 h together (04 = 3.17 h online);
+    2026 = DebugLogs/messages05, 1.08 h. Script: Claude's sandbox (errmap.py), not on this machine.
+                                                              2009 (01-04)   2026 (05)
+    Get coord for missing object N                                   2          1017    OURS - see (1)
+    ERROR: TimeCheckCB. SendTime.., dif=N                            0           373    OURS - see (2)
+    ERROR: AceOrRankChangedCB. PlayerIndex=N not found               0            19    OURS - see (3)
+    ERROR: Client 496 already exist                                  0             1    OURS - see (4)
+    ERROR: N elements remains / ~DLIS.. not empty (at exit)          0             4    new, not identified - (5)
+    Move1 / Move2 N, obj N, cli N                                  207            18    both; 62/h then, 17/h now
+    ERROR: n=N Object(N) Object->nMoveCycles=N                      14             2    both
+    ERROR: Wrong time stamp .. DataN.all                             8 per file    8    local file check, same
+    ERROR: Unknown command line option "/Name:.."                    2             1    launcher, same
+    ERROR: Wrong scan code translation                               0             2    local keyboard
+    ERROR: pr->GetDecV()=.., rDecV=..                              295             0    2009 only, client-side bursts
+    ERROR: There is no empty start place on requested airfield      33             0    2009 host refused a spawn (N=255)
+    Perform PseudoMove for PPlayer for N Extra Cycles                6             0    client-local - see (6)
+    CFT / EFT: frames not started                                    7             0    2009 only
+    WaitingForStartPlaceList is empty / Confirm object N not found
+      in list / ChatMessage from unknown player                      3             0    2009 only, one each
+  (1) MISSING OBJECT. 777 of the 1017 are two lorries, wire numbers 284 / 285 (0x011c AA Car, 0x011d Furgon).
+      19:51:58 Alon exits to HQ (MEC 10, world kept). 19:54:26 / 19:54:32 the convoy crosses a cell and the
+      server rotates the two cars to new numbers 'on 1 client: Alon@HQ 2742 m'. Client: 'Receive create object 284'
+      and NOTHING after it - no LOAD OBJECT, no 'Create NetCar', no 'out 6' (every other 'Receive create' in the
+      log, 147 of them, is followed by its 'Create Net..' line). The delete of the old copy 0.7 s later IS executed. So in HQ the
+      client executes deletes and drops creates. The server booked both as created; at his spawn 19:55:16 it
+      re-created one train and no car; both lorries stayed invisible, 640-2700 m from him, their frames logging
+      'missing object' at 2/s and 0.35/s until the next cell rotation at 19:57:41 (in flight - worked).
+      = the 'drawn-but-missing lorries' item left open at the 10-29 bank, and a candidate for Bama's invisible
+      column of 10-24 (not checked against those logs). The other ~240: frames that arrive in the 30-150 ms
+      between 'Receive create' and the client's own create, and frames still on the way after his exit.
+      2009 has 2 in 3.17 h. The client reports every object it HAS built with msg 6 ('out 6'3' [0x06][ONumber]);
+      2009: 1067 of them for 833 creates. That report is the server's proof of a create - it is read today only
+      to release the tank/soldier/train settle hold.
+  (2) TIMECHECK. Msg 89 is our lag-watch probe; 2009 never carries it (0 in / 0 out). The client prints the ERROR
+      when its clock minus the stamp is outside -20..2000 ms. Alon (rtt 155 ms): -185..-218 on 372 of 373 probes
+      (one +5807 at a load). Meno (rtt 36 ms): one, at a load. The fixed TIMECHECK_SEND_BIAS_MS does not cover a
+      pilot whose NET clock sits ~200 ms behind ours. The probe result itself is unaffected.
+  (3) ACE/RANK. Msg 88 handler (FA.exe 0x4f4120) walks the 512 CLIENT slots for one whose PlayerIndex matches and
+      logs the ERROR when none does - i.e. the receiver holds no client record for that player (in HQ, never flown,
+      or gone). 2009 carries msg 88 with no such error. 626 lines in 19 of the last 100 logs.
+  (4) 'Client 496 already exist': the AI station's client record sent again in a re-create batch (20:13:08, the
+      spawn after an airfield change) to a client that still held it. Ignored by the client. 37 in the last 100 logs.
+  (5) '~DLIS<class WHASH_BASE> not empty' + 'N elements remains' after 'End of log file': a client list not empty
+      at shutdown, N = 4..25, in 79 of the last 100 logs; the two 2009 logs that reach the exit are clean. Which
+      list is not identified.
+  (6) PSEUDOMOVE is not a message. FA.exe 0x44a9f2..0x44aa5e, in the main loop's MoveObjects step: when the frame
+      owes extra cycles and the local player object (PPlayer, 0xc6eb98) exists, its move routine (vtable+0x18) is
+      called once with that count and the line is printed. It is the client catching ITS OWN plane up after its own
+      long frame: 2009 messages01 '180 Extra Cycles' right after a 4592 ms model load; messages04 118-218 cycles
+      after 5-9 s holes in the log. The same line is in 16 places in the last 100 logs here (messages06 11-15
+      20:20:42: 4 cycles). The peer-side counterpart is Move1 / Move2.
+  ALSO SEEN in 2009: 'in 77'257' (the plane-type counts, RE'd 11-15) arrives with every start-place answer.
+  NOT CHANGED: nothing - analysis only.
+
+2026-11-16  ANALYSIS (2)  DO THE NEW ERRORS HAVE THEIR MESSAGES IN THE 2009 LOGS?  + a correction to (1) above
+  REQUEST (Alon): "check again the list of errors, check if the new errors displayed have matching MSGs in the
+    original logs."  Message inventory per hour, 2009 messages04 (3.17 h) against 2026 messages05 (1.08 h):
+    error                         triggered by            2009/h   2026/h   in 2009?
+    Get coord for missing object  msg 7 (never logged)       -        -     the messages around it all exist:
+                                  msg 2 create             229      112       create
+                                  msg 6 'built' (out)      337      139       report after each build
+                                  msg 3 delete in / out    146/111   76/20    delete / client's own drop list
+                                  BUT all 827 objects built in the 2009 logs are planes (789) and parachutes (38):
+                                  not one tank, lorry, train, soldier or ship. The case does not occur there.
+    TimeCheckCB                   msg 89 (17 B in, 9 out)    0      350     NO - never sent or answered in 2009
+    AceOrRankChangedCB not found  msg 88 (7 B)              35       38     YES, same size, 110 of them, no error
+    Client 496 already exist      msg 2 with a client rec.   -        -     the AI station does not exist in the
+                                                                            2009 logs (no ground objects)
+    N elements remains (exit)     none                                      -
+  CORRECTION to (1) of the entry above ('in HQ the client executes deletes and drops creates' - too simple).
+    Checked over the last 100 client logs (about 1,950 creates; _scratch/hqcreate2.py) and the 2009 logs:
+    - The client builds received creates ONE per ~0.33 s, last received first, while it is in the world. 2009:
+      36 creates outside flight, all built within 0.5 s (planes, a chute). 2026: 13 built after the own plane's
+      exit (bail-out, death view), incl. train / ship / lorry / soldiers.
+    - A create is NEVER built in two situations:
+      (i)  the pilot's own exit while creates are still queued: 'Flush disconnect object N' per queued record and
+           ONE msg 3 ('out 3') listing them - the client TELLS the server. 2009 has the same line (2x) and
+           message. Log 67 (10-29 12:13:24): creates 282 / 283 / 285 / 281 / 284 at the spawn, 284 and 281 built,
+           exit 0.4 s later, 'Flush disconnect object 285, 283, 282', 'out 3'10' - and the three lorries then
+           logged 'missing object' for 154 s (197 lines each) until the next rotation created them again.
+      (ii) the create arrives while the client is outside the world and the world is rebuilt before he flies:
+           messages05 19:54 (side left 19:52:34, re-entry 19:55:02 'DelObject 611 / 843, out 3'5', Preload ...):
+           the queued 284 / 285 vanish without a line and without a report. Also log 98 (311-316), log 20 (289).
+    - In BOTH the client never sends msg 6 for the object. msg 6 after a create = it exists; no msg 6 = it does not.
+    - So the fix is not 'no creates in HQ': it is (a) act on the msg-3 drop list for lorries as for tanks,
+      (b) treat a create without its msg 6 as not delivered.
+  ALSO in the inventory - only in 2026: in 89 / out 89 (probe), in 137 (weather), in 26 (our answer to the map
+    poll; 2009 sends the poll 'out 26' 48/h and never gets a msg 26 back - its map data comes as msg 57,
+    137-189 B, where ours is 9 B), in/out 34, out 51, out 119. Only in 2009: in 1, 28, 33, 45, 49, 56, 72, 76,
+    77 (with every start place), 94, 125, 129, 131, 136, 211, 224, 232 (one session each - absence in one
+    session proves little for 28 / 33).
+  NOT CHANGED: nothing - analysis only.
+
+2026-11-16  v968f8y-stable  THE LAG PROBE NO LONGER PRINTS 'ERROR: TimeCheckCB' IN THE CLIENT LOG (first item of the error map)
+  FOUND (ANALYSIS entries above): messages05, online 11-15 - 373 'ERROR: TimeCheckCB. SendTime=.., ReceiveTime=..,
+    dif=-206', one per lag-watch probe. Client handler FA.exe 0x4f5290: replies [0x59][SendTime][its NET clock],
+    dif = ReceiveTime - SendTime, ERROR when dif < -20 or > 2000; nothing else is done with it. Our stamp was
+    'our clock - 500 ms' for everyone (v968f7k, fitted to a local client 0.3 s behind us). Alon online: clock + way
+    in ~0.7 s behind -> dif -185..-218 on 372 of 373. Meno: inside the window. 2009 never sends msg 89.
+  CHANGED (server.py):
+    - _tc89_note_skew: every prompt answer (no later than 400 ms beyond the transport rtt) gives
+      skew = his ReceiveTime - our true send instant; the median of the last 5 is kept per session and per pilot name.
+    - _tc89_stamp: SendTime = our clock + skew - 300 ms -> his dif sits near +300 (room -320 / +1700 ms). Before the
+      first answer of a session: the skew his pilot had last time (kept in memory until a restart), else the old
+      fixed bias - at most ONE error line, in a pilot's first session after a server restart.
+    - One TIMECHECK line per session when the stamp starts following him ('his NET clock + the way in read -690 ms').
+    - The legacy clock reading (`timecheck on`: offset, reference, in/out split, rebase) now takes our true send
+      instant instead of 'stamp + fixed bias' - same numbers (test G: -790 / -790 / 100 / 100 before and after).
+    - Console `timecheck stamp on|off` (off = fixed bias for all); `timecheck` lists each pilot's skew; BASELINE
+      shows probe_stamp=per-pilot.
+  NOT CHANGED: when probes are sent, their size, the lag watch (it times a probe by our clock and reads his clock
+    from ReceiveTime - neither is the stamp), the LAGPERF columns. A pilot who really is seconds behind still prints
+    the ERROR (dif > 2000) - in his own log that line is now a true sign of it. A real clock step prints it for
+    2-3 probes until the median follows.
+  Tested offline (_scratch/test_8y.py, real send/handle code against a simulated client, old vs new):
+    clock -780 ms / 78 ms each way: 58 of 58 probes ERROR -> 1 of 58; next session of the same pilot 28 -> 0;
+    clock -300 ms / 18 ms: 0 -> 0; a 5 s load: 2 lines; queue 3 s behind: LAG-WATCH 'LAGGING' unchanged (6 lines
+    both); clock step -2500 ms: 'NET clock has moved' unchanged. test_ringlag.py and test_8v.py still pass.
+    Compiles. Not run as a whole server and not against a client.
+  VERIFY: fly online ten minutes; in the client log `ERROR: TimeCheckCB` should appear at most once (the first
+    probe ~20 s after entering), with 'in 89'17' still arriving every 10 s; server log has one
+    'TIMECHECK <pilot>: probe stamp now follows his clock' per session; lagperf probe_ms / late_ms as before.
+  Backup: _scratch/server.py.bak_v968f8x. Patch: _scratch/patch_8y.py.
