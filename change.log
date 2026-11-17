@@ -14261,3 +14261,372 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
   Tested offline (_scratch/test_9a_guns.py old vs new; test_8z_guns.py still passes). Compiles. Not run as a whole
     server and not against a client.
   Backup: _scratch/server.py.bak_v968f8z, _scratch/MODERATION.md.bak_v968f8z. Patch: _scratch/patch_9a.py.
+
+2026-11-16  ANALYSIS (3)  GAME_DEF GAME TYPES - IS THERE AN 'EVENT' TYPE?  (Alon: 'we have private and mission
+            types ... there might be an event type in the game exe')   Answer: no. Static RE of FA.exe + the 2009 logs.
+  THE TYPE FIELD (GAME_DEF [Main] Type, live struct +0xa8, the byte apply_game_type() writes):
+    - Read by the CfgFile letter reader FUN_007cfcc0("Type", "cmpt", default 'c') at 0x57f8c4: the value's first
+      letter is looked up in "cmpt" and the index is stored. So four values exist and no fifth can be parsed:
+        0 = c (the reader's default; word unknown - nothing in the exe names it and nothing tests for it)
+        1 = m  Mission   (official arenas)
+        2 = p  Private   (what the Create Arena dialog stores, 0x70e974; also the GameDef.cpp constructor default)
+        3 = t  training / practice (offline)
+    - Every test of the field found in the code (27 sites) is '== 1' or '== 3'. Nothing compares with 0, 2 or
+      any higher value.
+        == 1, 19 sites: the Mission / TC side - Msn_Prod resource asks and production, the HQ and map Production
+          Complex panels, spawn supply (0x466632 0x4759a7 0x48e1f5 0x48e415 0x48eb43 0x48f12a 0x5578fd 0x55855f
+          0x6dbaae 0x6dcde2 0x6dd42b 0x6ee1ec 0x732e59 0x427844 0x44c745 0x4689f0 0x540661 0x6cd6ca 0x6cf6a6).
+        == 3, 8 sites: the Msn_Evnt.cpp 'EventsChecker' (FUN_0045c2e0), CreationPlace / StartOnShip (0x441c98
+          0x4423f4 0x443133 0x443d86 0x45d6f5 0x45fd77 0x4bc9dc 0x55ed7b). 'Evnt' here = scripted mission
+          events of the offline practice missions; the seven sites checked are taken only with no online
+          session (VNET 0xc822d8 == 0); 0x55ed7b was not checked for that gate.
+    - LobbyType (+0xac) is a free text string - the lobby room's name. The client stores, prints and re-sends it;
+      no code compares it with anything.
+  THE 2009 LOGS (the client prints every GAME_DEF it loads: ' Type=%i', ' LobbyType=%s'):
+    - messages04, 16 May 2009, ONLINE, a real scheduled event: 'Battle 5 The Abbeville Boys',
+      LobbyType='--Fighter Ace Campaign V--', Type=1. [Tournament] Active=no (StartDelay=1 ShootDelay=1 Lives=3).
+      [Event] DelaysActive=yes, StartMethod=load, StartDelay=0, FlyButtonEnabled=no, TaxiLimit=5.0. No
+      [EventParam..] sections printed. At entry: 'in 131'6' -> 'GameEventStartTime=..', 'StartTime is set'.
+    - messages01, 1 Mar 2009, OFFLINE (no network lines): '5 Territorial Conquest', LobbyType='2 Practice', Type=3.
+    - Ours today (DebugLogs): Type=1 everywhere (10 older BOB dumps Type=2); event arena dumps: DelaysActive=yes,
+      StartMethod=load, StartDelay=0, FlyButtonEnabled=yes, TaxiLimit=0.0.
+  SO: an event arena in 2009 was an ordinary Type=1 arena. What made it an event was the [Event] section plus
+    msg 0x83 - the mechanism the server already serves since v953f5. Two values differ from the 2009 event:
+    FlyButtonEnabled (2009 no - Fly button shut until the sysop opens it; ours yes) and TaxiLimit (2009 5.0;
+    ours 0.0).
+  ALSO FOUND in the [Event] reader (0x5836de):
+    - StartMethod letters "lps" = load / player / sysop (default load). No client code reads it back (only load,
+      save, print) - by the look of it an instruction for the 2009 server about who starts the event.
+    - Per-class delay sections [EventParamFighters<i>], [EventParamBombers<i>], [EventParamSupport<i>] with keys
+      EngineStart, FireGuns, FireRockets, DropBombs, DropSupply, Taxi (minutes, added to Event.StartDelay) - the
+      'EVENT_PLANE_CONFIG list' noted in v953f5, empty in our templates and absent from the 2009 event dump.
+    - TaxiLimit is read once, 0x4b38dd, in the ground-movement check FUN ~0x4b3700 beside DelaysActive, the event
+      start and the Taxi delay (texts 0x142..0x145). Reading (not tested): how far a plane may roll before the
+      event / taxi delay has passed.
+  NOT CHANGED: nothing - analysis only. Tools: capstone over FA.exe (Ghidra was not running).
+
+2026-11-17  v968f9b-stable  THE PARACHUTES OF ONE FRAME GO OUT AS ONE DATAGRAM (Meno 11-16: 'lag after an hour and after 10 minutes'; live v968f9a)
+  REPORT: Meno, client log messages25 (one login 21:41 - 23:14 UTC; his PC clock is 4.2 s ahead of the server, times
+    below are server UTC). Server run_20261116_214041, lagperf_20261116/17, recorder dump Meno_20261116_223110.
+  WHAT HAPPENED: one slipped-input-queue episode, the same fault as 11-10 / 11-12 / 11-15 (v968f8r).
+    - 21:41 - 22:30, 49 min: clean. Probe answers 35-75 ms, 2-4 datagrams behind (one 11.7 s answer at the first
+      spawn, 21:43 - the world load).
+    - 22:30:51.9: the first object update on his client that is too old to play forward ('Move2 315, obj 337' =
+      stamp 315 ticks = 6.3 s behind his clock; FA.exe FUN_007e4a20 snaps the object instead of moving it when the
+      stamp is >= 300 ticks old, >= 200 for one class of object - that is the jumping). 8,208 such lines to the end of the
+      session, none before; 780 'ERROR: TimeCheckCB' (dif 2.1 - 27.3 s), one before (a load at 21:42).
+    - LAG-WATCH 22:31:10: 'LAGGING ... INPUT QUEUE', 62-124 datagrams behind until he left at 23:14 (43 min). NET
+      clock +1..+11 ms against entry, rtt 35-41 ms, loss 0, his own frames 0.0-0.2 s old. Seconds late = datagrams
+      behind / datagrams per second, again: 1.0-1.5 s at 46-70 pkt/s (22:31-22:34), 4-10 s at 8-17 pkt/s,
+      17.7-19.7 s at 5 pkt/s (22:42, 22:47, 22:49-22:52), 7.0-7.6 s at 10-11 pkt/s (23:05-23:09).
+    - His death and respawn at 22:34:33 and his HQ stay at 22:56:46 did not clear it (expected: only a new login
+      resets the queue). 'After 10 minutes' is, in the server's data, the same episode: 5.4-5.7 s late after he flew
+      again at 22:57, 7+ s from 23:04. There is no second onset.
+    - His next login 23:17 - 00:28 (71 min): probe answers 32-68 ms, never more than 48 ms late. The login before
+      (21:29 - 21:40, ended by the 9a update) was clean too.
+  THE TRIGGER (coincidence in time and in shape; not proven - the fault is a race):
+    - 22:30:36.7 - 22:30:48.2 _SA_Creed_ dropped ten parachutes next to him (objects 0x014f-0x0158). A pilot with
+      canopies in the air sends ONE msg-7 frame with his plane and every canopy (124 B with one, 430 B with ten);
+      relay_telemetry splits it (v547f5) and sent every record as its own datagram: 11 datagrams back to back,
+      4-5 times a second. PERF: relay_q_max 1-5 -> 11, server tx 22-25 -> 58.5 pkt/s with two pilots flying.
+    - Meno's first stale update: 15 s after the first canopy, 3.7 s after the tenth.
+    - It is the volley shape 8v removed from the AI frames (4-15 datagrams inside 3 ms, four times a second), and
+      the only place left where one datagram in becomes many out. Since AI bundling went on (11-15 14:06 UTC):
+      61.3 flying pilot-hours, 26 pilots, this one episode.
+    - Against: drops of 6-11 canopies at 23:10 (Meno already late), 23:23, 23:32 and 00:25 the same night, no
+      second pilot went late (who was in range is not known).
+  CHANGED (server.py):
+    - MSGLIST_SPLIT_CHUTES = True. The canopy records of one split frame go into the receiver's list outbox and are
+      flushed the moment the frame is done: plane record + ONE list instead of up to 11 datagrams (2 lists above 27
+      canopies). No added delay (forced flush, not the 25 ms timer); an AI frame already waiting in his outbox rides
+      along in front.
+    - Unchanged on purpose: the plane record (still its own plain datagram), a lone canopy (plain datagram, as
+      before), a pilot hanging under his own canopy (single-record frame, never split), a pilot the lag watch has
+      confirmed late (singles - more datagrams a second = fewer seconds late).
+    - Console: `mlist split on|off`; `mlist` shows it and 'N canopy records of split frames queued' per pilot.
+      BASELINE shows mlist_split_chutes=. TELEM-SPLIT lines end with '- canopy records in one list per peer'.
+      The recorder writes 'CHUTE msg7' for these (was only 'AI msg7' for list traffic).
+  NOT CHANGED: lag watch, probe, AI bundling, the split itself (which records, which peers, the chute gates).
+  NOT SOLVED: the fault is in the client (vcncNet.dll input queue counter, two threads, no lock). This removes the
+    last volley the server made; it cannot make a slip impossible, and once a pilot has slipped the server still
+    cannot clear it. Idea not built (Alon's call): while the watch has a pilot confirmed late, keep his datagram
+    rate up with harmless filler so 75 datagrams behind is ~1 s instead of 5-20 s.
+  VERIFY: start -> BASELINE '... mlist_split_chutes=True'. Two clients in one arena, one drops paratroops in sight
+    of the other: canopies come down smoothly on the watcher; `mlist` -> the watcher's line shows 'canopy records of
+    split frames queued'; PERF relay_q_max stays at 1-2 during the drop (was 11). `mlist split off` = the 9a wire.
+  Tested offline (_scratch/test_9b.py old vs new: 10 canopies 10 datagrams -> 1 list, payloads byte-identical and in
+    order, datagram numbers without a gap, late pilot still singles; test_8v.py and test_9a_guns.py still pass).
+    Compiles. relay_telemetry itself was not run in a test (checked by reading: the list branch sits before the
+    datagram number is taken). Not run as a whole server and not against a client - canopy records inside a list
+    have not been seen on a client yet (AI object frames, same message 7, have been since 11-15).
+  Backup: _scratch/server.py.bak_v968f9a. Patch: _scratch/patch_9b.py.
+
+2026-11-17  v968f9c-stable  FILLER: A SLIPPED INPUT QUEUE IS PUSHED THROUGH (Alon: 'if we know a client is behind with the datagrams, we
+            need to skip forward ... drop the lagging packets ... advance him to the current state of the server')
+  LOOKED INTO FIRST (vcncNet.dll + FA.exe, static; Ghidra not running):
+    - The queue: QInEnqueue 0x1000d206, QInDequeue 0x1000d14b, QInInit 0x1000d0bd, 256 places. Dequeue: 'if counter > 0:
+      take place[head], head+1, counter-1'. Enqueue: 'tail+1; place free -> store, else counter-1 (the datagram is thrown
+      away and its buffer never returned to the pool); counter+1'.
+    - What 'N datagrams behind' is, exactly: after the slip (one lost counter-1) the reader runs one place ahead for a lap;
+      every lone datagram and the first of every batch stays unread in its place; on the next lap the writer finds those
+      places taken, throws the new datagram away and moves on WITHOUT the counter - each leftover becomes one datagram of
+      standing offset. So N = the number of batches in that first lap (the old model + this rule: 36-71 for volley traffic,
+      213-227 for lone datagrams; live: Meno 65 and 60-82, RGP_JOLLY ~255). From then on his queue holds N datagrams its
+      counter does not know about, and they are the LAST N we sent, not old ones: every arriving datagram lets the game
+      read one, the oldest.
+    - So there is nothing lagging on the server to drop: what he has not seen yet sits in HIS queue, and sending less
+      makes him later (seconds late = N / datagrams a second).
+    - No reset from our side: QInInit has one caller, the connect routine (0x1000b11a in vcncLocalConnect); FA.exe calls
+      vcncConnect in one place (0x7e64e6), reached only from the login. QInFlush 0x1000d100 only drains what the counter
+      knows. Filling the queue on purpose does not realign it either (worked through: the leftovers come back as the same N).
+    - What moves the queue is any datagram at all. The cheapest one the game throws away in silence: msg 7 with no record,
+      [00][12][00][00][07]. Handler 0x7e3a70 starts 'dec ebx / je end'; 'in 7' lines go to the in-memory crash ring only
+      (logger 0x7cb340), never to messagesNN.log. It runs the handler's closing lines like every object frame: one Conductor
+      counter (+0x284c) steps down to its floor (+0x2844). What that counter steers was NOT found.
+    - The other candidates all write a line in his log per datagram: probe msg 89, a frame for a missing object ('Get coord
+      for missing object'), msgs 8-11 ('Unsupported message'), an empty list (the walker 0x1000d74e is do-while and would
+      read past the end), list entries with a system command ('Unsupported notification message').
+  THE SKIP, THEN: push the N through with empty datagrams, and keep pushing - N stays until his next login.
+  THE LIMIT: his queue. 254 places, N taken for good. If it fills while his game thread stands still (world load, alt-tab)
+    the overflow is thrown away for good, real datagrams included, and each one costs a pool buffer. Rules:
+      1. filler only while his game demonstrably runs - a probe answer in the last 2.5 s (probes go every second while
+         the filler is on) and, flying, a frame of his in the last 0.8 s (Meno's frames come 0.27-0.56 s apart);
+      2. real + filler together stay under HALF the free places per time-to-notice-a-stop (0.9 s flying, 3.0 s in HQ);
+      3. none from his spawn request (msg 77) to the first frame of the new life; none during a load hold.
+    What that gives: N 40 -> 0.3 s behind, 65 -> 0.65 s, 100 -> 1.2 s, 150 -> 2.6 s flying; in HQ about 3.3x that (65 ->
+    2.1 s). From about 200 up there is no room and nothing is sent (those pilots are as they were).
+  CHANGED (server.py):
+    - RINGPAD = True. When the lag watch confirms an episode: 'filler on - about N datagrams sit unread in his queue; ...
+      up to R a second = about X s behind; it was Y s'. One line a minute: 'held at 0.65 s behind by the filler (...)'.
+      N is re-measured from every probe answer; answers that return in a bunch (his game catching up) are left out.
+    - While the filler runs his AI frames stay bundled (single datagrams were the stand-in for this; `pad off` = singles).
+    - The episode no longer closes on prompt answers (with filler they all are). When the estimate drops under 20 a probe
+      flies with the filler stopped for at most 1 s; three of those answered promptly close it ('filler off - episode
+      closed - N filler datagrams were sent').
+    - Filler that does not help switches itself off: he is sent twice the datagrams and is still 0.7x as late, five spaced
+      answers running -> 'the delay does not shrink with datagrams, so it is not a held-back queue'.
+    - _load_hold_begin (msg 77) notes the spawn request for rule 3 whatever LOAD_HOLD says (LOAD_HOLD itself unchanged, off).
+    - Sender thread 'ringpad' (5 ms step, evenly spaced, each filler takes its number from the one datagram counter).
+    - Console: `pad` (who gets how much), `pad on|off`, `pad <pilot> <datagrams/s> [seconds]` = a test on any pilot in a
+      game (stops by itself; `pad <pilot> off`). BASELINE shows ringpad=True/0.3s.
+  NOT CHANGED: how an episode is found (three spaced late answers - 15-20 s after the slip, as before), the lobby (no
+    probe there, no filler: a slipped pilot is still slow in the lobby menus), lagperf columns (late_ms / behind_dgrams keep
+    their meaning; with filler late_ms reads the held delay, tx_pps includes the filler).
+  THE PRICE (model, _scratch/test_9c.py): a stop of his game while flying that we cannot see coming - alt-tab - finds his
+    queue fuller: with 67 behind and 12 real datagrams/s it overflowed after 15.6 s before, after about 9.5 s now
+    (15 s stop: 0 thrown away before, 81 now). A respawn load is covered by rule 3 (12 s load: 223 of 254 places, 0 thrown
+    away). A 60 s alt-tab overflowed before as well.
+  NOT VERIFIED ON A CLIENT: that the empty msg 7 really shows nothing, and what the +0x284c counter does when it is held at
+    its floor (candidate: how often his own frames go out - watch rx_pps of the tested pilot in lagperf).
+  VERIFY, in this order:
+    1. Offline, two clients or one: fly, then `pad <your pilot> 100 60` on the console. Nothing may change in the game;
+       messagesNN.log gets no new kind of line; `lagwatch` still shows 'ok'; the Net Info incoming bytes go up by
+       1.3-4 kB/s (13 B a datagram, 41 B with the IP/UDP header). (On Alon's own client the DLL debug log vcncnetNNN.log grows faster while it runs - several lines a datagram.)
+       Then the same with 250.
+    2. Live: nothing until a pilot slips. Then LAG-WATCH 'filler on', a minute later 'held at 0.6x s behind'; lagperf
+       late_ms of that pilot falls from thousands to hundreds, behind_dgrams stays about N + 10.
+    3. `pad off` at any time = v968f9b behaviour for everyone.
+  Tested offline: _scratch/test_9c.py old vs new (a model client that answers a probe once N more datagrams have been sent:
+    67 behind at 12/s 5.4 s -> 0.65 s; at 50/s 1.3 -> 0.64 s; 150 behind 18 -> 2.6 s; 250 behind nothing sent; 10 behind
+    1.8 -> 0.16 s with a trial every 30 s; in step again -> closed after 3 trials; healthy pilot with an 18 s load: no
+    episode, no filler; game stopped 15 s / 60 s: filler 0 within 0.8 s and back; spawn request: 0 through the load; HQ
+    10.5 -> 2.1 s; fixed 3 s delay: off after 548 fillers), _scratch/test_9c_thread.py (the real thread: 60 / 220 / 399 a
+    second for 60 / 220 / 400 asked, a gone session dropped), the DLL queue model with filler (real datagrams 3.0 s ->
+    0.16 s late, none lost). test_ringlag, test_8v, test_8y, test_9a_guns, test_9b still pass. Compiles. Not run as a
+    whole server and not against a client.
+  Backup: _scratch/server.py.bak_v968f9b. Patch: _scratch/patch_9c.py.
+
+2026-11-17  ANALYSIS (4)  IS THERE A PACKET IN vcncNet.dll THAT CLEARS / DROPS / ADVANCES THE INPUT QUEUE?  (Alon: 'the solution is
+            hiding in the dll ... find a packet that will drop old ones / clear the queue or advance the queue')   Answer: no.
+  HOW: vcncNet.dll in Ghidra (Alon's database), every function that touches the queue and every inbound packet handler read;
+    FA.exe with capstone for the game side.
+  THE QUEUE CAN ONLY BE TOUCHED BY FIVE FUNCTIONS (all references to counter 0x1001f438 / head 0x1001f440 / tail 0x1001f444):
+      QInInit    0x1000d0bd  <- FUN_1000b084 only (the body of vcncConnect / vcncLocalConnect)
+      QInFlush   0x1000d100  <- FUN_1000b084 (connect failed) and vcncDisconnect; frees only what the counter knows
+      QInSize    0x1000d0fa  (read only; vcncSystem 0x2329 hands it to the game)
+      QInDequeue 0x1000d14b  <- ProcessMessages 0x1000d388 <- vcncUpdate, and the window-message handler 0x1000d7a5
+      QInEnqueue 0x1000d206  <- the receive wrapper 0x1000db1a (and local notifications, FUN_1000dbff)
+    No packet handler calls QInInit or QInFlush, directly or through a pointer.
+  EVERYTHING THE DLL ACCEPTS FROM THE SERVER:
+    - transport header (vcnc_PacketDemux): ACK (0x02, our send queues), TIME (0x80), ADDR switch (0x04: new peer address),
+      SYN (0x10: dropped once connected), FIN (channel closed = connection lost), DATA (0x20) on channel 0 STANDARD,
+      1 RELIABLE, 2 URGENT, 3 LARGE, 4 STATUS, 5 CONTROL.
+    - CONTROL commands: 2 SUSPEND and 3 RESUME, nothing else (vcnc_ProcCtrlPkt_SUSPEND2_RESUME3). The 2009 lobby -> arena
+      hand-off: new peer address + connection index, the SEND queues are renumbered, the game is told with 0x8046 / 0x8047 -
+      and those two notices go through the same input queue. The input queue itself is not touched.
+    - application 'system' commands (OnPacketRecv 0x1000d7ca): 0x67 0x6a 0xc8 EShutDown 0xc9 ESystemMsg 0xcc EMsgList 0xcf 0xd1
+      0xd3 - all are enqueued like data. Any other system command goes to a one-place reply box for a waiting API call
+      (0x1000da4f); a second unsolicited one would block his input thread until the first is taken - not to be sent.
+    - ProcessMessages: 0x8028-0x802c (shutdown / lost connection: state + game callback), 0x803c (the list), the rest to
+      the game callback.
+  WHY NOTHING CAN ADVANCE IT: the read position moves one place per unit of the counter, the counter gets one unit per
+    datagram stored. Enqueue and dequeue keep (tail + 1 - head - counter) as it is; a datagram that finds its place taken
+    adds one (and is lost); only the race that caused the slip, the other way round, takes one off. The N uncounted
+    datagrams are physically in the queue and there is no code path that reads without the counter. Filling the queue to
+    the brim on purpose was worked through: the last N of the flood are left over, the offset comes back as N.
+  THE ONLY RESET IS A NEW CONNECT, AND ONLY THE GAME CALLS IT: FA.exe has one vcncConnect call (FUN_007e6470), run when
+    the network object is created at login. An automatic reconnect exists in FA.exe - launch option /Reconnect, main state
+    0x438a50: wait 90 / 120 s, disconnect, connect, re-enter the same arena - but it is the path of the AI-client mode
+    ('**AI**%X', GameDefsAI\\*.cfg) and is skipped for a player; for a player a lost connection ends in state 0x43dd60.
+  ALSO IN THE DLL (not a cure): 'FA LAGTEST' - with TrackPacket / PacketToTrack in vcncNet.ini the DLL logs one chosen
+    message at four points (wire -> queue, queue -> game callback, game call -> queue, queue -> wire): the queue delay of a
+    client measured on that client. vcncSystem 0x400 switches strict ordering of STANDARD datagrams (old ones rejected
+    BEFORE the queue) - no help for datagrams already in it.
+  SO, what exists: (1) not letting it slip - bundling (8v, 9b) from our side, ProcessAffinityMask=1 on the client;
+    (2) living with a slipped queue - the filler (9c); (3) a new connect - the pilot logging in again.
+  CHANGED: RINGPAD (the 9c filler) now defaults to False - Alon 11-17 'good but also very flawed'. `pad on` on the console
+    tries it; with it off the server behaves as v968f9b. Nothing else.
+
+2026-11-17  ANALYSIS (5)  IS THE RESTART AFTER A GRAPHICS CHANGE THE RECONNECT WE NEED?  (Alon: 'when I change the graphic settings
+            the game relaunches the client ... my connection isn't interrupted ... could we trigger it?')   Answer: no.
+  LOGS (Alon@HQ, live v968f9a, 07:16-07:18 UTC): client DebugLogs/messages12.log, DLL log vcncnet20261117071623089.log,
+    server run_20261116_214041.
+    - Same process: one messages12.log and one vcncnet log cover the whole session, before and after the change.
+    - DLL log: 'vcncConnect' once (07:16:23.091), 'vcncDisconnect' once (07:18:09.959, at exit), '[Input] BEGIN THREAD' once.
+      Between them the same queue is served every second ('QInDequeue :: Queue size'), except 07:17:38 - the ~1.5 s the
+      game spent reloading.
+    - Client log at the change: 07:17:25 joystick devices listed again; 07:17:38.07 'out 65'1', all plane models preloaded
+      again, 'Info TRN02 - scenes with valuable objects'. No 'VNET::SendEnterToGame', no new ClientID.
+    - Server: one SYN (07:16:23, sid 26), no second join; 07:17:40.19 'SCENE42 msg 42 x60 sent (client request)', then
+      his side choice again at 07:17:43.
+  FA.exe: the network object (pointer 0xc822d8) is written in two functions only - created in FUN_004f2370 (from the
+    connect state FUN_0043eba0), destroyed in FUN_004f3550 (from the AI-client reconnect state FUN_00438a50 and from the
+    shutdown FUN_0043b280). After a restart the menu state FUN_0043dd60 finds the network object alive and an arena chosen
+    (0xbf9988) and goes straight back to the arena state 0x438830. The AI flag 0xc6e8a4 is set only by the launch options
+    /AI: and /AIR:; 0xc7d8cb, the other way into the reconnect state, has no writer at all.
+  SO: the graphics change reloads the game on top of the SAME connection - which is why the connection is not interrupted
+    and also why the DLL's input queue (reset only by vcncConnect) would not be cleared by it. Triggering it from the
+    server would not help a slipped pilot. Inside a running player client nothing destroys and re-creates the connection;
+    only a new FA.exe process does.
+  NOT CHANGED: nothing - analysis only.
+
+2026-11-17  ANALYSIS (6)  DO OTHER PROTOCOLS / FORUMS HAVE A SERVER-SIDE WAY TO ADVANCE A CLIENT'S RECEIVE QUEUE?  (Alon: 'search the
+            internet ... we cannot use a reconnect ... padding might be the way but it needs to be done safely')
+  FOUND (web, 11-17):
+    - The bug class is known: a ring buffer whose element count is written by both the producer and the consumer. Arduino
+      core issue 195 describes it exactly - 'once a mismatch occurred, it would then forever be out of sync'. Every fix
+      discussed is in the code that owns the buffer (count derived from head and tail, or a lock). None from outside.
+    - Game netcode (gamedev.net snapshot threads): catching up, dropping old snapshots, resizing the buffer are all client
+      logic. From the server side the only lever named is how often it sends.
+    - The one documented way to move data through a buffer the sender does not own is filler: RFC 6202 3.2 ('blocks of white
+      space can be sent to achieve buffer overflow'), the 2 KB prelude of Internet Explorer's streaming. FFXI's PacketFlow
+      shows the same lever in a game: more packets a second = the client is fresher.
+    - Nothing found that lets a server move a client's read position.
+  SO: padding (v968f9c, RINGPAD, off by default) is the server-side route; see that entry for the three safety rules.
+  NOT CHANGED: nothing.
+
+2026-11-17  v968f9d-stable  PADDING IS AUTOMATIC: ON WHEN A PILOT IS LATE, OFF WHEN HE IS IN STEP AGAIN (Alon 14:45: 'a system that will
+            turn the padding on when a client is late or slow, then when it catches up turn the padding for the client off')
+  CHANGED (server.py), on top of the v968f9c machinery:
+    - RINGPAD = True again (it was switched off in ANALYSIS (4)). Per pilot, no console action needed.
+    - ON: the lag watch's verdict, as before - three spaced probe answers 800 ms or more over his rtt (15-20 s after
+      the slip). LAG-WATCH '  <pilot>: PADDING ON - about N datagrams sit unread in his queue; ... = about X s behind;
+      it was Y s'.
+    - OFF, three ways:
+        a. he is in step again. Shown by a probe flown with the padding stopped (1 s at most): whenever the estimate drops
+           under 20 datagrams, and NEW every RINGPAD_TRIAL_EVERY_S = 300 s whatever the estimate says. Three such probes
+           answered promptly in a row -> 'answers are prompt again ... episode closed', '  <pilot>: PADDING OFF - he is in
+           step again - N empty datagrams were sent'.
+        b. the padding does not shorten his delay (slow for another reason) -> 'PADDING OFF for this episode - ...'.
+        c. his session ends.
+    - The two log lines say PADDING ON / PADDING OFF (were 'filler on' / 'filler off').
+  TO KNOW: a held-back queue does not empty by itself. For a pilot like Meno 11-16 the padding therefore stays on until
+    he leaves; the 5-minute check finds him still behind (about 1.5 s late for that one second) and the padding goes on.
+    It ends early only if his queue really comes back into step.
+  NOT CHANGED: the three safety rules of 9c, the rates, `pad` / `pad on|off` / `pad <pilot> <n> [s]`, lagperf columns.
+  VERIFY: BASELINE '... ringpad=True/0.3s'. Offline first: `pad <your pilot> 100 60` - nothing may show in the game or in
+    messagesNN.log. Live: on the next slip the PADDING ON line, 'held at 0.6x s behind by the filler' once a minute,
+    lagperf late_ms in the hundreds; PADDING OFF when he leaves or is in step. `pad off` = v968f9b behaviour.
+  Tested offline (_scratch/test_9c.py, scenarios 15 and 16 new: 12 min behind -> two checks, 1.56 s late once each, padding
+    stays; slip at 60 s, in step at 400 s -> ON, 0.64 s, OFF, nothing sent afterwards; the 14 earlier scenarios unchanged;
+    test_9c_thread, test_ringlag, test_9b, test_8v, test_8y, test_9a_guns pass). Compiles. Not run as a whole server and
+    not against a client.
+  Backup: _scratch/server.py.bak_v968f9c. Patch: _scratch/patch_9d.py.
+
+2026-11-17  v968f9e-stable  TEST COMMAND `slip`: THE SERVER PLAYS A SLIPPED INPUT QUEUE FOR ONE PILOT (Alon: 'can you add a test
+            command that will force slow my client? or perhaps an external script for it')
+  WHY: the lag watch (8r-8y), the late singles (8v) and the padding (9c/9d) were only ever run against a model. A real
+    slipped queue cannot be made on demand (it takes one lost wake-up inside vcncNet.dll). This command produces the
+    same thing the pilot's game sees, from the server side, on one pilot, for a limited time.
+  WHAT A SLIPPED QUEUE DOES, AND WHAT THE TEST DOES: with the queue N places out of step, the last N datagrams we sent
+    lie unread in the client; each one is read only when a newer one arrives. The test keeps the last N unreliable
+    datagrams to that pilot in a line inside the server instead; each one leaves when a newer one is sent. Same order,
+    same 'N datagrams late', same dependence on how many datagrams a second he is sent - so the padding shortens the
+    delay in the test exactly as it would in the real case (the empty datagrams go through the same line).
+  CHANGED (server.py):
+    - _test_slip_send / _test_slip_set, placed before class _CountingSock; one added test in _CountingSock.sendto (the
+      single point every datagram leaves through). Held: datagrams with the header 00 00 20 <seq> and channel 0 =
+      unreliable game data (other planes, AI, parachutes, the lag probe msg 89, the padding). NOT held: reliable data,
+      ACKs, time sync, STATUS - the connection itself stays healthy and his NET clock stays right.
+    - Console: `slip <pilot> <datagrams behind, 1-250> [minutes, default 10, max 120]` | `slip <pilot> off` | `slip` (who
+      is under test, how many held, minutes left). Log tag TEST-SLIP at start, stop and time limit.
+    - Ends by `slip <pilot> off` (the held datagrams are sent at once, in order), by the time limit (same), or when he
+      logs out. Nothing is stored; a server restart ends it.
+  WHAT IT DOES NOT COPY: (1) in the real case reliable messages (chat, scores, hits) are late too, here they are on time;
+    (2) the real queue overflows at 254 and then loses datagrams, the test line never loses one; (3) what the client
+    does while its game stands still (loading, alt-tab). So it tests detection, the padding's switch-on / effect /
+    switch-off and what late world data looks like on the screen - not the overflow rule.
+  NOT CHANGED: anything a pilot not under test is sent; BASELINE; lag watch, padding, lists.
+  HOW TO USE (pilot in a game, best flying with AI around so he is sent 10-20 datagrams a second):
+    1. `slip Alon 65`. Expected delay = 65 / datagrams per second (5 s at 12/s). TEST-SLIP line in the log.
+    2. within about 20 s: LAG-WATCH 'LAGGING - his game handles what we send 5.x s late', then '  PADDING ON - about 65
+       datagrams sit unread ...'. On the screen: the others first run seconds late, then about 0.6 s late (flying).
+       `pad` and `lagwatch` show the state; lagperf late_ms falls from thousands to hundreds.
+    3. to see the lag without the cure: `pad off` before step 1 (then `pad on`).
+    4. `slip Alon off` -> within 5 minutes at most (the periodic check; sooner if the estimate is under 20) 'answers are
+       prompt again ... episode closed' and '  PADDING OFF - he is in step again'.
+    Try 20, 65, 150, 220: at 220 the padding should answer 'no room' or hold him at several seconds.
+  Tested offline (_scratch/test_9e.py): 20 unreliable + reliable + time datagrams, N=5 -> unreliable ones each exactly 5
+    late and in order, the others at once; `off` and the time limit release the rest in order. With the lag watch and
+    padding and a healthy model client at 12/s: `slip 65` -> 5.3 s late without padding, 0.63 s with it; LAGGING, PADDING
+    ON, after `slip off` episode closed and PADDING OFF, no errors. test_9c, test_9c_thread, test_ringlag, test_9b,
+    test_8v, test_8y, test_9a_guns, test_lagperf pass. Compiles. Not run as a whole server and not against a client.
+  Backup: _scratch/server.py.bak_v968f9d. Patch: _scratch/patch_9e.py.
+  LOCAL TEST BY ALON, 2026-11-17 12:57-13:03 UTC (run_20261117_145656.log, client messages13.log, DLL log
+    vcncnet20261117125717257.log; pilot AC2E_Bigalon^CO alone in Territorial Combat 1, flying, 6 real datagrams/s):
+    - 12:58:21 `slip 65`. Client: Move1 lines (object stamps 300-929 ticks old) and TimeCheckCB ERROR dif 18102..3449
+      from 12:58:45 - the same lines a really lagging client writes.
+    - 12:59:01 LAGGING 14.6 s late, PADDING ON (40 s after the start: at 6 datagrams/s each probe needs 11-15 s to come
+      back, and three are needed). First estimate 88 unread (true 65: ACK/time datagrams are counted but not held);
+      64-68 from the next reading on.
+    - 12:59:02 - 13:02:59: held at 0.63-0.67 s (lagperf late_ms 627-655), 105 datagrams/s to him, 4.5 kB/s. Client: no
+      Move line, no TimeCheckCB error, no 'Unsupported message', nothing at all about the empty datagrams.
+    - DLL log: 23,576 messages of 1 byte received = all 23,567 empty datagrams; each went through the input queue and
+      the game callback. Queue depth while padding: mean 1.8, 4 or less 99.6 % of the time, highest 11. vcncUpdate
+      stayed at 3000 calls a minute (50 a second) before, during and after. No error line in the DLL log.
+    - 13:02:59 `slip off`: 65 held datagrams released at once (client queue 69 for an instant, read off at once);
+      13:03:04 'answers are prompt again', PADDING OFF, 5 s later. Clean exit to the lobby 13:03:39.
+    - Test artefact: the client's STATUS reports showed 7-43 % download loss for the first 40 s (held datagrams look
+      lost to it). Not so in a real slip.
+    STILL OPEN: a real slipped queue (reliable messages late too, queue 65 places short); the three safety rules while
+      the game stands still (alt-tab, respawn, HQ) - not exercised, he flew throughout; hours of padding; N of 150+.
+  SECOND LOCAL TEST BY ALON, 2026-11-17 13:10-13:37 UTC (same run log; client messages15.log, DLL log
+    vcncnet20261117131030832.log; same pilot, alone in Territorial Combat 1):
+    - 13:11:20 `slip 65` (typed again 13:11:58 = same test, time limit restarted, nothing lost). 13:11:55 LAGGING 16.2 s,
+      PADDING ON. First estimate 134 -> 67 datagrams/s, 2.0 s; from the next readings 64-69 -> 105/s, 0.62-0.67 s for
+      the whole ten minutes (lagperf late_ms 625-667).
+    - The whole 10 minutes ran to the time limit: 60,648 empty datagrams sent, 60,661 one-byte messages in the DLL log
+      (all arrived). Queue depth while padding: mean 1.8, 4 or less 99.6 %, highest 12. vcncUpdate 50 a second throughout.
+      Client log 13:12-13:37: no Move line, no 'Unsupported message'; TimeCheckCB errors only before the padding and one
+      at the 5-minute check.
+    - Death and respawn under padding (13:12:25-28): the server dropped by itself from 99 to 24-29 empty datagrams a
+      second for the three seconds he was not flying, back to 88-100 with his first frames. Queue depth 3-6.
+    - HQ and back (13:12:38-40): 45, 42, 78 a second, then 92-100. Queue depth 3-4; his game loop ran 36 and 45 times in
+      those two seconds instead of 50.
+    - 5-minute check (13:16:55-56): padding held back for about a second (82, then 21 that second), one answer 1.6 s
+      late, padding on again.
+    - 13:21:58 time limit, 65 released (client queue 68 for an instant). PADDING OFF at 13:22:30, 32 s later: the
+      5-minute check had fired 2 s before the limit, and the next check under 20 datagrams waits RINGPAD_TRIAL_GAP_S =
+      30 s. During those 30 s he got 60 empty datagrams a second he no longer needed - harmless.
+    - 13:37:44 the client crashed: 'ERROR: Out of screen ...', 'Access violation at game, address 0x7D40D1' (drawing;
+      same signature in messages22/65/70) = Alon's screen lock. Padding had been off for 15 minutes. Server: FREEZE
+      'frames stopped ... transport still answers'. DLL log after the stop: vcncUpdate 0 calls, yet every arriving
+      message was still taken out of the queue at once ('Processing message in main thread' = the window-message path),
+      queue depth 1 until the process was closed 14:37. So a client standing on its crash box does not fill its queue.
+    - NOT THE SAME CRASH, before the test (13:10:07, messages14.log, session 13:09:48-13:10:07, no slip, no padding, no
+      probe sent yet): 'Assertion failed (!TrnWorld->pObjectsScene->IsPresentObject(pObject))', TrnWorld.cpp line 325,
+      at InsertPlayer, 1.6 s after an exit with MissExitCode 10 ('You are in Ghost Mode') followed directly by a
+      StartPlace request. Server side this was the SPAWN-WATCH 'grant never confirmed - 97% freeze signature' line.
+      Same assertion in messages00.log and messages01.log. Not looked into yet.
+    STILL OPEN after both tests: a real slipped queue; a game that stands still for seconds while padded (alt-tab, slow
+      load - Alon's machine loads in under a second); N of 150+; hours.

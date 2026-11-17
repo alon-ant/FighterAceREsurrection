@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9a-stable'
+VERSION = 'v968f9e-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -7440,7 +7440,7 @@ def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
-                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
+                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
 def console_handler():
@@ -7688,7 +7688,7 @@ def console_handler():
                                        + (f' | TimeCheck offset {_o:+d} ms rtt {_s.__dict__.get("_tc89_rtt_ms")} ms' + (f' drift {_sl:+.1f} ms/s' if _sl is not None else '') if _o is not None else ' | TimeCheck: no reply yet')
                                        + (f' | probe path in {int(_li)} ms / out {int(_lo)} ms, we send {_s.__dict__.get("_lag_tx_pps", 0.0):.1f} pkt/s {_s.__dict__.get("_lag_tx_bps", 0.0) / 1024:.1f} KB/s' if _li is not None else ''))   # v968f7s
             elif cmd in ('timecheck', 'nak', 'loadhold', 'freezewatch', 'tcevent', 'scene79', 'postleave', 'features'):   # v968f8b/8c: live switches
-                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE, MSGLIST_SINGLE_WHEN_LATE, TIMECHECK_STAMP_PER_PILOT
+                global TIMECHECK_ENABLE, NAK_FAST_RETX, LOAD_HOLD, FREEZE_WATCH, TC_USE_MSG104, TC_NATIVE_79, POST_LEAVE_WATCH, MSGLIST_BUNDLE, MSGLIST_SINGLE_WHEN_LATE, TIMECHECK_STAMP_PER_PILOT, MSGLIST_SPLIT_CHUTES
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 if cmd == 'timecheck' and len(_a) >= 2 and _a[0].lower() == 'stamp' and _a[1].lower() in ('on', 'off'):     # v968f8y
                     TIMECHECK_STAMP_PER_PILOT = (_a[1].lower() == 'on')
@@ -7771,10 +7771,14 @@ def console_handler():
                     MSGLIST_BUNDLE = (_a[0].lower() == 'on')
                 elif len(_a) >= 2 and _a[0].lower() == 'late' and _a[1].lower() in ('on', 'off'):      # v968f8v
                     MSGLIST_SINGLE_WHEN_LATE = (_a[1].lower() == 'on')
+                elif len(_a) >= 2 and _a[0].lower() == 'split' and _a[1].lower() in ('on', 'off'):     # v968f9b
+                    MSGLIST_SPLIT_CHUTES = (_a[1].lower() == 'on')
                 log('CONSOLE', f'MsgList bundling of AI object frames = {"ON" if MSGLIST_BUNDLE else "off"} '
                                f'(<= {MSGLIST_MAX_BYTES} B / {MSGLIST_MAX_N} frames per list, flush after {MSGLIST_FLUSH_MS} ms; `mlist on|off`); '
                                f'single datagrams for a pilot the lag watch has confirmed late = '
-                               f'{"ON" if MSGLIST_SINGLE_WHEN_LATE else "off"} (`mlist late on|off`)')
+                               f'{"ON" if MSGLIST_SINGLE_WHEN_LATE else "off"} (`mlist late on|off`); '
+                               f'canopy records of a split frame in one list = '
+                               f'{"ON" if MSGLIST_SPLIT_CHUTES else "off"} (`mlist split on|off`)')
                 for _s in get_all_sessions():
                     if getattr(_s, 'entered_game', False):
                         _l, _m, _1 = _s.__dict__.get('_ml_lists', 0), _s.__dict__.get('_ml_msgs', 0), _s.__dict__.get('_ml_singles', 0)
@@ -7782,7 +7786,72 @@ def console_handler():
                         log('CONSOLE', f'  {_s.current_pilot}: {_m} AI frames in {_l} lists ({(_m / _l) if _l else 0.0:.1f}/list), '
                                        f'{_1} sent alone; datagrams saved: {_m - _l}'
                                        + (f'; {_ls} sent singly while he was late' if _ls else '')
-                                       + (' [LATE NOW: singles]' if (MSGLIST_SINGLE_WHEN_LATE and _s.__dict__.get('_rl_on')) else ''))
+                                       + (f'; {_s.__dict__.get("_ml_split_recs", 0)} canopy records of split frames queued'
+                                          if _s.__dict__.get('_ml_split_recs') else '')
+                                       + (' [LATE NOW: singles]' if _mlist_late_single(_s) else ''))
+            elif cmd == 'slip':                                                         # v968f9e TEST: play a slipped input queue for one pilot
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _usage = 'usage: slip | slip <pilot> <datagrams behind, 1-250> [minutes, default 10] | slip <pilot> off'
+                if not _a:
+                    _n_run = 0
+                    for _s in get_all_sessions():
+                        _ts = _s.__dict__.get('_test_slip')
+                        if _ts is not None:
+                            _n_run += 1
+                            log('CONSOLE', f'  {getattr(_s, "current_pilot", "?")}: slip test - {_ts[1]} datagrams behind, {len(_ts[0])} held now, '
+                                           f'{_ts[4]} went through, {max(0.0, _ts[3] - time.time()) / 60.0:.1f} min left')
+                    log('CONSOLE', f'slip test: {_n_run} pilot(s). {_usage}')
+                else:
+                    _t = next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == _a[0]
+                               and getattr(x, 'entered_game', False)), None)
+                    if _t is None or len(_a) < 2:
+                        log('CONSOLE', f'slip: {"no pilot " + repr(_a[0]) + " in a game" if _t is None else "count missing"}. {_usage}')
+                    elif _a[1].lower() == 'off':
+                        log('CONSOLE', 'slip: ' + _test_slip_set(_t, 0))
+                    else:
+                        try:
+                            log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
+                        except ValueError:
+                            log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'pad':                                                          # v968f9c: filler for a slipped input queue
+                global RINGPAD
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _usage = 'usage: pad | pad on|off | pad <pilot> <datagrams/s> [seconds, default 60] | pad <pilot> off'
+                if len(_a) == 1 and _a[0].lower() in ('on', 'off'):
+                    RINGPAD = (_a[0].lower() == 'on')
+                elif _a:
+                    _t = next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == _a[0]
+                               and getattr(x, 'entered_game', False)), None)
+                    if _t is None or len(_a) < 2:
+                        log('CONSOLE', f'pad: {"no pilot " + repr(_a[0]) + " in a game" if _t is None else "rate missing"}. {_usage}')
+                    elif _a[1].lower() == 'off':
+                        _t.__dict__['_pad_manual'] = None
+                        log('CONSOLE', f'pad: test filler for {_a[0]} stopped ({_t.__dict__.get("_pad_sent", 0)} sent)')
+                    else:
+                        try:
+                            _pps = max(1.0, min(RINGPAD_MAX_PPS, float(_a[1])))
+                            _secs = max(1.0, min(600.0, float(_a[2]) if len(_a) > 2 else 60.0))
+                        except ValueError:
+                            _pps = None
+                        if _pps is None:
+                            log('CONSOLE', f'pad: not a number. {_usage}')
+                        else:
+                            _t.__dict__['_pad_manual'] = (_pps, time.time() + _secs)
+                            _PAD_SESS[id(_t)] = _t
+                            log('CONSOLE', f'pad: TEST - {_pps:g} filler datagrams/s to {_a[0]} for {_secs:g} s (empty msg-7 frames; '
+                                           f'his game should show nothing at all)')
+                log('CONSOLE', f'filler for a pilot whose input queue has slipped = {"ON" if RINGPAD else "off"} (aim {RINGPAD_TARGET_S:g} s behind; real + '
+                               f'filler stay under {RINGPAD_QUEUE_SHARE:g} of the free places of his queue per {RINGPAD_NOTICE_FLY_S:g} s flying / '
+                               f'{RINGPAD_NOTICE_HQ_S:g} s in HQ; none while his game does not run; `pad on|off`)')
+                _now_pad = time.time()
+                for _s in list(_PAD_SESS.values()):
+                    _d = _s.__dict__
+                    _m = _d.get('_pad_manual')
+                    log('CONSOLE', f'  {getattr(_s, "current_pilot", "?")}: '
+                                   + (f'TEST {_m[0]:g}/s, {max(0.0, _m[1] - _now_pad):.0f} s left' if _m else
+                                      f'{_d.get("_pad_n", "?")} datagrams unread in his queue -> {_pad_rate(_s, _now_pad):.0f} filler/s now '
+                                      f'(wanted in all {_d.get("_pad_pps") or 0:.0f}/s, room for {_pad_room(_s, _now_pad)[0]:.0f}/s, real {_d.get("_pad_real") or 0:.0f}/s)')
+                                   + f'; {_d.get("_pad_sent", 0)} filler datagrams sent')
             elif cmd == 'special74':                                                    # v968f7p test: msg 74 type 0 to one pilot
                 _a = (parts[1].split() if len(parts) > 1 else [])
                 _t = next((x for x in get_all_sessions() if _a and getattr(x, 'current_pilot', None) == _a[0]), None)
@@ -12913,6 +12982,70 @@ sock.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
 # (handshake/lobby never dropped). D: should read ~= the configured percentage. NEVER deploy >0.
 import random as _rnd
 TEST_DROP_PCT = 0.0
+# v968f9e [TEST: A SLIPPED INPUT QUEUE, PLAYED BY THE SERVER] (Alon 11-17: 'a test command that will force slow my client').
+# The real fault cannot be provoked (a thread race in the client). What it DOES to a pilot can be: his game reads what
+# we send N datagrams late. `slip <pilot> <N> [minutes]` keeps the last N unreliable datagrams to that pilot back - each
+# one leaves only when a newer one arrives behind it, in order. To the lag watch it is the same picture (answers late by
+# a count of datagrams, NET clock steady, transport rtt normal) and the padding pushes through it exactly as through the
+# real queue. Only STANDARD-channel data datagrams ([00 00 20 seq 00..]: object frames, lists, pushes, probes, padding)
+# are held; reliable data, ACKs, TIME and STATUS pass at once - held back at this level they would disturb his transport
+# and his clock, which the real fault never does. So in the test, chat / kills / creates are on time while everything
+# that moves is late. Differences from the real thing: no overflow (nothing is ever thrown away here), and it ends -
+# `slip <pilot> off`, the time limit (default 10 min), or his logout; what is held then goes out at once, in order.
+def _test_slip_send(raw, sess, ts, payload, addr):
+    """ts = [deque, N, lock, until]. Returns like sendto."""
+    hold = len(payload) >= 8 and payload[0] == 0 and payload[1] == 0 and payload[2] == 0x20 and (payload[4] >> 5) == 0
+    out = []
+    with ts[2]:
+        if time.time() >= ts[3]:                                 # time limit: let everything go, the test is over
+            sess.__dict__['_test_slip'] = None
+            out = list(ts[0]); ts[0].clear()
+            out.append(bytes(payload))
+            log('TEST-SLIP', f'{getattr(sess, "current_pilot", "?")}: time limit reached - test over, {len(out) - 1} held datagrams released')
+        elif not hold:
+            out.append(bytes(payload))
+        else:
+            ts[0].append(bytes(payload))
+            ts[4] += 1
+            while len(ts[0]) > ts[1]:
+                out.append(ts[0].popleft())
+    r = len(payload)
+    for pk in out:
+        try:
+            raw.sendto(pk, addr)
+        except OSError:
+            pass
+    return r
+
+def _test_slip_set(sess, n, minutes=10.0):
+    """n > 0: start / change the test for sess. n <= 0: stop it and release what is held. Returns a line for the console."""
+    d = sess.__dict__
+    ts = d.get('_test_slip')
+    name = getattr(sess, 'current_pilot', '?')
+    if n <= 0:
+        if ts is None:
+            return f'{name}: no slip test running'
+        with ts[2]:
+            d['_test_slip'] = None
+            out = list(ts[0]); ts[0].clear()
+        for pk in out:
+            try:
+                sock._s.sendto(pk, sess.addr)
+            except OSError:
+                pass
+        log('TEST-SLIP', f'{name}: test stopped - {len(out)} held datagrams released, {ts[4]} went through it')
+        return f'{name}: slip test stopped ({len(out)} held datagrams released)'
+    n = max(1, min(250, int(n)))
+    until = time.time() + max(0.5, min(120.0, float(minutes))) * 60.0
+    if ts is None:
+        d['_test_slip'] = [deque(), n, threading.Lock(), until, 0]
+    else:
+        with ts[2]:
+            ts[1] = n; ts[3] = until
+    log('TEST-SLIP', f'{name}: TEST - his unreliable datagrams now reach him {n} datagrams late for {minutes:g} min '
+                     f'(what a slipped input queue does); reliable data, ACKs and time sync are not held')
+    return f'{name}: slip test ON - {n} datagrams behind for {minutes:g} min. `slip {name} off` ends it.'
+
 class _CountingSock:
     """v467f5: thin delegating proxy - socket method slots are read-only on Windows, so the
     TX-counting choke point is a wrapper object instead of a sendto monkeypatch. Everything
@@ -12930,6 +13063,9 @@ class _CountingSock:
             if TEST_DROP_PCT > 0.0 and getattr(sess, 'entered_game', False) \
                     and _rnd.random() * 100.0 < TEST_DROP_PCT:
                 return len(payload)      # counted as sent, deliberately NOT transmitted
+            _ts = sess.__dict__.get('_test_slip')                 # v968f9e TEST: `slip <pilot> <N>`
+            if _ts is not None:
+                return _test_slip_send(self._s, sess, _ts, payload, addr)
         return self._s.sendto(payload, addr)
     def __getattr__(self, n): return getattr(self._s, n)
 sock = _CountingSock(sock)
@@ -14532,6 +14668,7 @@ def send_timecheck_89(s):
         pend[send_ms] = _t_sent
         _rlp = s.__dict__.setdefault('_rl_pend', {})                          # v968f8r: ring-lag watch - when, and how many datagrams he had been sent
         _rlp[send_ms] = (pend[send_ms], getattr(s, 'pkt_tx_n', 0))
+        _pad_trial_arm(s, send_ms, pend[send_ms])                             # v968f9c
         for k in [k for k in _rlp if pend[send_ms] - _rlp[k][0] > RINGLAG_PEND_KEEP_S]:
             _rlp.pop(k, None)
         _ringlag_silence_check(s, pend[send_ms])
@@ -14659,7 +14796,237 @@ RINGLAG_CLK_REF_N       = 3        # prompt answers that set his NET-clock refer
 RINGLAG_CLK_MOVED_MS    = 300      # NET clock this far from the reference = 'moved'
 RINGLAG_CLK_MOVED_N     = 3        # v968f8v: ... on this many prompt answers in a row before the line is written
 
+# --- v968f9c [FILLER: A SLIPPED INPUT QUEUE IS PUSHED THROUGH] (Alon 11-17: 'if we know a client is behind with the
+# datagrams, we need to skip forward ... advance him to the current state of the server') ---------------------
+# WHAT IS BEHIND: re-read of vcncNet.dll (QInEnqueue 0x1000d206, QInDequeue 0x1000d14b, QInInit 0x1000d0bd). After
+# the slip the client's queue holds N datagrams its game thread does not know about - its fill counter is N too
+# low. They are not old ones: they are the LAST N we sent. Every datagram that arrives lets the game read exactly
+# one - the oldest. So nothing on the server is 'lagging' and could be dropped, and sending LESS makes him later
+# (seconds late = N / datagrams per second). The counter is set right only by QInInit, called from the connect
+# routine alone (FA.exe has one vcncConnect call, at login) - the server cannot reset it.
+# THE SKIP: push the N through. A datagram the game throws away costs him nothing and moves the queue one step;
+# enough of them every second and what he reads is a fraction of a second old instead of 5-20 s. N stays, so the
+# push has to keep going until he logs in again.
+# THE FILLER is msg 7 with no record: app frame [00][12][00][00][07] (13 B with the transport header). FA.exe
+# msg-7 handler 0x7e3a70: 'dec ebx / je end' - no object touched, no line in his log ('in 7' goes to the in-memory
+# crash ring only, like every object frame). It does run the handler's last instructions, which every object
+# frame runs too: one Conductor counter (+0x284c) is stepped down to its floor (+0x2844). What that counter
+# steers was not found; in a busy arena object frames hold it at the floor anyway.
+# THE LIMIT is his queue: 254 places, N of them taken for good. A datagram that finds no free place is thrown away
+# by QInEnqueue AND its buffer is never given back (a fixed pool) - so the filler must never fill the queue while
+# his game thread stands still (a world load, alt-tab). Three rules:
+#   1. only while his game demonstrably runs: a probe answer in the last RINGPAD_ANSWER_GAP_S (probes go every
+#      RINGPAD_PROBE_S while the filler is on) and, when he flies, a frame of his in the last RINGPAD_FRAME_GAP_S;
+#   2. everything sent to him - real + filler - stays under RINGPAD_QUEUE_SHARE of the free places per 'time to
+#      notice a stop' (RINGPAD_NOTICE_FLY_S flying, RINGPAD_NOTICE_HQ_S otherwise);
+#   3. none from his spawn request (msg 77 - the world load follows) to the first frame of the new life, and none
+#      during a load hold.
+# So the delay it can reach depends on N: 40 -> 0.3 s, 65 -> 0.6 s, 100 -> 1.2 s, 150 -> 2.6 s flying (HQ: 3.3x that);
+# above ~200 there is no room left and nothing is sent.
+# N is measured by every probe answer (datagrams sent while the probe was out, less what a healthy client is sent
+# in his rtt + one frame). Answers that return in a bunch (his game catching up) are left out.
+# END OF AN EPISODE: with the filler on every answer is prompt, so prompt answers no longer close it. When the
+# estimate falls under RINGPAD_TRIAL_BELOW_N a probe flies with the filler stopped for at most RINGPAD_TRIAL_WAIT_S;
+# RINGLAG_CLEAR_N of those answered promptly close the episode.
+# Not in the lobby (no probe there to measure with). Console: `pad`, `pad on|off`, `pad <pilot> <datagrams/s>
+# [seconds]` (a test on any pilot in a game), `pad <pilot> off`.
+# v968f9d [AUTOMATIC] (Alon 11-17 14:45: 'a system that will turn the padding on when a client is late or slow, then when
+# it catches up turn the padding for the client off'). ON: the lag watch's own verdict (three spaced probe answers 800 ms or
+# more over his rtt) starts it for that pilot alone. OFF: (a) he is in step again - shown by probes flown with the padding
+# stopped: whenever the estimate drops under RINGPAD_TRIAL_BELOW_N, and every RINGPAD_TRIAL_EVERY_S whatever the estimate
+# says; RINGLAG_CLEAR_N prompt answers in a row close the episode; (b) the padding does not shorten his delay (he is slow
+# for another reason); (c) his session ends. A held-back queue does not empty by itself, so for most slipped pilots the
+# padding runs until they leave - stopping it earlier would put them back to 5-20 s.
+RINGPAD               = True
+RINGPAD_TRIAL_EVERY_S = 300.0    # a check with the padding stopped (1 s at most) this often, whatever the estimate says
+RINGPAD_TARGET_S      = 0.3      # the delay aimed at; the queue rule below usually decides
+RINGPAD_MIN_PPS       = 60.0
+RINGPAD_MAX_PPS       = 400.0
+RINGPAD_PROBE_S       = 1.0      # probe period while the filler is on = every heartbeat (an answer = his game thread runs)
+RINGPAD_ANSWER_GAP_S  = 2.5      # no probe answer for this long: no filler
+RINGPAD_FRAME_GAP_S   = 0.8      # flying and no frame of his for this long: no filler (his frames come 0.27-0.56 s apart)
+RINGPAD_QUEUE_SLOTS   = 254
+RINGPAD_QUEUE_SHARE   = 0.5
+RINGPAD_NOTICE_FLY_S  = 0.9
+RINGPAD_NOTICE_HQ_S   = 3.0
+RINGPAD_FRAME_MS      = 30
+RINGPAD_TRIAL_BELOW_N = 20
+RINGPAD_TRIAL_WAIT_S  = 1.0
+RINGPAD_TRIAL_GAP_S   = 30.0
+RINGPAD_TICK_S        = 0.005
+RINGPAD_BURST_MAX     = 6
+RINGPAD_QUEUE_MAX_N   = 300
+RINGPAD_FILLER        = bytes([0x00, 0x12, 0x00, 0x00, 0x07])
+_PAD_SESS = {}                # id(sess) -> sess with an open episode or a manual test (single dict ops only)
+
+def _pad_behind(pk, app_ms, net_ms):
+    """Datagrams his queue holds back: those sent while the probe was out, less the share a healthy client is
+    sent in the same way there and back plus one frame."""
+    if app_ms <= 0:
+        return 0
+    return max(0, int(round(pk * (1.0 - min(1.0, (net_ms + RINGPAD_FRAME_MS) / float(app_ms))))))
+
+def _pad_note(s, pk, app_ms, net_ms, now):
+    """One probe answer of a pilot in an episode -> the estimate (median of three) and the rate wanted.
+    Answers that come back in a bunch are his game thread catching up after a stop - their counts say how long
+    it stood still, not what his queue holds back - and are left out. An estimate above what a queue of 256 can
+    hold, five spaced answers running, means the delay is no held-back queue: the filler stops for the episode."""
+    d = s.__dict__
+    raw = _pad_behind(pk, app_ms, net_ms)
+    bunched = (now - d.get('_pad_ans', 0.0)) < 0.5
+    d['_pad_ans'] = now
+    if bunched:
+        return d.get('_pad_n', raw)
+    lag = app_ms - net_ms; pps = pk / max(0.05, app_ms / 1000.0)
+    ref = d.get('_pad_ref')                                  # (delay, datagrams/s) when the episode opened
+    if ref is None:
+        d['_pad_ref'] = (lag, pps)
+    if raw > RINGPAD_QUEUE_MAX_N or (ref is not None and pps >= 2.0 * ref[1] and lag >= 0.7 * ref[0]):
+        d['_pad_over'] = d.get('_pad_over', 0) + 1
+        if d['_pad_over'] >= 5 and not d.get('_pad_notq'):
+            d['_pad_notq'] = True; d['_pad_pps'] = 0.0
+            log('LAG-WATCH', f'  {getattr(s, "current_pilot", "?")}: PADDING OFF for this episode - he is sent {pps:.0f} datagrams/s'
+                             + (f' ({ref[1]:.0f} when it began)' if ref else '') + f' and is still {lag / 1000.0:.1f} s behind'
+                             + (f' ({ref[0] / 1000.0:.1f} s then)' if ref else '') + ', five answers running: the delay does not shrink with '
+                             f'datagrams, so it is not a held-back queue ({d.get("_pad_sent", 0)} filler datagrams were sent)')
+    else:
+        d['_pad_over'] = 0
+    if d.get('_pad_notq'):
+        return raw
+    h = d.setdefault('_pad_hist', [])
+    h.append(raw)
+    del h[:-3]
+    n = sorted(h)[len(h) // 2]
+    d['_pad_n'] = n
+    d['_pad_pps'] = min(RINGPAD_MAX_PPS, max(RINGPAD_MIN_PPS, n / RINGPAD_TARGET_S))
+    return n
+
+def _pad_room(s, now):
+    """Datagrams per second - real and filler together - his queue has room for (rule 2), and whether he flies."""
+    d = s.__dict__
+    lt = getattr(s, 'last_telem_time', 0.0) or 0.0
+    fly = bool(getattr(s, 'flying', False) and lt and now - lt <= 30.0)
+    free = max(0, RINGPAD_QUEUE_SLOTS - int(d.get('_pad_n') or 0))
+    return free * RINGPAD_QUEUE_SHARE / (RINGPAD_NOTICE_FLY_S if fly else RINGPAD_NOTICE_HQ_S), fly, lt
+
+def _pad_prompt(s, send_ms, pk, app_ms, net_ms, now, lag_ms):
+    """A prompt answer from a pilot in an episode. True = it counts towards closing the episode (no filler was
+    behind that probe); False = the filler carried it."""
+    d = s.__dict__
+    if not d.get('_pad_pps'):
+        return True
+    tr = d.get('_pad_trial')
+    if tr and tr[0] == send_ms:
+        d['_pad_trial'] = None; d['_pad_trial_last'] = now; d['_pad_ans'] = now
+        return True
+    n = _pad_note(s, pk, app_ms, net_ms, now)
+    _PAD_SESS[id(s)] = s
+    d['_rl_ms_min'] = min(d.get('_rl_ms_min', lag_ms), lag_ms)
+    if now - d.get('_rl_logged', 0.0) >= RINGLAG_LOG_S:
+        d['_rl_logged'] = now
+        log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: held at {lag_ms / 1000.0:.2f} s behind by the filler ({n} datagrams unread in his queue, '
+                         f'{pk / max(0.05, app_ms / 1000.0):.0f} datagrams/s to him, room for {_pad_room(s, now)[0]:.0f}; '
+                         f'{d.get("_pad_sent", 0)} filler datagrams so far); {(now - d["_rl_on"]) / 60.0:.0f} min so far, '
+                         f'transport rtt {net_ms} ms (flying={getattr(s, "flying", False)})')
+    return False
+
+def _pad_trial_arm(s, send_ms, t_sent):
+    """Before a probe leaves: when the estimate says he may be in step again, this probe flies with the filler
+    stopped. Answered promptly all the same = no datagrams are held back any more."""
+    d = s.__dict__
+    if not (RINGPAD and d.get('_rl_on') and d.get('_pad_pps')) or d.get('_pad_manual'):
+        return False
+    if d.get('_pad_trial'):                                  # one at a time (probes go a second apart, a trial waits longer)
+        return False
+    since = t_sent - d.setdefault('_pad_trial_last', t_sent)                 # v968f9d: counted from the start of the padding
+    if d.get('_rl_okn', 0) <= 0:                             # (a run of prompt trial answers continues at once)
+        if d.get('_pad_n', 1 << 30) >= RINGPAD_TRIAL_BELOW_N:
+            if since < RINGPAD_TRIAL_EVERY_S:                # still clearly behind: only the periodic check
+                return False
+        elif since < RINGPAD_TRIAL_GAP_S:
+            return False
+    d['_pad_trial'] = (send_ms, t_sent); d['_pad_trial_last'] = t_sent
+    return True
+
+def _pad_off(s, why=''):
+    d = s.__dict__
+    n = d.pop('_pad_sent', 0)
+    for k in ('_pad_hist', '_pad_pps', '_pad_n', '_pad_trial', '_pad_acc', '_pad_ans', '_pad_trial_last', '_pad_over', '_pad_notq',
+              '_pad_real', '_pad_win', '_pad_ref'):
+        d.pop(k, None)
+    if n:
+        log('LAG-WATCH', f'  {getattr(s, "current_pilot", "?")}: PADDING OFF{why} - {n} empty datagrams were sent')
+
+def _pad_rate(s, now):
+    """Filler datagrams per second for s right now."""
+    d = s.__dict__
+    if not getattr(s, 'entered_game', False) or getattr(s, 'closing', False):
+        return 0.0
+    if d.get('_load_hold_until') is not None:
+        return 0.0
+    room, fly, lt = _pad_room(s, now)
+    if fly and now - lt > RINGPAD_FRAME_GAP_S:                                       # rule 1: his game thread stands still
+        return 0.0
+    pz = d.get('_pad_pause')                                                         # rule 3: he asked to spawn (msg 77) -
+    if pz:                                                                           # the world load is coming; until his first frame
+        if now < pz[1] and lt <= pz[0]:
+            return 0.0
+        d['_pad_pause'] = None
+    man = d.get('_pad_manual')
+    if man:
+        if now < man[1]:
+            return float(man[0])
+        d['_pad_manual'] = None
+        log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: filler test over - {d.get("_pad_sent", 0)} filler datagrams sent at {man[0]:g}/s')
+        if not d.get('_rl_on'):
+            d.pop('_pad_sent', None)
+    if not RINGPAD or not d.get('_rl_on') or d.get('_pad_notq'):
+        return 0.0
+    tr = d.get('_pad_trial')
+    if tr:
+        if now - tr[1] < RINGPAD_TRIAL_WAIT_S + (d.get('_rtt_ms') or 0) / 1000.0:
+            return 0.0
+        d['_pad_trial'] = None; d['_rl_okn'] = 0; d['_pad_trial_last'] = now        # not answered in time: still behind
+        d['_pad_ans'] = now                                                          # the wait itself is no stop of his game
+    if now - d.get('_pad_ans', now) > RINGPAD_ANSWER_GAP_S:                          # rule 1
+        return 0.0
+    total = min(float(d.get('_pad_pps') or RINGPAD_MIN_PPS), room)                   # rule 2
+    return max(0.0, total - float(d.get('_pad_real') or 0.0))
+
+def _pad_tick(s, now, dt):
+    """One step of the filler for one pilot; returns the datagrams sent."""
+    d = s.__dict__
+    w = d.get('_pad_win')                                    # the real traffic to him, measured a second at a time
+    tx = getattr(s, 'pkt_tx_n', 0); ps = d.get('_pad_sent', 0)
+    if w is None:
+        d['_pad_win'] = (now, tx, ps)
+    elif now - w[0] >= 1.0:
+        d['_pad_real'] = max(0.0, ((tx - w[1]) - (ps - w[2])) / (now - w[0]))
+        d['_pad_win'] = (now, tx, ps)
+    r = _pad_rate(s, now)
+    if r <= 0.0:
+        d['_pad_acc'] = 0.0
+        return 0
+    acc = d.get('_pad_acc', 0.0) + r * dt
+    n = int(acc)
+    d['_pad_acc'] = acc - n
+    n = min(n, RINGPAD_BURST_MAX)
+    sent = 0
+    for _ in range(n):
+        try:
+            sock.sendto(bytes([0x00, 0x00, 0x20, s.nundgram(), 0x00, 0x00, 0x00, 0x00]) + RINGPAD_FILLER, s.addr)
+            sent += 1
+        except OSError:
+            break
+    if sent:
+        d['_pad_sent'] = d.get('_pad_sent', 0) + sent
+        _perf['tx'] += sent; _perf['txb'] += 13 * sent
+    return sent
+
 def _ringlag_period(s):
+    d = s.__dict__
+    if RINGPAD and d.get('_rl_on') and d.get('_pad_pps') and not d.get('_pad_notq'):          # v968f9c
+        return RINGPAD_PROBE_S
     d = s.__dict__
     return RINGLAG_FAST_PROBE_S if (d.get('_rl_streak', 0) > 0 or d.get('_rl_on')) else RINGLAG_PROBE_S
 
@@ -14745,11 +15112,16 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
                 log('LAG-WATCH', f'{name}: answers prompt ({app_ms} ms, transport {net_ms} ms) but his NET clock has moved {shift:+d} ms '
                                  f'against ours since entry, {d["_rl_clk_streak"]} answers in a row (flying={getattr(s, "flying", False)})')
             if d.get('_rl_on'):
+                if RINGPAD and not _pad_prompt(s, send_ms, pk, app_ms, net_ms, now, lag_ms):      # v968f9c: the filler carried it
+                    return
                 d['_rl_okn'] = d.get('_rl_okn', 0) + 1
                 if d['_rl_okn'] >= RINGLAG_CLEAR_N:
                     log('LAG-WATCH', f'{name}: answers are prompt again ({app_ms} ms, transport {net_ms} ms, {_clk_txt}) - episode closed after '
                                      f'{(now - d["_rl_on"]) / 60.0:.1f} min')
                     d['_rl_on'] = None; d['_rl_okn'] = 0
+                    if not d.get('_pad_manual'):
+                        _PAD_SESS.pop(id(s), None)
+                    _pad_off(s, ' - he is in step again')                                         # v968f9c
             return
         d['_rl_okn'] = 0
         prev = d.get('_rl_prev_late')                       # (answer time, probe time) of the previous late answer
@@ -14762,6 +15134,8 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
             d['_rl_streak'] = d.get('_rl_streak', 0) + 1
         pps = pk / max(0.2, app_ms / 1000.0)
         if d.get('_rl_on'):
+            if RINGPAD:                                                                           # v968f9c
+                _pad_note(s, pk, app_ms, net_ms, now); _PAD_SESS[id(s)] = s
             d['_rl_pk_min'] = min(d.get('_rl_pk_min', pk), pk); d['_rl_pk_max'] = max(d.get('_rl_pk_max', pk), pk)
             d['_rl_ms_min'] = min(d.get('_rl_ms_min', lag_ms), lag_ms); d['_rl_ms_max'] = max(d.get('_rl_ms_max', lag_ms), lag_ms)
             if now - d.get('_rl_logged', 0.0) >= RINGLAG_LOG_S:
@@ -14785,7 +15159,16 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
                              f'{_ringlag_verdict(lag_ms, shift)}. Late since ~{_since} UTC, {d["_rl_streak"]} spaced late answers '
                              f'(episode #{d["_rl_episodes"]} this session, flying={getattr(s, "flying", False)}, '
                              f'{"pilot told" if RINGLAG_NOTIFY else "pilot not told"})')
-            if MSGLIST_BUNDLE and MSGLIST_SINGLE_WHEN_LATE:                # v968f8v
+            if RINGPAD:                                                    # v968f9c
+                _n9c = _pad_note(s, pk, app_ms, net_ms, now); _PAD_SESS[id(s)] = s
+                d['_pad_trial_last'] = now
+                _r9c = min(d["_pad_pps"], _pad_room(s, now)[0])
+                log('LAG-WATCH', f'  {name}: PADDING ON - about {_n9c} datagrams sit unread in his queue; from now empty datagrams bring what he '
+                                 f'is sent up to {_r9c:.0f} a second (what his queue has room for) = about {_n9c / max(1.0, _r9c):.1f} s behind; '
+                                 f'it was {lag_ms / 1000.0:.1f} s. His AI frames stay bundled'
+                                 if (_r9c >= 1.0 and _n9c / _r9c < lag_ms / 1000.0) else
+                                 f'  {name}: about {_n9c} datagrams sit unread in his queue - it has no room for more datagrams a second than he is being sent: no filler')
+            elif MSGLIST_BUNDLE and MSGLIST_SINGLE_WHEN_LATE:              # v968f8v
                 log('LAG-WATCH', f'  {name}: his AI frames go out as single datagrams from now until the episode closes '
                                  f'(he is behind by a count of datagrams - more per second = fewer seconds late)')
             try:
@@ -23988,6 +24371,8 @@ TRAIN_STATE6_DELAY_S = 0.35   # v968f7z: msg-6 state answer for a train waits fo
 LOAD_HOLD_MAX_S = 20.0
 
 def _load_hold_begin(s, why=''):
+    _t9c = time.time()                                       # v968f9c: the filler (RINGPAD) stops here whatever LOAD_HOLD says
+    s.__dict__['_pad_pause'] = (_t9c, _t9c + LOAD_HOLD_MAX_S)
     if not LOAD_HOLD:
         return
     now = time.time()
@@ -24085,6 +24470,17 @@ MSGLIST_BUNDLE    = True     # master switch (console: mlist on|off|stats)  # v9
 # 5.5 s at 13/s). Bundling would make his delay longer, so his AI frames go out singly until the watch closes
 # the episode. Console: `mlist late on|off`.
 MSGLIST_SINGLE_WHEN_LATE = True
+# v968f9b [THE CHUTE RECORDS OF ONE FRAME = ONE DATAGRAM] (Meno 11-16 22:30:5x UTC, messages25 + run_20261116_214041:
+# the first slipped input queue in 61 flying pilot-hours with AI bundling on). A pilot with parachutes in the air
+# (paratroops, bomber crew) sends ONE msg-7 frame holding his plane and every canopy; relay_telemetry splits it
+# (v547f5) and until now sent every record as its own datagram - _SA_Creed_'s ten paratroopers were 11 datagrams
+# back to back, four times a second (PERF relay_q_max 1 -> 11, server tx 22 -> 58 pkt/s with two pilots flying),
+# the very volley shape 8v took out of the AI frames. Meno's queue slipped 15 s after the first canopy and
+# 3.5 s after the tenth. Now the canopy records of one source frame go into the receiver's list outbox and are
+# flushed at once when the frame is done: plane record + ONE list (11 datagrams -> 2). The plane record itself is
+# untouched (still the plain datagram it always was); a lone canopy is still a plain datagram (n == 1); a pilot the
+# lag watch has confirmed late still gets singles. Console: `mlist split on|off`.
+MSGLIST_SPLIT_CHUTES = True
 MSGLIST_MAX_BYTES = 1200    # entry bytes per list; the client's recv buffer is 0x5dc=1500 incl. headers
 MSGLIST_MAX_N     = 48      # entries per list (12-bit length field allows 4095 B; this is comfort)
 MSGLIST_FLUSH_MS  = 25      # oldest entry age that triggers a flush (flusher thread ticks every 10 ms)
@@ -24103,11 +24499,16 @@ def _mlist_send_plain(sess, frame):
     sess.__dict__['_txb_win'] = sess.__dict__.get('_txb_win', 0) + len(_p)
     return True
 
-def _mlist_queue(sess, frame):
+def _mlist_late_single(sess):
+    """v968f8v/9c: a pilot confirmed late gets his AI frames singly - unless the filler (RINGPAD) is doing the pushing."""
+    d = sess.__dict__
+    return bool(MSGLIST_SINGLE_WHEN_LATE and d.get('_rl_on') and not (RINGPAD and d.get('_pad_pps')))
+
+def _mlist_queue(sess, frame, what='AI'):
     """Queue one app frame ([bc][T][00][00][msg...]) for sess. Bundled into an EMsgList datagram with
     whatever else is queued for him within MSGLIST_FLUSH_MS; sent at once when the list is full."""
     if FLIGHT_RECORDER and len(frame) >= 9:                       # v968f8c: what we sent him, for the FREEZE tail
-        _rec(sess, 'S->C', 'UNREL', f'AI msg{frame[4]} obj=0x{struct.unpack_from("<H", frame, 7)[0]:04x} {len(frame)}B')
+        _rec(sess, 'S->C', 'UNREL', f'{what} msg{frame[4]} obj=0x{struct.unpack_from("<H", frame, 7)[0]:04x} {len(frame)}B')
     if sess.__dict__.get('_load_hold_until') is not None and _load_holding(sess):      # v968f7z
         d = sess.__dict__
         d['_load_hold_dropped'] = d.get('_load_hold_dropped', 0) + 1
@@ -24116,7 +24517,7 @@ def _mlist_queue(sess, frame):
         return True                                     # counted as sent: cadence bookkeeping unchanged
     if not MSGLIST_BUNDLE or getattr(sess, 'closing', False) or len(frame) < 5:
         return _mlist_send_plain(sess, frame)
-    if MSGLIST_SINGLE_WHEN_LATE and sess.__dict__.get('_rl_on'):          # v968f8v: confirmed late -> singles
+    if _mlist_late_single(sess):                                          # v968f8v: confirmed late -> singles (9c: not under filler)
         if sess._ml_n:
             _mlist_flush(sess, force=True)                                 # what was queued before the verdict, first
         sess.__dict__['_ml_late_singles'] = sess.__dict__.get('_ml_late_singles', 0) + 1
@@ -24192,6 +24593,32 @@ def _mlist_flusher():
             logx('MSGLIST', 'flusher loop error')
 
 threading.Thread(target=_mlist_flusher, name='mlist-flusher', daemon=True).start()
+
+def _padder():
+    """v968f9c: sends the filler of every pilot in _PAD_SESS, evenly, RINGPAD_TICK_S apart."""
+    _last = time.time()
+    while True:
+        try:
+            time.sleep(RINGPAD_TICK_S)
+            _now = time.time(); _dt = min(0.05, max(0.0, _now - _last)); _last = _now
+            if not _PAD_SESS:
+                continue
+            for _k, _s in list(_PAD_SESS.items()):
+                try:
+                    _d = _s.__dict__
+                    if getattr(_s, 'closing', False) or sadrs.get(getattr(_s, 'addr', None)) is not _s \
+                            or not (_d.get('_rl_on') or _d.get('_pad_manual')):
+                        _PAD_SESS.pop(_k, None)
+                        _pad_off(_s)
+                        continue
+                    _pad_tick(_s, _now, _dt)
+                except Exception:
+                    _PAD_SESS.pop(_k, None)
+                    logx('LAG-WATCH', 'filler step failed - pilot taken off the filler')
+        except Exception:
+            logx('LAG-WATCH', 'filler loop error')
+
+threading.Thread(target=_padder, name='ringpad', daemon=True).start()
 
 def _send_unrel_frame_to(sess, onum, payload):
     """One object-update frame (any payload size) to one session, tick re-stamped."""
@@ -28853,7 +29280,9 @@ def relay_telemetry(src, data, _split_obj=None):
                 log('TELEM-SPLIT', f'{src.current_pilot} {len(pl)}B multi-record frame -> '
                                    f'{[(f"0x{o:04x}", len(f) - 7) for o, f in _subs]} '
                                    f'(plane 0x{(src.my_obj_number or 0):04x}, chute '
-                                   f'0x{(getattr(src, "para_obj_number", None) or 0):04x}) [v547f5]')
+                                   f'0x{(getattr(src, "para_obj_number", None) or 0):04x}) [v547f5]'
+                                   + (' - canopy records in one list per peer [v968f9b]'
+                                      if (MSGLIST_SPLIT_CHUTES and MSGLIST_BUNDLE) else ''))
             _hdr8 = bytes(data[:8])
             _mine555 = {src.my_obj_number, getattr(src, 'para_obj_number', None)} \
                        | set(src.__dict__.get('crew_para_objs') or {})
@@ -28867,6 +29296,13 @@ def relay_telemetry(src, data, _split_obj=None):
                                            f'owned by the client?) [v547f5]')
                     continue
                 relay_telemetry(src, _hdr8 + _sub, _split_obj=_onum)
+            _p9b = src.__dict__.pop('_split9b_peers', None)      # v968f9b: one list per peer, now - no flush wait
+            if _p9b:
+                for _q9b in _p9b.values():
+                    try:
+                        _mlist_flush(_q9b, force=True)
+                    except Exception:
+                        logx('MSGLIST', 'split-frame flush failed')
             return
         # v915f5 [UNKNOWN RECORD SHAPE -> DROP, NEVER RELAY RAW] (Sean/_Hickapotamus_ 10-03 02:41:42:
         # 'bounds error ARR<NET::OBJECT*,2048>[23455]' on 'in 7'71' - a 64-byte record from CHARGER six
@@ -29307,7 +29743,8 @@ def relay_telemetry(src, data, _split_obj=None):
         if p.__dict__.get('_load_hold_until') is not None and _load_holding(p):      # v968f7z: he is loading
             p.__dict__['_load_hold_planes'] = p.__dict__.get('_load_hold_planes', 0) + 1
             continue
-        seq = p.nundgram()                                  # v813f5: the one datagram counter
+        _list9b = bool(MSGLIST_SPLIT_CHUTES and MSGLIST_BUNDLE and _split_obj is not None and _chute_frame)   # v968f9b
+        seq = None if _list9b else p.nundgram()             # v813f5: the one datagram counter (a list takes its own)
         if time.time() < p.__dict__.get('_relay_trace_until', 0.0):
             try:                                             # v861f5: `trace <pilot>`
                 _tx, _ty, _tz = unpack_plane_pos9(relayed[9:18])
@@ -29354,6 +29791,11 @@ def relay_telemetry(src, data, _split_obj=None):
                                      f'- a server-side delivery gap between two flying pilots')
         except Exception:
             pass
+        if _list9b:                                # v968f9b: canopy record of a split frame -> his list outbox
+            if _mlist_queue(p, bytes(relayed), what='CHUTE'):
+                p.__dict__['_ml_split_recs'] = p.__dict__.get('_ml_split_recs', 0) + 1
+                src.__dict__.setdefault('_split9b_peers', {})[id(p)] = p     # flushed when the source frame is done
+            continue
         pkt = bytes([0x00, 0x00, 0x20, seq, 0x00, 0x00, 0x00, 0x00]) + bytes(relayed)
         if RELAY_SEND_ASYNC:
             _relay_batch.append((p.addr, pkt))   # v389f5: defer the sendto syscall off the RX thread
