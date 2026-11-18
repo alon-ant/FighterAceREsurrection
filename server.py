@@ -353,10 +353,28 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9o-stable'
+VERSION = 'v968f9p-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
+# v968f9p [NO GAME_DEF BEFORE THE ARENA LIST] (Alon 11-18 18:03, the open item ''N elements remains' at exit not
+# identified'). Identified: the lobby's msg-212 handler (FUN_004ed9c0, LobbyRcv.cpp:0x11d) builds a 0x1e20-byte
+# GAME_DEF from every 212 and hands it to the arena table (FUN_0076be60), which looks for the row with that game
+# index - and when there is NO such row simply returns: the object is never freed. Since v164 we sent one 212 per
+# room BEFORE the list, i.e. before any row exists (the list handler FUN_0076d6c0 empties the table and builds the
+# rows), so every primed GAME_DEF was dropped on the floor. Each holds a plane-name hash table (WHASH), all hash
+# tables register in one global list, and at exit that list reports what is still alive: '~DLIS<class WHASH_BASE>
+# not empty / N elements remains'. N = 212s received - 212s the client asked for itself, in every log checked
+# (4 = 5-1 local, 8 = 9-1 live, 24 = 30-6 ...); messages08 15:08:26 shows the other case - seven primed 212s that
+# found rows were freed at the next list ('~GAME_DEF' x7). The 2009 game never primed: list first, then the client
+# asks for the arena it clicks ('out 212'5' -> 'in 212'), and its exits are clean.
+# The reason given for v164 ('_TrnNumber>=1' without a 212) was the list ROW's own terrain field: FUN_0076d6c0
+# calls FUN_00438e30(row+0x1c), which asserts on a terrain number below 1 - the rows carry the terrain now.
+# OFF = the 2009 order: the list alone; the 212 goes out when the client asks (handle_gamedef_request).
+# ON  = v164..v968f9o: one 212 per room first. Console `gdprime on|off`.
+# NOT explained: v611f5 (09-09) - a pilot back in the lobby after a second exit, list without a re-prime, 'a click
+# produced no traffic'. That path must be flown before this goes live (see the change.log entry).
+GAMEDEF_PRIME = False
 GAMEDEF_PACING_S = 0.12    # v477f5: seconds between consecutive 212 GAME_DEF blobs in the arena-
                            # list prime (send_arenalist_with_gamedefs). 0.12 is the v455 anti-CTD
                            # value (flakmagic's Aug-17 hard CTD died mid-parse of 4 rapid 212s;
@@ -8000,7 +8018,7 @@ def perform_restart(actor='console', graceful=False):
 def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
-                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r}/pi={ai_client_pi()} '
+                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r}/pi={ai_client_pi()} gdprime={GAMEDEF_PRIME} '
                     f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s slipcatch={SLIPCATCH} notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
@@ -8374,6 +8392,16 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'gdprime':                                                      # v968f9p: a 212 per room before the arena list, or not
+                global GAMEDEF_PRIME
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    GAMEDEF_PRIME = (_a[0].lower() == 'on')
+                    log('ARENALIST', f'GAME_DEF prime {"ON" if GAMEDEF_PRIME else "OFF"} by {_src}')
+                log('CONSOLE', f'gdprime = {"on" if GAMEDEF_PRIME else "off"}: off = an arena-list request is answered with the list alone and '
+                               f'the client asks for the GAME_DEF of the arena it clicks (the 2009 order; nothing left over in the client at exit). '
+                               f'on = one GAME_DEF per room is sent before the list (v164..v968f9o; each of them stays in the client\'s memory until '
+                               f'it exits: "N elements remains"). Takes effect at the next arena-list request of each pilot. `gdprime on|off`')
             elif cmd == 'ailist':                                                       # v968f9o: the AI station in the clients' people lists
                 global AI_STATION_LISTED
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -13472,7 +13500,7 @@ def send_arenalist_with_gamedefs(s, rooms, label):
         _lock = s._gamedef_lock = threading.Lock()
     primed = 0
     with _lock:
-        for r in rooms:
+        for r in (rooms if GAMEDEF_PRIME else ()):          # v968f9p: off = the list alone, the client asks for the 212 it needs
             if len(r) > 6 and r[6]:
                 try:
                     blob_key = hash(bytes(r[6]))

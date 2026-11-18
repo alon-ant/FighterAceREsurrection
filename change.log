@@ -15436,3 +15436,85 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     9g_e2e pass.
   Files: server.py only. Backup _scratch/server.py.bak_v968f9n. Patch _scratch/patch_9o.py. NOT on the live server
     (v968f9n), NOT banked (bank = v968f9n).
+
+2026-11-18  BANKED: v968f9o-stable   (user 17:57: "bank")   previous bank: v968f9n-stable (11-18 15:30 UTC)
+  SNAPSHOT: _scratch/bank/server.py.v968f9o (2,696,645 B, sha1 898bd4f42652...) + web_server.py.v968f9o + fa_logging.py.v968f9o
+    - byte-identical to the working files at 16:00 UTC. web_server.py and fa_logging.py are unchanged against the last
+    three banks. LIVE already runs this server.py (v968f9o, since 15:47:58 UTC).
+  IN THIS BANK (entry above):
+    9o the AI station is registered with PlayerIndex 0, so the clients leave it out of the private-message list;
+       `ailist on|off`; the slotmin-0 guard.
+  Also closed since the last bank: the v968f9n slot fix seen from the other pilot's side (Alon 17:37 'tested now').
+  STATE AT BANK - what has flown (two short runs, both read from the logs):
+    - LOCAL 15:44-15:46 UTC, AC2E_Bigalon^CO alone in room 49, two spawns: BASELINE 'ai_station='AI'/pi=0'; his client
+      log messages32 'Create client 496, (AI), PlayerIndex=0, Squadron=0'; no ERROR / Assertion line that is not in
+      every log (data-file time stamps, 'N elements remains' at exit).
+    - LIVE 15:48-15:50 UTC, Alon@HQ (index 1) and Moira@HQ (index 2) in TC Reborn Beta: both spawned, Moira's client
+      got 2 trains, a private message Alon -> Moira delivered (15:49:30 'test'). No Traceback in either run. The only
+      client errors in messages33 are the known ones (AceOrRankChangedCB PlayerIndex=2 not found, TimeCheckCB dif).
+    - Alon said 'bank' after these runs; what the list looked like was not written down here.
+  STATE AT BANK - NOT yet seen working (steps 3-6 of the v968f9o VERIFY list - neither run reached them):
+    - an AI object hit or destroyed by a pilot with the station on PlayerIndex 0: the lines on screen and the score.
+    - a pilot killed by an AI gun, tank or ship: the kill line.
+    - tanks, lorries, soldiers, ships on screen with the new station (the runs had trains only, for seconds).
+    - name tags on AI objects; the second target list (0x46e137); a typed whisper to 'AI'.
+    - `ailist on|off` typed on a console; the slotmin-0 guard (offline test only).
+    - everything under 'NOT yet seen working' in the v968f9n, v968f9m and v968f9k bank blocks.
+  KNOWN AND OPEN AT BANK:
+    - if any of the above differs from before, `ailist on` on the console returns to the old value without a restart
+      (for every station registered after it).
+    - the open list of the v968f9n block.
+
+2026-11-18  v968f9p-stable  'N ELEMENTS REMAINS' AT EXIT: IDENTIFIED - THE GAME_DEFS WE SEND BEFORE THE ARENA LIST (Alon 18:03: 'lets go
+            on this'; error map item (5) of 11-16)
+  WHAT THE LINE IS: every hash table of the client (WHASH) registers in one global list; when the program ends the list
+    reports the tables nobody destroyed: '~DLIS<class WHASH_BASE> not empty', 'N elements remains' (printed twice, once per
+    base class, same N), '~DLIS_BASE not empty'. One of those tables is the plane-name table inside every GAME_DEF object.
+  THE COUNT: N = (212s received) - (212s the client asked for with 'out 212'5'), in every recent log:
+      messages32 local  5 in, 1 asked ->  4      messages31/30/29 live  9 in, 1 asked ->  8      messages28  18, 2 -> 16
+      messages23        32, 4 -> 28              messages18  30, 6 -> 24                          messages16  20, 4 -> 16
+    i.e. N = the GAME_DEFs the server PUSHED (ARENALIST 'primed 8 GAME_DEF(s)') - 4 arenas locally, 8 on the live server.
+  THE MECHANISM (FA.exe): lobby msg 212 -> FUN_004ed9c0 (LobbyRcv.cpp:0x11d) allocates 0x1e20 bytes, builds the GAME_DEF
+    (FUN_0057f390 -> FUN_0057bee0, 'GAME_DEF size %i') and calls the arena table's FUN_0076be60(game index, object): it
+    looks for the row with that game index, frees the row's previous GAME_DEF and stores the new one - and when there is
+    NO such row it returns and the new object is never freed. Rows are made by the arena list (msg 210, FUN_0076d6c0),
+    which first empties the table (FUN_0076bda0 frees every row's GAME_DEF) and builds the rows with no GAME_DEF.
+    Since v164 the server sends one 212 per room BEFORE the list: no row exists yet, every one of them is dropped.
+    Proof of the other branch in messages08 15:08:24-26: seven primed 212s arrived while rows existed, and the next list
+    printed '~GAME_DEF' seven times - that log's N is 14, not 21.
+  2009: no priming. messages04: 'out 210' -> 'in 210'1110' (list), then per arena the pilot looks at 'out 212'5' ->
+    'in 212'; back from an arena: list, and 0.7 s later the client asks for its arena by itself. 20 GAME_DEFs received, 20
+    asked for, and the log ends without any '~DLIS' line.
+  WHY WE PRIMED: v164 ('with no 212 the current terrain stayed 0 ... _TrnNumber>=1'). That assertion is in FUN_00438e30 and
+    is evaluated by the LIST handler on the row's own terrain number (row+0x1c) - the rows carry it now ('trn5:Circle' in the
+    ARENALIST line). v476 ('they prime the client's terrain cache'): the terrain table (0xc85060, 99 entries) is filled at
+    start-up (FUN_0055adb0), not by a GAME_DEF. What a parsed-and-dropped GAME_DEF does leave behind: the plane pool is
+    loaded for its plane set (FUN_004c7cd0) and the camp table is rebuilt.
+  COST OF THE PRIME, besides the leak (about 8 KB + its tables per object, 8 per lobby visit; messages09: 103): the arena
+    list waits for it - messages31 'out 210' 15:34:56.78, three polls, list 15:34:59.37 = 2.6 s; and the three polls are
+    each answered with a list and 8 counts.
+  CHANGE: GAMEDEF_PRIME = False - an arena-list request is answered with the list (and the counts) alone; the 212 goes out
+    when the client asks (handle_gamedef_request, unchanged - it is also where the event table / Fly state of that pilot
+    is noted). Console `gdprime on|off` (on = v164..v968f9o). BASELINE line: gdprime=.
+  THE OPEN RISK - WHY THIS IS NOT FOR THE LIVE SERVER BEFORE A LOCAL TEST: v611f5 (09-09). Taurus, back in the lobby after
+    a second exit, got the list without a re-prime (the per-session cache then skipped it) and 'a click produced no
+    traffic'. The fix then was to prime again after every lobby re-init. Why a click did nothing was never read out of the
+    client; the explanation given ('rows with no GAME_DEF behind them') cannot be it - rows never have one until the
+    client asks. Much of the lobby re-init handling has changed since, but this exact path - back from an arena, list
+    with no 212 before it, click - has not been flown since 09-09.
+  VERIFY (local, in this order; `gdprime on` on the console undoes it for the next list request):
+    1. BASELINE: gdprime=False. Log in: the arena list appears at once (no 'primed N GAME_DEF(s)' line in the server log).
+    2. click an arena: the briefing / nations fill in (server: '212 on-demand'); Join; fly.
+    3. THE v611 PATH: leave to the lobby, click the same arena and another one, Join again. Then once more (a 'second
+       exit'). If a click does nothing: `gdprime on`, re-open the lobby, and tell me - then the prime stays and the fix
+       has to be another one.
+    4. an event-mode arena: enter, check the lock / Fly button state is what the host set (the event table is noted at the
+       on-demand 212 now, not at the prime).
+    5. exit the game: the last lines of messagesNN.log - 'End of log file' with no '~DLIS ... not empty' and no
+       'N elements remains'. (If a smaller N remains, something else pushes a 212 to a client without a row - send me the
+       log.)
+  Tests: _scratch/test_9p.py (9 checks; the client's arena table modelled from the two handlers: prime on reproduces 8
+    left after one visit and 24 after three, prime off 0; list-only answers; on-demand path untouched) ALL PASS; test_9o,
+    9n, 9k, 9g_e2e pass.
+  Files: server.py only. Backup _scratch/server.py.bak_v968f9o. Patch _scratch/patch_9p.py. NOT on the live server
+    (v968f9o), NOT banked (bank = v968f9o).
