@@ -341,7 +341,9 @@ that would show *banned for all games* in the lobby dialogs.
 | --- | --- |
 | `lagwatch [on\|off]`, `lagwatch notify on\|off` | The lag watch: finds a pilot whose game handles what it is sent late (a slipped input queue), logs the episode, dumps the recorder. |
 | `pad`, `pad on\|off`, `pad <pilot> <datagrams/s> [seconds]`, `pad <pilot> off` | Padding: empty datagrams that push a slipped queue through. Automatic since v968f9d - on when a pilot is late, off when he is in step again; the manual forms are for tests. |
+| `slipcatch`, `slipcatch on\|off`, `slipcatch test <pilot>`, `slipcatch hammer <pilot> <pairs/s> [minutes]` / `... off` | v968f9l, OFF by default, not yet seen on a real slip. Notices a slipped input queue in its first seconds (a probe every second to pilots flying; two unanswered while his frames keep coming) and sends one bunch of 250 empty datagrams that closes the lap, so the lag left is the small kind the padding handles. `test` = the bunch on a healthy pilot; `hammer` = back-to-back pairs to try to provoke a real slip on a test PC. |
 | `slip <pilot> <datagrams behind, 1-250> [minutes]`, `slip <pilot> off`, `slip` | TEST: the server plays a slipped input queue for one pilot so the padding can be watched working (v968f9e). |
+| `statuslock [on\|off]` | v968f9m, ON: a STATUS due for a pilot who is flying leaves right behind one of his frames, so the client's own data-loss gauge stops counting a frame that was on its way as lost. The STATLOSS log lines show what each pilot's gauge read. |
 | `mlist [on\|off]` | Bundling of AI frames into message lists (singles for a pilot the lag watch has confirmed late). |
 | `lagperf [on\|off]` | The lag/performance CSV in `logs/`. |
 | `car decoylane on\|off` | One kill-line decoy at a time per client, so every lorry kill prints its line (v968f9f; off = the old timing). |

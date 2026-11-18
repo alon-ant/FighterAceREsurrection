@@ -15107,3 +15107,154 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     console tables 4 / 4b, quick reference, still-open), EVENT_SCRIPTING.md (## equivalents, countdown). Unchanged,
     nothing in 8z-9k touches them: ADDING_A_MAP.md, FA_TC_economy.md, FA_groundwar_protocol.md, fa-auth-api.md,
     msg73_decode_notes.md, q6_reader_status.md. Pre-bank copies: _scratch/*.md.bak_v968f9k_prebank.
+
+2026-11-18  ANALYSIS (10)  MENO 11-17 23:33 UTC: LAG AFTER 1 h 58 min, 'DIDN'T FIX ITSELF' - WHY THE PADDING DID NOT RUN, AND WHAT THE
+            FIRST TEN SECONDS AFTER A SLIP DECIDE  (Meno: 'jumpy ... 8 second lag from hitting enter to my chat showing ...
+            flew for about 9 minutes ... no change'; Alon: 'didn't fix itself'). No code change.
+  WHAT HAPPENED (live run_20261117_145010 = v968f9e, lagperf_20261117.csv, his messages28; his clock = UTC):
+    - login 21:33:50, flying in room 134. lagperf to 23:33:12: probe 38-74 ms, 1-4 datagrams behind, 12-27 datagrams/s.
+    - 23:32:58.473 last prompt probe. 23:32:59.513 'in 34'9', then NOTHING handled for 11.1 s (23:33:10.634 the first
+      'Move1 551 ...' lines = object frames 5.5 s stale). 23:33:27.775 the next probe, dif=19593; from 23:33:38 steady
+      dif 8.4-10 s. One slip, between 23:32:59.5 and about 23:33:01, sudden, not a drift.
+    - LAG-WATCH 23:33:45.504: 'LAGGING - 9.2 s late; 218 datagrams ... (24 pkt/s) ... INPUT QUEUE', and the next line:
+      'about 216 datagrams sit unread in his queue - it has no room for more datagrams a second than he is being sent:
+      NO FILLER'. Then 8.2-12.0 s late, 212-246 datagrams, for 13 min until he left at 23:46:44; '6 probes unanswered
+      for up to 35 s' and '9 probes unanswered' in between (about one probe in five never came back).
+    So the watch saw it 15 s after the slip, and the padding decided not to run. It is its own rule (v968f9c: 'above ~200
+    there is no room left and nothing is sent'): 254 places, 216 held, the rest must take everything a stall of 0.9 s
+    brings -> 21 datagrams/s allowed, he is sent 24. The local tests (slip 66 and 150) never touched that end.
+  THE THREE EPISODES THE WATCH HAS RECORDED: Meno 11-15 13:14 71 datagrams (37/s), Meno 11-16 22:31 72 (46/s), Meno 11-17
+    23:33 218 (24/s). The first two are the kind the padding handles (not yet built then); this one is not.
+  THE QUEUE RE-READ (vcncNet.dll QInInit 0x1000d0bd, QInEnqueue 0x1000d206, QInDequeue 0x1000d14b - exact rules in
+    _scratch/qsim_inputqueue_exact.py):
+      enqueue: count == 254 -> refused.  w++ ; slot[w] empty -> store, count++ ; slot[w] OCCUPIED -> the datagram is thrown
+               away, w still moves, count unchanged (dec + inc)
+      dequeue: count > 0 -> take slot[r] (may be empty), clear it, r++, count--
+    1. A lost INC leaves ONE datagram behind (40 ms - nobody notices). A lost DEC puts the reader one slot AHEAD of the
+       writer: from then on a datagram is stored BEHIND the reader and is read one lap (255 datagrams) later.
+    2. PROOF THAT THE SERVER CANNOT UNDO IT: reads happen only on a count, counts come only from successful stores, so
+       unread items in the ring = (empty slots read) + lost INCs - lost DECs. Nothing the server sends lowers it - only
+       another lost DEC on his PC. Once the ring is full of unread datagrams it stays full (ANALYSIS 4, now exact).
+    3. In the FULL state back-to-back datagrams are poison: the second one lands on an occupied slot, the writer runs
+       ahead, and everything is thrown away until it has gone once round (model: bursts of 5 -> 99 % lost). That is the
+       'probes unanswered' and Flakmagic's blank menus. It is also why padding there is unsafe.
+    4. NEW - HOW FULL THE RING GETS IS DECIDED IN THE FIRST LAP (255 datagrams = about 10 s) AFTER THE SLIP. In that lap
+       the slots ahead of the reader are still empty: datagrams that arrive in one go are stored ahead of it and read at
+       once, only the first of each bunch is left behind. Model, one lost DEC:
+           all singles 255 | 95 % singles (bundled traffic, 11-17) 230-242 | 80 % singles 151-176 |
+           40 % singles + bunches of 3-10 (un-bundled AI frames, 11-15/16) 49-70
+       = the 218 of 11-17 and the 71 / 72 of 11-15 / 16. Bundling (v968f8v) made slips rarer (one in the 34 pilot-hours
+       before; fewer INC/DEC per second) and each one worse.
+    5. So there is a window. Model: the slip noticed L datagrams after it happened, then ONE long bunch that closes the
+       lap, then normal traffic -> final lag = about L:  1 s -> 31 datagrams, 2.5 s -> 66, 5 s -> 126, 8 s -> 206, never
+       -> 241. 31-66 datagrams = 1.3-2.7 s at 24/s, and the padding takes that to about 0.3-0.6 s (the tested range).
+  WHAT IT WOULD TAKE (not built - Alon's decision):
+    a. notice a slip within 1-2 s instead of 15: the probe every second to pilots in a game (17 bytes; today every 10 s),
+       verdict on two unanswered probes while his frames and transport acks keep coming;
+    b. at that moment one bunch of empty datagrams (about 250 minus what was sent since) with nothing else in between;
+    c. then the existing padding for what is left.
+    UNKNOWN: whether a bunch sent back to back is really enqueued before his game thread reads (Alon's DLL log in the
+    slip test: queue depth 1.8 on average, 11-12 at most, at about 300/s - so most of it, not all); a false verdict
+    costs a healthy pilot 250 empty datagrams once; a late verdict (ring already full) costs a slipped pilot about ten
+    seconds of everything (point 3) - the bunch must never be sent once the ring may be full. No way yet to make a real
+    slip on a test PC (the `slip` command plays one on the server side only); `pad <pilot> 400` back to back might
+    provoke one (the race grows with the square of the datagram rate).
+    THE CURE remains the client's own setting (vcncNet.ini [CLIENT] ProcessAffinityMask=1, v968f8r) - not applied, Alon's
+    ruling: server side only.
+  Files: _scratch/qsim_inputqueue_exact.py.
+
+2026-11-18  v968f9l-stable  SLIP-CATCH: NOTICE A SLIP IN ITS FIRST SECONDS, CLOSE THE LAP WITH ONE BUNCH (Alon 11-18 06:55 after ANALYSIS
+            (10): 'build the fast detection-plus-bunch approach'; on the ini cure: 'this is a possibility for laggy players,
+            not ruling out yet'). OFF BY DEFAULT - `slipcatch on`. Not pushed, not banked (the bank is v968f9k).
+  IDEA (ANALYSIS 10): after a lost DEC the ring fills with unread datagrams during ONE lap (255 datagrams); once full, no
+    server traffic can empty it and the padding has no room. During that lap a bunch that arrives in one go is stored
+    ahead of the reader; ~250 empty datagrams carry the writer once round and what is left is about the number of
+    datagrams sent between the slip and the bunch.
+  CHANGED (server.py):
+    - _slipcatcher thread (50 ms tick) + _slipcatch_step: for every pilot FLYING with frames coming and no episode open
+        a probe (msg 89) every 1 s (the keeper's 10-s probe is left out for him: _ringlag_due);
+        a probe 300 ms overdue over his rtt with a frame of his sent after it reached him -> the next probe at once;
+        VERDICT = two such probes inside 3.5 s, two frames after the older, one after the newer.
+      A stalled game thread sends no frames (no verdict); one lost probe is one probe (no verdict).
+    - guard: no bunch unless the last PROMPT answer (< 250 ms over rtt) is to a probe under 4 s old and at most 120
+      datagrams went to him since - otherwise 'TOO LATE for a bunch' is logged and the watch / padding carry on as
+      before (a bunch into a full ring costs 2-8 % of the next 3000 datagrams and gains nothing - qsim_bunch.py).
+    - _slipcatch_fire: 250 fillers in groups of 25 (1 ms apart), the probes still out are forgotten (their answers would
+      count the bunch as backlog), an episode is opened with the padding on for the estimate; ten seconds later a
+      'SLIP-CATCH result' line says what the probe answers measured. A false verdict ends by the padding's own trial
+      probes (three prompt answers) in about 6 s; 60 s before the catcher looks at that pilot again.
+    - console: `slipcatch` (state, counts, who is looked after), `slipcatch on|off`, `slipcatch test <pilot>` (the bunch
+      on a pilot who is in step), `slipcatch hammer <pilot> <pairs/s 1-50> [minutes]` / `... off` (back-to-back pairs of
+      fillers - the race itself - to try to provoke a real slip on a test PC). BASELINE line carries slipcatch=.
+    - small hooks: _ringlag_sample notes the newest answered probe, relay_telemetry the frame before the last,
+      send_timecheck_89 the probe it sent.
+  NOT CHANGED with slipcatch off: nothing on the wire (the thread idles).
+  TESTED OFFLINE (_scratch/test_9l.py: the catcher's own code against a model client whose input queue is the DLL's,
+    exactly; ALL PASS; 9k / 9e / 9c / 9b / 8y / 8v / ringlag still pass):
+      healthy 14 s, one lost probe, a 3-s game-thread stall                       -> no verdict
+      8 slips (lost DEC) at 24 datagrams/s                                         -> verdict 0.72-2.64 s after the slip, 17-54
+                                                                                      datagrams left unread = 0.6-2.3 s un-padded
+      the same slips without the catcher                                           -> 215-230 unread (Meno's state)
+      game thread reading only every 30 ms (the bunch arrives in pieces)           -> verdict 3.5 s, 54 unread
+      ring full before the catcher sees him                                        -> TOO LATE logged, no bunch
+      `slipcatch test` on a healthy queue                                          -> nothing left behind
+  NOT KNOWN / NOT TESTED:
+    - a REAL slip. The model is the DLL's code, but the catch has never met one; there is no way to make one on demand.
+    - how much of the bunch his game thread lets arrive in one go (Alon's DLL log during `slipcatch test` will show the
+      queue depth); whether 250 small datagrams in 10 ms all reach a pilot's PC.
+    - false verdicts on real links (two probes lost within 3.5 s; a game thread that answers late but keeps sending
+      frames). Each costs one bunch and a few seconds of padding to a healthy pilot.
+    - client log: 'in 89' / 'out 89' every second while flying (two lines a second more).
+    - pilots in HQ are not covered (no frames to tell a slip from a pause).
+    - the `slip` console test plays a slip on the SERVER side: good for watching the verdict, meaningless for the bunch.
+  VERIFY (local): `slipcatch on`; fly an ordinary pilot 10 min -> `slipcatch` says 'looked after by the catcher', no
+    VERDICT line. `slipcatch test <pilot>` -> nothing visible in the game; log: TEST line, 'in step again within 10 s'.
+    `slip <pilot> 100` -> a VERDICT line 1-3 s later (the detector). Optional: `slipcatch hammer <pilot> 10 20` and fly -
+    a VERDICT + 'result' line would be the first real catch.
+  Backup: _scratch/server.py.bak_v968f9k. Patch: _scratch/patch_9l.py. Models: _scratch/qsim_inputqueue_exact.py, qsim_bunch.py.
+
+2026-11-18  v968f9m-stable  THE CLIENT'S DATA-LOSS GAUGE: THE STATUS LEAVES RIGHT BEHIND ONE OF HIS FRAMES (Alon 11-18 15:54: 'check my
+            last connection quality with the online server - Alon@HQ. I keep getting a dataloss of up to 4%, the connection is
+            good, I think we are not calculating correctly or not sending the data correctly to the client')
+  HIS LAST ONLINE SESSIONS (live v968f9e; none since the live restart on v968f9k 04:34 UTC today): 11-17 07:16-07:18,
+    14:50-14:55, 18:15-18:27 UTC. Server side (lagperf / STATLOSS): rtt 154-157 ms, flat; downlink loss 0.0 %; probe
+    answers 1-25 ms over rtt; no lag episode.
+  HIS OWN DLL LOG has the ledger of every STATUS ('.. msgs sent from server / recvd by server / sent from client / recvd
+    by client / loss rate'), 561 intervals over the three sessions:
+        down: 1894 sent / 1895 counted | 1621 / 1622 | 483 / 484 - equal in every interval but the first
+        up:   1022 sent / 1020 counted | 1230 / 1228 | 370 / 368
+        'loss rate' > 0 in 25 of 378, 44 of 132 (the flying session), 9 of 51 intervals; typical 3-7 % flying, up to 43 %
+        for one interval in the lobby (3 packets against 1)
+    Nothing is lost. What he sees is the interval figure.
+  WHY (vcncNet.dll FUN_100073a4): interval loss = ((S + C) - (V + R)) / (S + C), set to 0 when negative; S, V = our two
+    counters in the STATUS (sent to him, received from him since the last one), C, R = his own since he handled the
+    last one. C runs until the STATUS REACHES him, V until we BUILT it - a round trip apart. One of his frames on its
+    way at that moment (a frame every 0.26 s, round trip 0.155 s: 43 of 83 boundaries) is in C and not in V: '1 of 17
+    lost' = 5.9 %. It arrives, is counted in the next interval, and that surplus is thrown away. The DLL's second
+    figure (running total, [ce3a]) stays right: 0.03-0.12 % at the end of each session.
+    Our counters are sent as the DLL expects them (v467-v471) - no arithmetic on the server can know what is on its way.
+  CHANGED (server.py):
+    - STATUS_PHASE_LOCK (ON) / _status_phase_wait: when a STATUS is due for a pilot who is FLYING with frames coming, his
+      heartbeat thread waits for his next frame (at most 0.6 s) and sends the STATUS right behind it. His next frame is
+      a frame period away, longer than the round trip, so nothing of his is on its way when the STATUS reaches him.
+      base_incr is the real elapsed time as always; STATUS intervals 2.0-2.6 s while flying. HQ / lobby: unchanged.
+    - relay_telemetry sets the event; build_status_request notes pkt_rx_n at the build.
+    - STATLOSS summary line (every 64 replies) adds: 'his gauge these N intervals: >0 in X, mean, max; a packet of his
+      in flight at the boundary in Y; Z STATUS sent behind a frame' - the DLL's own formula on the four counters, so
+      the live server shows what every pilot's gauge read, before and after.
+    - console `statuslock [on|off]`.
+  NOT CHANGED: the counters themselves, the STATUS format, the clock credit, pilots not flying.
+  TESTED OFFLINE:
+    - _scratch/test_9m.py: the wait (121 ms to a frame, STATUS 0.4 ms behind it; 0.6 s limit; none when not flying or
+      his frames have stopped); the gauge formula reproduces the DLL's 'loss rate' in all 132 intervals of his log.
+    - _scratch/statuslock_replay.py: his own send times from the DLL log replayed -
+        14:51-14:54, rtt 155 ms: packets on their way at the boundary today {0: 31, 1: 49, 2: 2}, gauge > 0 in 28 of 82
+          intervals, mean 1.64 % | behind a frame {0: 71, 1: 4, 2: 3}, 7 of 78, mean 0.47 %
+        the same at rtt 50 ms: 15 of 82 -> 2 of 78.   18:20-18:21: 11 of 27 -> 2 of 25.
+      What is left are his other packets (ACKs to our reliable messages, requests) and the lobby / HQ case.
+  NOT TESTED: against a client. A local test cannot show the effect (no latency - nothing is ever on its way); it can
+    show that STATUS, the session timer and the clock keep running.
+  VERIFY: local - fly five minutes: client clock normal, 'TX/STATUS' lines continue, `statuslock` counts 'sent behind a
+    frame'. Live - the STATLOSS lines: 'his gauge ... >0 in X' should fall to a few per 64 for pilots flying; `statuslock
+    off` for ten minutes gives the old picture for comparison.
+  Backup: _scratch/server.py.bak_v968f9l. Patch: _scratch/patch_9m.py.

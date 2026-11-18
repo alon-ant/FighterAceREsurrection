@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9k-stable'
+VERSION = 'v968f9m-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -413,6 +413,47 @@ STATUS_PACKETS = True      # v215: send periodic 'Game Status Message' STATUS re
                            # 262s wrap of the 18-bit A field; it also drives the System Status window
                            # (loss%, latency, SESSION TIME). Sent every STATUS_INTERVAL_S in-game.
 STATUS_INTERVAL_S = 2.0    # v215: cadence of STATUS requests (base-increment = elapsed ms since last).
+# v968f9m [THE CLIENT'S 'DATA LOSS' FIGURE: THE STATUS LEAVES RIGHT BEHIND ONE OF HIS FRAMES] (Alon 11-18 15:54: 'I keep
+# getting a dataloss of up to 4%, the connection is good, I think we are not calculating correctly or not sending the
+# data correctly to the client'). His three online sessions of 11-17, from his own DLL log ('.. msgs sent from server /
+# recvd by server / sent from client / recvd by client / loss rate' at every STATUS):
+#     down  1894 sent / 1895 counted, 1621 / 1622, 483 / 484 - equal in EVERY interval but the first: nothing lost
+#     up    1022 sent / 1020 counted, 1230 / 1228, 370 / 368 - but per interval client-sent minus server-received was
+#           -1 in 36, 0 in 47, +1 in 39 of the 132 intervals of the flying session
+# The DLL (FUN_100073a4): interval loss = ((S + C) - (V + R)) / (S + C), thrown away when negative, where S, V are OUR two
+# counters in the STATUS and C, R its own since the last STATUS. C counts what he sent until the STATUS REACHES him; V
+# what had reached US when we built it. One of his frames on its way at that moment (he sends one every 0.25 s, his
+# round trip is 0.155 s: 43 of 83 boundaries had one) is in C and not in V -> '1 of 17 packets lost' = 5.9 %; it is
+# counted in the next interval, where the surplus is thrown away. So the gauge shows 3-7 % in about every third
+# interval of a link that loses nothing. (The DLL's second figure, the running total, is right: 0.03-0.12 %.)
+# The counters cannot be made to agree by arithmetic - what is on its way to us is not known when the STATUS is built.
+# It can be made not to matter: when a STATUS is due for a pilot who is flying, the heartbeat waits (at most
+# STATUS_PHASE_WAIT_S) for his next frame and sends the STATUS right behind it. His next frame is then a whole frame
+# period away (0.25 s > his round trip), so nothing of his is on its way when the STATUS reaches him. base_incr is the
+# real elapsed time as before; STATUS intervals become 2.0-2.6 s for a flying pilot.
+# The STATLOSS line now also shows what the client's gauge made of the counters ('gauge'), and how often a packet of
+# his was on its way at the boundary ('in flight') - the before/after measure on the live server.
+STATUS_PHASE_LOCK   = True
+STATUS_PHASE_WAIT_S = 0.6
+_STATUS_LOCK_STATS  = {'locked': 0, 'timeout': 0}
+
+def _status_phase_wait(s, now):
+    """Called by the pilot's heartbeat thread when a STATUS is due. Returns the time to stamp it with."""
+    try:
+        lt = getattr(s, 'last_telem_time', 0.0) or 0.0
+        if not (getattr(s, 'entered_game', False) and getattr(s, 'flying', False) and lt and now - lt <= 1.0):
+            return now
+        ev = s.__dict__.get('_st_ev')
+        if ev is None:
+            ev = s.__dict__['_st_ev'] = threading.Event()
+        ev.clear()
+        if ev.wait(STATUS_PHASE_WAIT_S):
+            _STATUS_LOCK_STATS['locked'] += 1; s.__dict__['_st_lock_n'] = s.__dict__.get('_st_lock_n', 0) + 1
+        else:
+            _STATUS_LOCK_STATS['timeout'] += 1
+        return time.time()
+    except Exception:
+        return time.time()
 # v937f5 [A LOST STATUS COSTS THE CLIENT 2 s OF CLOCK - FOR GOOD]. The STATUS request is plain UDP and
 # we credit base_incr at send; the client adds it to its NET base only if the packet arrives. One lost
 # STATUS -> the client's reconstructed server time (base + A) is 2 s LOW from then on -> its next
@@ -7960,7 +8001,7 @@ def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
                     f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
-                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
+                    f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s slipcatch={SLIPCATCH} notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
 def console_handler():
@@ -8333,6 +8374,69 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'statuslock':                                                   # v968f9m: STATUS behind one of his frames
+                global STATUS_PHASE_LOCK
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    STATUS_PHASE_LOCK = (_a[0].lower() == 'on')
+                    log('STATLOSS', f'status phase lock {"ON" if STATUS_PHASE_LOCK else "OFF"} by {_src}')
+                log('CONSOLE', f'statuslock = {"ON" if STATUS_PHASE_LOCK else "off"}: a STATUS due for a pilot who is flying waits up to '
+                               f'{STATUS_PHASE_WAIT_S:g} s for his next frame and leaves right behind it (so none of his packets is on its way when it '
+                               f'reaches him - the client\'s data-loss gauge stops counting them as lost). This run: {_STATUS_LOCK_STATS["locked"]} sent '
+                               f'behind a frame, {_STATUS_LOCK_STATS["timeout"]} after the wait ran out. The STATLOSS lines show the gauge. `statuslock on|off`')
+            elif cmd == 'slipcatch':                                                    # v968f9l: notice a slip in its first seconds + the bunch
+                global SLIPCATCH
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                _usage = ('usage: slipcatch | slipcatch on|off | slipcatch test <pilot> | '
+                          'slipcatch hammer <pilot> <pairs/s 1-50> [minutes, default 10] | slipcatch hammer <pilot> off')
+                _w = (_a[0].lower() if _a else '')
+                _find = lambda _n: next((x for x in get_all_sessions() if getattr(x, 'current_pilot', None) == _n
+                                         and getattr(x, 'entered_game', False)), None)
+                if _w in ('on', 'off'):
+                    SLIPCATCH = (_w == 'on')
+                    log('LAG-WATCH', f'slip-catch {"ON" if SLIPCATCH else "OFF"} by {_src}')
+                elif _w == 'test':
+                    _t = _find(_a[1]) if len(_a) > 1 else None
+                    if _t is None:
+                        log('CONSOLE', f'slipcatch test: no such pilot in a game. {_usage}')
+                    elif _t.__dict__.get('_rl_on'):
+                        log('CONSOLE', f'slipcatch test: {_a[1]} has an episode open already - not on top of it')
+                    else:
+                        _slipcatch_fire(_t, time.time(), 40, 'forced from the console on a pilot who is in step', test=True)
+                elif _w == 'hammer':
+                    _t = _find(_a[1]) if len(_a) > 1 else None
+                    if _t is None or len(_a) < 3:
+                        log('CONSOLE', f'slipcatch hammer: {"no such pilot in a game" if _t is None else "rate missing"}. {_usage}')
+                    elif _a[2].lower() == 'off':
+                        _h = _HAMMER.pop(id(_t), None)
+                        log('CONSOLE', f'slipcatch hammer: stopped for {_a[1]} ({_h[4] if _h else 0} pairs sent)')
+                    else:
+                        try:
+                            _pp = max(1.0, min(50.0, float(_a[2]))); _mn = max(0.5, min(120.0, float(_a[3]) if len(_a) > 3 else 10.0))
+                            _HAMMER[id(_t)] = [_t, _pp, time.time() + _mn * 60.0, 0.0, 0]
+                            log('LAG-WATCH', f'{_a[1]}: HAMMER TEST - {_pp:g} back-to-back pairs of empty datagrams a second for {_mn:g} min '
+                                             f'(trying to provoke a real slip of his input queue; `slipcatch hammer {_a[1]} off` stops it)')
+                        except ValueError:
+                            log('CONSOLE', f'slipcatch hammer: not a number. {_usage}')
+                elif _w:
+                    log('CONSOLE', _usage)
+                _now_sc = time.time()
+                log('CONSOLE', f'slip-catch = {"ON" if SLIPCATCH else "off"}'
+                               + ('' if (RINGLAG_WATCH and globals().get('RINGPAD')) else ' (needs `lagwatch on` and `pad on`)')
+                               + f': probe every {SLIPCATCH_PROBE_S:g} s to pilots flying; verdict = 2 probes {SLIPCATCH_OVERDUE_S * 1000:.0f} ms overdue with his '
+                               f'frames coming; bunch {SLIPCATCH_BUNCH}; no bunch when the last prompt answer is over {SLIPCATCH_MAX_AGE_S:g} s old or more than '
+                               f'{SLIPCATCH_MAX_L} datagrams went out since. This run: {_SLIPCATCH_STATS["verdicts"]} verdict(s), {_SLIPCATCH_STATS["bunches"]} bunch(es), '
+                               f'{_SLIPCATCH_STATS["too_late"]} too late, {_SLIPCATCH_STATS["tests"]} test(s)')
+                for _s in get_all_sessions():
+                    if getattr(_s, 'entered_game', False):
+                        _d = _s.__dict__; _sc = _d.get('_sc') or {}
+                        _an = _d.get('_sc_ans')
+                        log('CONSOLE', f'  {getattr(_s, "current_pilot", "?")}: '
+                                       + ('looked after by the catcher' if _slipcatch_managed(_s, _now_sc) else
+                                          'episode open (watch + padding)' if _d.get('_rl_on') else 'not flying / no frames - keeper probes only')
+                                       + (f'; last answer {int(_an[3])} ms over rtt, to a probe {_now_sc - _an[1]:.1f} s old' if _an else '; no answer yet')
+                                       + (f'; {len(_sc.get("out") or [])} probe(s) out' if _sc else '')
+                                       + (f'; HAMMER {_HAMMER[id(_s)][1]:g} pairs/s, {_HAMMER[id(_s)][4]} sent' if id(_s) in _HAMMER else ''))
             elif cmd == 'pad':                                                          # v968f9c: filler for a slipped input queue
                 global RINGPAD
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -10344,6 +10448,7 @@ def build_status_request(sess, base_incr_ms):
     # v469f5 [STATLOSS]: remember the deltas just packed - the client's REPLY to this STATUS
     # reports ITS matching interval, and pairing the two yields DIRECTIONAL loss (see on_pkt).
     sess._st_last_txd = _txd; sess._st_last_rxd = _rxd
+    sess.__dict__['_st_build_rx'] = _rxn                               # v968f9m: to count what was on its way to us
     return bytes(p)
 
 # v371f5 [RELIABLE-VOLUME]: idempotent SCOREBOARD state does not need reliable delivery - it is
@@ -15269,6 +15374,7 @@ def send_timecheck_89(s):
         # client's transport dropped every probe (local 17:04: 12 probes sent, 0 'in 89' on the client)
         send_unrel(s, build_appspace_pkt_exact(bytes([0x59]) + struct.pack('<I', send_ms)), '<- TIMECHECK 89 probe')
         s._tc89_sent = time.time()
+        s.__dict__['_tc89_last_ms'] = send_ms                         # v968f9l
         s._tc89_tx = s.__dict__.get('_tc89_tx', 0) + 1
         if s._tc89_tx in (1, 12, 120):
             log('TIMECHECK', f'{getattr(s, "current_pilot", "?")}: probe #{s._tc89_tx} sent ({len(pend) - 1} earlier probe(s) still unanswered)')
@@ -15427,6 +15533,7 @@ RINGLAG_CLK_MOVED_N     = 3        # v968f8v: ... on this many prompt answers in
 # for another reason); (c) his session ends. A held-back queue does not empty by itself, so for most slipped pilots the
 # padding runs until they leave - stopping it earlier would put them back to 5-20 s.
 RINGPAD               = True
+SLIPCATCH             = False    # v968f9l: notice a slip in its first seconds and close the lap with one bunch - see _slipcatcher. `slipcatch on`
 RINGPAD_TRIAL_EVERY_S = 300.0    # a check with the padding stopped (1 s at most) this often, whatever the estimate says
 RINGPAD_TARGET_S      = 0.3      # the delay aimed at; the queue rule below usually decides
 RINGPAD_MIN_PPS       = 60.0
@@ -15626,6 +15733,8 @@ def _ringlag_due(s, now):
     d = s.__dict__
     if now - d.setdefault('_rl_enter', now) < RINGLAG_FIRST_PROBE_S:
         return False
+    if SLIPCATCH and _slipcatch_managed(s, now):                      # v968f9l: his probes come from the catcher thread
+        return False
     return now - d.get('_tc89_sent', 0.0) >= _ringlag_period(s)
 
 def _ringlag_notice(s, lag_s):
@@ -15680,6 +15789,7 @@ def _ringlag_sample(s, send_ms, now, recv_ms=None):
         pk = max(0, getattr(s, 'pkt_tx_n', 0) - tx0)
         clk, shift = _ringlag_clock(d, recv_ms, now, net_ms, lag_ms < RINGLAG_MIN_MS)
         d['_rl_last'] = (now, app_ms, net_ms, pk, shift)
+        d['_sc_ans'] = (send_ms, t_sent, tx0, lag_ms)                 # v968f9l: the newest answered probe (slip-catch)
         d['_rl_n'] = d.get('_rl_n', 0) + 1
         d['_rl_win_n'] = d.get('_rl_win_n', 0) + 1                    # v968f8t: for the LAGPERF row of this window
         d['_rl_win_max'] = max(d.get('_rl_win_max', lag_ms), lag_ms)
@@ -16132,7 +16242,11 @@ def _harvest_tick(src, pl):
                 pass
         src._tick_anchor = (t, now)
     src.last_telem_tick = t
+    src.__dict__['_sc_fprev'] = src.last_telem_time                   # v968f9l: the frame before this one (slip-catch)
     src.last_telem_time = now
+    _ev9m = src.__dict__.get('_st_ev')                                # v968f9m: a STATUS that is due leaves right behind this frame
+    if _ev9m is not None:
+        _ev9m.set()
     return True
 
 def _tick_rate_clamped(sess):
@@ -25250,6 +25364,211 @@ def _padder():
 
 threading.Thread(target=_padder, name='ringpad', daemon=True).start()
 
+# ----------------------------------------------------------------------------------------------------
+# v968f9l SLIP-CATCH: NOTICE A SLIP IN ITS FIRST SECONDS AND CLOSE THE LAP WITH ONE BUNCH (Alon 11-18 06:55, after ANALYSIS
+# (10) on Meno's 23:33 episode: 'build the fast detection-plus-bunch approach'). OFF by default: `slipcatch on`.
+# WHY (ANALYSIS 10, the queue exactly as in vcncNet.dll - _scratch/qsim_inputqueue_exact.py, qsim_bunch.py):
+#   A lost DEC puts the reader of his input queue one slot ahead of the writer. From that moment a datagram that
+#   arrives ALONE is stored behind the reader and read one lap (255 datagrams, 10 s at 24/s) later; the ring fills
+#   with unread datagrams and once it is full nothing the server sends can empty it - the padding has no room either
+#   (Meno 11-17: 216 held, 'no filler'). But while the lap is still running the slots AHEAD of the reader are empty:
+#   datagrams that arrive in one go are stored ahead of it and read at once. A bunch of about 250 empty datagrams
+#   carries the writer once round onto the few datagrams left behind since the slip, and what remains is a lag of
+#   about as many datagrams as were sent between the slip and the bunch - the small kind the padding handles.
+#       noticed after 1 s -> ~31 datagrams, 2.5 s -> ~66, 5 s -> ~126, 8 s -> ~206, never -> ~240      (model, 24/s)
+# HOW A SLIP LOOKS IN ITS FIRST SECONDS: nothing that arrives alone is handled - a probe (msg 89) gets no answer -
+#   while his game thread plainly runs: his own frames keep coming. (A stalled game thread - world load, alt-tab -
+#   sends no frames; a lost probe is one probe.)
+# THE CATCHER (own thread, SLIPCATCH_TICK_S): for every pilot flying with frames coming and no episode open
+#   - a probe every SLIPCATCH_PROBE_S (the keeper's 10-s probe is left out for him);
+#   - a probe not answered SLIPCATCH_OVERDUE_S over his rtt, with a frame of his sent after it reached him: the
+#     next probe leaves at once;
+#   - VERDICT: two probes of the last SLIPCATCH_WINDOW_S like that, two frames after the older one, one after the
+#     newer one;
+#   - only if the last PROMPT answer is recent (SLIPCATCH_MAX_AGE_S) and few datagrams went to him since
+#     (SLIPCATCH_MAX_L): otherwise the lap may be closed already, the ring full - a bunch then would only cost him
+#     seconds of everything (model: 2-8 % of the next 3000 datagrams, lag unchanged). 'too late' is logged, no bunch.
+#   - THE BUNCH: SLIPCATCH_BUNCH filler datagrams in groups of SLIPCATCH_GROUP; the probes still out are forgotten
+#     (their answers would count the bunch as backlog); an episode is opened with the padding on for what is left -
+#     the watch and the padding take it from there (estimate from the next answers, trial probes close it when he
+#     is in step, which is also how a FALSE verdict ends: the model shows no effect of the bunch on a healthy queue).
+# NOT covered: a pilot in HQ (no frames to tell a slip from a pause) - the old watch still sees him 15 s later.
+# NOT KNOWN: how much of a bunch his game thread lets arrive 'in one go' (model with the reader cutting in every
+#   5-20 datagrams: still slip distance + ~18); whether a real slip looks exactly like the model - there is no way
+#   to make one on purpose. `slipcatch hammer <pilot> <pairs/s>` sends back-to-back pairs of fillers (the INC of the
+#   second meets the DEC of the first - the race itself) to try to provoke one on a test PC.
+# The `slip` test command plays a slipped queue on the SERVER side: the catcher's verdict can be watched with it
+# (probes unanswered, frames coming), the bunch cannot (it just flushes the held datagrams).
+# ----------------------------------------------------------------------------------------------------
+SLIPCATCH_TICK_S      = 0.05
+SLIPCATCH_PROBE_S     = 1.0
+SLIPCATCH_OVERDUE_S   = 0.30
+SLIPCATCH_WINDOW_S    = 3.5
+SLIPCATCH_FRAME_GAP_S = 1.2
+SLIPCATCH_PROMPT_MS   = 250
+SLIPCATCH_MAX_AGE_S   = 4.0
+SLIPCATCH_MAX_L       = 120
+SLIPCATCH_BUNCH       = 250
+SLIPCATCH_GROUP       = 25
+SLIPCATCH_COOLDOWN_S  = 60.0
+_SLIPCATCH_STATS = {'verdicts': 0, 'bunches': 0, 'too_late': 0, 'tests': 0}
+_HAMMER = {}                  # id(sess) -> [sess, pairs a second, until, acc, pairs sent]
+
+def _slipcatch_managed(s, now):
+    """True when the catcher (not the keeper) flies this pilot's probes: flying, frames coming, no episode open."""
+    try:
+        d = s.__dict__
+        if not getattr(s, 'entered_game', False) or getattr(s, 'closing', False) or not getattr(s, 'flying', False):
+            return False
+        if d.get('_rl_on') or d.get('_pad_manual') or d.get('_load_hold_until') is not None or d.get('_pad_pause'):
+            return False
+        lt = getattr(s, 'last_telem_time', 0.0) or 0.0
+        return bool(lt and now - lt <= SLIPCATCH_FRAME_GAP_S)
+    except Exception:
+        return False
+
+def _slipcatch_bunch(s, n):
+    """n filler datagrams, back to back in groups of SLIPCATCH_GROUP. Returns the number sent."""
+    sent = 0
+    for i in range(int(n)):
+        try:
+            sock.sendto(bytes([0x00, 0x00, 0x20, s.nundgram(), 0x00, 0x00, 0x00, 0x00]) + RINGPAD_FILLER, s.addr)
+            sent += 1
+        except OSError:
+            break
+        if (i + 1) % SLIPCATCH_GROUP == 0 and i + 1 < n:
+            time.sleep(0.001)
+    d = s.__dict__
+    d['_pad_sent'] = d.get('_pad_sent', 0) + sent
+    _perf['tx'] += sent; _perf['txb'] += 13 * sent
+    return sent
+
+def _slipcatch_fire(s, now, L, why, test=False):
+    """The verdict's action: bunch, forget the probes still out, open an episode with the padding on."""
+    d = s.__dict__; name = getattr(s, 'current_pilot', '?')
+    t0 = time.time()
+    n = _slipcatch_bunch(s, SLIPCATCH_BUNCH)
+    for _k in list((d.get('_rl_pend') or {}).keys()):
+        d['_rl_pend'].pop(_k, None)
+    L = max(1, int(L))
+    d['_rl_on'] = now; d['_rl_logged'] = now; d['_rl_okn'] = 0; d['_rl_streak'] = 0; d['_rl_prev_late'] = None
+    d['_rl_episodes'] = d.get('_rl_episodes', 0) + 1
+    d['_rl_pk_min'] = d['_rl_pk_max'] = L
+    d['_rl_ms_min'] = d['_rl_ms_max'] = int(1000.0 * L / max(1.0, float(d.get('_pad_real') or 20.0)))
+    d['_pad_hist'] = [L]; d['_pad_n'] = L; d['_pad_over'] = 0; d['_pad_notq'] = False; d['_pad_ref'] = None
+    d['_pad_pps'] = min(RINGPAD_MAX_PPS, max(RINGPAD_MIN_PPS, L / RINGPAD_TARGET_S))
+    d['_pad_trial'] = None; d['_pad_trial_last'] = now - RINGPAD_TRIAL_GAP_S; d['_pad_ans'] = time.time()
+    _PAD_SESS[id(s)] = s
+    sc = d.setdefault('_sc', {})
+    sc['out'] = []; sc['cool'] = now + SLIPCATCH_COOLDOWN_S; sc['result_at'] = now + 10.0; sc['fired'] = (now, L, n, test)
+    _SLIPCATCH_STATS['tests' if test else 'bunches'] += 1
+    log('LAG-WATCH', f'{name}: SLIP-CATCH {"TEST" if test else "VERDICT"} - {why}. {n} empty datagrams sent in one bunch ({(time.time() - t0) * 1000:.0f} ms) '
+                     f'to close the lap; about {L} datagrams went to him since the slip = what should be left behind. Episode opened, padding on '
+                     f'(aim {d["_pad_pps"]:.0f}/s); the next probe answers measure what is really left')
+    try:
+        _p = _rec_dump(s, f'SLIP-CATCH: {why}')
+        if _p:
+            log('LAG-WATCH', f'  recorder dump -> {_p}')
+    except Exception:
+        pass
+
+def _slipcatch_step(s, now):
+    d = s.__dict__
+    sc = d.get('_sc')
+    if sc is None:
+        sc = d['_sc'] = {'out': [], 'last': 0.0, 'cool': 0.0, 'ok': None, 'late_logged': 0.0}
+    ra = sc.get('result_at')
+    if ra and now >= ra:                                                             # ten seconds after a bunch: what is left
+        sc['result_at'] = None
+        f = sc.get('fired') or (now, 0, 0, False)
+        if d.get('_rl_on'):
+            _n = d.get('_pad_n'); _room = _pad_room(s, now)[0]; _r = min(float(d.get('_pad_pps') or 0.0), _room)
+            log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: SLIP-CATCH result after 10 s - about {_n} datagrams unread in his queue '
+                             f'(expected about {f[1]}); padding {_r:.0f}/s of {_room:.0f}/s room = about {(_n or 0) / max(1.0, _r):.1f} s behind'
+                             + ('' if (_n or 0) <= 150 else ' - the bunch came too late or did not arrive in one go'))
+        else:
+            log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: SLIP-CATCH result - he was in step again within 10 s '
+                             f'({"it was a test" if f[3] else "a false verdict, or the bunch closed the lap completely"})')
+    if not _slipcatch_managed(s, now):
+        sc['out'] = []
+        return
+    if now < sc.get('cool', 0.0) or now - d.setdefault('_rl_enter', now) < RINGLAG_FIRST_PROBE_S:
+        return
+    rtt = (d.get('_rtt_ms') or 0) / 1000.0
+    pend = d.get('_rl_pend') or {}
+    ans = d.get('_sc_ans')                                                           # (send_ms, t_sent, tx0, lag_ms)
+    if ans and ans[3] < SLIPCATCH_PROMPT_MS and (sc.get('ok') is None or ans[1] > sc['ok'][0]):
+        sc['ok'] = (ans[1], ans[2])
+    out = [p for p in sc['out'] if p[0] in pend and now - p[1] <= SLIPCATCH_WINDOW_S]
+    lt = getattr(s, 'last_telem_time', 0.0) or 0.0; lp = d.get('_sc_fprev', 0.0) or 0.0
+    def frames_after(p):
+        t = p[1] + rtt + 0.05
+        return (1 if lt >= t else 0) + (1 if lp >= t else 0)
+    due = [p for p in out if now >= p[1] + rtt + SLIPCATCH_OVERDUE_S and frames_after(p) >= 1]
+    if len(due) >= 2 and frames_after(due[0]) >= 2:
+        tx = getattr(s, 'pkt_tx_n', 0)
+        ok = sc.get('ok')
+        L_lo = max(0, tx - due[0][2])
+        L_hi = max(L_lo, tx - ok[1]) if ok else None
+        age = (now - ok[0]) if ok else None
+        _SLIPCATCH_STATS['verdicts'] += 1
+        why = (f'{len(due)} probes unanswered ({now - due[0][1]:.2f} s and {now - due[-1][1]:.2f} s old, rtt {rtt * 1000:.0f} ms) while his frames keep coming '
+               f'(last {now - lt:.2f} s ago); last prompt answer ' + (f'to a probe {age:.1f} s old' if ok else 'unknown')
+               + f'; {L_lo}' + (f'-{L_hi}' if L_hi is not None else '+') + ' datagrams sent to him since')
+        if ok is None or age > SLIPCATCH_MAX_AGE_S or L_hi > SLIPCATCH_MAX_L:
+            _SLIPCATCH_STATS['too_late'] += 1
+            sc['out'] = []; sc['cool'] = now + SLIPCATCH_COOLDOWN_S
+            log('LAG-WATCH', f'{getattr(s, "current_pilot", "?")}: SLIP-CATCH - {why}: TOO LATE for a bunch (the lap may be closed already) - '
+                             f'left to the watch and the padding')
+            return
+        _slipcatch_fire(s, now, (L_lo + L_hi + 1) // 2, why)
+        return
+    newest = max(out, key=lambda p: p[1]) if out else None
+    want = (now - sc['last'] >= SLIPCATCH_PROBE_S) or \
+           (newest is not None and newest in due and newest[1] == sc['last'] and now - sc['last'] >= 0.2)
+    if want:
+        send_timecheck_89(s)
+        ms = d.get('_tc89_last_ms'); rec = (d.get('_rl_pend') or {}).get(ms)
+        sc['last'] = now
+        if rec is not None:
+            sc['last'] = rec[0]
+            out.append((ms, rec[0], rec[1]))
+    sc['out'] = out
+
+def _slipcatcher():
+    _last = time.time()
+    while True:
+        try:
+            time.sleep(SLIPCATCH_TICK_S)
+            _now = time.time(); _dt = min(0.25, max(0.0, _now - _last)); _last = _now
+            for _k, _h in list(_HAMMER.items()):                                     # test: back-to-back pairs
+                try:
+                    _s = _h[0]
+                    if _now >= _h[2] or getattr(_s, 'closing', False) or sadrs.get(getattr(_s, 'addr', None)) is not _s \
+                            or not getattr(_s, 'entered_game', False):
+                        _HAMMER.pop(_k, None)
+                        log('LAG-WATCH', f'{getattr(_s, "current_pilot", "?")}: hammer test over - {_h[4]} back-to-back pairs sent')
+                        continue
+                    _h[3] += _h[1] * _dt
+                    while _h[3] >= 1.0:
+                        _h[3] -= 1.0
+                        _slipcatch_bunch(_s, 2); _h[4] += 1
+                except Exception:
+                    _HAMMER.pop(_k, None)
+                    logx('LAG-WATCH', 'hammer step failed')
+            if not (SLIPCATCH and RINGLAG_WATCH and RINGPAD):
+                continue
+            for _s in get_all_sessions():
+                try:
+                    if getattr(_s, 'entered_game', False):
+                        _slipcatch_step(_s, _now)
+                except Exception:
+                    logx('LAG-WATCH', 'slip-catch step failed')
+        except Exception:
+            logx('LAG-WATCH', 'slip-catch loop error')
+
+threading.Thread(target=_slipcatcher, name='slipcatch', daemon=True).start()
+
 def _send_unrel_frame_to(sess, onum, payload):
     """One object-update frame (any payload size) to one session, tick re-stamped."""
     rt = getattr(sess, 'last_telem_tick', None)
@@ -31652,6 +31971,8 @@ def login(s):
                                                or _ringlag_due(s, _now_st)):          # v968f8r: the ring-lag watch flies the same probe
                             send_timecheck_89(s)                                   # v968f7e
                         if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
+                            if STATUS_PHASE_LOCK:                                                 # v968f9m
+                                _now_st = _status_phase_wait(s, _now_st)
                             _incr_ms = int((_now_st - s._status_last) * 1000)
                             _top = int(s.__dict__.pop('_tc89_rebase_ms', 0) or 0)                 # v968f7f
                             if _top > 0:
@@ -40648,6 +40969,22 @@ def on_pkt(data, addr):
                     s._loss_ul_ewma = 0.875*getattr(s,'_loss_ul_ewma',0.0) + 0.125*_ul
                     s._loss_ul_tx  = getattr(s,'_loss_ul_tx',0)  + _c_txd
                     s._loss_ul_rx  = getattr(s,'_loss_ul_rx',0)  + (_s_rxd or 0)
+                # v968f9m: (a) the interval figure the client's DLL makes of these four counters (FUN_100073a4);
+                # (b) how many of his packets reached us between the build of that STATUS and this reply = were on
+                # their way at the boundary (the reply itself is one of the count).
+                try:
+                    _d9m = s.__dict__
+                    if _s_txd is not None and sz >= 36:
+                        _tot = _s_txd + _c_txd; _got = (_s_rxd or 0) + _c_rxd
+                        _g = (100.0 * (_tot - _got) / _tot) if (_tot > 0 and _got < _tot) else 0.0
+                        _d9m['_gg_n'] = _d9m.get('_gg_n', 0) + 1; _d9m['_gg_sum'] = _d9m.get('_gg_sum', 0.0) + _g
+                        _d9m['_gg_pos'] = _d9m.get('_gg_pos', 0) + (1 if _g > 0 else 0); _d9m['_gg_max'] = max(_d9m.get('_gg_max', 0.0), _g)
+                        _b0 = _d9m.get('_st_build_rx')
+                        if _b0 is not None:
+                            _nf = max(0, getattr(s, 'pkt_rx_n', 0) - _b0 - 1)
+                            _d9m['_gg_fl'] = _d9m.get('_gg_fl', 0) + (1 if _nf > 0 else 0)
+                except Exception:
+                    pass
                 s._statreply_n = getattr(s, '_statreply_n', 0) + 1
                 if (s._statreply_n % 64) == 1:      # v905f5: was 16 - one loss summary per pilot per ~2 min
                     _dt = s._loss_dl_tx if getattr(s,'_loss_dl_tx',0) else 1
@@ -40658,7 +40995,14 @@ def on_pkt(data, addr):
                         f'dl_total={(1-getattr(s,"_loss_dl_rx",0)/_dt)*100:+.2f}% '
                         f'ul_total={(1-getattr(s,"_loss_ul_rx",0)/_ut)*100:+.2f}% '
                         f'rtt={getattr(s, "_rtt_ms", "?")}ms (max {getattr(s, "_rtt_max_s", 0.0):.1f}s) '   # v968f5v
-                        f'(n={s._statreply_n})')
+                        f'(n={s._statreply_n})'
+                        + (f' | his gauge these {s.__dict__["_gg_n"]} intervals: >0 in {s.__dict__.get("_gg_pos", 0)}, mean '
+                           f'{s.__dict__.get("_gg_sum", 0.0) / s.__dict__["_gg_n"]:.2f}%, max {s.__dict__.get("_gg_max", 0.0):.1f}%; '
+                           f'a packet of his in flight at the boundary in {s.__dict__.get("_gg_fl", 0)}; '
+                           f'{s.__dict__.get("_st_lock_n", 0)} STATUS sent behind a frame'
+                           if s.__dict__.get('_gg_n') else ''))
+                    for _k9m in ('_gg_n', '_gg_sum', '_gg_pos', '_gg_max', '_gg_fl', '_st_lock_n'):      # v968f9m: per summary window
+                        s.__dict__.pop(_k9m, None)
             except Exception:
                 pass
         if pt==1:
