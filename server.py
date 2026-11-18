@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9n-stable'
+VERSION = 'v968f9o-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8000,7 +8000,7 @@ def perform_restart(actor='console', graceful=False):
 def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
-                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r} '
+                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r}/pi={ai_client_pi()} '
                     f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s slipcatch={SLIPCATCH} notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
@@ -8374,6 +8374,17 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'ailist':                                                       # v968f9o: the AI station in the clients' people lists
+                global AI_STATION_LISTED
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    AI_STATION_LISTED = (_a[0].lower() == 'on')
+                    log('TANK', f'AI station listed = {AI_STATION_LISTED} by {_src} (PlayerIndex {ai_client_pi()} from the next registration)')
+                log('CONSOLE', f'ailist = {"on" if AI_STATION_LISTED else "off"}: the AI station is sent with PlayerIndex {ai_client_pi()}'
+                               f'{" (slotmin is 0, so it keeps the listed value)" if (not AI_STATION_LISTED and ai_client_pi() != 0) else ""}. '
+                               f'off = it is not in the private-message list of the clients (they list a station only when its PlayerIndex is above 0); '
+                               f'on = the old value, listed as "AI". A client takes a change when the station is next registered on it '
+                               f'(his next arena entry, or after his last AI object went). `ailist on|off`')
             elif cmd == 'slotmin':                                                      # v968f9n: lowest PlayerIndex handed out
                 global SLOT_INDEX_MIN
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -16462,7 +16473,21 @@ TANK_HEADER_SIZE  = 8
 TANK_UPDATE_SIZE  = 26
 TANK_CLASSES      = {131: 2, 132: 3, 133: 1, 134: 2, 135: 2, 136: 2, 137: 3}   # class_id -> gunsnum
 AI_CLIENT_ST      = 0x1f0          # station number for the server's AI objects (< 512)
-AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station (never a real pilot)
+AI_CLIENT_PI      = 0x7fffff00     # PlayerIndex for the AI station while it is LISTED (never a real pilot) - see ai_client_pi()
+# v968f9o [THE AI STATION LEAVES THE PRIVATE-MESSAGE LIST] (Alon 11-18 17:37: 'lets try and get rid of the AI: line in
+# the private chat list'). The client decides who is a pilot by the station's PlayerIndex: every list of people it
+# builds from the station table takes a station only when CLIENT+0x24 > 0 (signed) - the private-message targets
+# (0x44db97 `jle`), a second target list (0x46e137), the find-station-by-name used for a typed whisper (0x4696d0) and
+# the rank prefix of a name tag (0x4287dc). That test is how the 2009 game kept its 'AI Client' out of them (the same
+# test hid a pilot on index 0, v968f7m). Our AI station carried 0x7fffff00 - positive, so it was listed. With 0 it is
+# a station the objects can hang from and nothing else. A station with PlayerIndex 0 is field-proven: a pilot on index
+# 0 flew, chatted and was scored normally on every peer (SpUn 10-30, Alon 11-18) - only the lists left him out.
+# The name stays 'AI'. Never 0 while a pilot can hold index 0 (`slotmin 0`): the two would share a PlayerIndex.
+AI_STATION_LISTED = False          # console `ailist on|off`; a client takes the new value when the station is next registered
+def ai_client_pi():
+    if AI_STATION_LISTED or SLOT_INDEX_MIN < 1:
+        return AI_CLIENT_PI
+    return 0
 AI_CLIENT_NAME    = 'AI'             # v968f7l (Alon 10-30 17:20: 'the AI player shouldn't be there at all'): the AI objects need an  # v968f8d-stable: 7a wire - the AI station named again (v968f7l experiment reverted)
                                    # owner STATION (Type-0 client record, else o->Client()==0 -> Network.cpp:440 CTD), and the
                                    # client lists stations by name - that is the 'AI' entry he whispered to (target 496). The
@@ -17540,7 +17565,7 @@ def _ensure_ai_client_on(dst):
     if dst.__dict__.get('_ai_client_room') == dst.current_room:
         return b''
     dst._ai_client_room = dst.current_room
-    return build_client_record(AI_CLIENT_ST, AI_CLIENT_PI, AI_CLIENT_NAME, squadron=0)
+    return build_client_record(AI_CLIENT_ST, ai_client_pi(), AI_CLIENT_NAME, squadron=0)   # v968f9o
 
 def spawn_tank(room_id, camp, class_id, group_id=0, pos=None, reason='', send=True):
     """Create one NetTank on every in-game client of the room. Returns its ONumber.

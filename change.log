@@ -15355,3 +15355,84 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     (test_9g / 9h / 9i fail on the banked v968f9m too - superseded by 9j / 9k when the Fly switch moved to msg 0x74).
   Files: server.py only. Backups _scratch/server.py.bak_v968f9m (before 1) and .bak_v968f9n_a (before 2 and 3).
     Patches _scratch/patch_9n.py, patch_9n2.py. NOT on the live server (v968f9m), NOT banked (bank = v968f9m).
+
+2026-11-18  LIVE RESULT of v968f9n (live restarted on it 15:17:01 UTC; Alon@HQ and Moira@HQ in TC Reborn Beta 15:17-15:28;
+            Alon 17:28: 'better on the DL gauge only got twice 5% loss. looks good.')
+  (1) gauge: Alon@HQ > 0 in 3, 3, 5, 5 of four 64-interval windows = 16 of 256 (6 %; 21 % on v968f9m an hour earlier),
+      Moira@HQ 3, 4, 1, 2 = 10 of 256 (4 %). Largest single readings 14.3 % (Alon, one interval, a window with a
+      0.4 s round trip) and 18.5 % (Moira, her first window, arena entry). dl_total / ul_total within 0.2 % of zero
+      for both - nothing lost. 44-64 of 64 STATUS per window sent behind a frame.
+  (2) ground targets, scene 47 USA Tank Factory, Alon@HQ: 15:22:39.5 'GROUNDHIT first hit on object 1300 "Ammo Bunker"
+      - damage counts, 61 of 2000', 15:22:41.1 destroyed (SUPPLY: lost ammo 18000) = about 1.6 s of 20 mm fire.
+      Same pass: 'gunfire on object 1295 "Rail Yard" ... is IGNORED', the same for 1291 "Metal Factory" (hard, as
+      intended); AA battery 1298 destroyed by guns. 15:21:40 Tank Factory 1290 took a record of 1800 (bomb / rocket
+      size) and went at 4000 with the usual splash on its neighbours. Object 1300 in scene 47 is the building the
+      v968f9n entry had inferred.
+  (3) slots: BASELINE 'slot_min=1'; 'ROOM Alon@HQ -> room 134 slot ClientNumber=1 PlayerIndex=1 (peers=0)', Moira@HQ 2.
+      Her view of the private-message list was not reported separately ('looks good').
+  No Traceback / ERROR line in the run.
+
+2026-11-18  BANKED: v968f9n-stable   (user: "if you don't have anything else to add or fix you can bank it")   previous bank: v968f9m-stable (11-18 14:16 UTC)
+  SNAPSHOT: _scratch/bank/server.py.v968f9n (2,694,090 B, sha1 cde0489835e5...) + web_server.py.v968f9n + fa_logging.py.v968f9n
+    - byte-identical to the working files at 15:30 UTC. web_server.py and fa_logging.py are unchanged against the last
+    two banks. LIVE already runs this server.py (v968f9n, since 15:17:01 UTC).
+  IN THIS BANK (entry above):
+    9n (1) the lag-watch probe leaves after the STATUS (gauge), (2) Ammo Bunker / Large Ammo Bunker take gunfire, 2000;
+       Hardened Ammo Bunker stays bombs / rockets only; GROUNDHIT log line, (3) SLOT_INDEX_MIN 1 again; `slotmin`.
+  STATE AT BANK - what has flown: all three, live, one 11-minute session of two pilots (LIVE RESULT above).
+  STATE AT BANK - NOT yet seen working:
+    - (3) from the other pilot's screen: nobody has yet said 'he is in my private-message list' on this build.
+    - Large Ammo Bunker under guns (only in the Support Factory scenes); Hardened Ammo Bunker refusing guns (offline test only).
+    - `slotmin 0|1` typed on a console.
+    - 9l SLIP-CATCH is still switched off everywhere and untested on a real slip; with it on, its own 1-s probes are
+      not behind the STATUS (they come from the slip-catch thread).
+    - everything under 'NOT yet seen working' in the v968f9m and v968f9k bank blocks.
+  KNOWN AND OPEN AT BANK:
+    - the gauge still shows a figure in about 1 interval of 20 (ACKs and requests of his on their way, arena entry).
+    - an Ammo Bunker lasts under two seconds of sustained 20 mm fire (2000 against 1000-1200 for a fuel tank). If
+      that is too soft, the knob is the class life x OBJ_HP_LIFE_MULT, or a per-class figure.
+    - GROUNDHIT is one line per pilot and object; a busy evening of strafing will show how much log that is.
+    - the open list of the v968f9m block (large slips, affinity ini, bombs after death, FA LAGTEST, error-map items).
+
+2026-11-18  v968f9o-stable  THE AI STATION LEAVES THE PRIVATE-MESSAGE LIST (Alon 17:37: 'tested now' [the v968f9n slot fix, from the
+            other pilot's side] ... 'lets try and get rid of the AI: line in the private chat list')
+  Closes the OPEN item of the 10-30 bank ('the AI station's EMPTY name leaves a BLANK placeholder row ... find whether the
+  list can be made to skip the AI station').
+  WHY THE AI IS IN THE LIST: every AI object (tank, soldier, lorry, train, ship) needs an owner STATION on the client (the
+    Type-0 client record, 'Create client 496, (AI)'), and the private-message list is built from the station table, not
+    from the roster. v968f7l tried an empty NAME: the row stayed, blank.
+  WHAT THE CLIENT ACTUALLY TESTS (FA.exe): a station is taken as a person only when its PlayerIndex (CLIENT+0x24) is above
+    0, signed - `mov eax,[esi+0x24] / test eax,eax / jle skip` at 0x44db97 (private-message targets, list 1), 0x46e137
+    (the second target list, list 4), 0x4696d0 (find a station by name - a typed whisper), 0x4287dc (rank prefix of a
+    name tag). The binary's own strings name the reason: the 2009 game ran its AI as an 'AI Client' ('Cannot create game
+    by AI Client', 'Get PHYS_DATA for AI Client', 'AIClient. ... Receiving %i scenes') - a station that is not a pilot.
+    That same test hid a PILOT who had been given index 0 (v968f7m, v968f9n). Our AI station was sent with 0x7fffff00:
+    positive, so a person.
+  CHANGE: the AI station is registered with PlayerIndex 0 (ai_client_pi()). Name 'AI' and station number 496 unchanged,
+    the AI roster player the chat lines come from (index 0x1fe) unchanged. Guard: while a pilot can hold index 0
+    (`slotmin 0`) the old value is sent, so the two never share an index. Console `ailist [on|off]` (on = old value,
+    listed). BASELINE line prints 'ai_station='AI'/pi=0'. A client takes a change when the station is next registered
+    on it (arena entry, or after his last AI object went).
+  WHY 0 AND NOT A NEGATIVE NUMBER: a station with PlayerIndex 0 has flown on real clients - SpUn 10-30 and Alon 11-18
+    were stations with index 0 on every peer: planes, chat, hits and scores normal, only the lists left them out. A
+    negative index has never been on the wire.
+  WHAT IS NOT KNOWN: everything else the client derives from 'the owner is a person'. Until now AI objects were owned by
+    a 'person'; from here they are owned the way the 2009 AI Client's were. Read so far: the four list / tag sites
+    above; the object-owner readers of +0x24 that were found (chat 0x4f6246, exit data 0x4f8d10, 0x4fbac0 ...) work on
+    the local pilot. NOT read: every hit / kill / score path for an AI-owned object. Hence the local test below
+    before it goes anywhere.
+  VERIFY (local, one pilot is enough; a second shows the list better):
+    1. BASELINE line: ai_station='AI'/pi=0. Client log at the first AI object: 'Create client 496, (AI), PlayerIndex=0'.
+    2. private-message list with trains / lorries / tanks in range: no AI row, no blank row. Typing a whisper to 'AI':
+       the client no longer finds it.
+    3. the AI world as before: trains run, lorries drive, tanks roll and shoot, ships sail; name tags on them unchanged.
+    4. hit and destroy a tank / lorry / train: the lines on screen and the score as before. Let an AI gun or tank kill
+       you: the kill line as before.
+    5. AI chat lines (TC events, 'AI:' lines) still arrive.
+    6. no new ERROR / Assertion line in messagesNN.log around the first AI create and the first AI kill.
+    If anything in 3-6 differs: `ailist on` puts the old value back for every station registered after that.
+  Tests: _scratch/test_9o.py (8 checks: record bytes, the client's list test on it, `ailist on`, the slotmin-0 guard, a
+    pilot station untouched, single builder, whisper-to-AI answer keyed on the station) ALL PASS; test_9n, 9m, 9l, 9k,
+    9g_e2e pass.
+  Files: server.py only. Backup _scratch/server.py.bak_v968f9n. Patch _scratch/patch_9o.py. NOT on the live server
+    (v968f9n), NOT banked (bank = v968f9n).
