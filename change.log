@@ -15518,3 +15518,120 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     9n, 9k, 9g_e2e pass.
   Files: server.py only. Backup _scratch/server.py.bak_v968f9o. Patch _scratch/patch_9p.py. NOT on the live server
     (v968f9o), NOT banked (bank = v968f9o).
+
+2026-11-18  LIVE RESULT of v968f9p (Alon 18:25: 'works well! improved arena page loading time!')
+  LOCAL 16:17-16:19 UTC (v968f9p, gdprime=False), AC2E_Bigalon^CO: rooms 49 -> lobby -> 48 -> lobby -> 52 (the event-mode
+    room) -> lobby -> exit. messages34: 3 x 'in 212', 3 x 'out 212'5', and the log ends 'End of log file' - no '~DLIS'
+    line, no 'elements remains'.
+  LIVE 16:23-16:25 UTC (restarted on v968f9p 16:23:26), Alon@HQ and Moira@HQ: Alon 4 joins / 4 leaves of TC Reborn Beta,
+    Moira 6 joins over four arenas (130, 222, 135, 134) with a leave between each. No 'primed' line, no Traceback.
+    messages35 (Alon): 'out 210' -> 'in 210'321' in 0.16-0.20 s each of the five times (messages31 on v968f9o: 2.6 s and
+    three polls); every click 'out 212'5' -> 'in 212' in 0.19 s; 6 received, 6 asked for; ends 'End of log file' clean.
+  THE v611 PATH (back from an arena, list with no 212 before it, click, Join): flown 2 times locally and 8 times live by
+    two clients, including second and third exits. Every click produced its request and every Join its 201.
+  messages33 (the session before, on v968f9o with the prime): 27 in, 3 asked -> '24 elements remains'. Same pilot, same
+    PC, twenty minutes apart.
+
+2026-11-18  BANKED: v968f9p-stable   (user 18:25: "bank!")   previous bank: v968f9o-stable (11-18 16:00 UTC)
+  SNAPSHOT: _scratch/bank/server.py.v968f9p (2,699,678 B, sha1 0f0be59b96dd...) + web_server.py.v968f9p + fa_logging.py.v968f9p
+    - byte-identical to the working files at 16:27 UTC. web_server.py and fa_logging.py are unchanged against the last
+    four banks. LIVE already runs this server.py (v968f9p, since 16:23:26 UTC).
+  IN THIS BANK (entry above):
+    9p no GAME_DEF before the arena list (GAMEDEF_PRIME False): the list alone, the 212 when the client asks; `gdprime`.
+       Closes error-map item (5) ''N elements remains' at exit'.
+  STATE AT BANK - what has flown: steps 1, 2, 3 and 5 of the VERIFY list, locally and live (LIVE RESULT above).
+  STATE AT BANK - NOT yet seen working:
+    - step 4: an EVENT-mode arena with a hold or a Fly-button state set by a host, entered on this build (room 52 was
+      entered locally for 20 s, nothing was switched). The pilot's event table / Fly state is now noted when his client
+      asks for the 212, no longer at the prime.
+    - a web edit of an arena's settings while pilots sit in the lobby (they get the new GAME_DEF at their click, as
+      before - not exercised).
+    - other pilots' clients and connections (two clients so far, both sysops, both on good links); a pilot who joins
+      through the launcher's 're-attach' path.
+    - `gdprime on` typed on a console.
+    - steps 3-6 of the v968f9o list (AI objects hit / killed with the station on PlayerIndex 0) - still open.
+  KNOWN AND OPEN AT BANK:
+    - why the click did nothing on 09-09 (v611f5) is still not known; it did not happen in ten tries today. If a pilot
+      reports arenas he cannot click after coming back to the lobby: `gdprime on`.
+    - GAMEDEF_PACING_S and the per-session GAME_DEF cache (_gamedef_sent, cleared at 0xce) only matter with the prime on.
+    - the open lists of the v968f9o / v968f9n blocks.
+
+2026-11-18  NOTE after the v968f9p bank (Alon 18:31: 'tested offline, AI kill registers') - closes one open line of the v968f9o block
+  LOCAL 16:28-16:31 UTC on v968f9p (ai_station='AI'/pi=0, gdprime=False), AC2E_Bigalon^CO in room 49:
+    18:30:59 local 'DEATH ... lost a plane to AA/AI ground fire (exit=0x63, MEC&0xf=6) -> planes_lost_ai +1', SCORE -600,
+    KILL 'died (no creditable shooter)'. Client messages36 16:30:40-16:30:54: 'USA Anti-Aircraft has damaged / ripped up /
+    shredded your ...' - the killer was an ANTI-AIRCRAFT battery. AA guns are terrain objects of the scene, they do not hang
+    from the AI station (496 owns tanks, soldiers, lorries, trains, ships). So: a death by AA is booked and worded as before
+    while the station sits on the client with PlayerIndex 0 ('Create client 496, (AI), PlayerIndex=0' at 16:29:15) - it is
+    not yet a kill by, or of, an object the station owns.
+    Client log messages36: no Assertion; the only ERROR lines are the known ones (TimeCheckCB dif, WaitingForStartPlaceList
+    is empty); ends '~GAME_DEF' / 'End of log file' clean.
+  STILL OPEN from that block: a pilot killed by a TANK or SHIP gun (the kill line), a pilot DESTROYING a tank / lorry /
+    train (lines and score), name tags on AI objects, tanks / ships / soldiers on screen with the new station,
+    `ailist on|off` on a console.
+
+2026-11-18  BANK v968f9p-stable CONFIRMED - STATE UPDATE (user 18:46: 'soldiers look ok. trains too. hit a train. killed it. bank')
+  No new snapshot: server.py is byte-identical to _scratch/bank/server.py.v968f9p (sha1 0f0be59b96dd...), web_server.py and
+  fa_logging.py unchanged. This block moves lines from 'NOT yet seen working' (v968f9o and v968f9p blocks) to 'has flown'.
+  LIVE 16:34-16:46 UTC on v968f9p (ai_station='AI'/pi=0, gdprime=False), Alon@HQ in TC Reborn Beta, SeanTB1 also on the server:
+    - client messages37 16:38:01 'Create client 496, (AI), PlayerIndex=0' - the station registered with the first soldier.
+    - SOLDIERS: 14 paratroops taken at scene 46 (16:35:49), dropped 16:37:34-16:37:40, each chute landing answered with a
+      NetSoldier (class 170, stick 1, 'defend scene 46'); Alon: 'soldiers look ok'.
+    - TRAINS: on screen and running ('trains too'); train 0x0104 (GBR): TANKHIT lines from 16:43:30 ('hit train 0x0104 camp 1
+      for 165 -> fuel #4 hp 435'), the client printed 'You have hit GBR train' per hit; SCORE '+10 = rail car' for wagons
+      #3, #4 (16:44:13), #1, #2 (16:44:41) and '+40 = train kill (0x0104)' at 16:45:01, ground=25.
+    - no Traceback; client ERROR lines: AceOrRankChangedCB PlayerIndex=2 not found (3, known), 'Object->nMoveCycles' (14 at
+      16:40:13 for objects 294-300 - the class the error map of 11-16 lists as present in 2009 too).
+  SO, with the AI station on PlayerIndex 0, seen working on a real client: station create, soldiers, trains, hitting and
+    destroying a train with the lines and the score, a death by AA (16:30 local run), the private-message list without AI.
+  STILL NOT SEEN on this build: a tank or a ship (on screen, destroyed, or killing a pilot), a lorry destroyed, name tags
+    read out, `ailist` / `gdprime` / `slotmin` typed on a console, an event-mode arena under a hold (v968f9p step 4).
+
+2026-11-18  v968f9q-stable  THE MAIN LOBBY'S PLAYER LIST (Alon 19:02: 'main lobby not showing all players in it. players not in an
+            arena should be listed there ... currently in the lobby: Alon@HQ, BZRD_Scraps_wCw - but in game I cannot see
+            Scraps, he cannot see me either in the player list')
+  THE CASE (live run_20261118_162326, v968f9p; /whosonline/onlineplayers.json agreed that both were in the lobby):
+    16:40:25 BZRD_Scraps_wCw logs in while Alon@HQ is in TC Reborn Beta; ~16:46 Alon leaves the arena to the lobby.
+    From then on neither lists the other.
+  HOW THE CLIENT KEEPS THE LIST (FA.exe): the lobby object owns a vector of {name, status}. It asks for it once, with a
+    bare 0xcb (msg 203), whenever the lobby is built - at login and every time the pilot comes back from an arena; the
+    vector starts empty. The answer [0xcb] + N x [status u8][name asciiz] (handler FUN_004ef8b0; stops at an empty name)
+    is appended entry by entry (FUN_0076d830 -> FUN_0076cdc0 = push_back: no clear, no duplicate check). After that only
+    msg 204 [0xcc][add u8][status u8][name] changes it (FUN_004ed720 -> FUN_0076d8a0: add = push_back, remove = the first
+    entry of that name). The status byte is the pilot's rights byte (FUN_006b8e80 on it = the sysop mark).
+  WHAT THE SERVER DID: 0xcb was always answered EMPTY (log tag GAMELIST - from the days it was taken for the arena list);
+    the only 204s were an ADD to every session at a pilot's login and a REMOVE at his logout; the 'UI INIT ADD' burst at
+    pilot select left before the client had a lobby to hold it. So a client listed exactly the pilots who logged in after
+    its own lobby was last built:
+      - Alon back from the arena: lobby rebuilt, 0xcb answered empty -> an empty list (no Scraps);
+      - Scraps: his adds for the pilots already online were lost, and a pilot coming back from an arena was announced to
+        nobody (no Alon).
+  CHANGE (LOBBY_LIST_REAL = True):
+    - the 0xcb answer is the real list: every OTHER pilot with no arena entered (the test the web who-is-online uses for
+      'lobby'), status 0, one packet (about 80 names; more follow as single adds). send_lobby_players().
+    - that request is also the moment the pilot is announced to the others (login AND return from an arena).
+    - entering an arena (ROOM assignment) takes him off the others' lobby lists; logout as before.
+    - s._lobby_have records what each client's vector holds: a name is never added twice and never removed when it is
+      not there; 204s go only to clients that are in the lobby (a client in an arena has no lobby object - less traffic
+      for pilots who fly - and gets the whole list when it comes back).
+    - broadcast_player_join / broadcast_player_leave now go through lobby_announce(); send_initial_ui_list does nothing.
+    - log tag LOBBYLIST: '<pilot>: lobby opened - N other pilot(s) in the lobby: [...]', '<pilot> added to / taken off the
+      lobby list of N pilot(s) (logged in | his lobby opened | entered an arena | left)'.
+    - console `lobbylist on|off|show` (show = what each lobby client's list holds). BASELINE: lobbylist=.
+  NOT CHANGED: the pilot himself is not in the list we send (as before - whether the client shows its own name is its own
+    doing); the 'In lobby: ...' chat line at login still names everybody online; status stays 0 (no sysop mark in the
+    lobby list - it could carry the rights byte like the arena roster does).
+  ASSUMPTIONS TO WATCH IN THE TEST:
+    - the client's vector is empty at EVERY 0xcb. If it is not (suspect: a pilot switch inside one login - the client
+      also sends 0xcb then), names would show twice after it.
+    - a pilot on the arena's HQ screen counts as in the arena (not listed in the lobby).
+  VERIFY (two clients):
+    1. A in the lobby, B logs in: each lists the other.   2. A enters an arena: off B's list.
+    3. A comes back to the lobby: A lists B at once, B lists A again.   4. repeat 2-3 a few times: no name twice.
+    5. B switches pilot (same login): A shows the new name once, the old one gone; B's own list shows A once.
+    6. B logs out: off A's list.   Server log: the LOBBYLIST lines; console `lobbylist show` = the lists as the server
+    believes them - compare with the screens.   Back to the old behaviour: `lobbylist off`.
+  Tests: _scratch/test_9q.py (23 checks; the client's vector modelled from the three handlers; the 16:40-16:46 case,
+    churn, logout from inside an arena, 200 names, wire bytes, the switch) ALL PASS; test_9p, 9o, 9n, 9k, 9g_e2e pass.
+  Files: server.py only. Backup _scratch/server.py.bak_v968f9p. Patch _scratch/patch_9q.py (+ the overflow adds, applied
+    after it). NOT on the live server (v968f9p), NOT banked (bank = v968f9p).

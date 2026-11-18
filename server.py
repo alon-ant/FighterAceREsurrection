@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9p-stable'
+VERSION = 'v968f9q-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8018,7 +8018,7 @@ def perform_restart(actor='console', graceful=False):
 def _log_baseline():
     log('BASELINE', f'wire features at start: timecheck={TIMECHECK_ENABLE} nak={NAK_FAST_RETX} mlist={MSGLIST_BUNDLE} tcevent38={TC_USE_MSG104} '
                     f'scene79={TC_NATIVE_79} postleave={POST_LEAVE_WATCH} loadhold={LOAD_HOLD} mod128/91={MOD_NATIVE_FEEDBACK} '
-                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r}/pi={ai_client_pi()} gdprime={GAMEDEF_PRIME} '
+                    f'clock_rebase={CLOCK_REBASE} slot_min={SLOT_INDEX_MIN} keeper={REL_KEEPER_INTERVAL_S:g}s ai_station={AI_CLIENT_NAME!r}/pi={ai_client_pi()} gdprime={GAMEDEF_PRIME} lobbylist={LOBBY_LIST_REAL} '
                     f'freezewatch={FREEZE_WATCH} ringlag={RINGLAG_WATCH}/{RINGLAG_PROBE_S:g}s slipcatch={SLIPCATCH} notify={RINGLAG_NOTIFY} probe_stamp={"per-pilot" if TIMECHECK_STAMP_PER_PILOT else "fixed"}  [{VERSION} = the v968f7a wire + the 7n/7r/7t/7u/7y/8a/8e fixes + the 8r msg-89 lag probe + 8v AI-frame bundling] mlist_late_single={MSGLIST_SINGLE_WHEN_LATE} mlist_split_chutes={MSGLIST_SPLIT_CHUTES} ringpad={RINGPAD}/{RINGPAD_TARGET_S:g}s lagperf={LAGPERF_LOG} push2009={PUSH_2009}'
                     f'(40={_p2009("40")} 71={_p2009("71")} 26={_p2009("26")} 43={_p2009("43")})')   # v968f8d / v968f8r / v968f8t
 
@@ -8392,6 +8392,20 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'lobbylist':                                                    # v968f9q: the main lobby's player list
+                global LOBBY_LIST_REAL
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    LOBBY_LIST_REAL = (_a[0].lower() == 'on')
+                    log('LOBBYLIST', f'real lobby list {"ON" if LOBBY_LIST_REAL else "OFF"} by {_src}')
+                _in = [x.current_pilot for x in get_all_sessions() if _sess_in_lobby(x)]
+                log('CONSOLE', f'lobbylist = {"on" if LOBBY_LIST_REAL else "off"}: in the lobby now ({len(_in)}): {_in}. on = a client that opens its lobby '
+                               f'gets every pilot who is not in an arena, and pilots are added / taken off as they come back from or enter an arena. '
+                               f'off = the old way (0xcb answered empty, add at login / remove at logout only). `lobbylist on|off`')
+                if _a and _a[0].lower() == 'show':
+                    for x in get_all_sessions():
+                        if _sess_in_lobby(x):
+                            log('CONSOLE', f'  {x.current_pilot}: his list holds {sorted(x.__dict__.get("_lobby_have") or [])}')
             elif cmd == 'gdprime':                                                      # v968f9p: a 212 per room before the arena list, or not
                 global GAMEDEF_PRIME
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -11464,6 +11478,95 @@ def _arena_gameindex(name, room_id=0):
     reproduces the legacy value, kept as a resolution fallback in _find_room_by_gidx."""
     first = (name.encode()[:1] or b'\x00')[0]
     return bytes([room_id & 0xff, 0xff, 0xff, first])   # 4 bytes, little-endian on wire
+
+# --- v968f9q THE MAIN LOBBY'S PLAYER LIST (msg 203 / 0xcb + msg 204 / 0xcc) -----------------------------------------
+# Alon 11-18 19:02: 'main lobby not showing all players in it. players not in an arena should be listed there ...
+# currently in the lobby: Alon@HQ, BZRD_Scraps_wCw - but in game I cannot see Scraps, he cannot see me either'.
+# How the client keeps that list (FA.exe): the lobby object owns a vector of {name, status}. It asks for it ONCE, with
+# a bare 0xcb, when the lobby is (re)built - at login and every time the pilot comes back from an arena (the lobby is
+# built anew, the vector starts empty). The answer [0xcb] + N x [status u8][name asciiz] (FUN_004ef8b0; the loop stops
+# at an empty name, so zero padding is safe) is APPENDED entry by entry (FUN_0076d830 -> FUN_0076cdc0, a plain push_back,
+# no clear, no duplicate check). After that only msg 204 changes it: [0xcc][add u8][status u8][name] (FUN_004ed720 ->
+# FUN_0076d8a0: add = push_back, remove = the first entry with that name). The status byte is the pilot's RIGHTS byte
+# (FUN_006b8e80 on it decides the sysop mark).
+# What the server did: 0xcb was always answered EMPTY ('GAMELIST 0xcb -> empty' - the name is from the days it was
+# taken for the arena list), and the only 204s were an ADD to everybody at a pilot's login and a REMOVE at his logout.
+# So a client listed exactly the pilots who logged in AFTER its own lobby was last built: back from an arena = an empty
+# list (Alon 16:46 -> no Scraps); a pilot who came back from an arena was announced to nobody (Scraps, logged in 16:40
+# while Alon flew -> no Alon). The 'UI INIT ADD' burst at pilot select went out before the client had a lobby to put
+# it in.
+# Now: the 0xcb answer is the real list - every other pilot who is NOT in an arena (the same test as the web site's
+# who-is-online: no arena entered) - and it is also the moment this pilot is announced to the others. Entering an arena
+# takes him off the others' lists. s._lobby_have is what each client's vector holds, so a name is never added twice or
+# removed when it is not there. 204s go only to clients that are in the lobby (a client in an arena has no lobby object
+# and gets the whole list when it comes back). Console `lobbylist on|off|show`.
+LOBBY_LIST_REAL = True
+LOBBY_LIST_MAX_PAYLOAD = 1200          # one reliable packet; about 80 names
+_lobby_lock = threading.Lock()
+
+def _sess_in_lobby(x):
+    """A pilot is selected and no arena is entered (the web who-is-online 'lobby' state)."""
+    try:
+        if not getattr(x, 'auth_done', False) or getattr(x, 'closing', False) or not getattr(x, 'current_pilot', None):
+            return False
+        return not (getattr(x, 'entered_game', False) and getattr(x, 'current_room', None) is not None)
+    except Exception:
+        return False
+
+def lobby_names_for(s):
+    out = []
+    for x in get_all_sessions():
+        if x is s or not _sess_in_lobby(x):
+            continue
+        n = x.current_pilot
+        if n and n != getattr(s, 'current_pilot', None) and n not in out:
+            out.append(n)
+    return out
+
+def build_lobby_players_203(names):
+    """msg 203: [0xcb] + N x [status u8 = 0][name asciiz]. Returns (packet, names that fitted)."""
+    data = bytearray([0xcb]); used = []
+    for n in names:
+        rec = bytes([0x00]) + (n.encode('latin1', 'replace') if isinstance(n, str) else bytes(n))[:31] + b'\x00'
+        if len(rec) < 3 or len(data) + len(rec) > LOBBY_LIST_MAX_PAYLOAD:
+            continue
+        data += rec; used.append(n)
+    return build_appspace_pkt(bytes(data)), used
+
+def send_lobby_players(s):
+    """The answer to the client's 0xcb: who is in the lobby now. Also the moment the others learn that he is."""
+    try:
+        with _lobby_lock:
+            _all = lobby_names_for(s)
+            pkt, used = build_lobby_players_203(_all)
+            s.__dict__['_lobby_have'] = set(_all)
+        send_rel(s, pkt, f'<- LobbyPlayers 203 ({len(used)})', to=5.0)
+        for _n in [n for n in _all if n not in used]:      # more names than one packet holds: the rest as single adds
+            send_rel(s, build_ui_player_update(_n, is_join=True), f'<- UI ADD [{_n}] (list overflow)', to=3.0)
+        used = _all
+        log('LOBBYLIST', f'{s.current_pilot}: lobby opened - {len(used)} other pilot(s) in the lobby: {used}')
+        lobby_announce(s.current_pilot, True, exclude=s, reason='(his lobby opened)')
+    except Exception:
+        logx('LOBBYLIST', 'lobby player list failed')
+
+def lobby_announce(pilot, present, exclude=None, reason=''):
+    """msg 204 to every client that is in the lobby and whose list differs: add `pilot` or take him off."""
+    if not pilot:
+        return 0
+    pkt = build_ui_player_update(pilot, is_join=present); told = []
+    for sess in get_all_sessions():
+        if sess is exclude or not _sess_in_lobby(sess) or sess.current_pilot == pilot:
+            continue
+        with _lobby_lock:
+            have = sess.__dict__.setdefault('_lobby_have', set())
+            if present == (pilot in have):
+                continue
+            (have.add if present else have.discard)(pilot)
+        _submit_send(send_rel, sess, pkt, f'<- UI {"ADD" if present else "REMOVE"} [{pilot}] {reason}', to=3.0)
+        told.append(sess.current_pilot)
+    if told:
+        log('LOBBYLIST', f'{pilot} {"added to" if present else "taken off"} the lobby list of {len(told)} pilot(s) {reason}: {told}')
+    return len(told)
 
 def build_gamelist(rooms):
     """Build the 0xcb GameList (arena list) response.
@@ -15037,6 +15140,11 @@ def assign_player_slot(s, room_id):
     log('ROOM', f'{s.current_pilot} -> room {room_id} slot ClientNumber={s.client_number} '
                 f'PlayerIndex={s.player_index} (peers={_npeers}, '
                 f'{"kept" if _kept else "assigned"})')
+    if LOBBY_LIST_REAL:                                   # v968f9q: in an arena = off the lobby lists
+        try:
+            lobby_announce(s.current_pilot, False, exclude=s, reason='(entered an arena)')
+        except Exception:
+            logx('LOBBYLIST', 'arena-entry announce failed')
     return s.client_number, s.player_index
 
 def _maybe_grant_create_entry(s):
@@ -31620,6 +31728,8 @@ def send_active_list(target_sess):
                                               '<- active list', to=3.0), daemon=True).start()
 
 def broadcast_player_join(pilot_name, exclude_sess=None):
+    if LOBBY_LIST_REAL:                                   # v968f9q
+        lobby_announce(pilot_name, True, exclude=exclude_sess, reason='(logged in)'); return
     pkt = build_ui_player_update(pilot_name, is_join=True)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
@@ -31692,12 +31802,16 @@ def teardown_ingame_presence(s, why='(disconnected)'):
         return False
 
 def broadcast_player_leave(pilot_name, exclude_sess=None):
+    if LOBBY_LIST_REAL:                                   # v968f9q
+        lobby_announce(pilot_name, False, exclude=exclude_sess, reason='(left)'); return
     pkt = build_ui_player_update(pilot_name, is_join=False)
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
         _submit_send(send_rel, sess, pkt, f'<- UI REMOVE [{pilot_name}]', to=3.0)
 
 def send_initial_ui_list(target_sess):
+    if LOBBY_LIST_REAL:                                   # v968f9q: the list goes out when his client asks for it (0xcb)
+        return
     for sess in get_all_sessions():
         if sess is not target_sess and sess.current_pilot:
             pkt = build_ui_player_update(sess.current_pilot, is_join=True)
@@ -39177,6 +39291,10 @@ def handle_post_auth(s, cmd, pl):
                         threading.Thread(target=_ce_send, daemon=True).start()
                         log('CE', f'pushed notes for {_mrow[1]!r} (id={_msid}) to {s.current_pilot!r}')
                         return
+                elif sub == 0xcb and LOBBY_LIST_REAL:
+                    # v968f9q: 0xcb is the lobby PLAYER list request - answer with who is in the lobby
+                    threading.Thread(target=lambda: send_lobby_players(s), daemon=True).start()
+                    return
                 elif sub == 0xcb:
                     # GameList = THE ARENA LIST (confirmed via FUN_004f03b0).
                     # Respond with open rooms as arena records instead of empty.
