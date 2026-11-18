@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9m-stable'
+VERSION = 'v968f9n-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -8374,6 +8374,14 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'slotmin':                                                      # v968f9n: lowest PlayerIndex handed out
+                global SLOT_INDEX_MIN
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0] in ('0', '1'):
+                    SLOT_INDEX_MIN = int(_a[0])
+                    log('SLOT', f'slot_min = {SLOT_INDEX_MIN} by {_src} (pilots already inside keep their index)')
+                log('CONSOLE', f'slotmin = {SLOT_INDEX_MIN}: the lowest PlayerIndex a pilot entering an arena can get. 1 = normal (a pilot on '
+                               f'index 0 is missing from every other client\'s private-message list); 0 = the v968f7a wire. `slotmin 0|1`')
             elif cmd == 'statuslock':                                                   # v968f9m: STATUS behind one of his frames
                 global STATUS_PHASE_LOCK
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -14761,7 +14769,7 @@ def get_sessions_in_room(room_id):
 # fall back to plain first-free and log - a possible misbinding beats an array overrun.
 SLOT_REUSE_COOLDOWN_S = 3600.0   # a freed slot stays reserved this long for its old pilot
 SLOT_INDEX_SOFT_MAX   = 120      # never let the cooldown push allocation past this index
-SLOT_INDEX_MIN        = 0        # v968f7m: NEVER hand out PlayerIndex/ClientNumber 0. The client's private-message  # v968f8d-stable: 7a wire - PlayerIndex 0 handed out again (the whisper-list gap of v968f7m stays until the baseline is confirmed)
+SLOT_INDEX_MIN        = 1        # v968f9n: back to 1 (the 8d baseline had put 0 back - Alon 11-18: 'she couldn't see me in the list')  # v968f7m: NEVER hand out PlayerIndex/ClientNumber 0. The client's private-message  # v968f8d-stable: 7a wire - PlayerIndex 0 handed out again (the whisper-list gap of v968f7m stays until the baseline is confirmed)
                                  # target list (FUN_0044db4f) walks the 512-entry NET::CLIENT table and SKIPS every
                                  # station whose PlayerIndex (CLIENT+0x24) is <= 0 (`test eax,eax / jle`) - so the
                                  # pilot who entered an empty arena first (slot 0) was invisible in everyone's
@@ -31967,9 +31975,7 @@ def login(s):
                                 except OSError:
                                     pass
                         _freeze_watch(s, _now_st)                                      # v968f8b
-                        if s.entered_game and ((TIMECHECK_ENABLE and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S)
-                                               or _ringlag_due(s, _now_st)):          # v968f8r: the ring-lag watch flies the same probe
-                            send_timecheck_89(s)                                   # v968f7e
+                        # v968f9n: the lag-watch probe moved BEHIND the STATUS (end of this block) - see there
                         if _pend is None and (_now_st - s._status_last) >= STATUS_INTERVAL_S:
                             if STATUS_PHASE_LOCK:                                                 # v968f9m
                                 _now_st = _status_phase_wait(s, _now_st)
@@ -32009,6 +32015,19 @@ def login(s):
                                                     f'({s.current_pilot})')
                             except OSError:
                                 pass
+                        # v968f9n [THE PROBE LEAVES AFTER THE STATUS, NOT BEFORE IT] (Alon 11-18 16:35, live v968f9m: 'testing i
+                        # got 7% DL'). His DLL log 14:21-14:30 UTC: gauge > 0 in 54 of 258 intervals, 36 of them '7 %' = 1 of
+                        # 14 packets - and in 46 of the 54 the packet of his that was on its way was 21 bytes long: his ANSWER to
+                        # our lag-watch probe (msg 89). The probe went out in this heartbeat just before the STATUS; since v968f9m
+                        # the STATUS then waits up to a frame period for his next frame, so the probe reaches him first, he
+                        # answers, and the answer is still on its way when the STATUS is built (whenever the wait is shorter
+                        # than his round trip). Every probe = one phantom reading, one interval in five. Sent after the STATUS
+                        # the answer is sent after he has handled it and both sides count it in the next interval. Without
+                        # those intervals his log shows 8 of 209.
+                        _now_st = time.time()
+                        if s.entered_game and ((TIMECHECK_ENABLE and _now_st - s.__dict__.get('_tc89_sent', 0.0) >= TIMECHECK_PERIOD_S)
+                                               or _ringlag_due(s, _now_st)):          # v968f8r: the ring-lag watch flies the same probe
+                            send_timecheck_89(s)                                   # v968f7e
                     errors = 0
                 except OSError:
                     errors += 1
@@ -32830,15 +32849,50 @@ HARD_TARGET_KEYWORDS = ('factory', 'hangar', 'headquarter', 'hq', 'rail yard', '
 SOFT_TARGET_KEYWORDS = ('aa ', 'aa battery', 'flak', 'fuel tank', 'radar', 'tent', 'truck', 'searchlight',
                         'gun', 'antenna', 'crate', 'car', 'jeep', 'artillery', 'howitzer',
                         'storage', 'tower', 'barrack')    # v709f5: storage / towers / barracks are soft (user)
+# v968f9n [AMMO BUNKERS TAKE GUNFIRE] (Alon 11-18: 'the building is an ammo store and it should be destructible
+# with 20 mm rounds, albeit more than a fuel dump or silo'): 'Ammo Bunker' / 'Large Ammo Bunker' were hard through
+# the word 'bunker'. They are soft now and keep the class life (1000 x OBJ_HP_LIFE_MULT = 2000 against a fuel
+# tank's 1000 / 1200). 'Hardened Ammo Bunker' stays bombs / rockets only - HARD_FIRST_KEYWORDS is read before
+# the soft list.
+HARD_FIRST_KEYWORDS = ('hardened ammo',)
+SOFT_TARGET_KEYWORDS = SOFT_TARGET_KEYWORDS + ('ammo bunker',)
 HARD_TARGET_MIN_HIT = 1500      # a single msg-31 record below this is gunfire. The client batches damage per
                                 # 0.5 s, so a cannon burst arrives as ONE record of up to ~1100 (online 07:43:
                                 # 960 / 1103 on a fuel tank from a P-38); bombs land at 2100+ (250 lb) each.
 
 def _is_hard_target(oi):
     nm = (oi.get('name') or '').lower()
+    if any(k in nm for k in HARD_FIRST_KEYWORDS):          # v968f9n
+        return True
     if any(k in nm for k in SOFT_TARGET_KEYWORDS):
         return False
     return any(k in nm for k in HARD_TARGET_KEYWORDS)
+
+def _ground_hit_note(s, obj, oi, hard, total=None, need=None):
+    """v968f9n: ONE line at the normal log level the first time a pilot's guns or bombs reach a building in this
+    session (the per-record GROUND31 lines are debug-only, so the live log could not say what was hit or why
+    nothing happened). Decorations (trees ...) are left out."""
+    try:
+        if oi is None or int(oi.get('value') or 0) <= 0 or oi.get('destroy_mode') == 2:
+            return
+        seen = s.__dict__.setdefault('_ghit_seen', set())
+        k = (s.current_room, obj, bool(hard))
+        if k in seen:
+            return
+        if len(seen) > 400:
+            seen.clear()
+        seen.add(k)
+        _sc = oi.get('scene')
+        _si = trn_scene_info(s.current_room, _sc) if (_sc is not None and _sc >= 0) else None
+        _where = f'scene {_sc} "{_si.get("name")}"' if _si else f'scene {_sc}'
+        if hard:
+            log('GROUNDHIT', f'{s.current_pilot}: gunfire on object {obj} "{oi.get("name")}" ({_where}) is IGNORED - a hard '
+                             f'target, only a record of {HARD_TARGET_MIN_HIT}+ (bomb / rocket) counts. First such hit; said once per object.')
+        else:
+            log('GROUNDHIT', f'{s.current_pilot}: first hit on object {obj} "{oi.get("name")}" ({_where}) - damage counts, '
+                             f'{total} of {need} so far. Said once per object.')
+    except Exception:
+        pass
 OBJ_HP_LIFE_MULT = 2.0     # v707f5: 1.0 -> 2.0 (pilots: 'some targets too soft' at the raw class life -
                            # a factory died to one 250 lb bomb). x2 = two bombs / a longer strafe; the
                            # old value x 25 was 5..12x. Console: `repair hp <mult>`.
@@ -33595,6 +33649,7 @@ def _handle_ground_damage_31(s, body, via=''):
                 _hard = False
         if _hard:
             recs.append(f'atk={atk} obj={obj} dmg={dmg} (gunfire on a hard target - ignored)')
+            _ground_hit_note(s, obj, _oi, True)                       # v968f9n
             continue
         GROUND_HP[key] = GROUND_HP.get(key, 0) + dmg
         recs.append(f'atk={atk} obj={obj} dmg={dmg} (total={GROUND_HP[key]})')
@@ -33633,6 +33688,7 @@ def _handle_ground_damage_31(s, body, via=''):
             okey = (s.current_room, obj)
             if okey in _SCENE36_DESTROYED:
                 continue        # already dead - a second destroy is the Trn_Obj.cpp:415 CTD
+            _ground_hit_note(s, obj, oi, False, GROUND_HP[key], _hp_need)   # v968f9n
             if GROUND_HP[key] >= _hp_need:
                 destroyed.append((obj, oi))
     log('GROUND31', f'{s.current_pilot}{via} {n} rec(s): ' + '; '.join(recs) +

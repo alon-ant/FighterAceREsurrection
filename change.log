@@ -15258,3 +15258,100 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     frame'. Live - the STATLOSS lines: 'his gauge ... >0 in X' should fall to a few per 64 for pilots flying; `statuslock
     off` for ten minutes gives the old picture for comparison.
   Backup: _scratch/server.py.bak_v968f9l. Patch: _scratch/patch_9m.py.
+
+2026-11-18  LIVE RESULT of v968f9m (Alon@HQ online 14:10:55-14:14:33 UTC, live started on v968f9m 14:10:28; his DLL log
+            vcncnet20261118141049863.log, messages26, live run_20261118_141028, lagperf):
+    - ledger, 105 intervals: down 1172 sent / 1172 counted; up 992 / 991.
+    - 'loss rate' > 0 in 6 of 105 intervals (5.7 %), mean 0.60 %. Before, same pilot, same link: 44 of 132 (33 %) in the
+      flying session of 11-17, 25 of 378 and 9 of 51 in the two mostly-lobby ones; mean 1.93 %.
+    - client-sent minus server-counted per interval: 0 in 92 of 105 (before 47 of 132 flying).
+    - the six: 14:11:11 (7 against 5) and 14:11:19 (15 against 8, 21.9 %) = the burst of his packets at arena entry /
+      spawn; 5.9 %, 3.2 %, 4.2 % = one packet of his on the way (not a frame); 14:14:01 8.0 % = one packet each way, at
+      the moment of his crash and respawn.
+    - server: '46 STATUS sent behind a frame' of the first 64; 'his gauge these 64 intervals: >0 in 5, mean 0.74 %'
+      - the server's own line agrees with his DLL.
+    - nothing else moved: base_incr 2000-2601 ms (median 2094), their sum = the session's length; NET clock 0-1 ms vs
+      entry; probe answers 2-22 ms over rtt (142-143 ms); tick lag 0.00; no TimeCheck error in his client log.
+    One session of 3.6 minutes, one pilot. It shows what the replay predicted (7 of 78).
+
+2026-11-18  BANKED: v968f9m-stable   (user: "looks good ... bank if you agree with the results")   previous bank: v968f9k-stable (11-18 04:30)
+  SNAPSHOT: _scratch/bank/server.py.v968f9m (2,689,771 B, sha1 324d5712c22a...) + web_server.py.v968f9m + fa_logging.py.v968f9m
+    - byte-identical to the working files at 14:16 UTC. web_server.py and fa_logging.py are unchanged against the last bank. Deploy the
+    three together. LIVE already runs this server.py (v968f9m, since 14:10:28 UTC).
+  IN THIS BANK (entries above):
+    9l SLIP-CATCH: notice a slip in its first seconds, one bunch of 250 fillers, then the padding. OFF by default.
+    9m the STATUS leaves right behind one of the pilot's frames (the client's data-loss gauge); gauge and boundary
+       figures in the STATLOSS line; `statuslock`.
+    ANALYSIS (10) Meno 11-17: why the padding did not run; the first lap after a slip decides how full the ring gets.
+  STATE AT BANK - what has flown:
+    - 9m: live, one session of Alon@HQ (see LIVE RESULT above): gauge > 0 in 6 % of the intervals instead of a third,
+      clock and probes untouched.
+    - 9g-9k (the event round of the last bank) are now on the live server too (since 04:34 UTC) - no report yet.
+  STATE AT BANK - NOT yet seen working:
+    - 9l SLIP-CATCH HAS NEVER BEEN SWITCHED ON, locally or live (BASELINE 'slipcatch=False' in every run). Banked as
+      code that idles: with it off only three one-line hooks run (the newest answered probe, the frame before the last,
+      the probe just sent). Before `slipcatch on` on the live server: the local steps of the v968f9l entry (ten minutes
+      flying, `slipcatch test`, `slip <pilot> 100`).
+    - 9m with several pilots, with a pilot whose round trip is longer than his frame period, and over hours.
+    - everything listed under 'NOT yet seen working' in the v968f9k bank block still stands.
+  KNOWN AND OPEN AT BANK:
+    - the gauge still shows a figure when a packet of his that is not a frame is on its way (ACKs, requests), at arena
+      entry / spawn, and in the lobby where three or four packets are compared.
+    - a slip of the large kind (Meno 11-17, about 220 of 254 places held) is still not helped by anything that is
+      switched on. Open: slip-catch (untested), or ProcessAffinityMask=1 in the pilot's vcncNet.ini (Alon 11-18: 'a
+      possibility for laggy players, not ruling out yet').
+    - the rest of the v968f9k list (event-lock client limits, the 0x74 re-send at every HQ open, bombs after death,
+      FA LAGTEST, dynamic weather off, error-map items).
+
+2026-11-18  v968f9n-stable  THREE REPORTS FROM THE 14:19-14:43 UTC LIVE SESSION (Alon 16:35 / 16:41, live = v968f9m)
+  (1) 'testing i got 7% DL'  -> THE LAG-WATCH PROBE LEAVES AFTER THE STATUS, NOT BEFORE IT
+    Evidence (his DLL log vcncnet20261118141952122.log, flying 14:21-14:30 UTC): gauge > 0 in 54 of 258 STATUS
+    intervals, 36 of them '7 %' (1 packet of 14). In 46 of the 54 the packet of his that was on its way when the
+    STATUS reached him was 21 bytes long = his answer to our msg-89 probe. No packet was lost in the session (frames
+    0.260 s apart all the way, the STATUS reached him 0.146 s after his last frame - the 9m phase lock does its job).
+    Cause: the heartbeat sent the probe just BEFORE the STATUS branch. Since 9m the STATUS then waits up to a frame
+    period for his next frame, so the probe reached him first, he answered, and the answer was still on its way when
+    the STATUS was built. One phantom reading per probe.
+    Change: in _hb the probe block (TimeCheck period or _ringlag_due) moved behind the STATUS branch. He handles the
+    STATUS first, answers the probe afterwards, both sides count the answer in the next interval. Probe timing and the
+    lag reading are untouched (the stamp is taken when it is sent).
+    Expected: his log without the probe intervals = 8 of 209 (4 %), most of them 1-of-14 readings from ACKs / requests.
+    NOT covered: with `slipcatch on` its 1-s probes are sent from the slip-catch thread, not from the heartbeat, and
+    would again cross a STATUS now and then.
+  (2) 'I attacked a building with 20 mm shells and it didn't get damaged ... an ammo store ... should be destructible
+      with 20 mm rounds, albeit more than a fuel dump or silo'  -> AMMO BUNKERS TAKE GUNFIRE
+    Evidence: his client sent 29 msg-31 damage reports (31 records) 14:24:47-14:26:33 UTC under USA AA fire; the live
+    log has no destroy, no score line. The per-record GROUND31 lines are debug-only, so WHICH object is not in the live
+    log - inferred: three minutes out of GB Front Airfield 49 the USA scene with an ammo building that survives 31
+    gun records is Tank Factory 47 (22 km) with its 'Ammo Bunker'; the 'Ammo Storage' tents of USA Front Airfield 46
+    (14 km) need 400 and would have gone with the first burst.
+    Cause: v708f5 hard-target rule - a record under HARD_TARGET_MIN_HIT (1500) on a class whose NAME holds a hard
+    keyword is discarded, and 'bunker' is one. Ammo Bunker / Large Ammo Bunker fell under it.
+    Change: SOFT_TARGET_KEYWORDS + 'ammo bunker'; new HARD_FIRST_KEYWORDS ('hardened ammo',) read before the soft
+    list so 'Hardened Ammo Bunker' stays bombs / rockets only. HP is the class life x OBJ_HP_LIFE_MULT as for every
+    building: Ammo Bunker and Large Ammo Bunker 2000, Fuel Tank 1000, Fuel tanks 1200, Fuel / Ammo Storage 400.
+    Nothing else changed class (checked over every class of trn02 / trn05 / trn06).
+    New log line GROUNDHIT at the normal level, once per pilot and object (decorations left out): 'first hit on
+    object N "name" (scene ..) - damage counts, X of Y' or '... is IGNORED - a hard target'. The next report of
+    this kind can be answered from the live log.
+  (3) 'Moira@HQ ... I could send her a private message and she got it, but she couldn't see me in the list. I left the
+      arena and reconnected to it and she still couldn't see my name'  -> PLAYERINDEX 0 IS NOT HANDED OUT AGAIN
+    Evidence (run_20261118_141028.log): 14:20:06, 14:37:05, 14:38:21 'ROOM Alon@HQ -> room 134 slot ClientNumber=0
+    PlayerIndex=0'; Moira@HQ had PlayerIndex 1. The join was announced to her each time (PLAYER62 broadcast join ->
+    1 peer, camp changes -> 2 sessions). Leaving and coming back gave him 0 again: a retired slot is held for its
+    pilot for an hour.
+    Cause: the one found on 10-30 (v968f7m): the client's private-message target list (FUN_0044db4f) walks the
+    station table and skips every station whose PlayerIndex is <= 0. v968f7m set SLOT_INDEX_MIN = 1; the stable
+    baseline v968f8d (11-03) put 0 back 'until the baseline is confirmed' and it was never restored. The lag
+    question that baseline was built for has since been traced to the DLL's input queue; the slot floor has no part
+    in it.
+    Change: SLOT_INDEX_MIN = 1 again (first free, kept slot, own retired slot and the fallback all honour it).
+    Console `slotmin [0|1]` shows / sets it without a restart (pilots already inside keep their index).
+    NOT verified from her side: no log of Moira's client was available; the diagnosis rests on the server log and the
+    10-30 disassembly. If 'the list' she meant is not the private-message target list, this is not the fix.
+  Tests: _scratch/test_9n.py (19 checks: class sorting old against new over the three terrains, the msg-31 handler on
+    Ammo Bunker / Fuel Tank / Hardened Ammo Bunker, the GROUNDHIT lines, slot assignment with floor 1 and 0, probe
+    after STATUS in _hb) ALL PASS; test_9m, 9l, 9k, 9j, 9g_e2e, 9e, 9c, 9b, 8y, 8v, ringlag pass as before
+    (test_9g / 9h / 9i fail on the banked v968f9m too - superseded by 9j / 9k when the Fly switch moved to msg 0x74).
+  Files: server.py only. Backups _scratch/server.py.bak_v968f9m (before 1) and .bak_v968f9n_a (before 2 and 3).
+    Patches _scratch/patch_9n.py, patch_9n2.py. NOT on the live server (v968f9m), NOT banked (bank = v968f9m).
