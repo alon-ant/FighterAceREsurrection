@@ -1,4 +1,4 @@
-# Event Scripting - a guide for moderators (v958f5f)
+# Event Scripting - a guide for moderators (v958f5f; commands as of v968f9k)
 
 An **event script** tells the server how to keep score during an event: what earns points, whether
 teams or individual pilots compete, what the arena is told after every score, how often a progress
@@ -14,6 +14,8 @@ web: Admin -> arena -> Settings -> Events tab      write / load the script, tick
 pilots re-enter the arena                          (settings reach a client on entry)
    |
 event open 149  ->  event fight 149                scoring STARTS when the fight starts
+   |      (in game, sysop: ##EventOpen -> ##EventFight; `event open 149 180` / ##EventOpen 180 = a
+   |       countdown that ends in the fight by itself)
    |      every award: a chat line (and the log)
    |      every N minutes: "EVENT UPDATE" with the standings + cockpit banner
    |      event scores 149 / event status 149       look at the board at any time
@@ -188,14 +190,14 @@ Example - a louder fox hunt:
 | Moment | What the script does |
 | --- | --- |
 | `event open <room>` / pilots spawn | nothing yet - the board is empty until the fight |
-| `event fight <room>` (or the tournament's competition start, or `##StartEvent`) | scoring starts from zero: start lines, objectives, fox-hunt notice |
+| `event fight <room>` / `##EventFight` / `##StartEvent`, the tournament clock reaching the competition, or the end of an `event open <room> <seconds>` countdown | scoring starts from zero: start lines, objectives, fox-hunt notice |
 | during the fight | awards announced, updates every N min, hold points every minute |
 | `event scores <room>` | prints the standings on the console and pushes an update to the arena now |
-| `event status <room>` | script name, mode, time since start, standings, top 10 pilots |
-| `event hold <room>` | weapons locked; the board keeps its scores (nothing can be scored anyway) |
+| `event status <room>` / `##EventStatus` | script name, mode, time since start, standings, top 10 pilots (`##EventStatus` gives the clock, lock and Fly-button state; the standings are on the console form) |
+| `event hold <room>` / `##EventHold` | weapons locked; the board keeps its scores (nothing can be scored anyway) |
 | event length elapses or `event end <room>` | FINAL update, winner (or draw), banner; the board is frozen |
 | `event fight <room>` again | a new round - the board starts from zero |
-| `event reset <room>` / arena reset | board wiped |
+| `event reset <room>` / `##EventReset` / arena reset | board wiped |
 
 Only pilots inside the arena score; a pilot who leaves keeps his points. Moderators score like anyone
 else - fly as a referee on the neutral side, or in a plane that cannot score, if that matters.

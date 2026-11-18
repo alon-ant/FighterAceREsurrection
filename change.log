@@ -14630,3 +14630,480 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
       Same assertion in messages00.log and messages01.log. Not looked into yet.
     STILL OPEN after both tests: a real slipped queue; a game that stands still for seconds while padded (alt-tab, slow
       load - Alon's machine loads in under a second); N of 150+; hours.
+
+2026-11-17  ANALYSIS (7)  THE DLL'S OWN 'FA LAGTEST' SWITCH (Alon: 'look in to this and see if we can use this'). No code change.
+  WHAT IT IS (vcncNet.dll, read with capstone): two keys in vcncNet.ini, section [CLIENT], read at 0x10001fcb with the
+    other keys: TrackPacket (on/off, global 0x1002057c) and PacketToTrack (a 16-bit vcnc command number, 0x10020580).
+    Both globals are read at four places only, and each place only writes one fixed log line when the message's command
+    number equals PacketToTrack:
+      1. 0x1000bb2e vcncSendMessage           'FA LAGTEST: sendto vcnc game call -> processqueue'
+      2. 0x100017f1 before sendto()           'FA LAGTEST: sendto processqueue -> wire'
+      3. 0x1000189d after recvfrom()          'FA LAGTEST: recvfrom wire -> processqueue'      (first message of a datagram)
+      4. 0x1000d4f0 ProcessMessages, before the game callback
+                                              'FA LAGTEST: recvfrom processqueue -> vcnc game callback'
+    Lines 3 and 4 stand on the two sides of the input queue - the place where the slip is. The lines carry no number,
+    only the log's time stamp (Display Time=1). They go through the unconditional printer 0x1000243f, so they are
+    written with LogFlags=0 too (LogToFile=1 is enough): a small log, unlike Alon's full one (96 MB in 6 minutes).
+    It changes nothing in how the client behaves. It cannot move the queue.
+    (The log header prints 'TrackPacket' twice; the second line is PacketToTrack - a slip in the DLL's own text.)
+  THE COMMAND NUMBER: bytes 2-3 of the app frame ([bc][T][cmd hi][cmd lo]); every game message has 0 ('APPSPACE Cmd 0').
+    The DLL queues an APPSPACE message whatever its number (0x1000d7ca: type nibble 1-2 -> queue) and hands it to the
+    game without routing by it (0x1000d551); numbers 0x8028-0x802c and 0x803c are its own and must not be used.
+    FA.exe's callback 0x7e7450 treats every number under 0x8000 the same: the number is ignored. So the server can put
+    a number of its own on one kind of message - the lag probe, say 89 - and the game does not notice.
+  WHAT WE CAN DO WITH IT:
+    a. With no server change: PacketToTrack=0 logs every single game message in and out. Lines 3 minus lines 4 = the
+       messages lying unread in his queue; in a slipped queue that difference stays at N. Bundled lists are counted at
+       neither point. About 2 lines per message - large while padded (200 lines a second).
+    b. With the probe numbered 89 and PacketToTrack=89: exactly two lines per probe, 'arrived' and 'given to the
+       game'. The time between them is the queue delay, measured inside the client, to the millisecond.
+    Either gives what both `slip` tests could not: proof from a REAL slipped queue that the delay sits between the wire
+    and the game, and how much the padding shortens it there.
+  LIMITS: it needs lines in that pilot's vcncNet.ini (a settings file, not the program) - Alon's decision under the
+    server-side-only rule; his own ini was read, not touched ([CLIENT] LogFlags=0xFFFFFFF, LogToFile=1, Append=1,
+    Display Time=1). On his own client it adds nothing: his full log already shows the queue sizes. The `slip` test
+    cannot check the reading (it holds the datagrams in the server, so the client's queue delay stays near zero); it
+    can only show that the lines appear and that a numbered probe is harmless. Read from the code, not run.
+  NOT CHANGED: nothing.
+
+2026-11-17  v968f9f-stable  CAR KILL LINES: ONE DECOY AT A TIME PER CLIENT (Taurus 11-17: 'dropped bombs on cars, lots of hits, 3 cyan
+            lines, all 6 cars were destroyed'; chat 15:24 'only 3 blue lines on 6 car kills')  +  ANALYSIS (8): BOMBS THAT GO
+            OFF AFTER THE PILOT'S DEATH (same report: two 5-second-fuse bombs, crashed before they went off, no damage online)
+  1. THE CAR LINES
+  WHAT HAPPENED (live run_20261117_145010, 15:23:20 UTC; Taurus' messages40, his clock +33.4 s): convoy 2 had FIVE
+    lorries (not six). Two bombs, ten hits in two msg-51 lists 0.5 s apart; the server destroyed all five and scored
+    all five (+100 each, 188150 -> 188550). Each kill line is printed through a decoy: [create a car of the same class]
+    ... 0.6 s + his round trip later [kill-entry delete of it]; the client prints 'X destroyed SU car' only when that
+    delete finds the decoy BUILT. His client:
+        53.632 / .696 / .744  Receive create object 299, 300, 301
+        53.960 Create NetCar 301    54.185 / .248 Receive create object 302, 303
+        54.279 Server require delete object 299   <- not built yet: no ExitDataArrive, no line
+        54.290 Create NetCar 303
+        54.326 Server require delete object 300   <- not built yet: no line
+        54.387 delete 301 -> line   54.627 Create NetCar 302   54.828 delete 302 -> line   54.876 delete 303 -> line
+    The client builds ONE queued object every 0.34 s (102 gaps in that log: 0.326-0.356 s) and takes the NEWEST first.
+    Five decoys inside 0.6 s -> the two oldest were still waiting when their deletes came. Even two kills 0.1 s apart
+    could lose a line.
+  CHANGED (server.py):
+    - CAR_DECOY_LANE = True, _decoy_lane_take(sess, now, hold): per client, a decoy is created only when the one before
+      it has been deleted (+ CAR_DECOY_LANE_GAP_S 0.1 s). So the decoy is always the newest object in his queue and is
+      built at his next slot (0.34 s at most), well inside the 0.6 s + rtt before its delete. Create, positioning frame
+      and kill-entry delete are all timed from the lane, per client.
+    - First kill: as before (line 0.6 s + rtt after the hit). Each further kill in the same burst: 0.74 s later than
+      the one before (rtt 41 ms). Five kills: last line about 3 s after the last hit. Never held back more than
+      CAR_DECOY_LANE_MAX_S = 20 s.
+    - CAR log line adds '(one decoy at a time: this one N s after the kill)'; the send description of a held create
+      adds '[lane: N s after the kill]'. Console `car decoylane on|off` (off = v968f9e behaviour).
+  NOT CHANGED: the kill itself, score, explosion, wreck (20 s), the decoy's records, tanks.
+  VERIFY: kill a whole convoy with one or two bombs -> as many 'destroyed <camp> car' lines as lorries, about 0.7 s
+    apart; client log: every 'Server require delete object N' of a decoy is followed by 'ExitDataArrive. Number=N ...
+    (car)'. BASELINE unchanged.
+  Tested offline (_scratch/test_9f.py, client model = one build per 0.34 s, newest first, every build phase tried): his
+    five kills, before 3/5 (the same three decoys as in his log), after 5/5; 2 kills 0.1 s apart 1/2 -> 2/2; 10 kills
+    in 1 s 4/10 -> 10/10 (last line 6.4 s after the last kill); rtt 200 ms the same. test_9e, test_ringlag, test_9c,
+    test_9b, test_8v pass. Compiles. Not run as a whole server and not against a client.
+  Backup: _scratch/server.py.bak_v968f9e. Patch: _scratch/patch_9f.py.
+  2. ANALYSIS (8) - BOMBS AFTER DEATH. No code change.
+    Online (messages40): 15:48:07.8 and 08.2 'out 31' (his rockets), 08.208 'Player crashed into static ground object',
+    ExitEvent(334) IsDelete=1, DelObject 334; 08.297 'You have destroyed SU Rail Yard' (the rocket hit sent at the
+    crash - counted, +150); 09.604 one crater record; 12.528 InsertPlayer (new plane, 4.3 s after the crash). Between
+    the crash and the respawn the client sent NO msg 31 and no further crater. Server: nothing from him in that time
+    except the crater. So the server was never told about the two bombs.
+    Offline (messages41 + the film): crash 15:57:03.924, 'You have destroyed GER Fuel Factory' 07.138 and '... Tank
+    Factory' 08.005 (3.2 s and 4.1 s after the crash), InsertPlayer 11.965 (8.0 s after it).
+    WHY (FA.exe, ground object damage 0x568bd0): when a network object exists (online), the damage is not applied
+    locally but reported - and first the attacker is asked for its object number (call [vtbl+0xc] at 0x568c8d);
+    'test eax,eax / jl 0x568e8d' returns without reporting when that number is negative. The pilot's plane loses its
+    number the moment the client deletes it at the crash (DelObject 334). With no network object (offline) the same
+    function applies the damage itself with no such test (0x568d03). So: online the client itself throws away ground
+    damage from a weapon whose plane is already gone; offline it does not. It is in the client, so it was the same
+    on the 2009 servers.
+    Second reason it could not have counted here: online he was back in a new plane 4.3 s after the crash; by the
+    offline timing the bombs go off 3.2-4.1 s after it - the margin is a fraction of a second.
+    SERVER SIDE: nothing arrives that says where those bombs went off (no msg 31; no crater record came either), so
+    the server has nothing to turn into damage. Not fixable from the server with what the client sends.
+
+2026-11-17  ANALYSIS (9)  BOMBS AFTER DEATH - FA.EXE READ FOR A WAY AROUND (Alon: 'dig in to the FA.EXE and RE it to find if there is
+            a way around this'). No code change. Ghidra + capstone on FA.exe (Oct 29 2009 build).
+  THE CHAIN, each link read in the code:
+    1. Blast: FUN_0044efe0 (weapon) walks the ground objects within 300 m and calls each one's vtbl+0x44 with the
+       weapon; that ends in the ground object's damage function 0x568bd0 (vtbl+0x40) with the weapon's OWNER
+       (weapon+0x58) as attacker.
+    2. 0x568bd0, online branch (DAT_00c822d8 != 0): attacker->vtbl[+0xc]() ; 'test eax,eax / jl 0x568e8d' = return, no
+       report, no damage. That slot (0x4b45c0) returns [plane+0xac] = the plane's NetworkBody number - the same field
+       the client prints as 'NetNumber=%i'. Offline branch 0x568d03: damage applied locally, no test.
+    3. At the death (Msn_Exit.cpp FUN_0045cec0): the client builds a NEW PLAYER_PLANE at once and walks five weapon
+       lists (DAT_00c7e4a4/4b4/4c4/4cc/4d4), moving every weapon owned by the old plane to the new one; then the old
+       plane is deleted ('DelObject N', 'Send del packet to server'). The new plane's number is -1.
+    4. A number is given in one place only: the msg-5 handler FUN_007e5030, to a body on the Conductor's waiting list
+       (+0x2858), found by its ident. The client puts its plane on that list when it sends its spawn (out 4) at
+       InsertPlayer. A confirm that matches nothing: 'Confirm object %i not found in list, send delete'.
+    5. InsertPlayer after a death waits for the death view: FUN_00460460 sets DAT_00c7e5c8 = now + 8000 ms (constant
+       0xbf6360; 4000 in one case), and FUN_0045f840 returns every frame until it has passed. Only the pilot's own
+       key shortens it (to a 2 s fade, or at once in the second half). All writes to that timer and to the key flag
+       are inside the Msn_Exit state functions and the key handler - no message handler touches them.
+       Taurus 11-17: 3.4 s, 4.3 s and 6.8 s between crash and InsertPlayer; offline 8.0 s.
+    So from the crash until the confirm of the next spawn (2-8 s) the pilot's bombs have an owner with number -1 and
+    every ground hit they make is dropped inside the client. FUN_00441b60 (respawn) does not clear the weapon lists,
+    so a bomb still waiting AFTER that confirm should count again, under the new plane's number (read, not seen).
+  LEVERS LOOKED AT, ALL CLOSED: a confirm sent early (no waiting entry - the client answers with a delete); ending
+    the death view from the server (no message writes the timer); keeping the old plane's number (the client deletes
+    its own plane at the crash); the owner-is-NULL branch of 0x568bd0, which does report with a negative attacker
+    code (the owner is never NULL here - step 3 always hands the weapons to the new plane).
+  WHAT STILL LEAVES THE CLIENT WHILE HE IS DEAD: the crater record (msg 52). AddCrater FUN_004447a0 and its sender
+    FUN_00444b10 test no number; the record goes out 1 s after the blast (Taurus' log: 1.0-1.4 s behind each blast).
+    It carries each crater to 0.125 m and its size 1-4 (bomb charge < 110 / < 260 / < 510 / more). The server already
+    decodes it (crater_positions) and already turns it into splash on lorries (v968f5o); it also holds every ground
+    object's position and life (mapdata trn_tables: goi 1565 objects, got 84 types). So the server COULD turn a crater
+    that arrives from a dead pilot into blast damage on the buildings around it.
+    BUT: a bomb that goes off ON an object leaves no crater (FUN_0044ffa0: the object-hit branch returns before
+    AddCrater; Taurus 15:40:46 and 15:40:47, two bombs, 20 objects damaged, no msg 52), and in his 15:48 case no
+    crater record came for the two bombs at all. Whether a delayed bomb lying on open ground sends one while its
+    pilot is dead is not shown by any log yet.
+  TEST THAT SETTLES IT (local server, a few minutes): delayed bomb on open ground beside a building, crash at once,
+    touch no key for the 8 s. (a) server log: is there a CRATER line from him after his DEATH line and no msg-31
+    damage? (b) second run with the longest fuse and a quick respawn: does the damage count when the bomb goes off
+    after 'ServerConfirm'?
+  NOT CHANGED: nothing.
+  LOCAL TEST BY ALON, 2026-11-17 17:47 and 17:57 UTC (run_20261117_145656.log, still v968f9e; messages17.log; DLL log
+    vcncnet20261117174552062.log): 30-second fuse, drop, crash, respawn at once.
+      run 1: crash 17:47:45.64, ServerConfirm (Number 311) 17:47:48.18, 'out 52' 17:48:15.21 = 1 crater, size 3, at
+             (-57638, 6252). Blast about 17:48:14.2 = 26 s after the confirm; the fuse had started about 1.4 s
+             before the crash.
+      run 2: crash 17:57:10.71, ServerConfirm (Number 314) 17:57:13.39, 'out 52' 17:57:33.44 = 1 crater, size 3, at
+             (-58694, 6447). Blast about 20 s after the confirm; the fuse had started about 8.3 s before the crash.
+    SHOWS: a bomb whose fuse is running survives the crash AND the respawn and goes off on time (step 3 and the
+      'weapon lists are not cleared' reading above), and its crater record is sent.
+    DOES NOT SHOW anything about damage: both craters lie on open ground of his own airfield (scene 32), 462 m and
+      899 m from the nearest ground object (goi 508 AA battery; 549 Fir); the blast only looks 300 m. No 'out 31' was
+      to be expected and none was sent. It also does not show a crater sent while dead - both blasts came long after
+      the respawn.
+    Seen on the way, not looked into: the server sends the crater record back to its own sender (client 'in 52' 3 ms
+      after 'out 52', log says 'relayed to 0 peer(s)'); the same pair is in Taurus' messages40.
+    STILL TO TEST: (A) long fuse beside an ENEMY object (well inside 300 m), crash, respawn at once -> 'out 31' /
+      SCENE36 when it goes off? (B) 5 s fuse on open ground, crash within 2 s, no key for 8 s -> CRATER line between
+      the DEATH and CONFIRM5 lines?
+
+2026-11-17  v968f9g-stable  EVENT MANAGEMENT ROUND (Taurus 11-17, live room 189 'Death Bowl Test': 'Joining is disabled for all
+            including Sysops ... event open 189 300 and no one could enter ... ##joinenable no change ... no hot guns, no
+            engines at any point. Spun crashed waiting on timers. Need engines from the start. Need cold guns (no firing,
+            not no damage taken). Need Sysop entry to not start timers. Need Server side commands ported to in game
+            commands ... ##flydisable/##flyenable had no effect in event arena, nor pilot training arena')
+  WHAT HAPPENED (live run_20261117_145010, v968f9e; his messages42/43/44, his clock +33.4 s):
+    A 18:04-18:17  arena: tournament on (lives 1, ghosting, last-wins, joining 3, shooting 1), event mode OFF.
+        - 18:07:34, 18:09:51, 18:14:01 'TOURNAMENT START by first spawn (Taurus@HQ)': the sysop looking at the arena
+          started the clock three times.
+        - `event hold 189` on an arena without event mode fell back to the server-side GUNS COLD, which then stayed on
+          until ##StartEvent at 18:34.
+    B 18:20-18:29  event mode still OFF, 'Fly button enabled from the start' unticked.
+        - apply_tournament_settings wrote FlyButtonEnabled=no into the GAME_DEF although the arena was not in event
+          mode. The client greys the HQ Fly button on that flag alone (sysops exempt): no ordinary pilot had a Fly
+          button, and for 11 minutes not one Fly ask reached the server. ##JoinEnable works on the OTHER gate (the
+          server's answer to a Fly ask) and could change nothing; `event fly 189 on` was refused ('not in event mode').
+        - `event open 189 300` / `240`: the number was not read at all (only `in <s>` was).
+    18:29:24 event mode ticked on the web; 18:30:26 `event open 189 180`; 18:31:00 `event fly 189 on` -> everybody flew.
+        - clients: 'You'll be able to start engines after Event starts' / 'Event not started yet!' - the event lock
+          holds the ENGINES too; the arena air-starts, so the pilots glided.
+        - the tournament clock reached the competition at 18:34:26; nothing told the event lock. MONSTERDOGG crash-
+          landed 18:34:31 and lost his only life; ##StartEvent came at 18:34:50; Bama won 18:35:37.
+    C 18:41-18:55  joining 0, shooting 0, event mode on.
+        - `event fly 189 10` and `event fly 189 120` were read as OFF (anything that was not 'on').
+        - after ##StartEvent Taurus_HQ (ordinary pilot) was refused 'Joining has ended for this tournament' until
+          `event open 189 500` (works as designed; the new ##EventReset / ##EventOpen are the in-game way).
+    19:13-19:15  ##flydisable / ##flyenable: the words did not exist (server log NOT-A-COMMAND); ##JoinDisable /
+        ##JoinEnable worked in room 108. His client at entry (messages44): '[Event] DelaysActive=yes StartMethod=load
+        StartDelay=0 FlyButtonEnabled=no TaxiLimit=0.000000'.
+  FA.exe (RE this round):
+    - The lock is per ACTION. Engine start (0x4d87da), guns (FUN_004a2b70), rockets, bombs / supplies, taxi each test
+      DelaysActive && (start unknown -> refused | now < start + (Event.StartDelay + EVENT_PLANE_CONFIG[class][camp]
+      .<action>) minutes). EVENT_PLANE_CONFIG = [3 classes][8 camps] x 0x18 bytes at GAME_DEF+0x1ba8: +0 present,
+      +4 EngineStart, +8 FireGuns, +0xc FireRockets, +0x10 DropBombs (DropSupply for Support), +0x14 Taxi; INI
+      sections [EventParam<Fighters|Bombers|Support><camp>]; the client's GAME_DEF dump prints them.
+    - Wire, unpack FUN_0057bee0 at 0x57dbf9-0x57e18e (re-read for this entry): after the 4-byte TaxiLimit, a list of
+      records [key][5 bytes], key != 0, class = (key >> 3) & 3 (asserts < 3), camp = key & 7, each value = byte - 0x80
+      into +4..+0x14, present = 1; a 0 byte ends the list. Every template we serve has the empty list (that 0 is the
+      byte at len-84).
+    - The Fly button obeys the enable byte of msg 0x83 in any arena (FUN_004f5e10 -> FUN_00440b40).
+    - Tournament clock arithmetic is signed (collisions 0x447c0a 'sub / js', HUD 0x475880 'sub / jns'; the 0x5c handler
+      0x4f4200 only stores the value): a start in the FUTURE counts down correctly.
+    - Tournament pre-competition does not stop the firing - it skips plane collisions and bullet hits. 'No firing' exists
+      only through the event lock.
+  CHANGED (server.py):
+    1. FlyButtonEnabled is written from the web box only when the arena is in event mode; otherwise it is served 'yes'.
+    2. A sysop's spawn never starts the tournament clock (he is told once); the first ordinary pilot's does, as before.
+    3. The clock starts the fight: _tn_arm_fight / _tn_clock_fight - when the tournament clock reaches the competition
+       the server closes joining, frees the event lock (event mode) or ends a guns-cold hold, says 'the competition
+       starts NOW' + FIGHT. Armed by every path that sets the start; 'fight now' paths arm nothing.
+    4. `event open <room> <seconds>` / ##EventOpen <seconds>: the joining window of that run. start = now + seconds -
+       StartDelay minutes, so every client counts exactly that; a timed window closes by itself even where the arena's
+       window is 0. `event open <room> in <s>` is unchanged. `event fly <room>` takes on|off only (else: usage).
+    5. In-game ## words (CHAT_SERVER_COMMANDS, sysops): ##EventOpen [s], ##EventClose, ##EventFight / ##EventGo /
+       ##EventStart, ##EventEnd [winner], ##EventReset, ##EventStatus, ##FlyEnable, ##FlyDisable (+ the existing
+       ##EventHold). Event words answer only in arenas with tournament or event mode. Shared with the console through
+       event_open_room / event_end_room / event_reset_room. ##StartEvent now also ends a guns-cold hold in an arena
+       without event mode, as `event fight` did.
+    6. The Fly button in ANY arena: event_fly_button sends 0x83 [enable][start in the past] to an arena without event
+       mode (such a client reads nothing else from it), _FLY_OFF remembers it for joiners, an arena reset clears it.
+    7. ENGINES FREE WHILE LOCKED - web box ev_engines (web_server.py: 'Engines free while locked (weapons-only lock)';
+       unticked = exactly the old lock):
+         - apply_event_plane_config (last writer in build_lz_gamedef, the only one that changes the length): 24 records
+           [0x20+class*8+camp][0x80][0xf8][0xf8][0xf8][0x80] = EngineStart 0, weapons 120 min, Taxi 0, at the list byte;
+           Event.StartDelay served 0. +144 bytes, about +75 compressed.
+         - event_wire_start: the LOCK goes out as a start 30 min in the past (engines + taxi free, weapons 'in MM:SS';
+           _event_lock_refresh re-sends it every 20 min), the FIGHT as fight time - 120 min (the arena's unlock delay
+           is added by the server). Server state is unchanged: e['start'] None = locked.
+         - per pilot: event_note_gamedef records, when a 212 goes to a session, whether THAT one carried the table. A
+           pilot whose GAME_DEF has no table (entered before the box was ticked) gets the plain lock / the real start
+           and one line telling him to re-enter - a 'start in the past' would have freed his weapons.
+         - fallbacks: tail not recognised -> no table; 212 payload over GAMEDEF_TABLE_MAX_PAYLOAD (1320 B) with the
+           table -> built again without it. Either way _EVENT_TABLE_ROOMS[room] = False, the arena keeps the full
+           lock and the GAMEDEF212 log line says so.
+    8. event status / hold / open texts name the lock type; `event reset` also cancels the fight timer and ends guns cold.
+  NOT CHANGED: arenas without the new box (GAME_DEF byte-identical to v968f9f except the Fly flag of point 1), ##GunsCold
+    / ##GunsHot, lives, winner, event scripts, event length, ##JoinDisable / ##JoinEnable.
+  TESTED OFFLINE ONLY (_scratch/test_9g.py, ALL PASS; 9f/9e/9c/9b/9a/8y/8v/ringlag tests still pass):
+    - the 5 arena blobs of the local DB: Fly flag yes without event mode / no with it; table inserted, read back with a
+      re-implementation of the client's loop (24 records, values 0/120/120/120/0), the 83 bytes behind the list
+      unchanged, everything before it unchanged but Event.StartDelay; LZ round trip (1077 -> 1221 B, 615 -> 689 B
+      compressed; 1196 -> 1340 B, 745 -> 819 B).
+    - logic with stub sessions and a hand-driven clock: sysop spawn leaves the clock idle; ##EventOpen 180 / 60 / 45
+      with 3- and 0-minute windows (server phases and the client's countdown target agree; latecomer refused; FIGHT by
+      the clock); gating and usage; ##FlyDisable / ##FlyEnable without event mode incl. a joiner; legacy lock freed by
+      the clock; engines-free wire values at entry, hold, refresh, fight, for a pilot with and without the table;
+      table-less fallback; guns cold ended by the clock; ##EventReset; ##EventStatus.
+    - _scratch/test_9g_e2e.py: the REAL build_gamedef_212 of server.py (all writers, walk guard, alignment) on a copy of
+      the local DB, 4 open rooms, box off / on: aligned both ways, 24 records at the list byte, payload 689-849 B
+      without and 769-913 B with the table (limit 1320 B); with the limit forced to 300 B the arena is served without
+      the table and flagged. (The copy _scratch/_t9g.db is left behind - deleting is not permitted from the test.)
+  NOT TESTED: any of it against a client. The inserted table is the one part that changes what the client PARSES at
+    arena entry - try it on the local server first (see VERIFY 3) before the box is ticked on a live arena.
+  VERIFY:
+    1. arena with tournament on, event mode off, 'Fly button' box unticked: ordinary pilots have the Fly button; a
+       sysop spawns -> `event status` still says idle; the first ordinary pilot's spawn starts the clock.
+    2. ##FlyDisable in any arena -> ordinary pilots' Fly button grey, sysop's not; ##FlyEnable -> back.
+    3. event mode + 'Engines free while locked': enter the arena -> client log (messages) GAME_DEF dump shows
+       [EventParamFighters0] ... EngineStart=0 FireGuns=120 ... sections after [Event]; spawn -> the engine runs,
+       fire -> 'You'll be able to open fire in MM:SS', bombs the same. ##EventFight -> everything free at once.
+       ##EventHold -> weapons refuse again, engine keeps running.
+    4. ##EventOpen 60 in that arena -> 'Time until end of joining' counts 60 s on the client, then the shooting
+       countdown, then 'the competition starts NOW' and the weapons work without anybody typing ##StartEvent.
+    5. server log: 'GAMEDEF212 event: [EventParam] 24 records ...' at each serve; 'EVENT room N: ... pilot(s) hold a
+       GAME_DEF without the [EventParam] table' names pilots who must re-enter.
+  NOT PUSHED, NOT BANKED. Live server still v968f9e.
+
+2026-11-17  v968f9h-stable  EVENT CLOCK FROM 0 AT THE FIGHT; THE FLY BUTTON AS THE CLIENT REALLY HAS IT (Alon 11-17 22:10, local
+            test of v968f9g with an ordinary pilot: 'holding fire with engine running now works as expected. event timer
+            set to 30 min, started the clock at 30 instead of 0 and counting up to 30:00. fly button cannot be disabled.')
+  WHAT HAPPENED (local run_20261117_215756, room 52 'Free For All': event mode, engines free, event length 30, no
+    tournament; his messages19, client clock = UTC):
+    - 20:02:44 the client's GAME_DEF dump shows the 24 [EventParam...] sections (it prints the 'present' field under the
+      name EngineStart, hence 'EngineStart=1'; FireGuns/FireRockets/DropBombs=120, Taxi=0). 20:02:46.659 'GED:
+      1023246785, now: 1025046651' = a start 30 min back; trigger -> 'You'll be able to open fire in 89:56'. Hold,
+      fight, hold, fight (20:04-20:07) all arrived and worked. THE LOCK WORKS on a real client.
+    - THE CLOCK: the HUD event clock is drawn at 0x4559a4 as  now - (start + Event.StartDelay minutes)  (text 0x5bd,
+      'not started' text 0x5bc when no start). v968f9g served Event.StartDelay 0 and held the weapons with +120 in
+      the table, so the clock read 30:00 during the hold (start 30 min back) and 120:10 after `event fight`.
+    - THE FLY BUTTON: `event fly 52 off` 20:08:10 and 20:08:28, 0x83 with enable byte 0 received both times, button
+      lit. FUN_00440b40 (the only thing that byte reaches): enable != 0 -> DAT_00c1cdbc = 1 (lit), DAT_00c7e308 = 1;
+      enable == 0 -> nothing. HQ dialog init 0x6e1b9b at arena entry: lit = GAME_DEF.FlyButtonEnabled, or else
+      DAT_00c7e308 - which nothing ever clears. The client can be switched ON by the server, never OFF in place; and
+      a client that got the enable byte once (every event arena sent it with each state message) is lit everywhere
+      until the game is restarted. My v968f9g reading 'the 0x83 enable byte toggles it' was wrong, and its offline
+      test only checked the byte the server sent.
+    - Also read: 0x4b379a prints, every 15 s in the cockpit, 'Event not started yet!' (0x142) while no start is known
+      and 'Event will be started in MM:SS' (0x143) while start + Event.StartDelay lies ahead; the lock checks add
+      Event.StartDelay and the table value as signed ints (0x4d884f-0x4d8868), getters read +4 / +0x14 (0x4d8780,
+      0x4b2570).
+  CHANGED (server.py):
+    1. apply_event_plane_config: Event.StartDelay = 120, records [key][0x08][0x80][0x80][0x80][0x08] = EngineStart -120,
+       weapons 0, Taxi -120. Engines and taxi net 0, weapons net 120 - every lock moment as in v968f9g; the HUD
+       clock's zero is now the weapons-free moment. Same length (+144 B).
+    2. event_wire_start / event_scheduled_fight: while locked, if the tournament clock is running, the lock goes out as
+       (competition time - 120 min): the HUD counts down to the fight, 'Event will be started in MM:SS' is true, the
+       weapons come free on the clients at that moment; _tn_arm_fight pushes it whenever the clock is (re)set. With
+       nothing scheduled: start 30 min back as before = a 90..70 min placeholder (the 15-s line then reads 'Event will
+       be started in 89:45' - new, a consequence of 1; no way to have the clock right at the fight AND silence here).
+    3. `event open <room> <seconds>` / ##EventOpen <seconds> in an event arena WITHOUT a tournament = the fight in
+       <seconds> (event_start at=...), counted down natively. event_start says 'weapons free in 90 s' for short waits
+       (it used to say STARTED for anything under 30 s).
+    4. Fly button: fly_button_on / fly_enable_byte / fly_gamedef_flag / apply_fly_button_live.
+       - the enable byte is 1 only after a host's explicit `on` (or the fight) in an arena that serves the button off;
+         every other 0x83 carries 0, so clients are no longer made immune;
+       - a host's `off` is written into the served GAME_DEF (the lobby re-serve key includes it): pilots who enter
+         afterwards have a grey button;
+       - handle_fly_start_place refuses a non-sysop Fly ask while the button is off ('The Fly button is disabled by
+         the host - please wait.', once per 10 s) - for the pilots inside and for clients enabled earlier;
+       - ##FlyDisable in an arena without event mode sends nothing (a 0 byte is a no-op); ##FlyEnable sends the byte;
+       - console `event fly` now also tells the room; ##EventStatus shows 'Fly button: OFF'.
+    5. event_on_spawn always states the room's event state at entry in an event arena, 'no start' included (the
+       handler stores whatever it gets, 0x4407c0; whether the client clears an old start by itself at entry is
+       not known).
+  NOT CHANGED: the lock itself (verified by Alon above), the table's size and place, arenas without event mode apart
+    from point 4, ##JoinDisable / ##JoinEnable.
+  TESTED OFFLINE ONLY: _scratch/test_9h.py ALL PASS (table values -120/0/0/0/-120 and StartDelay 120 read back on the 5
+    local blobs; live Fly-off flag; enable-byte rules in event and non-event arenas incl. Alon's sequence; scheduled
+    lock = fight - 120 min; ##EventOpen 90 without a tournament; everything from test_9g). _scratch/test_9g_e2e.py PASS
+    (real build_gamedef_212, 4 rooms, payload 769-913 B). The Fly-ask refusal in handle_fly_start_place is NOT
+    covered by a test - six lines beside the ##JoinDisable gate.
+  VERIFY (restart the game client first - one that received the old enable byte keeps a lit button):
+    1. event arena, engines free: enter -> dump shows Event StartDelay=120, [EventParam...] FireGuns=0 Taxi=-120;
+       engine runs, weapons refuse; HUD clock negative, counting down (placeholder ~-90:00).
+    2. `event fight <room>` -> HUD clock 0:10 and counting up; with event length 30 the server ends it at 30:00.
+    3. `event open <room> 90` -> 'weapons free in 90 s', HUD counts -1:30 -> 0:00, weapons work at 0 without a command.
+    4. `event fly <room> off` while a pilot is in HQ -> his button stays lit, the click gives 'The Fly button is disabled
+       by the host'; he leaves to the lobby and comes back -> grey. `event fly <room> on` -> lit, he can fly.
+  NOT PUSHED, NOT BANKED. Live server still v968f9e.
+
+2026-11-17  v968f9i-stable  GO ANNOUNCEMENT AT THE END OF A COUNTDOWN; THE ENABLE BYTE ONLY TO A GREY BUTTON (Alon 11-17 22:40, local
+            test of v968f9h: verify list 'as expected. just add a fight/go message with a flashing yellow text like in the
+            weapons hold when the timer of YY seconds in "event open XX YY" elapses. fly button doesn't disable but it
+            prevents joining the game world')
+  WHAT HAPPENED (local run_20261117_223141, room 52; his messages20):
+    - clock and countdown work on the client: 'Event will be started in 89:57' during the hold, 20:38:05 `event open 52
+      30` -> 'EVENT: weapons free in 30 s.', 'Event will be started in 00:21', '00:06' - and then nothing: the clients
+      freed their weapons by themselves and no line or banner said so.
+    - Fly button: 20:35:41 `event fly 52 on` (the button WAS on) -> v968f9h sent the enable byte to Test13 = his client
+      immune from then on. 20:35:51 `off`; 20:35:57 lobby and back; 20:36:02 dump 'FlyButtonEnabled=no' - the GAME_DEF
+      part works - but the button was lit (the immunity), he clicked, 'Fly ask refused - the Fly button of room 52 is
+      off'. Exactly the client rule written up in v968f9h, triggered by my own needless byte.
+  CHANGED (server.py):
+    1. event_start with a countdown (future start and/or the arena's unlock delay): a timer in e['timer'] announces
+       'EVENT: FIGHT - weapons free!' + banner 'FIGHT! - WEAPONS FREE' when it runs out. Cancelled by the next
+       event_start / event_stop; it also checks the room's start is still the one it was armed for.
+    2. _FLY_SERVED[room] = FlyButtonEnabled as written into the GAME_DEF last built; event_note_gamedef marks the
+       session (_flyno) when the 212 it is sent says 'off'. fly_enable_byte(room, sess) is 1 only for such a session
+       while the room's button is on - at `on`, at the fight, at entry. A client with a lit button is never sent it.
+  NOT CHANGED: the refusal, the GAME_DEF flag, the lock, the table.
+  LIMIT THAT STAYS (client): a pilot whose grey button was lit by ##FlyEnable keeps a lit button until he restarts the
+    game; a later ##FlyDisable stops him by the refusal only.
+  TESTED OFFLINE: _scratch/test_9i.py ALL PASS (30 checks; new: his on/off/re-enter/on sequence gives bytes 0,0,0,0,1;
+    the byte goes only to the grey pilot; FIGHT line after 90 s and not before; a hold or an `event fight` during the
+    countdown cancels it). _scratch/test_9g_e2e.py PASS incl. the Fly flag recorded from the real build.
+  VERIFY: restart the client; `event open 52 30` -> at 0:00 'EVENT: FIGHT - weapons free!' and the flashing line.
+    `event fly 52 off` (without an `on` before it), pilot to the lobby and back -> grey button; `event fly 52 on` -> lit.
+  NOT PUSHED, NOT BANKED. Live server still v968f9e.
+
+2026-11-17  v968f9j-stable  THE FLY BUTTON TOGGLES: MSG 0x74 (Alon 11-17 23:02, after the v968f9i explanation of why his button stayed
+            lit: 'as you described. but the fly off must be able to toggle the button off')
+  FOUND (FA.exe): I had only followed the event flag. The HQ dialog decides the Fly button in FUN_006de570 (called from
+    14 places, the listener list 0xbfa5c8 among them). Apart from camp / plane / airfield / tournament lives it reads
+    TWO flags the server can reach:
+        DAT_00c1cdbc  event 'Fly button enabled'  (0x6de8d4)  GAME_DEF + msg 0x83 enable byte - ONE WAY (v968f9h)
+        DAT_00c1cdb8  JOIN ENABLED                (0x6de658)  0 -> button disabled
+    DAT_00c1cdb8 is written by FUN_004ee470 = the handler of msg 116 = 0x74 (dispatch slot 0xc820a8; table base
+    0xc81ed8 + 4*id, checked against 201 -> 0xc821fc and 208 -> 0xc82218):
+        [0x74][disabled u8]   disabled != 0: a client with rights (DAT_00c6e8b0) returns, any other sets the flag 0;
+                              disabled == 0: flag 1;   then every listener is called -> the HQ dialog redraws.
+    The lobby sets the flag again when an arena is picked (0x6ad9d6 / 0x6af909, from the arena record's +0x24).
+    So there IS a two-way, repeatable switch for pilots already inside: what the 2009 server sent the room when a
+    sysop typed ##JoinDisable / ##JoinEnable (the client itself only sends 0x5f to the server).
+  CHANGED (server.py):
+    - build_join_state_74 / fly_sync: msg 0x74 [1|0] (2 bytes, in-game framing like 0x83).
+    - event_fly_button (##FlyDisable / ##FlyEnable / `event fly <room> on|off` / the client's ##EnableFlyButton): state,
+      then 0x74 to everybody inside. `on` in an event arena still adds the 0x83 enable byte for a client whose GAME_DEF
+      said 'off' (the other flag).
+    - event_on_spawn: a joiner of a room whose button is off gets 0x74 [1]; of a room a host has switched this run,
+      the state either way. Arenas nobody touched get nothing.
+    - event_start: when the fight turns a button on that was off, 0x74 [0] goes with it. event_reset_room: after a
+      host command, the arena's own state is sent again.
+    - fly_gamedef_flag -> None: a host command no longer writes FlyButtonEnabled into the served GAME_DEF (v968f9h/i).
+    - The Fly-ask refusal while off stays as the backstop. Texts updated.
+  NOT CHANGED: ##JoinDisable / ##JoinEnable (button lit, spawn refused - Taurus keeps the two apart), the arena setting
+    'Fly button enabled from the start', everything else of v968f9i.
+  TESTED OFFLINE: _scratch/test_9j.py ALL PASS (33 checks; new: 0x74 [1]/[0] of 2 bytes to pilots inside and to joiners
+    in a non-event arena, off/on/off toggles each time, untouched arena gets nothing, Alon's room-52 commands, reset,
+    arena served off + fight). e2e PASS; packet on the wire 00 22 00 00 74 01.
+  NOT TESTED against a client: that the button really greys. The handler is short and unambiguous, but this message
+    has never been sent by this server before.
+  VERIFY: ordinary pilot in HQ of room 52 -> `event fly 52 off`: client log 'in 116'2', button grey at once;
+    `event fly 52 on`: lit; repeat. Second pilot entering while off: grey. Sysop: stays lit.
+  NOT PUSHED, NOT BANKED. Live server still v968f9e.
+
+2026-11-18  v968f9k-stable  FLY BUTTON OFF ALSO FOR A PILOT WHO RE-ENTERS (Alon 11-18 06:19, local test of v968f9j: 'toggle now works!
+            but when a player leaves the arena and rejoins with the button disabled it becomes reenabled, clicking it
+            works however he is not allowed to spawn')
+  WHAT HAPPENED (local run_20261118_061643, room 52; his messages22): `event fly 52 off` 04:17:32 - 'in 116'2', button
+    grey (CONFIRMED: msg 0x74 works on a real client, both ways, 04:18:00 / :06 / :10). Lobby and back: 04:17:48.813
+    'in 116'2', then 'in 201'17' (the join answer) in the same batch. Button lit; click 04:17:51 -> 'Fly ask refused'.
+  WHY (FA.exe, Arenas_dlg.cpp): when the join completes (FUN_006af7b0, on ArenaJoinIdent - after the 201) the dialog
+    sets the flag afresh:  DAT_00c1cdb8 = (arena record +0x24 && no rights) ? 0 : 1.  My entry-time 0x74 came BEFORE
+    the 201 and was overwritten. Record (0x28 bytes, FUN_0076b5b0) +0x24 = arg 10 of FUN_0076d3d0 = desc+0x20 of
+    the 0xd2 list row = flag byte bit 0x04 (0x76d75c-0x76d782). That bit was mapped on 2026-08-31 as the red X
+    'disabled arena' icon, 'cosmetic - does NOT block joining'. It is the join-disabled flag: enter freely, Fly
+    button grey.
+  CHANGED (server.py):
+    - build_arenalist: row flag |= ARENA_LIST_JOIN_DISABLED_FLAG (0x04) while the room's Fly button is off
+      (fly_off_for_list: only rooms a host switched or with a live event state are looked at - the list is built on
+      every lobby poll). Lobby shows the red X; a joiner's button is grey from the first frame; sysops are exempt
+      in the client.
+    - fly_sync_hq: when the client opens its HQ screen (0x3a request - after the join has completed) the room's 0x74
+      state is sent again, if the button is off or a host has switched the room this run. Covers an arena list the
+      client fetched before the command.
+  NOT CHANGED: the toggle, the refusal backstop, rooms nobody switched (no bit, no message).
+  TESTED OFFLINE: _scratch/test_9k.py ALL PASS (35 checks); e2e PASS incl. the real build_arenalist: flag byte of the
+    room 0x00 -> 0x04, other rows unchanged.
+  VERIFY: `event fly 52 off`, pilot to the lobby: room 52 has the red X; enter: Fly button grey at once. `event fly 52
+    on` while he is in HQ: lit. Off again, another lobby round trip: grey. Sysop: lit throughout.
+  NOT PUSHED, NOT BANKED. Live server still v968f9e.
+
+2026-11-18  BANKED: v968f9k-stable   (user: "good! bank! update all MD files")   previous bank: v968f8y-stable (11-16)
+  SNAPSHOT: _scratch/bank/server.py.v968f9k (2,665,408 B, sha1 355197f7e4c4...) + web_server.py.v968f9k (346,212 B,
+    acf3a6e6f31c...) + fa_logging.py.v968f9k (12,074 B, f1224785b532...) - byte-identical to the working files at
+    04:30 UTC. Against the last bank: web_server.py differs by the event-mode box 'Engines free while locked' and the
+    label texts (9g); fa_logging.py is unchanged. Deploy the three together.
+  IN THIS BANK (v968f8z .. v968f9k, entries above):
+    8z an event hold is enforced on the server too; GAME_DEF tail check accepts equal oxygen ceilings
+    9a ##GunsCold / ##GunsHot = weapons hold only, apart from the event hold (##EventHold)
+    9b the parachutes of one frame go out as one datagram
+    9c filler for a slipped input queue (`pad`)            9d padding automatic: on when late, off when in step
+    9e `slip` test command                                 9f car kill lines: one decoy at a time per client
+    9g event round: sysop spawn never starts the clock, the clock starts the fight, `event open <room> <seconds>`,
+       in-game ##Event... words, FlyButtonEnabled only with event mode, 'Engines free while locked' (the [EventParam]
+       table in the GAME_DEF)
+    9h HUD event clock from 0 at the fight (StartDelay 120 / EngineStart -120); scheduled lock; ##EventOpen <s> without a
+       tournament = the fight in <s>
+    9i FIGHT announcement at the end of a countdown; the 0x83 enable byte only to a client with a grey button
+    9j the Fly button toggle: msg 0x74                     9k ... and for a pilot who re-enters: arena-list bit 0x04
+       + the state again at HQ open
+    ANALYSIS (3) game types / (4) no queue-advance packet in the DLL / (5) graphics restart / (6) other protocols /
+       (7) the DLL's FA LAGTEST / (8)(9) bombs after the pilot's death
+  STATE AT BANK - what has flown:
+    - LIVE runs v968f9e since 11-17 14:50:10 UTC (8z, 9a-9e). No slipped-queue episode has occurred on it yet (Bama's
+      91-minute run 11-17: none), so the automatic padding has not been needed live.
+    - Padding against a real client, LOCAL, with `slip` (Alon 11-17, two runs): fillers invisible to the game (23,567
+      and 60,648 sent, all received), game loop steady 50/s, delay 14.6-16.2 s -> 0.62-0.67 s, automatic off when the
+      test ends, death / respawn / HQ handled, the 5-minute check works.
+    - Event system against a real client, LOCAL (Alon 11-17 22:10 .. 11-18 06:27, one ordinary pilot + console, room
+      52 event mode without tournament): the [EventParam] GAME_DEF parses (dump shows the 24 sections), engine runs
+      while the weapons refuse, hold / fight / hold, HUD clock from 0 at the fight, `event open 52 30` countdown, the
+      Fly button toggle by msg 0x74 for a pilot in HQ, red X + grey button for a pilot who re-enters (9k: 'good!').
+  STATE AT BANK - NOT yet seen working:
+    - 9f-9k on the LIVE server; anything of the event round with more than one pilot.
+    - tournament + event mode together (Death Bowl): ##EventOpen 180 -> joining -> countdown -> FIGHT by the clock;
+      the sysop-spawn rule; the ## words typed in game by a sysop (the local tests used the console).
+    - 9i's FIGHT banner at the end of a countdown and 9h's scheduled lock were not reported on separately.
+    - 9f car lanes (offline test only). 9b on a parachute drop with a late pilot. A REAL slipped queue under padding,
+      a long stall while padded, N >= 150, hours.
+    - the Fly-ask refusal while the button is off is only a backstop now; seen once (11-18 04:17:51).
+  KNOWN AND OPEN AT BANK:
+    - Event lock, client limits: placeholder countdown (90..70 min) and 'Event will be started in MM:SS' every 15 s
+      during a hold with nothing scheduled; the event enable byte is one way (a client lit once stays lit until the
+      game is restarted - ##FlyDisable still greys it through msg 0x74).
+    - The 0x74 state is re-sent at EVERY HQ open (0x3a) of a room a host has switched - every few seconds in Alon's
+      messages23. Harmless; a per-session 'already told' marker would make it once per entry. Left as tested.
+    - '[EventParam] EngineStart=1' in the client's dump is the dump printing the 'present' field; the engine check
+      reads +4 (0x4d8780).
+    - Bombs after the pilot's death (ANALYSIS 9): kept open by Alon. Tests A (long fuse beside an enemy object, crash,
+      respawn) and B (5 s fuse on open ground, crash, no key for 8 s) still decide whether a crater-based server rule
+      can be built. Seen on the way: the crater record is echoed to its sender; the 13:10 IsPresentObject assertion.
+    - FA LAGTEST probe tag (ANALYSIS 7): 'not for now'.
+    - From the last bank, unchanged: dynamic weather must stay off on the live arena; error-map items (ace/rank msg
+      88 at every spawn, lorry drop list msg 3 / msg 6); Meno's messages21 (greyed Enter); open decisions (cargo
+      lines in pounds, msg 51 under guns cold / event hold, ##GunCold alias, Meno's two CTD crash charges).
+    - Rulings recorded since the last bank: ##GunsCold / ##GunsHot are a weapons hold only and separate from the
+      event hold (11-16); non-event arenas carry no event timers or flags; padding must be safe, no reconnect as a
+      lag fix (11-17); 'the fly off must be able to toggle the button off' (11-17).
+  MD FILES AT BANK: EVENTS.md (v968f9k), MODERATION.md (header v968f9k; event-mode section rewritten, Fly-button flags,
+    console tables 4 / 4b, quick reference, still-open), EVENT_SCRIPTING.md (## equivalents, countdown). Unchanged,
+    nothing in 8z-9k touches them: ADDING_A_MAP.md, FA_TC_economy.md, FA_groundwar_protocol.md, fa-auth-api.md,
+    msg73_decode_notes.md, q6_reader_status.md. Pre-bank copies: _scratch/*.md.bak_v968f9k_prebank.

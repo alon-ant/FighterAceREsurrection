@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9e-stable'
+VERSION = 'v968f9k-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1552,7 +1552,7 @@ def tournament_state(room_id, create=True):
     e = TOURNAMENTS.get(room_id)
     if e is None and create:
         e = {'start': None, 'participants': set(), 'deaths': {}, 'ghosts': set(), 'finished': False,
-             'winner': None, 'by': '', 'cfg': None, 'join_closed': False, 'told': set()}
+             'winner': None, 'by': '', 'cfg': None, 'join_closed': False, 'told': set(), 'timed': False}
         TOURNAMENTS[room_id] = e
     return e
 
@@ -1575,17 +1575,32 @@ def tournament_phase(room_id, cfg=None):
         return 'countdown', int(t_comp - now)
     return 'competition', 0
 
-def tournament_start(room_id, by='console', at=None, announce=True):
+def _fmt_span(sec):
+    sec = int(round(max(0.0, float(sec))))
+    if sec < 120 or sec % 60:
+        return f'{sec} s' if sec < 120 else f'{sec // 60} min {sec % 60} s'
+    return f'{sec // 60} min'
+
+def tournament_start(room_id, by='console', at=None, announce=True, join_s=None):
     """(Re)start the room's tournament clock at wall time `at` (default now) and push msg 0x5c to every
     in-game pilot. Lives/participants are reset. Returns the entry or None when the room has no
-    tournament."""
+    tournament.
+    v968f9g: join_s = a joining window of that many seconds for THIS run (`event open <room> <seconds>`,
+    ##EventOpen <seconds>), whatever the arena's 'Joining window' minutes say. The clients only know the
+    arena's StartDelay minutes and the start time, so the start is placed so that start + StartDelay ends
+    join_s from now (with StartDelay 0 the start lies in the future) - their 'Time until end of joining'
+    counts the right time, then the shooting countdown, then the competition."""
     _TN_CFG.pop(room_id, None)
     cfg = tournament_cfg_for_room(room_id)
     if not cfg:
         return None
     e = tournament_state(room_id)
-    e.update({'start': float(at or time.time()), 'participants': set(), 'deaths': {}, 'ghosts': set(),
-              'finished': False, 'winner': None, 'by': by, 'cfg': dict(cfg), 'join_closed': False, 'told': set()})
+    _t0 = float(at or time.time()); _timed = False
+    if join_s is not None:
+        _t0 = time.time() + max(0.0, float(join_s)) - cfg['tn_start_delay'] * 60.0; _timed = True
+    e.update({'start': _t0, 'participants': set(), 'deaths': {}, 'ghosts': set(),
+              'finished': False, 'winner': None, 'by': by, 'cfg': dict(cfg), 'join_closed': False, 'told': set(),
+              'timed': _timed})
     pkt = build_tournament_start_5c(e['start'])
     n = 0
     for p in get_sessions_in_room(room_id):
@@ -1595,7 +1610,8 @@ def tournament_start(room_id, by='console', at=None, announce=True):
                 e['participants'].add(p.current_pilot)
     if announce:
         room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining open '
-                                  + (f'for {cfg["tn_start_delay"]} min' if cfg['tn_start_delay'] else 'until the host closes it')
+                                  + (f'for {_fmt_span(join_s)}' if _timed else
+                                     f'for {cfg["tn_start_delay"]} min' if cfg['tn_start_delay'] else 'until the host closes it')
                                   + f', shooting {cfg["tn_shoot_delay"]} min later; lives: '
                                   f'{cfg["tn_lives"] or "unlimited"}'
                                   + (', ghosting' if cfg['tn_ghosting'] else '')
@@ -1604,6 +1620,7 @@ def tournament_start(room_id, by='console', at=None, announce=True):
                       f'(net_ms {tournament_net_ms(e["start"])}) -> {n} pilot(s); cfg {cfg}')
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
     evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
+    _tn_arm_fight(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v968f9g
     return e
 
 # ----------------------------------------------------------------------------------------------------
@@ -1623,6 +1640,27 @@ def tournament_start(room_id, by='console', at=None, announce=True):
 # ----------------------------------------------------------------------------------------------------
 EVENTS = {}       # room_id -> {'start': unix|None, 'fly': bool, 'by': str}
 EV_MSG_START = 0x83
+# v968f9g [ENGINES FREE, WEAPONS LOCKED] (Taurus 11-17: 'Need engines from the start', 'Need cold guns (no firing, not
+# no damage taken)' - in his event-mode run every air-started pilot sat at 'You'll be able to start engines after
+# Event starts' and glided into the ground). The client's lock is per ACTION: each check (engine start 0x4d87da,
+# guns FUN_004a2b70, rockets, bombs/supplies, taxi) is  DelaysActive && (start unknown || now < start + (Event.
+# StartDelay + EVENT_PLANE_CONFIG[class][camp].<action>) minutes).  With the start UNKNOWN everything is refused;
+# with a start KNOWN the per-class table decides - and that table (INI [EventParamFighters|Bombers|Support<camp>]
+# EngineStart, FireGuns, FireRockets, DropBombs|DropSupply, Taxi; empty in every template we serve) is what the
+# 2009 events used to say 'engines at once, guns N minutes later'. An arena with the web box 'Engines free while
+# locked' gets the table (EngineStart 0, Taxi 0, the three weapon delays EVENT_WEAPON_LOCK_MIN) and its lock is
+# sent as a start in the PAST instead of 'no start':
+#   locked : start = now - EVENT_ENGINE_BACKDATE_S  -> engines free, weapons 'You'll be able to open fire in MM:SS'
+#            (re-sent every EVENT_LOCK_REFRESH_S so the 120 minutes never run out)
+#   fight  : start = fight time - EVENT_WEAPON_LOCK_MIN minutes -> everything free at the fight time
+# Server state is unchanged (e['start'] None = locked); only the wire value differs - event_wire_start().
+EVENT_WEAPON_LOCK_MIN = 120
+EVENT_ENGINE_BACKDATE_S = 1800.0      # also covers a client NET clock that still lags after a lobby stay (v953f5c)
+EVENT_LOCK_REFRESH_S = 1200.0
+_FLY_OFF = {}     # room_id -> by: HQ Fly button greyed by ##FlyDisable in an arena WITHOUT event mode
+_EVENT_TABLE_ROOMS = {}   # room_id -> bool: did the GAME_DEF last built for the room carry the [EventParam] table? Without
+                          # it a 'start in the past' would unlock EVERYTHING, so such a room keeps the old lock (start 0).
+_EVENT_REFRESH = {'t': None}
 
 # v953f5c (Alon 01:43 'event timer running even in arenas that are not events'): the client compares the
 # start we send with ITS OWN NET clock (Timer.cpp frame clock, base + STATUS credits). After a lobby stay
@@ -1658,8 +1696,79 @@ def event_state(room_id):
         cfg = event_cfg_for_room(room_id) or {}
         e = EVENTS[room_id] = {'start': None, 'fly': bool(cfg.get('ev_fly_button', 1)) if cfg else True,
                                'by': 'arena default', 'timer': None}
-        log('EVENT', f'room {room_id}: event mode, initial state LOCKED (fly button {"on" if e["fly"] else "off"})')
+        log('EVENT', f'room {room_id}: event mode, initial state LOCKED (fly button {"on" if e["fly"] else "off"}'
+                     + (', engines free - weapons-only lock' if cfg.get('ev_engines') else ', engines and weapons') + ')')
+        if _EVENT_REFRESH['t'] is None:                           # v968f9g
+            _event_lock_refresh_arm()
     return e
+
+def event_engines_free(room_id, cfg=None):
+    """v968f9g: True when the room's lock is the weapons-only one - the web box is ticked AND the GAME_DEF last
+    built for it carried the [EventParam] table (False after a tail the writer did not recognise or a message
+    that would have been too long: such an arena keeps the full lock)."""
+    cfg = cfg if cfg is not None else (event_cfg_for_room(room_id) or {})
+    return bool(cfg.get('ev_engines')) and _EVENT_TABLE_ROOMS.get(room_id) is not False
+
+def event_note_gamedef(s, room_id):
+    """v968f9g: called after a GAME_DEF 212 of the room went to this session - remember whether THAT one carried the
+    table. A pilot keeps the GAME_DEF he entered with (the 212 is re-served to the lobby when the settings change,
+    never into the arena), so the box ticked while he is inside does not reach him: without the table a 'start in
+    the past' would free everything on his client, with it a 'no start' would hold his engines."""
+    try:
+        s.__dict__.setdefault('_evtab', {})[room_id] = (_EVENT_TABLE_ROOMS.get(room_id) is True)
+        s.__dict__.setdefault('_flyno', {})[room_id] = (_FLY_SERVED.get(room_id) is False)     # v968f9i
+    except Exception:
+        pass
+
+def event_scheduled_fight(room_id):
+    """v968f9h: the competition time of a running tournament clock in this room, if it lies ahead (and near enough
+    for the engines-free form: the wire start must already be in the past), else None."""
+    try:
+        cfg = tournament_cfg_for_room(room_id)
+        t = tournament_state(room_id, create=False) if cfg else None
+        if not t or t['start'] is None or t['finished']:
+            return None
+        tf = t['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0
+        now = time.time()
+        if tf > now + 1.0 and tf - EVENT_WEAPON_LOCK_MIN * 60.0 < now - 60.0:
+            return tf
+    except Exception:
+        logx('EVENT', 'scheduled fight lookup failed')
+    return None
+
+def event_wire_start(room_id, e, sess=None):
+    """v968f9g: the start time that goes on the wire for this room's state (None = 'no start known'). With `sess`
+    the answer is for that pilot's own GAME_DEF: only a client that was served the table gets the engines-free
+    form, every other one the plain lock / the real start."""
+    cfg = event_cfg_for_room(room_id) or {}
+    if not event_engines_free(room_id, cfg):
+        return e['start']
+    if sess is not None and sess.__dict__.get('_evtab', {}).get(room_id) is not True:
+        return e['start']
+    if e['start'] is None:
+        # v968f9h: when the tournament clock is running the fight time is KNOWN - the lock is sent as that time
+        # (minus the table's weapon minutes): the HUD clock counts down to the fight, 'Event will be started in
+        # MM:SS' is true, and the weapons come free on every client at that moment by themselves.
+        _tf = event_scheduled_fight(room_id)
+        if _tf is not None:
+            return _tf - EVENT_WEAPON_LOCK_MIN * 60.0
+        return time.time() - EVENT_ENGINE_BACKDATE_S
+    return e['start'] + (int(cfg.get('ev_start_delay', 0) or 0) - EVENT_WEAPON_LOCK_MIN) * 60.0
+
+def _event_lock_refresh_arm():
+    t = threading.Timer(EVENT_LOCK_REFRESH_S, _event_lock_refresh); t.daemon = True; t.start()
+    _EVENT_REFRESH['t'] = t
+
+def _event_lock_refresh():
+    try:
+        for rid, e in list(EVENTS.items()):
+            if e.get('start') is None and event_mode(rid) and event_engines_free(rid) \
+                    and any(getattr(p, 'entered_game', False) for p in get_sessions_in_room(rid)):
+                event_push(rid, 'lock refresh')
+    except Exception:
+        logx('EVENT', 'lock refresh failed')
+    finally:
+        _event_lock_refresh_arm()
 
 def event_cfg_for_room(room_id):
     """The served [Event] values (template + web ev_* overrides) or None."""
@@ -1678,17 +1787,39 @@ def event_cfg_for_room(room_id):
                     base[k] = int(float(v))
                 except (TypeError, ValueError):
                     pass
-        return {k: base[k] for k in ('ev_enabled', 'ev_start_delay', 'ev_fly_button')}
+        out = {k: base[k] for k in ('ev_enabled', 'ev_start_delay', 'ev_fly_button')}
+        try:
+            out['ev_engines'] = 1 if int(float(st.get('ev_engines', 0) or 0)) else 0      # v968f9g
+        except (TypeError, ValueError):
+            out['ev_engines'] = 0
+        return out
     except Exception:
         logx('EVENT', 'cfg read failed'); return None
 
 def event_push(room_id, label):
     e = event_state(room_id)
-    pkt = build_event_83(e['fly'], e['start'])
-    n = 0
+    n = 0; _pk = {}; _stale = []
+    _free = event_engines_free(room_id)
     for p in get_sessions_in_room(room_id):
         if getattr(p, 'entered_game', False):
-            _submit_send(send_rel, p, pkt, f'<- EVENT {label} (0x83 fly={int(e["fly"])} start={"set" if e["start"] else 0})', to=3.0); n += 1
+            _ws = event_wire_start(room_id, e, sess=p)             # v968f9g: per pilot - see event_note_gamedef
+            _fb = fly_enable_byte(room_id, p)                      # v968f9h/i: per pilot
+            if (_ws, _fb) not in _pk:
+                _pk[(_ws, _fb)] = build_event_83(_fb, _ws)
+            _submit_send(send_rel, p, _pk[(_ws, _fb)], f'<- EVENT {label} (0x83 enable={int(_fb)} start={"set" if _ws else 0})', to=3.0); n += 1
+            if _free and p.__dict__.get('_evtab', {}).get(room_id) is not True:
+                _stale.append(p)
+    for p in _stale:
+        try:
+            if p.__dict__.get('_evtab_told') != room_id:
+                p.__dict__['_evtab_told'] = room_id
+                send_system_msg(p, 'EVENT: this arena now keeps the engines free while the weapons are locked, but your client '
+                                   'entered with the older arena settings (engines locked too). Leave to the lobby and come back in to get them.')
+        except Exception:
+            pass
+    if _stale:
+        log('EVENT', f'room {room_id}: {len(_stale)} pilot(s) hold a GAME_DEF without the [EventParam] table (entered before the '
+                     f'box was ticked): plain lock for them - {sorted(str(getattr(p, "current_pilot", "?")) for p in _stale)}')
     return n
 
 def event_start(room_id, by='console', at=None, _delayed=False):
@@ -1707,7 +1838,10 @@ def event_start(room_id, by='console', at=None, _delayed=False):
     e['timer'] = None
     _future = (at is not None and float(at) > time.time() + 1.0)
     e['start'] = float(at) if _future else time.time() - EVENT_UNLOCK_BACKDATE_S
+    _was_off9j = not e['fly']
     e['fly'] = True; e['by'] = by
+    if _was_off9j:
+        fly_sync(room_id, label=', the fight')                    # v968f9j
     globals().get('_EVENT_HOLD_CACHE', {}).pop(room_id, None)      # v968f8z: ... and ends now
     try:
         if room_id in GUNS_COLD:                                   # v968f9a: the fight is on - a guns-cold hold ends with it
@@ -1718,9 +1852,29 @@ def event_start(room_id, by='console', at=None, _delayed=False):
     if not tournament_cfg_for_room(room_id):          # v956f5: the tournament arms its own clock at the competition start
         event_arm_end(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)
         evs_schedule_start(room_id, (e['start'] if _future else time.time()) + _d * 60.0, by=by)   # v958f5
-    _mins = int(round(((e['start'] - time.time()) if _future else 0.0) / 60.0 + _d))
-    if _mins > 0:
-        room_system_msg(room_id, f'EVENT: weapons free in {_mins} min.')
+    _secs9h = ((e['start'] - time.time()) if _future else 0.0) + _d * 60.0
+    if _secs9h > 1.0:
+        room_system_msg(room_id, f'EVENT: weapons free in {_fmt_span(_secs9h)}.')     # v968f9h: seconds too
+        # v968f9i (Alon 11-17 22:40: 'add a fight/go message with a flashing yellow text like in the weapons hold when
+        # the timer of YY seconds in "event open XX YY" elapses'): the clients free their weapons at that moment by
+        # themselves and nothing said so. A timer announces it - cancelled by the next event_start / event_stop (they
+        # cancel e['timer']), and it checks that the start it was armed for is still the room's start.
+        def _go9i(_rid=room_id, _tok=e['start']):
+            try:
+                _ee = EVENTS.get(_rid)
+                if not _ee or _ee.get('start') != _tok:
+                    return
+                _ee['timer'] = None
+                room_system_msg(_rid, 'EVENT: FIGHT - weapons free!')
+                try:
+                    room_banner(_rid, 'FIGHT! - WEAPONS FREE')
+                except Exception:
+                    pass
+                log('EVENT', f'room {_rid}: countdown over - FIGHT announced')
+            except Exception:
+                logx('EVENT', 'go announcement failed')
+        _t9i = threading.Timer(_secs9h, _go9i); _t9i.daemon = True; _t9i.start()
+        e['timer'] = _t9i
     else:
         room_system_msg(room_id, 'EVENT: STARTED - weapons free!')
         try:
@@ -1746,7 +1900,9 @@ def event_stop(room_id, by='console'):
     if not tournament_cfg_for_room(room_id):
         event_end_cancel(room_id)                       # v956f5: a plain event arena on hold has no clock
     n = event_push(room_id, 'stop')
-    room_system_msg(room_id, 'EVENT: HOLD - weapons and engines are locked until the host starts the event.')
+    room_system_msg(room_id, 'EVENT: HOLD - weapons are locked until the host starts the event (engines stay free).'
+                    if event_engines_free(room_id) else
+                    'EVENT: HOLD - weapons and engines are locked until the host starts the event.')
     try:
         room_banner(room_id, 'HOLD FIRE')
     except Exception:
@@ -1754,25 +1910,193 @@ def event_stop(room_id, by='console'):
     log('EVENT', f'room {room_id}: STOP by {by} -> {n} pilot(s)')
     return e
 
-def event_fly_button(room_id, on, by='console'):
-    if not event_mode(room_id):
-        log('EVENT', f'room {room_id}: `event fly` ignored - the arena is not in event mode')
+# ----------------------------------------------------------------------------------------------------
+# v968f9h THE FLY BUTTON, AS THE CLIENT REALLY HAS IT (Alon 11-17 22:10, local, ordinary pilot: 'fly button cannot be
+# disabled' - `event fly 52 off` twice, his client took both 0x83 and the button stayed lit).
+#   FUN_00440b40(enable), the only thing msg 0x83's enable byte reaches:
+#       enable != 0 -> DAT_00c1cdbc = 1 (button lit) and DAT_00c7e308 = 1;   enable == 0 -> NOTHING.
+#   HQ dialog init (Hq_dlg.cpp, 0x6e1b9b), run when the pilot enters the arena:
+#       DAT_00c1cdbc = GAME_DEF.FlyButtonEnabled ? 1 : (DAT_00c7e308 ? 1 : 0)
+#   DAT_00c7e308 is written nowhere else - once a client has been sent an enable byte it keeps a lit button in EVERY
+#   arena until the game is restarted.
+# So the button can be switched ON from the server at any time, and OFF only through the GAME_DEF a pilot ENTERS
+# with - and not at all on a client that was enabled once. v968f9g's ##FlyDisable (a 0 byte) could never work, and
+# every event arena sent the enable byte with each state message, which made every client immune.
+# Now:  * the enable byte is sent only where a host switched the button on in an arena that serves it off;
+#       * 'off' is written into the GAME_DEF the lobby is served (fly_gamedef_flag) - pilots who enter afterwards
+#         have a grey button;
+#       * and the server refuses the Fly ask of anybody else (handle_fly_start_place) - the pilot who was inside,
+#         or whose client was enabled before, clicks a lit button and is told why nothing happens. Sysops fly.
+# ----------------------------------------------------------------------------------------------------
+_FLY_TOUCHED = set()      # non-event rooms where a host switched the Fly button this run
+# v968f9i (Alon 11-17 22:35 local: `event fly 52 on` with the button already on, then `off`, re-entered - GAME_DEF dump
+# 'FlyButtonEnabled=no', button lit, click refused): the `on` had sent the enable byte to a client that needed none
+# and made it immune 10 s before the test. The byte now goes ONLY to a client whose own GAME_DEF of the room said
+# 'off' (_flyno, recorded when the 212 is sent) - i.e. one that really sits in front of a grey button.
+_FLY_SERVED = {}          # room_id -> FlyButtonEnabled as written into the GAME_DEF last built for the room
+
+def fly_button_on(room_id):
+    """The server's view: may ordinary pilots fly here as far as the Fly button goes?"""
+    if room_id is None:
+        return True
+    try:
+        if event_mode(room_id):
+            e = EVENTS.get(room_id)
+            if e is not None:
+                return bool(e['fly'])
+            return bool((event_cfg_for_room(room_id) or {}).get('ev_fly_button', 1))
+    except Exception:
+        logx('EVENT', 'fly state lookup failed')
+    return room_id not in _FLY_OFF
+
+def fly_enable_byte(room_id, sess=None):
+    """The enable byte for msg 0x83 to this pilot: 1 only when the room's button is on AND the GAME_DEF he holds
+    told his client 'off' (he looks at a grey button). Never 1 otherwise - see above."""
+    try:
+        if sess is None or sess.__dict__.get('_flyno', {}).get(room_id) is not True:
+            return False
+        return fly_button_on(room_id)
+    except Exception:
+        logx('EVENT', 'fly byte lookup failed'); return False
+
+# ----------------------------------------------------------------------------------------------------
+# v968f9j THE REAL TOGGLE: msg 0x74 (Alon 11-17 23:02: 'the fly off must be able to toggle the button off').
+# The HQ dialog decides the Fly button in FUN_006de570; besides camp / plane / airfield it has TWO server flags:
+#     DAT_00c1cdbc  the event 'Fly button enabled' (GAME_DEF + msg 0x83, one way, see above)   0x6de8d4
+#     DAT_00c1cdb8  JOIN ENABLED                                                               0x6de658
+# and DAT_00c1cdb8 has its own message, id 116 = 0x74 (dispatch slot 0xc820a8 -> FUN_004ee470):
+#     [0x74][disabled u8]   disabled != 0 -> DAT_00c1cdb8 = 0 (button grey) - ignored by a client with moderator rights
+#                           disabled == 0 -> DAT_00c1cdb8 = 1 (button lit)
+#     then every listener is told (list 0xbfa5c8 - the HQ dialog redraws the button at once).
+# It works both ways, any number of times, in any arena, on a pilot who is already inside. This is what the 2009
+# server sent the room for ##JoinDisable / ##JoinEnable (the client only sends 0x5f TO the server). The flag is set
+# to 'enabled' again when a pilot picks an arena in the lobby (0x6ad9d6 / 0x6af909), so a joiner of a room whose
+# button is off is sent the message at entry.
+#   ##FlyDisable / `event fly <room> off`  -> 0x74 [1] to the room, and to every joiner
+#   ##FlyEnable  / `event fly <room> on`   -> 0x74 [0] to the room (+ the 0x83 enable byte to a client whose GAME_DEF
+#                                             said 'off', which holds the OTHER flag down)
+# The GAME_DEF is no longer touched by a host command (v968f9h/i wrote FlyButtonEnabled=no into it - not needed, and
+# it made the way back depend on the one-way byte). The server-side refusal of the Fly ask stays as the backstop.
+# ##JoinDisable / ##JoinEnable are unchanged: the button stays lit, the server refuses the spawn.
+# ----------------------------------------------------------------------------------------------------
+FLY_MSG_JOIN_STATE = 0x74
+
+def build_join_state_74(disabled):
+    return build_ingame_pkt(bytes([FLY_MSG_JOIN_STATE, 1 if disabled else 0]))
+
+def fly_sync(room_id, only=None, label=''):
+    """Send the room's Fly-button state (msg 0x74) to every pilot inside, or to `only`. Returns the count."""
+    try:
+        off = not fly_button_on(room_id)
+        pkt = build_join_state_74(off); n = 0
+        for p in ([only] if only is not None else get_sessions_in_room(room_id)):
+            if getattr(p, 'entered_game', False) or only is not None:
+                _submit_send(send_rel, p, pkt, f'<- FLY BUTTON {"off" if off else "on"} (0x74{label})', to=3.0); n += 1
+        return n
+    except Exception:
+        logx('EVENT', 'fly sync failed'); return 0
+
+def fly_gamedef_flag(room_id):
+    """v968f9j: a host command no longer changes the served GAME_DEF (msg 0x74 does the job) - always None."""
+    return None
+
+# v968f9k A PILOT WHO RE-ENTERS (Alon 11-18 06:19: 'toggle now works! but when a player leaves the arena and rejoins
+# with the button disabled it becomes reenabled, clicking it works however he is not allowed to spawn').
+# His client: 04:17:48.813 'in 116'2' and THEN 'in 201'17' in the same batch - the 0x74 sent at entry is handled
+# before the join answer, and when the Arenas dialog completes the join (FUN_006af7b0, on ArenaJoinIdent) it sets
+# the flag afresh:  DAT_00c1cdb8 = (arena record +0x24 && no rights) ? 0 : 1.  Record +0x24 is filled from the 0xd2
+# arena-list row: flag byte bit 0x04 -> desc+0x20 -> FUN_0076d3d0 arg 10 -> record +0x24 (FUN_0076b5b0). That is the
+# bit mapped on 2026-08-31 as the RED X 'disabled arena' icon, 'cosmetic, does not block joining' - it is the join-
+# disabled flag: no block on entering the arena, a grey Fly button inside.
+#   * the arena list carries bit 0x04 for a room whose Fly button is off (red X in the lobby; the joiner's button
+#     is grey from the first frame);
+#   * and the state is sent again when the client opens the HQ screen (its 0x3a request - after the join has
+#     completed, so nothing overwrites it): covers a list the client fetched before the host's command.
+ARENA_LIST_JOIN_DISABLED_FLAG = 0x04
+
+def fly_off_for_list(room_id):
+    """Cheap for the arena list (built on every lobby poll): only rooms a host has switched, or whose event state
+    exists, are looked at closely."""
+    try:
+        if room_id in _FLY_OFF:
+            return not fly_button_on(room_id)
+        e = EVENTS.get(room_id)
+        if e is not None and not e['fly']:
+            return not fly_button_on(room_id)
+    except Exception:
+        pass
+    return False
+
+def fly_sync_hq(s):
+    """The client has opened its HQ screen: state the room's Fly-button flag (off, or a room a host has switched)."""
+    try:
+        rid = getattr(s, 'current_room', None)
+        if rid is None:
+            return
+        if not fly_button_on(rid) or rid in _FLY_TOUCHED or (EVENTS.get(rid) or {}).get('fly_host'):
+            fly_sync(rid, only=s, label=', HQ open')
+    except Exception:
+        logx('EVENT', 'fly state at HQ open failed')
+
+def apply_fly_button_live(d, room_id):
+    """v968f9h: the live Fly-button state into the GAME_DEF being served (length-preserving, tail-anchored).
+    Returns a change string, '' when nothing to do, None when the tail is not recognised."""
+    st = fly_gamedef_flag(room_id)
+    if st is None:
+        return ''
+    o = _gamedef_tournament_offsets(d)
+    if o is None:
         return None
+    was = bool(d[o['flags2']] & EV_FLAG2_FLYBUTTON)
+    if was == st:
+        return ''
+    if st: d[o['flags2']] |= EV_FLAG2_FLYBUTTON
+    else:  d[o['flags2']] &= (~EV_FLAG2_FLYBUTTON) & 0xff
+    return f'Event.FlyButtonEnabled {int(was)}->{int(st)} (host command)'
+
+def event_fly_button(room_id, on, by='console'):
+    if room_id is None:
+        return None
+    on = bool(on)
+    if not event_mode(room_id):
+        _FLY_TOUCHED.add(room_id)
+        if on:
+            _FLY_OFF.pop(room_id, None)
+        else:
+            _FLY_OFF[room_id] = by
+        n = fly_sync(room_id)                                     # v968f9j: the toggle itself
+        log('EVENT', f'room {room_id}: Fly button {"ENABLED" if on else "DISABLED"} by {by} (arena without event mode) -> {n} pilot(s) (0x74)')
+        return {'start': None, 'fly': on, 'by': by, 'timer': None}
     e = event_state(room_id)
-    e['fly'] = bool(on)
-    n = event_push(room_id, 'fly-button')
-    log('EVENT', f'room {room_id}: Fly button {"ENABLED" if on else "DISABLED"} by {by} -> {n} pilot(s)')
+    e['fly'] = on; e['fly_host'] = True
+    n = fly_sync(room_id)                                         # v968f9j
+    if on:
+        event_push(room_id, 'fly-button')                         # the 0x83 enable byte for clients whose GAME_DEF said 'off'
+    log('EVENT', f'room {room_id}: Fly button {"ENABLED" if on else "DISABLED"} by {by} -> {n} pilot(s) (0x74)')
     return e
 
 def event_on_spawn(s):
-    """ServerConfirm: a joiner of a room whose event has started gets the start, else nothing (his
-    GAME_DEF already says locked)."""
+    """Arena entry: the room's event state for the joiner."""
     rid = getattr(s, 'current_room', None)
-    if rid is None or not event_mode(rid):
-        return                                   # v953f5d: nothing at all outside event-mode arenas
+    if rid is None:
+        return
+    try:                                         # v968f9j: the Fly-button toggle state, any arena
+        if not fly_button_on(rid):
+            fly_sync(rid, only=s, label=', entry')
+        elif rid in _FLY_TOUCHED or (EVENTS.get(rid) or {}).get('fly_host'):
+            fly_sync(rid, only=s, label=', entry')      # a room a host has switched this run: state it both ways
+    except Exception:
+        logx('EVENT', 'fly state at entry failed')
+    if not event_mode(rid):
+        if fly_enable_byte(rid, s):              # v968f9h/i: only to a client that entered with a grey button
+            _submit_send(send_rel, s, build_event_83(True, time.time() - EVENT_UNLOCK_BACKDATE_S),
+                         '<- FLY BUTTON on (0x83, entry)', to=3.0)
+        return                                   # v953f5d: nothing else at all outside event-mode arenas
     e = event_state(rid)
-    if e['start'] or not e['fly']:
-        _submit_send(send_rel, s, build_event_83(e['fly'], e['start']), '<- EVENT state (0x83, entry)', to=3.0)
+    _ws = event_wire_start(rid, e, sess=s)       # v968f9g
+    # v968f9h: always - a 'no start' is stated too (the start a client holds from an earlier arena or round is not
+    # known to be cleared at entry; the handler stores whatever it is sent, 0x4407c0).
+    _submit_send(send_rel, s, build_event_83(fly_enable_byte(rid, s), _ws), '<- EVENT state (0x83, entry)', to=3.0)
 
 def event_status_text(rid=None):
     out = []
@@ -1782,7 +2106,8 @@ def event_status_text(rid=None):
         if not event_mode(r):
             out.append(f'room {r}: not an event arena (event mode off on the web) - no lock, no timers'); continue
         e = EVENTS.get(r) or {'start': None, 'fly': True, 'by': ''}
-        out.append(f'room {r}: EVENT MODE, unlock delay {cfg.get("ev_start_delay", "?")} min, '
+        out.append(f'room {r}: EVENT MODE ({"weapons-only lock, engines free" if event_engines_free(r, cfg) else "engines + weapons lock"}), '
+                   f'unlock delay {cfg.get("ev_start_delay", "?")} min, '
                    f'fly button initially {cfg.get("ev_fly_button", "?")} | '
                    + (f'STARTED {time.strftime("%H:%M:%S", time.gmtime(e["start"]))} UTC by {e["by"]}' if e['start'] else 'not started (locked)')
                    + f', fly button {"on" if e["fly"] else "off"}')
@@ -2419,7 +2744,58 @@ def _tournament_rebase(room_id, by, back_s, label):
     log('TOURNAMENT', f'room {room_id}: {label.upper()} by {by} -> {n} pilot(s); participants {sorted(e["participants"])}')
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5 re-armed
     evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
+    _tn_arm_fight(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v968f9g
     return e, cfg
+
+_TN_FIGHT_TIMERS = {}       # room_id -> Timer that fires at the competition start reached by the CLOCK
+
+def _tn_arm_fight(room_id, t_comp, by='clock'):
+    """v968f9g [THE CLOCK STARTS THE FIGHT] (Taurus 11-17: 'Timers for joining ran out ok, timer for game on worked,
+    but no hot guns, no engines at any point' - live room 189: `event open` 18:30:26, joining 3 min + shooting 1 min
+    -> competition 18:34:26; the event lock stayed until he typed ##StartEvent at 18:34:50, MONSTERDOGG had crash-
+    landed at 18:34:31 and lost his only life). When the tournament clock itself reaches the competition, the server
+    now does what ##StartEvent does for the other half: weapons free in an event-mode arena (and a guns-cold hold
+    ends), the arena is told. 'Fight now' paths (delay <= 1 s) free the weapons themselves and arm nothing here."""
+    old = _TN_FIGHT_TIMERS.pop(room_id, None)
+    if old:
+        try: old.cancel()
+        except Exception: pass
+    delay = float(t_comp) - time.time()
+    if delay <= 1.0:
+        return
+    e = tournament_state(room_id, create=False)
+    tok = e['start'] if e else None
+    t = threading.Timer(delay, _tn_clock_fight, args=(room_id, tok)); t.daemon = True; t.start()
+    _TN_FIGHT_TIMERS[room_id] = t
+    try:                                   # v968f9h: a locked engines-free arena now counts down to this moment
+        if event_mode(room_id) and event_engines_free(room_id) and event_state(room_id).get('start') is None:
+            event_push(room_id, 'fight scheduled')
+    except Exception:
+        logx('EVENT', 'schedule push failed')
+
+def _tn_clock_fight(room_id, tok):
+    try:
+        _TN_FIGHT_TIMERS.pop(room_id, None)
+        e = tournament_state(room_id, create=False)
+        if not e or e['start'] != tok or e['finished']:
+            return                                             # re-based, reset or finished since it was armed
+        e['join_closed'] = True
+        for p in get_sessions_in_room(room_id):
+            if getattr(p, 'entered_game', False) and getattr(p, 'flying', False) and p.current_pilot and not sess_rights(p):
+                e['participants'].add(p.current_pilot)
+        room_system_msg(room_id, 'TOURNAMENT: the competition starts NOW. Good luck!')
+        try:
+            room_banner(room_id, 'FIGHT!')
+        except Exception:
+            pass
+        log('TOURNAMENT', f'room {room_id}: COMPETITION by the clock; participants {sorted(e["participants"])}')
+        if event_mode(room_id):
+            if event_state(room_id).get('start') is None:
+                event_start(room_id, by='the clock')
+        elif guns_cold(room_id):
+            guns_set(room_id, False, by='the clock')
+    except Exception:
+        logx('TOURNAMENT', 'clock fight failed')
 
 def tournament_close_joining(room_id, by='console'):
     """v952f5c: skip the JOINING window only - joining closes now, the shooting countdown (ShootDelay min)
@@ -2436,6 +2812,7 @@ def tournament_close_joining(room_id, by='console'):
             _submit_send(send_rel, p, pkt, '<- TOURNAMENT close-joining (0x5c)', to=3.0)
     event_arm_end(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v956f5
     evs_schedule_start(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)  # v958f5
+    _tn_arm_fight(room_id, e['start'] + (cfg['tn_start_delay'] + cfg['tn_shoot_delay']) * 60.0, by=by)   # v968f9g
     room_system_msg(room_id, (f'EVENT: TOURNAMENT - joining is closed - shooting starts in {cfg["tn_shoot_delay"]} min.'))
     return e
 
@@ -2483,6 +2860,18 @@ def tournament_on_spawn(s):
         return
     if e['start'] is None:
         # first pilot in a tournament arena starts the clock (console `tournament start` restarts it)
+        if sess_rights(s):
+            # v968f9g [A SYSOP'S SPAWN NEVER STARTS THE CLOCK] (Taurus 11-17: 'Need Sysop entry to not start timers,
+            # regardless of country chosen' - live 18:07:34, 18:09:51, 18:14:01 'START by first spawn (Taurus@HQ)'
+            # while he was only looking at the arena). The host opens it (##EventOpen [seconds] / `event open`),
+            # or the first ordinary pilot's spawn does.
+            _who = s.current_pilot or '?'
+            if _who not in e.setdefault('told', set()):
+                e['told'].add(_who)
+                send_system_msg(s, 'TOURNAMENT: the clock is not running and your spawn does not start it. '
+                                   '##EventOpen [seconds] opens the joining window; the first pilot\'s spawn does too.')
+                log('TOURNAMENT', f'room {rid}: sysop {_who} spawned - the clock stays idle')
+            return
         tournament_start(rid, by=f'first spawn ({s.current_pilot})')
         e = tournament_state(rid)
     else:
@@ -2517,7 +2906,7 @@ def tournament_fly_allowed(s):
     # v968f8m: a joining window of 0 does not mean 'closed at once' (that locked out everybody but the first
     # pilot) - it means no clock closes it: joining stays open until the host closes it (`event close`) or
     # starts the fight (##StartEvent / `event fight`)
-    _open = (phase == 'joining') or (not cfg['tn_start_delay'] and not e.get('join_closed'))
+    _open = (phase == 'joining') or (not cfg['tn_start_delay'] and not e.get('join_closed') and not e.get('timed'))   # v968f9g: a timed window closes by itself
     if not _open and who not in e['participants']:
         return False, 'Joining has ended for this tournament.'
     lives = cfg['tn_lives']
@@ -2620,6 +3009,64 @@ def tournament_status_text(rid=None):
                 out.append(f'    {p:<24} deaths {e["deaths"].get(p, 0)}' + ('  GHOST' if p in e['ghosts'] else ''))
     return out or ['no tournament rooms']
 
+def event_open_room(rid, by='console', at=None, join_s=None):
+    """v968f9g: `event open` / ##EventOpen. Returns the result line."""
+    _tcfg = tournament_cfg_for_room(rid)
+    _t = tournament_start(rid, by=by, at=at, join_s=join_s) if _tcfg else None
+    _ev = event_mode(rid)
+    if _ev and not _t and join_s is not None:
+        # v968f9h: no tournament clock to run - the number is the countdown to the fight itself (= event fight in <s>)
+        if event_state(rid).get('start') is not None:
+            event_stop(rid, by=by)
+        event_start(rid, by=by, at=time.time() + max(0.0, float(join_s)))
+        return f'weapons free in {_fmt_span(join_s)} (the clients count it down); ##EventHold stops it'
+    if _ev and (not _t or event_state(rid).get('start') is not None):
+        event_stop(rid, by=by)            # a new round starts locked; a plain event arena: open = locked, waiting for 'fight'
+    if not (_t or _ev):
+        return 'this arena has neither tournament nor event mode (web: Tournament section)'
+    out = []
+    if _t:
+        _tcfg = tournament_cfg_for_room(rid) or _tcfg
+        out.append('tournament clock started (joining '
+                   + (_fmt_span(join_s) if join_s is not None else
+                      f'{_tcfg["tn_start_delay"]} min' if _tcfg['tn_start_delay'] else 'open until closed')
+                   + f', shooting {_tcfg["tn_shoot_delay"]} min later)')
+    if _ev:
+        _ph = tournament_phase(rid)[0] if _t else ''
+        out.append('weapons locked until the fight' + (' - the clock frees them at the competition start'
+                                                      if _ph in ('joining', 'countdown') else ''))
+    return ', '.join(out)
+
+def event_end_room(rid, winner=None, by='console'):
+    if EVS.get(rid) and not EVS[rid].get('finished'):
+        evs_finish(rid, by='console')                                 # v958f5
+    if tournament_cfg_for_room(rid):
+        tournament_finish(rid, winner=winner, by=by)
+    event_end_cancel(rid)
+    return 'done'
+
+def event_reset_room(rid, by='console'):
+    TOURNAMENTS.pop(rid, None); _TN_CFG.pop(rid, None)
+    event_end_cancel(rid); evs_stop(rid)                              # v958f5
+    for _reg in (_EVS_START_TIMERS, _TN_FIGHT_TIMERS):
+        _t0 = _reg.pop(rid, None)
+        if _t0:
+            try: _t0.cancel()
+            except Exception: pass
+    _ev = EVENTS.pop(rid, None)
+    if _ev and _ev.get('timer'):
+        try: _ev['timer'].cancel()
+        except Exception: pass
+    if _ev and _ev.get('fly_host'):
+        fly_sync(rid, label=', reset')                                # v968f9j: the arena's own Fly-button state again
+    if guns_cold(rid):                                                # v968f9g: a reset leaves no hold behind
+        guns_set(rid, False, by=by)
+    if event_mode(rid):
+        event_stop(rid, by=by)
+    return ('cleared - back to the start' + (' (weapons locked)' if event_mode(rid) else '')
+            + '; `event open` / ##EventOpen starts the clock'
+            + ('' if event_mode(rid) else ', and so does the first ordinary pilot\'s spawn'))
+
 def enact_mod_action(s, op, body):
     """Apply the self-testable moderator actions server-side. `body` is opcode-first.
 
@@ -2664,6 +3111,8 @@ def enact_mod_action(s, op, body):
                 tournament_go(room, by=by)
             if event_mode(room):
                 event_start(room, by=by)
+            elif guns_cold(room):                  # v968f9g: as `event fight` - the fight ends a guns-cold hold
+                guns_set(room, False, by=by)
             log('MODERATOR', f'EVENT FIGHT in room {room} by {by} (##StartEvent)')
         elif op == 0x8b:                       # ClearScores: not modelled (scores are the ladder's) - logged
             log('MODERATOR', f'CLEARSCORES from {by} in room {room} - not implemented (arena scores live in the ladder)')
@@ -6085,7 +6534,16 @@ def apply_tournament_settings(d, settings):
     if not EVENT_LOCK_ALL_ARENAS:
         _set_bit('ev_enabled', EV_FLAG_DELAYS, 'Event.DelaysActive')   # v953f5d: event mode = this arena only
         _set_u8('ev_start_delay', 'ev_start_delay', 0, 240)            # v953f5f: the client's own unlock countdown
-    _set_bit('ev_fly_button', EV_FLAG2_FLYBUTTON, 'Event.FlyButtonEnabled', 'flags2')
+    # v968f9g [THE FLY-BUTTON FLAG BELONGS TO EVENT MODE] (Taurus 11-17: 'Joining is disabled for all including
+    # Sysops ... no one could enter' - room 189 18:20-18:31: event mode OFF, 'Fly button enabled from the start'
+    # unticked -> served FlyButtonEnabled=no; the client greys the HQ Fly button on that flag alone, `event fly`
+    # refused to act outside event mode, and for eleven minutes not one Fly ask reached the server). Without
+    # DelaysActive the flag is now always served yes.
+    if d[o['flags']] & EV_FLAG_DELAYS:
+        _set_bit('ev_fly_button', EV_FLAG2_FLYBUTTON, 'Event.FlyButtonEnabled', 'flags2')
+    elif not (d[o['flags2']] & EV_FLAG2_FLYBUTTON):
+        d[o['flags2']] |= EV_FLAG2_FLYBUTTON
+        changes.append('Event.FlyButtonEnabled 0->1 (no event mode in this arena: the Fly button is never greyed by the GAME_DEF)')
     _set_bit('tn_enabled', TN_FLAG_ACTIVE, 'Active')
     _set_u8('lives', 'tn_lives', 0, 99)
     _set_bit('tn_ghosting', TN_FLAG_GHOSTING, 'Ghosting')
@@ -6094,6 +6552,46 @@ def apply_tournament_settings(d, settings):
     _set_u8('start_delay', 'tn_start_delay', 0, 240)
     _set_u8('shoot_delay', 'tn_shoot_delay', 0, 240)
     return changes
+
+def apply_event_plane_config(d, settings):
+    """v968f9g: insert the [EventParam<class><camp>] table for an 'engines free' event arena (see EVENT_WEAPON_LOCK_MIN).
+    Wire (GameDef.cpp pack 0x577753 / unpack FUN_0057bee0): at the list byte (len-84 while the list is empty) one
+    record per present [class][camp]:  [0x20 + class*8 + camp][EngineStart+0x80][FireGuns+0x80][FireRockets+0x80]
+    [DropBombs|DropSupply+0x80][Taxi+0x80], minutes; a 0 byte ends the list. NOT length-preserving: called LAST,
+    after every tail-anchored writer and the walk guard; the bytes behind the list keep their distance from the end.
+    Event.StartDelay would hold the engines back too, so it is served 0 and added by the server (event_wire_start).
+    Returns a change string, '' when not applicable, None when the tail is not recognised."""
+    settings = settings if isinstance(settings, dict) else {}
+    def _on(k):
+        try:
+            return bool(int(float(settings.get(k, 0) or 0)))
+        except (TypeError, ValueError):
+            return False
+    if not (_on('ev_enabled') and _on('ev_engines')):
+        return ''
+    o = _gamedef_tournament_offsets(d)
+    if o is None:
+        return None
+    if not (d[o['flags']] & EV_FLAG_DELAYS):
+        return ''
+    # v968f9h (Alon 11-17 22:10: 'event timer set to 30 min, started the clock at 30 instead of 0'): the client's HUD
+    # event clock (0x4559a4) is  now - (start + Event.StartDelay)  and v968f9g served StartDelay 0 with the weapons
+    # held by +120 in the table - so the clock read 30:00 during the hold (the lock's start is 30 min back) and
+    # would have read 120:10 at the fight. Turned round: Event.StartDelay = W, the table takes W OFF again for
+    # engines and taxi (the checks add the two as signed ints: 0x4d884f-0x4d8868) and adds nothing for the weapons.
+    # Every lock moment is where it was; the clock's zero is now the weapons-free moment = the fight.
+    _w = max(1, min(127, int(EVENT_WEAPON_LOCK_MIN)))
+    _old = d[o['ev_start_delay']]; d[o['ev_start_delay']] = _w
+    _e = 0x80 - _w
+    ent = bytearray()
+    for _cls in range(3):                       # Fighters, Bombers, Support
+        for _camp in range(8):
+            ent += bytes([0x20 + _cls * 8 + _camp, _e, 0x80, 0x80, 0x80, _e])
+    _at = len(d) - 84
+    d[_at:_at] = ent
+    return (f'[EventParam] 24 records (3 classes x 8 camps: EngineStart -{_w}, Taxi -{_w}, guns/rockets/bombs-supplies 0) '
+            f'inserted at the list byte, +{len(ent)} B; Event.StartDelay {_old}->{_w} (engines and taxi net 0, weapons {_w} min; '
+            f'the arena\'s own unlock delay is added by the server)')
 
 def apply_radar_gate_defaults(d, room_id, settings):
     """v949f5: with the radar gate on for this arena and no explicit [Radar] override, serve the
@@ -6694,6 +7192,28 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
             return None, 0, 0
     elif room_name:
         GAMEDEF_BAD_NAMES.discard(room_name)
+    try:                                               # v968f9h: a host's ##FlyDisable / ##FlyEnable
+        _flv = apply_fly_button_live(d, room_id)
+        if _flv:
+            log('GAMEDEF212', 'event: ' + _flv)
+    except Exception:
+        logx('GAMEDEF212', 'live fly-button state failed')
+    try:                                               # v968f9g: the one writer that changes the length - last
+        _epc = apply_event_plane_config(d, arena_settings)
+        if room_id is not None:
+            _EVENT_TABLE_ROOMS[room_id] = bool(_epc)         # always: an unticked box must not leave a stale True
+        if _epc is None:
+            log('GAMEDEF212', 'event plane config: tail not recognised - not inserted (the arena locks engines too)')
+        elif _epc:
+            log('GAMEDEF212', 'event: ' + _epc)
+    except Exception:
+        logx('GAMEDEF212', 'event plane config failed')
+    try:                                               # v968f9i: what this GAME_DEF tells the client about the Fly button
+        _o9i = _gamedef_tournament_offsets(d)
+        if room_id is not None and _o9i is not None:
+            _FLY_SERVED[room_id] = bool(d[_o9i['flags2']] & EV_FLAG2_FLYBUTTON)
+    except Exception:
+        pass
     D_orig = len(d)
     # REAL-LZ encode with bc*16+1 alignment. Real compression keeps even teamed GAME_DEFs far
     # under the client's per-packet MTU ceiling (the all-literals encoder INFLATES the struct
@@ -8275,17 +8795,12 @@ def console_handler():
                 _by = 'console' if _src == 'terminal' else _src
                 try:
                     if _sub in ('open', 'start'):
-                        _rid = int(_a[1], 0); _at = None
+                        _rid = int(_a[1], 0); _at = None; _js = None
                         if len(_a) > 3 and _a[2].lower() == 'in':
                             _at = time.time() + float(_a[3])
-                        _t = tournament_start(_rid, by=_by, at=_at) if tournament_cfg_for_room(_rid) else None
-                        _ev = event_mode(_rid)
-                        if _ev and not _t:
-                            event_stop(_rid, by=_by)          # a plain event arena: open = locked, waiting for 'fight'
-                        log('CONSOLE', f'event open room {_rid}: ' + ', '.join(
-                            ([f'tournament clock started (joining {tournament_cfg_for_room(_rid)["tn_start_delay"]} min)'] if _t else [])
-                            + (['weapons locked until fight'] if _ev else [])) if (_t or _ev) else
-                            f'event open room {_rid}: this arena has neither tournament nor event mode (web: Tournament section)')
+                        elif len(_a) > 2:
+                            _js = float(_a[2])                 # v968f9g: `event open <room> <seconds>` = the joining window
+                        log('CONSOLE', f'event open room {_rid}: ' + event_open_room(_rid, _by, at=_at, join_s=_js))
                     elif _sub in ('close', 'closejoin', 'nojoin'):
                         _rid = int(_a[1], 0)
                         _e = tournament_close_joining(_rid, by=_by)
@@ -8311,27 +8826,10 @@ def console_handler():
                             log('CONSOLE', f'event hold room {_rid}: not an event-mode arena -> ' + guns_set(_rid, True, by=_by))   # v960f5
                     elif _sub in ('end', 'finish'):
                         _rid = int(_a[1], 0); _w = _a[2] if len(_a) > 2 else None
-                        if EVS.get(_rid) and not EVS[_rid].get('finished'):
-                            evs_finish(_rid, by='console')                                 # v958f5
-                        if tournament_cfg_for_room(_rid):
-                            tournament_finish(_rid, winner=_w, by=_by)
-                        event_end_cancel(_rid)
-                        log('CONSOLE', f'event end room {_rid}: done')
+                        log('CONSOLE', f'event end room {_rid}: ' + event_end_room(_rid, winner=_w, by=_by))
                     elif _sub == 'reset':
                         _rid = int(_a[1], 0)
-                        TOURNAMENTS.pop(_rid, None); _TN_CFG.pop(_rid, None)
-                        event_end_cancel(_rid); evs_stop(_rid)                              # v958f5
-                        _t0 = _EVS_START_TIMERS.pop(_rid, None)
-                        if _t0:
-                            try: _t0.cancel()
-                            except Exception: pass
-                        _ev = EVENTS.pop(_rid, None)
-                        if _ev and _ev.get('timer'):
-                            try: _ev['timer'].cancel()
-                            except Exception: pass
-                        if event_mode(_rid):
-                            event_stop(_rid, by=_by)
-                        log('CONSOLE', f'event reset room {_rid}: cleared - the next spawn re-opens it')
+                        log('CONSOLE', f'event reset room {_rid}: ' + event_reset_room(_rid, by=_by))
                     elif _sub in ('scores', 'score', 'report'):
                         _rid = int(_a[1], 0)
                         for _l in evs_status_text(_rid):
@@ -8339,9 +8837,18 @@ def console_handler():
                         if evs_active(_rid):
                             evs_report(_rid)                                                # v958f5: push an update now
                     elif _sub == 'fly':
-                        _rid = int(_a[1], 0); _on = (_a[2].lower() in ('on', '1', 'yes', 'enable')) if len(_a) > 2 else True
+                        _rid = int(_a[1], 0); _w = (_a[2].lower() if len(_a) > 2 else '')
+                        if _w in ('on', '1', 'yes', 'enable', 'enabled'):
+                            _on = True
+                        elif _w in ('off', '0', 'no', 'disable', 'disabled'):
+                            _on = False
+                        else:
+                            raise ValueError('on|off')      # v968f9g: `event fly 189 10` used to switch the button OFF
                         _e = event_fly_button(_rid, _on, by=_by)
-                        log('CONSOLE', f'event fly room {_rid}: ' + (f'{"on" if _on else "off"}' if _e else 'not an event-mode arena'))
+                        if _e:
+                            room_system_msg(_rid, 'The Fly button is enabled.' if _on else 'The Fly button is disabled by the host.')
+                        log('CONSOLE', f'event fly room {_rid}: ' + (('on' if _on else 'off - greyed for everybody but sysops, now and for pilots who enter')
+                                                                     if _e else 'no such room'))
                     else:
                         _rid = int(_a[1], 0) if len(_a) > 1 else None
                         for _l in tournament_status_text(_rid):
@@ -8360,7 +8867,7 @@ def console_handler():
                                 log('CONSOLE', f'room {_r}: event length {event_length_min(_r)} min - clock starts with the fight')
                 except (IndexError, ValueError):
                     log('CONSOLE', 'usage: event open|close|fight|hold|end|reset|fly|status|scores  -  '
-                                   'open <room> | close <room> | fight <room> [in <s>] | hold <room> | end <room> [winner] | reset <room> | fly <room> on|off | status [room]')
+                                   'open <room> [joining seconds] | close <room> | fight <room> [in <s>] | hold <room> | end <room> [winner] | reset <room> | fly <room> on|off | status [room]')
             elif cmd == 'poll':
                 # v951f5: poll start <room|all> <secs> <question> | <choice> | <choice> ...
                 #         poll status [room] | poll end [room] | poll cancel [room]
@@ -10963,6 +11470,8 @@ def build_arenalist(rooms):
         hdr[0:4]  = (planeset & 0xFFFFFFFF).to_bytes(4, 'little')  # plane-set (default)
         hdr[4:8]  = _arena_gameindex(creator, r[0])                     # [00 ff ff creator[0]]
         hdr[8]    = ARENA_LIST_PASSWORD_FLAG if pw_protected else 0   # +8 flag: password LOCK icon
+        if fly_off_for_list(r[0]):
+            hdr[8] |= ARENA_LIST_JOIN_DISABLED_FLAG                  # v968f9k: red X + grey Fly button for a joiner
         if ARENA_LIST_ICON_BIT_PROBE:                            # diagnostic: map bits->icons
             hdr[8] = (0x01, 0x02, 0x04)[idx] if idx < 3 else 0
         hdr[9:11] = (0).to_bytes(2, 'little')                     # desc+0x18 (unused)
@@ -11017,6 +11526,7 @@ def build_arenalist(rooms):
 # GameIndex. A server arena this client never selected was never cached -> terrain 0
 # -> crash. So push the stored GAME_DEF as a 212 (same GameIndex as the 0xd2 record)
 # BEFORE the list, so the arena - with its real terrain - is cached first.
+GAMEDEF_TABLE_MAX_PAYLOAD = 1320        # v968f9g: see build_gamedef_212
 def build_gamedef_212(room, hide_planes=None):
     """[0xd4][GameIndex:4][LZ GAME_DEF] as an APPSPACE packet, EXACT bc*16+1 size.
     The stored blob is LZ-compressed at a size (==4 mod16) that can't sit on the
@@ -11042,19 +11552,33 @@ def build_gamedef_212(room, hide_planes=None):
         _room_official = (scoring_mode_for_room(room[0]) is not None) or bool(room_has_economy(room[0]))
     except Exception:
         _room_official = False
-    comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
-                                    force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
-                                    plane_camp=plane_camp_for_room(room),
-                                    arena_settings=db_get_room_settings(room[0]),
-                                    hide_planes=hide_planes,
-                                    is_ffa=is_ffa_room(room),
-                                    stamp_mission=_room_official,  # v438f5b: official -> Type 1
-                                    room_name=(room[1] or None),   # v473f5: DB name -> in-arena
-                                    tc_room=_tc_room_flag(room[0]),  # v824f5: TC-only patches
-                                    room_id=room[0])                 # v949f5: arena world clock
-    if comp is None:
-        log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
-        return None
+    _st212 = db_get_room_settings(room[0])
+    for _try212 in (0, 1):
+        comp, D, pad = build_lz_gamedef(blob, planeset_for_room(room),
+                                        force_ffa=(FFA_NEUTRAL_GUARD and is_ffa_room(room)),
+                                        plane_camp=plane_camp_for_room(room),
+                                        arena_settings=_st212,
+                                        hide_planes=hide_planes,
+                                        is_ffa=is_ffa_room(room),
+                                        stamp_mission=_room_official,  # v438f5b: official -> Type 1
+                                        room_name=(room[1] or None),   # v473f5: DB name -> in-arena
+                                        tc_room=_tc_room_flag(room[0]),  # v824f5: TC-only patches
+                                        room_id=room[0])                 # v949f5: arena world clock
+        if comp is None:
+            log('GAMEDEF212', f'LZ build failed for room {room[0]}; skipping 212')
+            return None
+        # v968f9g: the [EventParam] table adds 144 bytes (about 75 compressed). The 212 must fit ONE reliable packet
+        # (a 1345 B GAME_DEF is known to arrive, an 1889 B message never was ACKed - see the msg-96 note): when the
+        # table pushes the message past GAMEDEF_TABLE_MAX_PAYLOAD it is built again WITHOUT the table and the arena
+        # keeps the full lock (engines too) - event_wire_start() reads _EVENT_TABLE_ROOMS.
+        if (_try212 == 0 and 5 + len(comp) > GAMEDEF_TABLE_MAX_PAYLOAD and _EVENT_TABLE_ROOMS.get(room[0]) is True):
+            log('GAMEDEF212', f'room {room[0]}: {5 + len(comp)} B with the event plane table > {GAMEDEF_TABLE_MAX_PAYLOAD} B - '
+                              f'served WITHOUT it (engines-free lock not available in this arena: the lock holds engines too)')
+            _st212 = dict(_st212 or {}); _st212['ev_engines'] = 0
+            continue
+        if _try212 == 1:
+            _EVENT_TABLE_ROOMS[room[0]] = False
+        break
     payload = bytes([0xd4]) + gidx + comp
     n = len(payload); bc = 0 if n <= 1 else (n - 1 + 15) // 16
     log('GAMEDEF212', f'212 LZ gidx={gidx.hex()} decompressed={D}B pad={pad} '
@@ -11334,9 +11858,73 @@ def _cmd_event_hold(s, args):
         return 'Sysops only.'
     rid = getattr(s, 'current_room', None)
     if event_stop(rid, by=getattr(s, 'current_pilot', None) or 'sysop'):
+        if event_engines_free(rid):                                                             # v968f9g
+            return 'event hold: weapons are locked on every client until the event is started (##StartEvent / ##EventFight); engines stay free.'
         return 'event hold: engines and weapons are locked until the event is started (##StartEvent). For a weapons-only hold use ##GunsCold.'
     return 'this arena is not in event mode - ##GunsCold gives a weapons hold here.'
+def _cmd_event(s, args, verb):
+    """v968f9g: the console's `event` verbs as in-game ## commands (Taurus 11-17: 'Need Server side commands ported
+    to in game commands. should only work in arenas with tournament or event settings enabled')."""
+    if not sess_rights(s):
+        return 'Sysops only.'
+    rid = getattr(s, 'current_room', None); by = getattr(s, 'current_pilot', None) or 'sysop'
+    if rid is None:
+        return 'Not in an arena.'
+    if verb in ('flyon', 'flyoff'):
+        if event_fly_button(rid, verb == 'flyon', by=by) is None:
+            return 'no arena'
+        room_system_msg(rid, 'The Fly button is enabled.' if verb == 'flyon' else 'The Fly button is disabled by the host.')
+        return ('Fly button enabled for this arena.' if verb == 'flyon' else
+                'Fly button off: greyed for everybody but sysops, now and for pilots who enter. ##FlyEnable restores it. '
+                '(##JoinDisable is the other gate: the button stays lit, the server refuses the spawn.)')
+    if verb == 'status':
+        return '\n'.join(tournament_status_text(rid) + event_status_text(rid) + guns_status_text(rid)
+                         + ([] if fly_button_on(rid) else ['Fly button: OFF (##FlyEnable restores it)']))
+    if not (tournament_cfg_for_room(rid) or event_mode(rid)):
+        return 'This arena has neither tournament nor event mode (web admin: arena settings, Tournament section) - event commands work only there.'
+    if verb == 'open':
+        _js = None
+        if args:
+            try:
+                _js = float(args[0])
+            except ValueError:
+                return 'usage: ##EventOpen [seconds of joining]'
+        return 'event open: ' + event_open_room(rid, by, join_s=_js)
+    if verb == 'close':
+        return 'event close: ' + ('joining closed, shooting countdown running' if tournament_close_joining(rid, by=by)
+                                  else 'no tournament in this arena')
+    if verb == 'fight':
+        _done = []
+        if tournament_cfg_for_room(rid) and tournament_go(rid, by=by):
+            _done.append('competition now')
+        if event_mode(rid):
+            if event_start(rid, by=by):
+                _done.append('weapons free')
+        elif guns_cold(rid):
+            _done.append(guns_set(rid, False, by=by))
+        return 'event fight: ' + (', '.join(_done) if _done else 'nothing to do')
+    if verb == 'end':
+        return 'event end: ' + event_end_room(rid, winner=(args[0] if args else None), by=by)
+    if verb == 'reset':
+        return 'event reset: ' + event_reset_room(rid, by=by)
+    return 'unknown event command'
 CHAT_SERVER_COMMANDS = {
+    'eventopen':   lambda s, a: _cmd_event(s, a, 'open'),      # v968f9g
+    'openevent':   lambda s, a: _cmd_event(s, a, 'open'),
+    'eventclose':  lambda s, a: _cmd_event(s, a, 'close'),
+    'closeevent':  lambda s, a: _cmd_event(s, a, 'close'),
+    'eventfight':  lambda s, a: _cmd_event(s, a, 'fight'),
+    'eventgo':     lambda s, a: _cmd_event(s, a, 'fight'),
+    'eventstart':  lambda s, a: _cmd_event(s, a, 'fight'),     # the client's own word is ##StartEvent
+    'eventend':    lambda s, a: _cmd_event(s, a, 'end'),
+    'endevent':    lambda s, a: _cmd_event(s, a, 'end'),
+    'eventreset':  lambda s, a: _cmd_event(s, a, 'reset'),
+    'resetevent':  lambda s, a: _cmd_event(s, a, 'reset'),
+    'eventstatus': lambda s, a: _cmd_event(s, a, 'status'),
+    'flyenable':   lambda s, a: _cmd_event(s, a, 'flyon'),
+    'enablefly':   lambda s, a: _cmd_event(s, a, 'flyon'),
+    'flydisable':  lambda s, a: _cmd_event(s, a, 'flyoff'),
+    'disablefly':  lambda s, a: _cmd_event(s, a, 'flyoff'),
     'eventhold': _cmd_event_hold,                    # v968f9a
     'holdevent': _cmd_event_hold,
     'mark':     lambda s, a: _cmd_mark(s, a),            # v968f5d: ##mark <label> - named mark at the plane's spot
@@ -12772,7 +13360,7 @@ def send_arenalist_with_gamedefs(s, rooms, label):
                 # pilots kept the old 212 until their lobby re-initialised).
                 try:
                     _sj = json.dumps(db_get_room_settings(r[0]) or {}, sort_keys=True)
-                    blob_key = (blob_key, hash(_sj))
+                    blob_key = (blob_key, hash(_sj), fly_gamedef_flag(r[0]))     # v968f9h: + a host's Fly-button command
                 except Exception:
                     pass
                 if sent_map.get(r[0]) == blob_key:
@@ -12781,6 +13369,7 @@ def send_arenalist_with_gamedefs(s, rooms, label):
                 if pkt is not None:
                     send_rel(s, pkt, f'<- GAME_DEF 212 (room {r[0]})', to=5.0)
                     sent_map[r[0]] = blob_key
+                    event_note_gamedef(s, r[0])           # v968f9g
                     primed += 1
                     # v455f5/v477f5: pacing between GAME_DEFs (GAMEDEF_PACING_S) - flakmagic's
                     # Aug-17 hard CTD (messages04_1_) died mid-parse of 4 rapid 212s; client
@@ -17127,6 +17716,27 @@ CAR_KILL_LINE_VIA_DECOY = True   # v968f6l decoy line. v968f6m: OFF (Alon 10-29 
                                  # later in every log), so a kill-entry delete in the SAME batch found nothing to name. Kept as a
                                  # two-step (create, positioning frame, kill-delete CAR_DECOY_LINE_DELAY_S later) for a later test.
 CAR_DECOY_LINE_DELAY_S  = 0.6    # v968f6m: beat between the decoy's create and its kill-entry delete
+CAR_DECOY_LANE          = True   # v968f9f: ONE decoy at a time per client. The client builds one queued object every 0.34 s,
+                                 # NEWEST FIRST (Taurus messages40, 11-17: 102 gaps 0.326-0.356 s; five lorries killed by two bombs
+                                 # inside 0.6 s -> five decoys, the two oldest were still unbuilt when their kill-entry deletes
+                                 # came 0.65 s after the creates: 'Server require delete object 299' with no ExitDataArrive = no
+                                 # cyan line; 3 lines for 5 kills). With the lane a decoy is created only when the one before it
+                                 # is gone, so it is always the newest in his queue and is built at his next slot. Console:
+                                 # `car decoylane on|off`.
+CAR_DECOY_LANE_GAP_S    = 0.1    # pause between one decoy's delete and the next one's create
+CAR_DECOY_LANE_MAX_S    = 20.0   # a line is never held back longer than this (then decoys overlap again)
+_DECOY_LANE_LOCK = threading.Lock()
+def _decoy_lane_take(sess, now, hold_s):
+    """Books this client's decoy lane for hold_s seconds. Returns how long to wait before the create (0 = now)."""
+    if not CAR_DECOY_LANE:
+        return 0.0
+    with _DECOY_LANE_LOCK:
+        d = sess.__dict__
+        wait = max(0.0, float(d.get('_decoy_lane_free') or 0.0) - now)
+        if wait > CAR_DECOY_LANE_MAX_S:
+            wait = CAR_DECOY_LANE_MAX_S
+        d['_decoy_lane_free'] = now + wait + hold_s + CAR_DECOY_LANE_GAP_S
+        return wait
 CAR_WRECK_S             = 20.0   # v968f6m: = TANK_WRECK_S - a dead lorry stays as a wreck as long as a dead tank
 CAR_DEAD_HP_AFTER_S     = 3.0    # v968f6n: a dead lorry's frames report HP 0 from this long after the kill (the lethal hit has landed by then)
 CAR_KILL_DELETE_MAX_S   = 30.0   # v968f6k: ceiling for the per-client delete delay (v968f6m: 12 -> 30 so `car killdelay 20` fits)
@@ -17300,33 +17910,42 @@ def car_killed(onum, killer, reason=''):
             _nd = 0
             _holders = [_p for _p in get_sessions_in_room(c['room'])
                         if getattr(_p, 'addr', None) in c['peers'] and getattr(_p, 'entered_game', False)]
-            for _p in _holders:
-                _submit_send(send_rel, _p, build_msg13(bytes([0x02]) + _ensure_ai_client_on(_p) + _drec),
-                             f'<- decoy CAR 0x{_d:04x} create (cyan line for 0x{onum:04x}) -> {_p.current_pilot}', to=3.0)
-                _nd += 1
-            try:                                                   # v968f6m: park the decoy on the wreck so it is never seen elsewhere
+            # v968f6m: the decoy is parked on the wreck so it is never seen elsewhere (one positioning frame).
+            # v968f6p: per client, CAR_DECOY_LINE_DELAY_S + his round trip between create and kill-entry delete - the
+            # delete must find the decoy already built or it prints nothing.
+            # v968f9f: create, frame and delete all start when this client's decoy lane is free (see CAR_DECOY_LANE).
+            try:
                 _dpl = pack_car_state(c['pos'][0], c['pos'][1], c['pos'][2], c['fwd'], flags=0, aux=(1, 0, 0, 0, 0))
-                def _decoy_frame(_ps=_holders, _dd=_d, _pl=_dpl):
-                    for _q in _ps:
-                        try:
-                            sock.sendto(bytes([0x00, 0x00, 0x20, _q.nundgram(), 0x00, 0x00, 0x00, 0x00]) + build_car_update(_ai_stamp(_q, _dd), _dd, _pl), _q.addr)
-                        except Exception:
-                            pass
-                threading.Timer(0.15, _decoy_frame).start()
             except Exception:
-                pass
-            # v968f6p: per client, CAR_DECOY_LINE_DELAY_S + his round trip - the create is deferred to the client's
-            # main loop ('Receive create object' -> 'Create NetCar' 150-300 ms), and on a stalled channel both
-            # reliable messages arrive together; the delete must find the decoy already built or it prints nothing.
-            _dmax = 0.0
+                _dpl = None
+            _dmax = 0.0; _wmax = 0.0; _now9f = time.time()
             for _q in _holders:
                 _dd_s = CAR_DECOY_LINE_DELAY_S + float(_q.__dict__.get('_rtt_ewma_s') or 0.0)
-                _dmax = max(_dmax, _dd_s)
-                threading.Timer(_dd_s, lambda _q=_q, _dd=_d, _raw=_ddel: _submit_send(
-                    send_rel, _q, build_msg13(_raw), f'<- decoy CAR 0x{_dd:04x} kill-entry delete (cyan line) -> {_q.current_pilot}', 3.0)).start()
+                _w9f = _decoy_lane_take(_q, _now9f, _dd_s)
+                def _decoy_create(_q=_q, _dd=_d, _rec=_drec, _on=onum, _w=_w9f):
+                    _submit_send(send_rel, _q, build_msg13(bytes([0x02]) + _ensure_ai_client_on(_q) + _rec),
+                                 f'<- decoy CAR 0x{_dd:04x} create (cyan line for 0x{_on:04x}) -> {_q.current_pilot}'
+                                 + (f' [lane: {_w:.2f}s after the kill]' if _w > 0.0 else ''), 3.0)
+                def _decoy_frame(_q=_q, _dd=_d, _pl=_dpl):
+                    try:
+                        sock.sendto(bytes([0x00, 0x00, 0x20, _q.nundgram(), 0x00, 0x00, 0x00, 0x00]) + build_car_update(_ai_stamp(_q, _dd), _dd, _pl), _q.addr)
+                    except Exception:
+                        pass
+                def _decoy_delete(_q=_q, _dd=_d, _raw=_ddel):
+                    _submit_send(send_rel, _q, build_msg13(_raw), f'<- decoy CAR 0x{_dd:04x} kill-entry delete (cyan line) -> {_q.current_pilot}', 3.0)
+                if _w9f <= 0.0:
+                    _decoy_create()
+                else:
+                    threading.Timer(_w9f, _decoy_create).start()
+                if _dpl is not None:
+                    threading.Timer(_w9f + 0.15, _decoy_frame).start()
+                threading.Timer(_w9f + _dd_s, _decoy_delete).start()
+                _dmax = max(_dmax, _w9f + _dd_s); _wmax = max(_wmax, _w9f)
+                _nd += 1
             threading.Timer(_dmax + 1.0, lambda _dd=_d: ai_onum_released(_dd)).start()
             log('CAR', f'{c["name"]} 0x{onum:04x}: lethal msg-51 to {_nh} client(s) -> explosion + wreck; cyan line via decoy 0x{_d:04x} '
-                       f'to {_nd} client(s); plain delete of the wreck in {CAR_WRECK_S:.0f}s')
+                       f'to {_nd} client(s)' + (f' (one decoy at a time: this one {_wmax:.1f}s after the kill)' if _wmax > 0.0 else '')
+                       + f'; plain delete of the wreck in {CAR_WRECK_S:.0f}s')
             _CAR_GONE[onum] = (time.time(), f'killed {reason}')
             threading.Timer(CAR_WRECK_S, lambda: delete_car(onum, reason=f'(wreck removed, killed by {kname or "?"})')).start()
             return
@@ -19557,6 +20176,11 @@ def car_console(args, by='console'):
                 '       car drive <onum> <mps> (calibration, no streaming) | integrate on|off | goto <onum> <x> <y> [mps]']
     v = args[0].lower()
     try:
+        if v == 'decoylane':                                            # v968f9f
+            global CAR_DECOY_LANE
+            if len(args) >= 2 and args[1].lower() in ('on', 'off'):
+                CAR_DECOY_LANE = (args[1].lower() == 'on')
+            return [f'car decoylane = {"ON" if CAR_DECOY_LANE else "off"} (one kill-line decoy at a time per client; off = all at once, as before v968f9f)']
         if v == 'killdelay':                                            # v968f6j
             global CAR_KILL_DELETE_DELAY_S
             if len(args) >= 2:
@@ -23334,6 +23958,12 @@ def arena_reset_state(room_id):
         logx('CLOCK', 'clock re-base on reset failed')
     TOURNAMENTS.pop(room_id, None); _TN_CFG.pop(room_id, None)   # v952f5: the next spawn restarts the tournament clock
     GUNS_COLD.pop(room_id, None)                                 # v960f5: a rebuilt arena is guns hot
+    _FLY_OFF.pop(room_id, None)                                  # v968f9g: ... and its Fly button is back
+    _FLY_TOUCHED.discard(room_id)
+    _tf9g = _TN_FIGHT_TIMERS.pop(room_id, None)
+    if _tf9g:
+        try: _tf9g.cancel()
+        except Exception: pass
     WEATHER.pop(room_id, None)                                   # v962f5: back to the arena's weather
     event_end_cancel(room_id)                                    # v956f5
     evs_stop(room_id)                                            # v958f5
@@ -29941,6 +30571,7 @@ def handle_gamedef_request(s, game_idx, via=''):
         pkt = build_gamedef_212(room, hide_planes=hidden_plane_ids_for(s))
         if pkt is not None:
             send_rel(s, pkt, f'<- GAME_DEF 212 on-demand{via} (room {room[0]} gidx=0x{game_idx:08x})', to=5.0)
+            event_note_gamedef(s, room[0])                # v968f9g
         else:
             log('POST-AUTH', f'212 request{via} gidx=0x{game_idx:08x}: LZ build failed')
     else:
@@ -30099,6 +30730,13 @@ def handle_fly_start_place(s, af, mid, n, via='', reply_sub=0x17):
             s.__dict__['_join_refused_at'] = time.time()
             send_system_msg(s, 'Joining is disabled by the host - please wait.')
             log('MODERATOR', f'{s.current_pilot}: Fly ask refused - room {s.current_room} is join-disabled')
+        return
+    # v968f9h [FLY BUTTON OFF = NO FLY, WHATEVER THE CLIENT'S BUTTON SHOWS] - see fly_button_on()
+    if not sess_rights(s) and not fly_button_on(getattr(s, 'current_room', None)):
+        if time.time() - s.__dict__.get('_fly_refused_at', 0.0) > 10.0:
+            s.__dict__['_fly_refused_at'] = time.time()
+            send_system_msg(s, 'The Fly button is disabled by the host - please wait.')
+            log('MODERATOR', f'{s.current_pilot}: Fly ask refused - the Fly button of room {s.current_room} is off')
         return
     # v952f5 TOURNAMENT: joining window closed / out of lives (ghosting re-entry is allowed)
     try:
@@ -39264,6 +39902,8 @@ def handle_post_auth(s, cmd, pl):
         # meant nothing had ever been sent and every row read 0. That is precisely why the v236 probe
         # came back "all 0": neither test run contained a single plane spawn (CONFIRM5 = 0), so msg 25
         # never went on the wire. Push the career state whenever the HQ screen opens (debounced).
+        if sub == 0x3a and s.entered_game:
+            fly_sync_hq(s)                         # v968f9k: the Fly-button state, once the HQ really is open
         if sub == 0x3a and s.entered_game and SEND_CAREER_ON_HQ:
             _now = time.time()
             if _now - getattr(s, '_career_push_at', 0.0) > CAREER_PUSH_DEBOUNCE_S:

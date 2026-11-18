@@ -4,7 +4,7 @@ Documentation of the moderator/sysop system as currently enabled on the LAN serv
 (`fa with web server.py`). Covers how rights are granted, the in-game `##` commands, and
 the server-console commands.
 
-Last updated for server **v950f5**.
+Last updated for server **v968f9k** (banked 2026-11-18). Sections carry the version they were written for.
 
 ---
 
@@ -89,6 +89,8 @@ lobby. No session is killed — that is how the 2009 host did it.
 | `##BanAll <player> <hours>` | Native boot + no entry to **any arena** for N hours (also kicked at pilot select). |
 | `##UnBan <player>` / `##UnBanAll <player>` | Lift the ban. |
 | `##JoinDisable` / `##JoinEnable` (also `##EnableFlyButton`) | While disabled a non-moderator's Fly ask is refused (*Joining is disabled by the host*); the room is told either way. |
+| `##FlyDisable` / `##FlyEnable` | Server-side words, any arena (v968f9j): msg 0x74 `[0x74][disabled u8]` to the room and to joiners - the client's JOIN ENABLED flag (DAT_00c1cdb8, handler FUN_004ee470; a client with moderator rights ignores 'disabled'), which the HQ dialog reads for the Fly button and redraws at once. Toggles both ways. For a pilot who enters later the same flag comes from the arena list: 0xd2 row flag bit 0x04 (the red X icon) -> arena record +0x24 -> set when the join completes (v968f9k); the state is also re-sent when his HQ screen opens. The server also refuses non-sysop Fly asks while off. An arena reset clears it. |
+| `##EventOpen [s]`, `##EventClose`, `##EventFight` (`##EventGo`), `##EventHold`, `##EventEnd [winner]`, `##EventReset`, `##EventStatus` | v968f9g, server-side words: the console's `event` verbs for the arena the sysop is in. Answer only in arenas with tournament or event mode (status everywhere). See EVENTS.md. |
 | `##ResetGame` | Runs the arena reset (announce, countdown, boot, rebuild). |
 | `##AllChatOn` / `##AllChatOff` | Recorded for the room. |
 | `##killp` / `##ejectp` / `##crumblep` / `##nofuelp <player>` | Relayed natively to the target's client, which runs the death / bail-out / fuel loss itself. |
@@ -187,7 +189,8 @@ The step-by-step event command chain (prepare, gather, clock, weapons lock, disc
 The arena-creation dialog's Tournament group (enabled / number of lives / ghosting) plus the hidden
 template values (joining window 5 min, shooting 2 min later, allow tabbing off, last one flying wins
 on) are editable per arena on the web (Tournament section) and are served in the GAME_DEF. The server
-runs the clock: it starts at the first spawn or with `event open <room> [in <seconds>]`, every
+runs the clock: it starts at the first ordinary pilot's spawn (never a sysop's, v968f9g; never by a spawn in
+an event-mode arena, v968f8m) or with `event open <room> [joining seconds]` / `##EventOpen [seconds]`, every
 pilot receives the same start (msg 0x5c, late joiners at ServerConfirm), the cockpit counts down the
 joining window and then the shooting delay (no guns, no collisions until then). Pilots who ask to fly
 after the joining window closed are refused unless they were already in; a pilot out of lives is
@@ -197,24 +200,59 @@ flying wins" the server declares the winner (msg 0x30: "<name> has won") and fla
 skips both countdowns (joining closes, the competition starts now - "FIGHT!"); `event status [room]`
 shows phase, deaths and ghosts; `event end <room> [winner]` closes it by hand; `event reset <room>`
 (and an arena reset) clears it so the next spawn restarts. v955f5: one `event` command family drives
-both the tournament clock and the weapons lock - see EVENTS.md.
+both the tournament clock and the weapons lock - see EVENTS.md. v968f9g: a number on `event open` is the
+joining window of that run in seconds (the start is placed so that the clients' own "Time until end of
+joining" counts exactly that; with a 0-minute window the start lies in the future, which the client's
+signed clock arithmetic handles), and when the clock reaches the competition the server itself closes
+joining, frees the event lock or ends a guns-cold hold, and announces the fight.
 Moderators never count as participants and are never refused.
 
-### Event mode - the weapons lock (v953f5)
+### Event mode - the lock (v953f5, rewritten for v968f9k)
 
 The game's [Event] section, served only to arenas with **event mode** ticked on the web (Tournament
-section); all other arenas carry no event flag, no timers and no entry message. An event arena starts
-locked ("Event not started yet!" on entry): a pilot can take off but cannot start engines, fire guns,
-launch rockets, drop bombs or torpedoes, deploy paratroopers or drop supplies - the client says "You'll
-be able to open fire after Event starts". The server sends the state before the entry grant (as the
-2009 server did) and again at spawn. `##StartEvent` in game (sysop) or `event fight <room> [in <seconds>]` on the console
-starts the event: "EVENT STARTED" banner, everything unlocks (after the "unlock N min" delay if set,
-with an "in MM:SS" countdown on the client). `event hold <room>` locks at once ("HOLD FIRE"). Both work only in event-mode arenas (the console
-says so otherwise); a pilot who entered before the setting was ticked keeps his old arena data until
-he re-enters.
-`##EnableFlyButton` / `event fly <room> on|off` drive the HQ Fly button separately (the arena setting
-"Fly button enabled from the start" is its initial state). Joiners get the current state at spawn;
-an arena reset returns to the arena's initial state.
+section); all other arenas carry no event flag, no timers and no entry message. The command chain is in
+EVENTS.md; this is how it works.
+
+**The lock.** With `DelaysActive` in the GAME_DEF every client checks each ACTION by itself - engine
+start, guns, rockets, bombs / supplies, taxi:
+
+    refused while   no event start is known,   or   now < start + (Event.StartDelay + the action's minutes) min
+
+The action's minutes come from the [EventParam<Fighters|Bombers|Support><camp>] table of the GAME_DEF
+(EngineStart, FireGuns, FireRockets, DropBombs|DropSupply, Taxi; 3 classes x 8 camps; empty in every
+template). The start is msg 0x83 `[0x83][fly enable u8][start NET ms u32]`; start 0 = "no start".
+
+| Arena setting | GAME_DEF served | Locked | Fight |
+| --- | --- | --- | --- |
+| "Engines free while locked" unticked (the old lock) | no table, Event.StartDelay = the arena's "unlock N min" | start 0: every action refused, "... after Event starts" | the real start (10 s back-dated): everything free after the unlock delay |
+| ticked (weapons-only lock, v968f9g/h) | 24 records `[0x20 + class*8 + camp][EngineStart -120][0][0][0][Taxi -120]` (each byte value + 0x80) at the list byte, +144 bytes; Event.StartDelay = 120 | a start in the PAST: engines and taxi net 0 minutes = free; weapons 120 minutes = "You'll be able to open fire in MM:SS" | `fight time - 120 min`: weapons free at the fight time (the arena's unlock delay is added by the server) |
+
+- The HUD event clock is `now - (start + Event.StartDelay)`: with the weapons-only lock it counts down to
+  the fight and up from 0:00 after it. While locked the cockpit prints "Event will be started in MM:SS"
+  every 15 s (the old lock: "Event not started yet!").
+- The locked start is `scheduled fight - 120 min` when the fight time is known (tournament clock
+  running, `event open <room> <seconds>`, `event fight <room> in <s>`) - the clients then free the
+  weapons at that moment themselves and the server announces FIGHT; with nothing scheduled it is 30
+  minutes in the past, re-sent every 20 minutes (a 90..70 minute placeholder on the clients).
+- Each pilot gets the form that fits the GAME_DEF HE was served (recorded when the 212 is sent): one who
+  entered before the box was ticked gets the old lock and is told to re-enter. If the table cannot be
+  inserted (unknown tail layout) or would push the GAME_DEF message past 1320 bytes, the arena is served
+  without it and keeps the old lock - the log says so.
+- The state is sent at arena entry and on every change. While an event is on hold the server also drops
+  the room's damage reports (v968f8z).
+- When the tournament clock reaches the competition, or a countdown runs out, the server starts the
+  event by itself (v968f9g/i).
+
+**The Fly button - two separate flags in the client** (HQ dialog, FUN_006de570):
+
+| Flag | Set by | Behaviour |
+| --- | --- | --- |
+| event "Fly button enabled" (DAT_00c1cdbc) | GAME_DEF `FlyButtonEnabled` (the arena setting "Fly button enabled from the start", served only with event mode on) and the enable byte of msg 0x83 | ONE WAY: the byte can only light the button, and a client that got it once keeps a lit button in every arena until the game is restarted (FUN_00440b40, HQ init 0x6e1b9b). The server sends the byte only to a client whose own GAME_DEF said "off", when a host enables the button or the fight starts |
+| JOIN ENABLED (DAT_00c1cdb8) | msg 0x74 `[0x74][disabled u8]` (FUN_004ee470; a client with moderator rights ignores "disabled"), and at the moment a join completes the arena-list row's flag bit 0x04 (the red X icon; FUN_006af7b0) | TWO WAY, any number of times, on pilots already in HQ. This is what `##FlyDisable` / `##FlyEnable` / `event fly <room> on|off` drive (v968f9j/k): 0x74 to the room, bit 0x04 in the 0xd2 list while off, and the state again when a client opens its HQ screen |
+
+The server also refuses a non-sysop Fly ask while the button is off. `##JoinDisable` / `##JoinEnable`
+(client opcode 0x5f) are server-side only: the button stays lit, the spawn is refused. An arena reset
+returns everything to the arena's own state.
 
 ### The Chat tab's filter boxes - what each one really switches (v961f5, from the EXE)
 
@@ -255,7 +293,8 @@ room, and a non-sysop gets `Sysops only.` Since v968f9a they are the weapons hol
 never touch the event state: engines stay on, the event and tournament clocks keep running. The event
 lock (engines and weapons locked on the clients) is a separate word, `##EventHold` (console `event hold
 <room>`), lifted by `##StartEvent` / `event fight <room>` - which also ends a guns-cold hold. While an
-event is on hold the server drops the room's damage reports too (v968f8z).
+event is on hold the server drops the room's damage reports too (v968f8z). A guns-cold hold also ends
+when the tournament clock reaches the competition and at `##EventReset` (v968f9g).
 The guns-cold hold is server-side: the clients keep firing but the
 server drops every damage report that leaves the room (msg 28 plane hits, msg 29 canopy hits, msg 31
 ground damage - bombs and rockets included), so nothing registers and no kill is booked; collisions
@@ -291,7 +330,21 @@ that would show *banned for all games* in the lobby dialogs.
 | `say <room|all> <text>` | Yellow system line **and** the ~10 s on-screen banner. |
 | `broadcast <text>` | Server-wide banner (in-game) + *Server:* chat (lobby). |
 | `boot <pilot> [text]` | EShutDown with text (the client exits the game). |
+| `event open\|close\|fight\|hold\|end\|reset\|fly\|status\|scores <room> ...` | The event toolbox - see EVENTS.md. In game: `##EventOpen [s]`, `##EventClose`, `##EventFight`, `##EventHold`, `##EventEnd [winner]`, `##EventReset`, `##EventStatus`, `##FlyEnable`, `##FlyDisable`. |
+| `guns <room> cold\|hot\|status` | Server-side weapons hold (in game `##GunsCold` / `##GunsHot` / `##GunsStatus`). |
+| `poll start\|status\|end\|cancel ...` | Server polls (above). |
 | `help [word]` | Every console command by section; `help ban` filters. |
+
+### 4b. Operational console commands added up to v968f9k (not moderation)
+
+| Command | Effect |
+| --- | --- |
+| `lagwatch [on\|off]`, `lagwatch notify on\|off` | The lag watch: finds a pilot whose game handles what it is sent late (a slipped input queue), logs the episode, dumps the recorder. |
+| `pad`, `pad on\|off`, `pad <pilot> <datagrams/s> [seconds]`, `pad <pilot> off` | Padding: empty datagrams that push a slipped queue through. Automatic since v968f9d - on when a pilot is late, off when he is in step again; the manual forms are for tests. |
+| `slip <pilot> <datagrams behind, 1-250> [minutes]`, `slip <pilot> off`, `slip` | TEST: the server plays a slipped input queue for one pilot so the padding can be watched working (v968f9e). |
+| `mlist [on\|off]` | Bundling of AI frames into message lists (singles for a pilot the lag watch has confirmed late). |
+| `lagperf [on\|off]` | The lag/performance CSV in `logs/`. |
+| `car decoylane on\|off` | One kill-line decoy at a time per client, so every lorry kill prints its line (v968f9f; off = the old timing). |
 
 ---
 
@@ -321,11 +374,21 @@ in-game:  ##Ban/##BanAll <player> <hours>   ##UnBan/##UnBanAll <player>
           ##Gag/##GagAll <player> <hours>   ##UnGag/##UnGagAll <player>   ##GagRoom / ##UnGagRoom
           ##JoinDisable / ##JoinEnable      ##ResetGame      ##GSM <player> <text>
           ##killp / ##ejectp / ##crumblep / ##nofuelp <player>
+          ##EventOpen [s] / ##EventClose / ##EventFight (##StartEvent) / ##EventHold / ##EventEnd [winner]
+          ##EventReset / ##EventStatus      ##FlyDisable / ##FlyEnable      ##GunsCold / ##GunsHot / ##GunsStatus
+console:  event open|close|fight|hold|end|reset|fly|status|scores <room> ...   guns <room> cold|hot|status
 ```
 
 ---
 
 ## 6. Still open
+
+- **Event lock, client limits (v968f9k):** during a hold with nothing scheduled the weapons-only lock
+  shows a placeholder countdown (90..70 min) and "Event will be started in MM:SS" every 15 s - the HUD
+  clock cannot both start from 0 at the fight and stay silent before it. A pilot whose grey event
+  button ("Fly button enabled from the start" unticked) was lit once keeps it lit until he restarts the
+  game; `##FlyDisable` still greys him through the other flag. The 0x74 state is re-sent at every HQ
+  open of a room a host has switched (harmless, a little chatty).
 
 - **Lobby "for all games" dialogs**: the client reads GagAll/BanAll minutes from a 25-byte 0xDA
   lobby attach (offsets +0xd / +0x11); we send the 15-byte safe form, so a globally banned pilot
