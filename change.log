@@ -15847,3 +15847,72 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     log line) ALL PASS; test_9t, 9s, 9q, 9p pass.
   Files: server.py. Backup _scratch/server.py.bak_v968f9t. Patch _scratch/patch_9u.py.
     NOT on the live server (v968f9s), NOT banked (bank = v968f9q).
+
+v968f9v-stable  (2026-11-19)  THE ARENA-CLICK CRASHES: AN ARENA COPIED FROM ONE THAT CARRIED THE [EventParam] TABLE
+  REPORTS (11-19, ten logs): 'Runtime error joining the new Deathbowl arena after setting up event settings' (Taurus,
+    Moira); 'ONLY changed number values in fields ... runtime error clicking 1 time on that arena'; 'Created another new
+    arena. Exact copy of an existing arena ... Saved. Arena now produces runtime error when you click one time on it'.
+    Two client lines: 'bounds error ... ARR<ARR<EVENT_PLANE_CONFIG,8>,3>[3] 0..2' and 'Invalid version of packed
+    physics' options' (physopt.cpp:642).
+  CAUSE: the client's Create-arena dialog starts from the GAME_DEF of the arena that is selected - the struct WE served,
+    with everything we patched into it - and sends that back as the new arena's GAME_DEF. We store it. For an arena
+    served with the 'engines free' table (the box, v968f9g; and since v968f9r every air-start event arena - the Death
+    Bowl) the stored copy therefore holds our 24 [EventParam] records (144 bytes) and our Event.StartDelay 120.
+    Every writer that finds its bytes by their distance from the END of the struct assumes the record list is EMPTY
+    (list byte at len-84). With 144 bytes of records in front of the tail, all fields BEFORE the list sit 144 bytes
+    further from the end than those writers think - so on a copy they wrote INTO the stored records:
+      tournament StartDelay / ShootDelay / Lives   len-93..-91   (the web saves 5 / 2 / n on every save)
+      Event.StartDelay                             len-89        (0, or our 120 = 0x78)
+      radar AlwaysVisible / RangeMult / ...        len-106..-94  (floats; the web saves them on every save)
+    and then the table writer put a second table behind the first. The client walks the list record by record: a
+    float byte on a key (0xf8 -> class 3) is the bounds error; a 0 byte on a key ends its list early, the rest of the
+    GAME_DEF is read from the wrong place and the physics-options block fails its version check.
+    The same shift made the web page show nonsense defaults for such an arena (start delay 128 ...).
+  PROOF: _scratch/repro_copy.py stores the served struct of a table arena as a new arena and serves it under five
+    settings. On v968f9s: 5 of 5 break, first one 'the client reads 1 record(s), then: BOUNDS ERROR class 3 (key 0xf8)'
+    - Taurus's line. Compression is not involved (our LZ was run against FA.exe's own decompressor on 320 streams).
+    Live log of the day: 189 'Death Bowl' was served '(air-start arena)' with the table from 14:54; arenas 226 (15:19),
+    227 (15:32), 228 (16:31), 229 (16:40), 230 (16:43) were each in 'event mode, initial state LOCKED ... (air-start
+    arena)' one second after creation, before any web save - they inherited the served struct. On v968f9u (17:23, rule
+    off, 189 served without the table) Taurus's new copy 232 took a web save and an entry without a crash.
+  WHY v968f9t / 9u ALONE ARE NOT THE CURE: they stop NEW tables being served by the air-start rule, so new copies come
+    out clean - but an arena already stored with the table (227 and 230 are closed, not deleted) still breaks on the
+    first web save, and ticking 'Engines free' on any arena makes every later copy of it a broken one.
+  CHANGE 1 - gamedef_strip_event_table(d): a stored GAME_DEF is brought back to the empty-list form before anything
+    reads or patches it. Recognised: our full table (24 six-byte records in front of the list terminator, keys
+    0x20..0x37 in order - 16 of 24 keys in place is enough, so a table our own writers scribbled on still counts), or a
+    shorter run of intact records of ours. Removed with it: our Event.StartDelay 120 -> 0. Called in build_lz_gamedef
+    right after the decompress (before the creation stamp and every writer), in the walk-guard fallback, and in
+    decompress_gamedef (every reader of a stored blob: event_cfg_for_room, the web page's tournament defaults,
+    room_is_air_start). decompress_gamedef(raw=True) gives the blob as stored (gamedefdump). The stored blob itself
+    is NOT rewritten. The table stays what it was meant to be: a serve-time decision of THIS arena.
+    Log, once per arena: GAMEDEF-GUARD "arena N ('name'): its stored GAME_DEF carries a copied [EventParam] table
+    (24 records - the arena was created as a copy of one served with it) - taken out before this arena's own settings
+    are applied; Event.StartDelay 120 -> 0".
+  CHANGE 2 - AN UNTICKED BOX IS A VALUE (found by the new test, same family): apply_tournament_settings skipped all
+    its work when every tn_* / ev_* setting was 0 or blank - it read a saved 0 as 'nothing saved'. A copy of an event
+    arena has Event.DelaysActive=1 (and Tournament Active) in its stored GAME_DEF; with every box unticked on the web
+    and the numbers at 0 the client still got DelaysActive=1 and locked engines and guns, while the server
+    (event_cfg_for_room does honour the 0) ran no event there - a lock nothing could open, in an arena the page shows
+    as not in event mode. Now only a missing or blank key means 'the arena's own value'. With the web's usual save
+    (start delay 5, shoot delay 2) the old gate passed anyway, which is why this was not seen.
+  WHAT A COPY STILL INHERITS, BY DESIGN: event mode / tournament mode themselves (the flag bits) until the first web
+    save - the copy of an event arena is an event arena, the web page shows it ticked, the server runs the lock.
+    'Engines free' is a web-only box and is not inherited.
+  NOT CHANGED: EVENT_AIR_START_ENGINES_FREE stays False in this build (console: eventair on). The rule was not at
+    fault - it only made the Death Bowl the first table arena that somebody copied - and comes back as the default once
+    this build has run clean; until then tick 'Engines free while locked' on the air-start event arenas (same effect,
+    survives a restart).
+  VERIFY: (1) reopen 227 or 230 (still stored with the table) and click it: no crash, and the log has the
+    GAMEDEF-GUARD '... carries a copied [EventParam] table (24 records ...' line. `gamedefdump 227` shows 'STORED struct
+    ... (copied [EventParam] records in it: 24)'. (2) tick 'Engines free' on the Death Bowl, create an exact copy of
+    it in the client, save its web settings with other numbers, click it from a freshly started client: no crash,
+    same GAMEDEF-GUARD line for the new arena. (3) a copy with every event / tournament box unticked: guns and engines
+    free at once.
+  Tests: _scratch/test_9v.py (recogniser: both table forms, scribbled table, partial run, 20000 random tails without a
+    false hit; pipeline: a copy with the table is served BYTE FOR BYTE like the same copy without it under seven
+    settings; flags after an all-unticked save; readers) ALL PASS. repro_copy.py: 'all served copies parse'.
+    sweep_9v.py: the 4 arenas of the local DB are served byte-identical by v968f9u and v968f9v.
+    test_9u, 9t, 9s, 9r, 9r_e2e, 9q, 9p, 9o, 9n, 9g_e2e pass.
+  Files: server.py. Backup _scratch/server.py.bak_v968f9u. Patches _scratch/patch_9v.py, patch_9v2.py.
+    Live server = v968f9u (since 17:23 UTC). NOT deployed, NOT banked (bank = v968f9q). server.py 2,723,205 B.

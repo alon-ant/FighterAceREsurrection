@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9u-stable'
+VERSION = 'v968f9v-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -5469,6 +5469,57 @@ def apply_runway_angle(d, deg=60):
     except Exception:
         return None
 
+# v968f9v [AN ARENA COPIED FROM ONE THAT HAD THE [EventParam] TABLE] - the cause of the 11-19 arena-click crashes.
+# The client's Create-arena dialog starts from the GAME_DEF of the arena that is selected - the struct WE served, with
+# everything we patched into it - and sends it back as the new arena's GAME_DEF. For an arena served with the
+# 'engines free' table (v968f9g box; v968f9r every air-start event arena) that copy carries our 24 records and our
+# Event.StartDelay 120, and it is stored. Every writer that finds its bytes by their distance from the END assumes
+# the list is EMPTY (list byte at len-84): with 144 bytes of records in front of the tail all the fields before the
+# list sit 144 bytes further from the end than those writers think, so they write INTO the stored records -
+# tournament delays and lives at len-93..-91, Event.StartDelay at len-89, the radar floats at len-106..-94, the
+# oxygen / range floats further up - and the table writer adds a second table behind the first. A float byte on a
+# record's key gives the client 'bounds error ... EVENT_PLANE_CONFIG ...[3] 0..2' (key 0xf8: class 3), a zero byte
+# on a key ends its list early and the rest is read from the wrong place ('Invalid version of packed physics'
+# options'). Reproduced offline with exactly the first signature (_scratch/repro_copy.py).
+# So: a stored GAME_DEF is brought back to the empty-list form BEFORE anything reads or patches it. The table is a
+# serve-time decision of THIS arena (apply_event_plane_config), never something an arena inherits.
+_EVENT_TABLE_VALS = (bytes([0x08, 0x80, 0x80, 0x80, 0x08]),      # v968f9h..: EngineStart -120, weapons 0, Taxi -120
+                     bytes([0x80, 0xf8, 0xf8, 0xf8, 0x80]))      # v968f9g: EngineStart 0, weapons +120, Taxi 0
+_GD_STRIP_SEEN = set()
+
+def gamedef_strip_event_table(d):
+    """(struct without a copied [EventParam] table, records removed, True if Event.StartDelay was put back to 0).
+    Recognised: (a) our full table - 24 six-byte records right in front of the list terminator at len-84 whose keys
+    are 0x20..0x37 in order; a table our own tail writers have already scribbled on still counts (16 of the 24 keys
+    in place); (b) a shorter run of intact records of ours. Anything else is left alone."""
+    try:
+        n = len(d)
+        if n < 260 or d[n - 84] != 0:
+            return d, 0, False
+        k = 0
+        s24 = n - 84 - 144
+        if s24 > 20 and sum(1 for i in range(24) if d[s24 + 6 * i] == 0x20 + i) >= 16:
+            k = 24
+        else:
+            p = n - 84; prev = None
+            while k < 24 and p - 6 > 20:
+                key = d[p - 6]
+                if not (0x20 <= key <= 0x37) or (prev is not None and key >= prev) or bytes(d[p - 5:p]) not in _EVENT_TABLE_VALS:
+                    break
+                prev = key; p -= 6; k += 1
+        if k == 0:
+            return d, 0, False
+        start = n - 84 - 6 * k
+        d2 = bytearray(d)
+        del d2[start:n - 84]
+        sd = start - 5                                   # [Event.StartDelay][TaxiLimit x4] sit right in front of the list
+        reset = False
+        if d2[sd] == 120:                                # ours (v968f9h): the arena's own value is the web setting
+            d2[sd] = 0; reset = True
+        return d2, k, reset
+    except Exception:
+        return d, 0, False
+
 def _gamedef_tail_ok(d):
     """v888f5: True if the GAME_DEF tail has the known layout (the same test apply_craters_vanish
     uses: [Oxygen1 f32 @len-80][Oxygen2 f32 @len-76][3 small bytes][CratersVanishDelay][Number]).
@@ -6587,7 +6638,13 @@ def apply_tournament_settings(d, settings):
     if not TOURNAMENT_ENABLED:
         return []
     settings = settings if isinstance(settings, dict) else {}
-    if not EVENT_LOCK_ALL_ARENAS and not any(str(settings.get(k, '') or '') != '' for k in
+    # v968f9v [AN UNTICKED BOX IS A VALUE]: this gate read a saved 0 as 'nothing saved' (str(0 or '') == ''), so an
+    # arena whose boxes were ALL unticked and whose numbers were all blank or 0 was served with whatever its stored
+    # GAME_DEF held. For an arena created as a copy of an event arena that is Event.DelaysActive=1 (and Tournament
+    # Active): the client locked engines and guns while the web page showed event mode off and the server -
+    # event_cfg_for_room does honour the 0 - ran no event there, so nothing could ever unlock it. The web stores
+    # every box as 1/0 on each save; only a key that is missing or blank means 'the arena's own value'.
+    if not EVENT_LOCK_ALL_ARENAS and not any(settings.get(k) not in (None, '') for k in
                ('tn_enabled', 'tn_lives', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner',
                 'tn_start_delay', 'tn_shoot_delay', 'ev_enabled', 'ev_start_delay', 'ev_fly_button')):
         return []
@@ -6873,6 +6930,16 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     if not d or d[0] != 0x8a:
         log('GAMEDEF212', f'decompressed version=0x{(d[0] if d else 0):02x} (expected 0x8a)')
         return None, 0, 0
+    try:                                               # v968f9v: a copied [EventParam] table goes before anything is patched
+        d, _k9v, _r9v = gamedef_strip_event_table(d)
+        d = bytearray(d)
+        if _k9v and (room_id, _k9v) not in _GD_STRIP_SEEN:
+            _GD_STRIP_SEEN.add((room_id, _k9v))
+            log('GAMEDEF-GUARD', f'arena {room_id} ({room_name!r}): its stored GAME_DEF carries a copied [EventParam] table '
+                                 f'({_k9v} records - the arena was created as a copy of one served with it) - taken out before '
+                                 f'this arena\'s own settings are applied' + ('; Event.StartDelay 120 -> 0' if _r9v else ''))
+    except Exception:
+        logx('GAMEDEF212', 'event-table strip failed')
     # v210: FRESH CREATION-TIME STAMP - the real fix for the 'CRAP backward NET Time' freeze.
     # The GAME_DEF carries CreationTime (LE u32 ms @offset 5) and CreationTimeSeconds (LE u32 s
     # @offset 9). The client seeds its game clock as WORLD_TIME::Init ss=CreationTimeSeconds, then
@@ -7271,7 +7338,7 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
     # never reach it.
     if _gamedef_aa_offset(d) is None:
         try:
-            _raw = bytearray(fa_decompress(b[v - 6:], len(b) - v + 6))
+            _raw = bytearray(gamedef_strip_event_table(fa_decompress(b[v - 6:], len(b) - v + 6))[0])   # v968f9v
         except Exception:
             _raw = None
         if _raw is not None and _gamedef_aa_offset(_raw) is not None:
@@ -7364,9 +7431,11 @@ def build_lz_gamedef(blob, planeset=0, force_ffa=False, plane_camp=None, arena_s
                 return None, 0, 0
     return encode_all_literals(bytes(d)), D_orig, pad
 
-def decompress_gamedef(blob):
+def decompress_gamedef(blob, raw=False):
     """Return the decompressed GAME_DEF struct (starts with version 0x8a) from a stored
-    blob, or None. The stored blob is LZ-compressed beginning 6 bytes before the 0x8a."""
+    blob, or None. The stored blob is LZ-compressed beginning 6 bytes before the 0x8a.
+    v968f9v: without a copied [EventParam] table (gamedef_strip_event_table) unless raw=True - every reader of a
+    stored GAME_DEF addresses the tail by its distance from the end."""
     try:
         b = bytes(blob)
         if not b:
@@ -7375,7 +7444,9 @@ def decompress_gamedef(blob):
         if b[v] != 0x8a:
             return None
         d = fa_decompress(b[v - 6:], len(b) - (v - 6))
-        return d if d and d[0] == 0x8a else None
+        if not (d and d[0] == 0x8a):
+            return None
+        return d if raw else bytes(gamedef_strip_event_table(d)[0])
     except Exception:
         return None
 
@@ -8437,7 +8508,7 @@ def console_handler():
                     log('EVENT', f'air-start arenas always engines-free: {"ON" if EVENT_AIR_START_ENGINES_FREE else "OFF"} by {_src}')
                 log('CONSOLE', f'eventair = {"on" if EVENT_AIR_START_ENGINES_FREE else "off"}: on = an air-start arena in event mode always gets the '
                                f'weapons-only lock (the [EventParam] table goes into its GAME_DEF without the web box); off = only where the box '
-                               f'"Engines free while locked" is ticked. OFF since v968f9t: the table crashed the client on arenas 226-230 (11-19). '
+                               f'"Engines free while locked" is ticked. OFF since v968f9t; the 11-19 crashes were COPIES of a table arena (cured in v968f9v). '
                                f'Takes effect at the next GAME_DEF a client asks for. `eventair on|off`')
             elif cmd == 'gamedefdump':                                                  # v968f9t: an arena's GAME_DEF in hex, for the RE
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -8455,8 +8526,9 @@ def console_handler():
                         _stg = db_get_room_settings(_rid) or {}
                         log('GAMEDEF-HEX', f'room {_rid} {_room[1]!r} creator {_room[2]!r}: settings {json.dumps(_stg, sort_keys=True)}')
                         log('GAMEDEF-HEX', f'room {_rid} STORED blob {len(_blob)} B: {_blob.hex()}')
-                        _raw = decompress_gamedef(_blob)
-                        log('GAMEDEF-HEX', f'room {_rid} STORED struct {len(_raw) if _raw else 0} B: {bytes(_raw).hex() if _raw else "-"}')
+                        _raw = decompress_gamedef(_blob, raw=True)
+                        log('GAMEDEF-HEX', f'room {_rid} STORED struct {len(_raw) if _raw else 0} B (copied [EventParam] records in it: '
+                                           f'{gamedef_strip_event_table(_raw)[1] if _raw else 0}): {bytes(_raw).hex() if _raw else "-"}')
                         _keep = (_EVENT_TABLE_ROOMS.get(_rid, 'x'), _FLY_SERVED.get(_rid, 'x'), _ROOM_AIR_START.get(_rid, 'x'))
                         for _tag, _over in (('WITHOUT the table', {'ev_no_table': 1}), ('WITH the table', {'ev_engines': 1, 'ev_enabled': 1})):
                             _s2 = dict(_stg); _s2.update(_over)
