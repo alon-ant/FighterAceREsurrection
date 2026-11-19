@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9s-stable'
+VERSION = 'v968f9u-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1767,7 +1767,14 @@ def event_state(room_id):
 # the engines on no matter if the event has started or not'). A pilot who spawns at altitude with the engine refused
 # glides into the ground (Taurus 11-17). So in an arena whose GAME_DEF says StartGround = no the lock is ALWAYS the
 # weapons-only one - the web box 'Engines free while locked' only decides for ground-start arenas.
-EVENT_AIR_START_ENGINES_FREE = True
+# v968f9t [OFF AGAIN - CLIENT CRASHES] (11-19 15:25-16:44 UTC, live v968f9s: Taurus / Moira, ten logs): every arena
+# created that day (226-230, air start) made the client stop while reading its GAME_DEF - 'bounds error ... ARR<ARR<
+# EVENT_PLANE_CONFIG,8>,3>[3] 0..2' or 'Invalid version of packed physics' options being unpacked' - from the moment
+# event mode was on, i.e. from the moment this rule put the [EventParam] table into it. The table writer (v968f9g)
+# had only ever run on arenas 189 and 52 (the web box); on those new arenas it lands in the wrong place. Until that is
+# understood from one of their GAME_DEFs (console `gamedefdump <room>`), the table is written ONLY where the box is
+# ticked, as before v968f9r. Console `eventair on|off`.
+EVENT_AIR_START_ENGINES_FREE = False
 
 def event_engines_wanted(room_id, cfg=None):
     """The arena's lock should leave the engines free: the web box, or (v968f9r) an air-start arena."""
@@ -8422,6 +8429,47 @@ def console_handler():
                             log('CONSOLE', 'slip: ' + _test_slip_set(_t, int(_a[1]), float(_a[2]) if len(_a) > 2 else 10.0))
                         except ValueError:
                             log('CONSOLE', f'slip: not a number. {_usage}')
+            elif cmd == 'eventair':                                                     # v968f9t: the v968f9r air-start rule
+                global EVENT_AIR_START_ENGINES_FREE
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                if _a and _a[0].lower() in ('on', 'off'):
+                    EVENT_AIR_START_ENGINES_FREE = (_a[0].lower() == 'on')
+                    log('EVENT', f'air-start arenas always engines-free: {"ON" if EVENT_AIR_START_ENGINES_FREE else "OFF"} by {_src}')
+                log('CONSOLE', f'eventair = {"on" if EVENT_AIR_START_ENGINES_FREE else "off"}: on = an air-start arena in event mode always gets the '
+                               f'weapons-only lock (the [EventParam] table goes into its GAME_DEF without the web box); off = only where the box '
+                               f'"Engines free while locked" is ticked. OFF since v968f9t: the table crashed the client on arenas 226-230 (11-19). '
+                               f'Takes effect at the next GAME_DEF a client asks for. `eventair on|off`')
+            elif cmd == 'gamedefdump':                                                  # v968f9t: an arena's GAME_DEF in hex, for the RE
+                _a = (parts[1].split() if len(parts) > 1 else [])
+                try:
+                    _rid = int(_a[0])
+                    _room = next((r for r in db_get_open_rooms() if r[0] == _rid), None)
+                except Exception:
+                    _rid = None; _room = None
+                if _room is None:
+                    log('CONSOLE', 'usage: gamedefdump <room id>  - writes the arena\'s stored GAME_DEF and what is served from it (without / '
+                                   'with the event plane table) to the log as hex')
+                else:
+                    try:
+                        _blob = bytes(_room[6]) if len(_room) > 6 and _room[6] else b''
+                        _stg = db_get_room_settings(_rid) or {}
+                        log('GAMEDEF-HEX', f'room {_rid} {_room[1]!r} creator {_room[2]!r}: settings {json.dumps(_stg, sort_keys=True)}')
+                        log('GAMEDEF-HEX', f'room {_rid} STORED blob {len(_blob)} B: {_blob.hex()}')
+                        _raw = decompress_gamedef(_blob)
+                        log('GAMEDEF-HEX', f'room {_rid} STORED struct {len(_raw) if _raw else 0} B: {bytes(_raw).hex() if _raw else "-"}')
+                        _keep = (_EVENT_TABLE_ROOMS.get(_rid, 'x'), _FLY_SERVED.get(_rid, 'x'), _ROOM_AIR_START.get(_rid, 'x'))
+                        for _tag, _over in (('WITHOUT the table', {'ev_no_table': 1}), ('WITH the table', {'ev_engines': 1, 'ev_enabled': 1})):
+                            _s2 = dict(_stg); _s2.update(_over)
+                            _c, _D, _pad = build_lz_gamedef(_blob, planeset_for_room(_room), arena_settings=_s2, room_name=_room[1], room_id=_rid)
+                            _d2 = fa_decompress(_c, len(_c)) if _c else b''
+                            log('GAMEDEF-HEX', f'room {_rid} SERVED {_tag}: struct {len(_d2)} B (pad {_pad}), compressed {len(_c) if _c else 0} B, '
+                                               f'table written: {_EVENT_TABLE_ROOMS.get(_rid)}: {bytes(_d2).hex()}')
+                        for _dct, _v in zip((_EVENT_TABLE_ROOMS, _FLY_SERVED, _ROOM_AIR_START), _keep):
+                            if _v == 'x': _dct.pop(_rid, None)
+                            else: _dct[_rid] = _v
+                        log('CONSOLE', f'gamedefdump {_rid}: 5 GAMEDEF-HEX lines written to the log')
+                    except Exception:
+                        logx('GAMEDEF-HEX', f'dump of room {_rid} failed')
             elif cmd == 'lobbylist':                                                    # v968f9q: the main lobby's player list
                 global LOBBY_LIST_REAL
                 _a = (parts[1].split() if len(parts) > 1 else [])
@@ -31782,12 +31830,26 @@ def broadcast_room_creation(db_id, exclude_sess=None):
     if pkt is None:
         log('ROOM-ECHO', f'broadcast skipped (no pkt) db_id={db_id}')
         return
-    n = 0
+    # v968f9u [NEVER TO A CLIENT THAT IS IN AN ARENA] (Flakmagic 11-19 16:33 UTC 'Access violation at game ...
+    # 0x7E2928' 71 s after Taurus created arena 228; his client had been sending msg 67 once a second since arena 227
+    # was created an hour earlier). Msg 220 (0xdc) is the server's answer to the pilot who CREATED a game. The
+    # client's handler FUN_004edec0 tells the lobby and then, for a positive game index, calls FUN_004f1b10 - the
+    # routine that prepares the client for entering a game: own object number, client number and the message
+    # buffers set back to 'none', a table of 312 words cleared, the in-game message handlers registered anew, and
+    # the once-a-second msg-67 ping started that only the join answer (201) stops. Sent to a client that is FLYING
+    # it does all of that to the game in progress, and the ping never ends (flak: 3579 pings in the hour to his
+    # crash; three reliable packets a second for him and for the server).
+    # A client in an arena needs nothing here: it asks for the arena list when it comes back to the lobby.
+    n = 0; skipped = []
     for sess in get_all_sessions():
         if sess is exclude_sess: continue
+        if getattr(sess, 'entered_game', False) and getattr(sess, 'current_room', None) is not None:
+            skipped.append(getattr(sess, 'current_pilot', None) or '?')
+            continue
         _submit_send(send_rel, sess, pkt, f'<- broadcast new room db_id={db_id}', to=3.0)
         n += 1
-    log('ROOM-ECHO', f'broadcast room db_id={db_id} -> {n} other session(s)')
+    log('ROOM-ECHO', f'broadcast room db_id={db_id} -> {n} other session(s) in the lobby'
+                     + (f'; NOT sent to {len(skipped)} pilot(s) in an arena: {skipped}' if skipped else ''))
 
 def send_active_list(target_sess):
     others = [s.current_pilot for s in get_all_sessions()

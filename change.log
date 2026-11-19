@@ -15756,3 +15756,94 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     NOT banked (bank = v968f9q). LIVE at the time of writing: v968f9r since 11-19 06:09:06 UTC (the crash itself was on
     v968f9q) - so server.py (9r + this fix) is the build to deploy; the 9q1 hotfix is only for going BACK to the bank.
     A restart puts the ring at 0x0100 again: the window described above is open for the first hour or so of every run.
+
+2026-11-19  v968f9t-stable  CLIENTS CRASH AT THE ARENA CLICK - THE v968f9r AIR-START RULE IS SWITCHED OFF (Alon 19:00: 'we have lots of
+            runtime errors now' - Taurus, Moira, Flakmagic; ten logs)
+  THE LOGS (all 11-19, UTC; live v968f9s since 06:18:22, which contains v968f9r):
+    A. messages51 15:25:27, 52 15:26:41, 53 15:27:47, 54 15:28:52, 56 15:31:19 (Taurus, arena 226 'Death Bowl Arena'):
+       'out 212'5' -> 'in 212'801' / 'GAME_DEF size 796' -> 'Exception: bounds error - class ARR<class ARR<struct
+       GAME_DEF_BASE::EVENT_PLANE_CONFIG,8>,3>[3] 0..2' (ring.hpp:27). The client read an [EventParam] record whose key
+       says plane class 3 (FA.exe 0x57dc21: class = (key >> 3) & 3, must be 0..2).
+    B. messages57 15:35:01 (844 B), 58 15:36:35, 59 16:32:34 (844 B), 62 16:44:36 (828 B) (arenas 227-230): 'Exception:
+       generic error - Invalid version of packed physics' options being unpacked' (physopt.cpp:642) - the part of the
+       GAME_DEF behind the list read from the wrong place.
+    Both at the single click on the arena (the click asks for the GAME_DEF since v968f9p; before that the same GAME_DEF
+    would have hit the client at the arena list).
+    C. messages94 16:33:03 (Flakmagic, 'ctrl+d ... froze'): 'Access violation at game, address:0x7E2928, type:1
+       v.addr:0x240120F0' (Main.cpp:2407) after 'out 26'1' + 'out 70'1' at 16:32:45 and a once-a-second 'out 67'1' /
+       'in 67'17' / 'out 67'17' exchange from 16:32:55. A different crash, not looked into yet beyond this.
+  THE SERVER: 'EVENT room 226 / 227 / 228 / 229 / 230: event mode, initial state LOCKED (... engines free - weapons-only
+    lock (air-start arena))' at 15:19, 15:32, 16:31, 16:40, 16:43 - five arenas created that day, all air start, all in
+    event mode: the v968f9r rule put the [EventParam] table into each. Room 227 15:34:59: '2 pilot(s) hold a GAME_DEF
+    without the [EventParam] table' - they had entered fine before event mode was switched on. Arena 189 (the old
+    Death Bowl), same rule, same day: event run 14:54-15:01 without a crash.
+  WHAT IS KNOWN: the crashes begin where the table begins. The table writer (v968f9g) had only ever run on two arenas
+    (189, 52: the web box). It finds its place by distance from the END of the GAME_DEF (list byte at len-84 while the
+    list is empty) after a check of the tail from len-83 on; on the arenas created 11-19 that place is evidently not
+    where the client reads the list.
+  WHAT IS RULED OUT: the compression. 320 GAME_DEFs built by the real pipeline (4 local arenas x names x settings, with
+    and without the table) were run through the client's OWN decompressor (FA.exe FUN_007d68f0 executed under an
+    emulator, _scratch/gen_lzcases.py + /home/claude/fa/emu_lz.py): identical to ours on all 320; the client's limit
+    (decompressed <= 2 x compressed, mix.cpp:0x9d) is kept in all.
+  WHAT IS NOT KNOWN: what differs in those five GAME_DEFs. They are only in the live database.
+  CHANGE:
+    - EVENT_AIR_START_ENGINES_FREE = False: the table is written only where the box 'Engines free while locked' is
+      ticked - the state before v968f9r. Console `eventair on|off`. (v968f9r's code stays.)
+    - console `gamedefdump <room>`: five GAMEDEF-HEX lines in the log - settings, the stored blob, the stored struct,
+      and the struct as served without and with the table. Changes nothing.
+    - web_server.py back to the banked file (the 'AIR-START arena always ...' help text removed); EVENTS.md says so.
+    - kept from v968f9s: a number just handed out is not handed out again (Scraps's crash).
+  CONSEQUENCE: an air-start arena under an event hold has its engines refused again unless the box is ticked - and the
+    box must NOT be ticked on arenas 226-230 or on any newly created arena until the writer is fixed.
+  TO DO NEXT (needs the live data): after the deploy, on the live console `gamedefdump 226` and `gamedefdump 228`;
+    from the hex: where the client's list really is in those GAME_DEFs, then a writer that finds it by reading the
+    struct forward as the client does, and a check that runs the client's own parser on the result.
+  Tests: _scratch/test_9t.py (gamedefdump on the 4 local arenas: 5 lines, no exception, nothing left changed; usage line;
+    default off) ALL PASS; test_9s, 9r (rule forced on), 9r_e2e (same), 9q, 9p, 9o pass.
+  Files: server.py; web_server.py = the banked one. Backup _scratch/server.py.bak_v968f9s. Patch _scratch/patch_9t.py.
+    NOT on the live server (v968f9s), NOT banked (bank = v968f9q).
+
+2026-11-19  v968f9u-stable  A NEW ARENA RESET THE NETWORK STATE OF EVERY PILOT IN THE AIR (Alon 19:12 on Flakmagic's crash: 'inspect it
+            now. they might be tied')
+  FLAKMAGIC'S LOG (messages94; his clock runs 32 s ahead of the server's):
+    15:32:36.708 'in 220'777' -> 15:32:37.710 'out 67'1' / 'in 67'17' / 'out 67'17', and that triple once a second from
+    then on: 3579 times in the hour that follows (7158 'out 67' lines; a normal session has two per arena entry).
+    16:31:52.360 'in 220'777' again. 16:33:03 'Exception: generic error - Access violation at game, address:0x7E2928,
+    type:1 v.addr:0x240120F0' (Main.cpp:2407).
+  THE SERVER AT THOSE MOMENTS: 15:32:03.985 'ROOM-ECHO broadcast room db_id=227 -> 4 other session(s)' and 16:31:19.764
+    '... db_id=228 -> 2 other session(s)' - Taurus creating arenas 227 and 228. 16:32:37 'FREEZE flak: his frames stopped
+    6.7 s ago' (= 16:32:31 server = 16:33:03 on his clock), reaped 16:34:23.
+  WHAT MSG 220 (0xdc) IS (FA.exe): the server's answer to the pilot who CREATED a game - [0xdc][..][game index or error].
+    Handler FUN_004edec0: tell the lobby's listeners, then for a positive index call FUN_004f1b10. FUN_004f1b10 prepares
+    the client for entering a game: own object number (0xbfedb8), 0xbfedbc, 0xbfedc4 := -1; the outgoing message buffers'
+    lengths := 0; 312 words at 0xc84568 := 0; FUN_004f1240 registers the in-game message handlers again; and
+    DAT_00c82eb0 := now + 1000 starts the once-a-second msg 67 that only the join answer (msg 201) stops. Msg 67 inbound
+    (FUN_00426960) is sent straight back - hence the triple.
+  WHAT THE SERVER DID WITH IT: broadcast_room_creation() sent that message to EVERY other session 'so their arena lists
+    show the new room' - also to pilots in an arena. On a client that is flying, FUN_004f1b10 runs against the game in
+    progress. He flew on for an hour with that state (bombing worked); 71 s after the second one his client died in the
+    key handler FUN_007e2730 (the fault address lies in it: a write through a pointer that is no longer valid).
+  HOW SURE: that every flying client was reset and left pinging by each arena creation - certain (handler code, his log,
+    the server's ROOM-ECHO lines). That the reset is what killed his client at Ctrl+D - likely, not proven: the fault
+    is a bad pointer in the key-reaction list, which is damage of exactly the kind a half re-initialised client makes,
+    and it came 71 s after the second reset; he reports the same freeze once before.
+  ARE THE TWO TIED: by the trigger, not by the mechanism. Both come from the arenas created on 11-19. The click crashes
+    (v968f9t entry) are the [EventParam] table in those arenas' GAME_DEF and happen in a freshly started client with no
+    msg 220 in its log (messages52/53/54/56/58: crash on the first click, seconds after start). This one is the creation
+    broadcast and hits pilots who are flying somewhere else.
+    Scraps's log of 11-18 also has an 'in 220' 66 s before his crash - but his crash line is the duplicate object number
+    the server demonstrably sent twice (v968f9s entry); noted, not taken as the cause.
+  CHANGE: broadcast_room_creation skips every session that is in an arena (entered_game and a room). Lobby sessions get the
+    message as before. ROOM-ECHO line: '... -> N other session(s) in the lobby; NOT sent to M pilot(s) in an arena: [...]'.
+  LEFT AS IT IS, KNOWN: a LOBBY client that gets the broadcast also runs FUN_004f1b10 and pings msg 67 once a second until
+    its next arena entry (the server does not answer it there). No harm seen from that in months; the clean way - the
+    creator alone gets msg 220, the others a fresh arena list - is a separate step.
+  OLDER REPORTS THIS MAY BELONG TO: anything odd that began for several pilots at once while somebody created an arena.
+    A pilot hit by it shows 'out 67'1' once a second in his messages log, far from any arena entry.
+  VERIFY: with one pilot flying, create an arena from another client. Server: 'ROOM-ECHO ... NOT sent to 1 pilot(s) in an
+    arena: [...]'. The flying pilot's messages log: no 'in 220', no 'out 67' lines after his entry. The new arena shows in
+    his list when he returns to the lobby, and at once for pilots in the lobby.
+  Tests: _scratch/test_9u.py (in-arena sessions skipped, lobby sessions and the half-joined one served, creator excluded,
+    log line) ALL PASS; test_9t, 9s, 9q, 9p pass.
+  Files: server.py. Backup _scratch/server.py.bak_v968f9t. Patch _scratch/patch_9u.py.
+    NOT on the live server (v968f9s), NOT banked (bank = v968f9q).

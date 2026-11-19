@@ -2539,7 +2539,7 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + '</div>' + _row
                 + _tnchk('ev_engines', 'Engines free while locked (weapons-only lock)',
                          '(tick = pilots can start engines and fly at once; guns, rockets, bombs and supplies refuse until the fight. '
-                         'Untick = engines are locked too - a held start. An AIR-START arena always has the engines free, ticked or not)')
+                         'Untick = engines are locked too - a held start)')
                 + '</div>' + _row
                 + _tnnum('ev_length', 'Event length', 0, 1440, 'min from the start of the fight (0 = until ended by hand); the server ends it: tournament finished, weapons locked')
                 + '</div>'
