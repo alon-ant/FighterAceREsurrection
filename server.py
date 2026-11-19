@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9r-stable'
+VERSION = 'v968f9s-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -14473,26 +14473,64 @@ OBJ_NUMBER_LOW_MAX = 0x03FF   # v968f6h: the client's inbound hit record (msg 51
                               # victim number (the top 6 are the trailer index), so an object the server wants to HIT
                               # from its side must be numbered below 1024. Lorries are allocated from this range first.
 
+# v968f9s [A NUMBER JUST HANDED OUT IS NOT HANDED OUT AGAIN] (BZRD_Scraps_wCw 11-18 22:19:52 UTC, live v968f9q:
+# 'Assertion failed (!Objects[no->Number()])' Network.cpp:391 = a create for an object number his client already
+# held). Two allocators met on 0x016e: the kill-line DECOY of a destroyed lorry took it from the ring at 22:19:51.84
+# (the ring was at 0x016e, 23 minutes after a restart), and 0.48 s later the cell rotation of another lorry asked for
+# the LOWEST free number below 0x400 and was given 0x016e too - a decoy is in no table (it lives 0.6 s + a round
+# trip), so _obj_numbers_in_use() did not know it; it was only quarantined AFTER its delete (ai_onum_released). His
+# client built the decoy at 51.909 and the rotated lorry's create at 52.259, 0.2 s before the decoy's delete.
+# Every number this function returns is now remembered and refused for OBJ_NUM_ISSUE_HOLD_S, checked under the lock,
+# whichever path asks - that also closes the same gap between 'issued' and 'entered in its table' for every other
+# caller on another thread. The decoy's number is additionally quarantined at once (see the decoy code).
+OBJ_NUM_ISSUE_HOLD_S = 120.0
+_OBJ_NUM_ISSUED = {}                    # number -> monotonic time it was handed out
+_OBJ_NUM_STATS = {'refused_recent': 0}
+
+def _obj_num_take(n):
+    """Under _obj_num_lock: True and remembered when n was not handed out in the last OBJ_NUM_ISSUE_HOLD_S."""
+    now = time.monotonic()
+    t = _OBJ_NUM_ISSUED.get(n)
+    if t is not None and now - t < OBJ_NUM_ISSUE_HOLD_S:
+        _OBJ_NUM_STATS['refused_recent'] += 1
+        return False
+    if len(_OBJ_NUM_ISSUED) > 1024:
+        for _k in [k for k, v in _OBJ_NUM_ISSUED.items() if now - v >= OBJ_NUM_ISSUE_HOLD_S]:
+            _OBJ_NUM_ISSUED.pop(_k, None)
+    _OBJ_NUM_ISSUED[n] = now
+    return True
+
 def next_obj_number(low=False):
+    """v968f9s: the allocator proper is _next_obj_number_raw; this wrapper says in the log when a number was stepped over
+    because it had just been handed out (each such line is a collision of the 11-18 22:19:52 kind that did not happen)."""
+    _r0 = _OBJ_NUM_STATS['refused_recent']
+    n = _next_obj_number_raw(low)
+    _r1 = _OBJ_NUM_STATS['refused_recent']
+    if _r1 != _r0 and (_r1 <= 5 or _r1 % 50 == 0):
+        log('OBJNUM', f'0x{n:04x} issued ({"low range" if low else "ring"}) - stepped over {_r1 - _r0} number(s) handed out in the last '
+                      f'{OBJ_NUM_ISSUE_HOLD_S:.0f} s and not yet in any table ({_r1} such steps this run)')
+    return n
+
+def _next_obj_number_raw(low=False):
     global _obj_num_next
     used = _obj_numbers_in_use()          # gathered BEFORE the lock (sl nests outside)
     if low:
         with _obj_num_lock:
             for n in range(0x0100, OBJ_NUMBER_LOW_MAX + 1):
-                if n not in used and not any(q[0] == n for q in _obj_num_free):
+                if n not in used and not any(q[0] == n for q in _obj_num_free) and _obj_num_take(n):
                     return n
         log('OBJNUM', 'no free number below 0x400 - lorry takes one from the ring (will not explode on its clients)')
     with _obj_num_lock:
         if RECYCLE_OBJ_NUMBERS and _obj_num_free:
             n, freed_at = _obj_num_free[0]
-            if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC and n not in used:   # v782f5: never a live AI number
+            if (time.monotonic() - freed_at) >= OBJ_NUMBER_QUARANTINE_SEC and n not in used and _obj_num_take(n):   # v782f5: never a live AI number
                 _obj_num_free.pop(0)
                 return n
         for _ in range(OBJ_NUMBER_MAX - 0x0100 + 1):
             n = _obj_num_next
             _obj_num_next = _obj_num_next + 1
             if _obj_num_next > OBJ_NUMBER_MAX: _obj_num_next = 0x0100
-            if n not in used:
+            if n not in used and _obj_num_take(n):
                 return n
         # Pathological: every id live/in-grace (needs ~1800 concurrent+recent objects).
         log('OBJNUM', f'CRITICAL: object-number ring exhausted - issuing {n} despite use')
@@ -18217,6 +18255,7 @@ def car_killed(onum, killer, reason=''):
         # removed by a plain delete CAR_WRECK_S later (the client's own wreck timer is 15 s).
         if CAR_KILL_LINE_VIA_DECOY and entry is not None and killer is not None:
             _d = next_obj_number()
+            ai_onum_released(_d)          # v968f9s: out of circulation from the moment it is issued (it is in no table)
             _drec = build_car_record(AI_CLIENT_ST, _d, c['camp'], c['class'])
             _ddel = bytes([0x03]) + struct.pack('<ff', 0.0, 0.0) + struct.pack('<H', _d & 0x7fff) + bytes([0x53]) \
                     + kill_tail_hunter(killer, killer.my_obj_number)

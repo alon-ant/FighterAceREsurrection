@@ -15710,3 +15710,49 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     test_9k itself now stops at a NameError (its loader does not know the new names) - superseded by test_9r.
   Files: server.py, web_server.py (one help text). Backups _scratch/server.py.bak_v968f9q, web_server.py.bak_v968f9q.
     Patch _scratch/patch_9r.py. NOT on the live server (v968f9q), NOT banked (bank = v968f9q).
+
+2026-11-19  v968f9s-stable  CLIENT CRASH 'Assertion failed (!Objects[no->Number()])' - TWO ALLOCATORS GAVE OUT THE SAME OBJECT NUMBER
+            (Alon 08:09: 'scraps had a runtime error', messages26 of BZRD_Scraps_wCw; live v968f9q, run_20261118_215628)
+  HIS CLIENT (last lines, UTC):  22:19:51.775 'Receive create object 366' -> 51.909 'Create NetCar (furgon). St=496,
+    ONumber=366. Camp=2'   22:19:52.245 'Receive create object 366' -> 52.259 'Create NetCar (car4fuel). St=496,
+    ONumber=366. Camp=2' -> 'Exception in Fighter Ace engine: logical error / Assertion failed (!Objects[no->Number()])
+    Network.cpp line 391'. A second object was created under a number (366 = 0x016e) the client was still holding.
+  THE SERVER, SAME HALF SECOND (room 134, Bama strafing an SU lorry column, Scraps 2.4 km away):
+    22:19:51.844 'Furgon 0x010f: lethal msg-51 to 2 client(s) ... cyan line via decoy 0x016e to 2 client(s)'
+    22:19:52.324 'Car for Fuel 0x0130 crossed into cell (-12, 15) -> rotated to 0x016e on 2 client(s): BZRD_Scraps_wCw, Bama'
+    and in the FREEZE dump of his session: seq 132 'decoy CAR 0x016e create', seq 134 'CAR 0x0130 rotated to 0x016e',
+    seq 135 'decoy CAR 0x016e kill-entry delete' 0.2 s later - the delete that would have freed the number came after
+    the second create. 22:19:59 'GAME THREAD STALLED', 22:21:44 reaped.
+  CAUSE: the kill-line DECOY (a car created for about 0.6 s + a round trip so that the client prints 'X destroyed Y') takes
+    its number from the ring (next_obj_number()); the cell ROTATION of a lorry takes the LOWEST free number below 0x400
+    (next_obj_number(low=True), v968f6h/6r). 'Free' is what _obj_numbers_in_use() does not list - and a decoy is in no
+    table; it was only quarantined after its delete (ai_onum_released, 1 s after). While the ring itself is still below
+    0x400 - the first few hundred objects after a restart, and again after each wrap at 0x07ff - the ring's next number
+    IS the lowest free one. The server had been restarted at 21:56:28; the ring stood at 0x016e. One such pair in 16
+    decoys of that run. Bama got the same two creates and lived: his decoy was deleted before his client built the
+    second one - it is a race of a few tenths of a second per client.
+  CHANGE:
+    - every number next_obj_number() returns is remembered (_OBJ_NUM_ISSUED) and refused to both paths for
+      OBJ_NUM_ISSUE_HOLD_S = 120 s, checked under the allocator lock. That also closes the same gap - issued, not yet
+      entered in its table - for every other caller on another thread (planes, chutes, soldiers, trains, ships).
+    - the decoy's number is quarantined the moment it is issued (300 s), not only after its delete.
+    - log 'OBJNUM 0x.... issued (low range | ring) - stepped over N number(s) handed out in the last 120 s and not yet
+      in any table' (the first five times, then every 50th): each line is a collision of this kind that did not happen.
+  NOT CHANGED: which numbers the objects get otherwise; the decoy line itself; the rotation rules.
+  TWO BUILDS, same fix:
+    - server.py = v968f9s-stable = v968f9r (air-start arenas keep their engines, NOT yet reported on) + this fix.
+    - _scratch/server.py.v968f9q1_hotfix = v968f9q1-stable = the banked and live v968f9q + this fix ONLY (the diff is the
+      allocator block, the wrapper, one line at the decoy, the VERSION line; web_server.py of the bank goes with it).
+      For the live server if the crash fix should go out before the event change has been tried.
+  VERIFY: it cannot be provoked on demand (it needs a lorry kill and a cell crossing inside half a second while the ring
+    is in the low range). _scratch/test_9s.py replays the live sequence: the banked v968f9q hands out 0x016e twice, the
+    new code 0x016e and 0x016f. On the live server after deploy: an 'OBJNUM ... stepped over' line now and then while
+    lorries are being killed in the first hour after a restart = the fix at work; no 'Receive create object N' twice
+    in a row for the same N in a client log.
+  Tests: _scratch/test_9s.py (10 checks: the live sequence on old and new code; ring/low in both orders; 8 threads x 60
+    numbers all different; the hold ends; low range exhausted -> ring) ALL PASS on both builds. test_9r, 9r_e2e, 9q, 9p,
+    9o, 9n pass on server.py.
+  Files: server.py. Backup _scratch/server.py.bak_v968f9r. Patches _scratch/patch_9s.py, patch_9s2.py.
+    NOT banked (bank = v968f9q). LIVE at the time of writing: v968f9r since 11-19 06:09:06 UTC (the crash itself was on
+    v968f9q) - so server.py (9r + this fix) is the build to deploy; the 9q1 hotfix is only for going BACK to the bank.
+    A restart puts the ring at 0x0100 again: the window described above is open for the first hour or so of every run.
