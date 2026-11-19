@@ -17,7 +17,7 @@ form are in MODERATION.md.
 | Tournament | Allow tabbing out | exiting to HQ does not cost a life |
 | Tournament | Last one flying wins | the server announces the winner ("X has won") |
 | Event mode | Event mode: locked until the host starts the event | the arena begins locked (see step 4); arenas without it have no event timers at all |
-| Event mode | Engines free while locked (weapons-only lock) | v968f9g: the lock holds guns, rockets, bombs, torpedoes, troops and supplies only - engines start and planes taxi from the first second. Unticked = the lock holds the engines too |
+| Event mode | Engines free while locked (weapons-only lock) | v968f9g: the lock holds guns, rockets, bombs, torpedoes, troops and supplies only - engines start and planes taxi from the first second. Unticked = the lock holds the engines too. **An air-start arena always has the engines free, ticked or not (v968f9r)** - a plane that spawns at altitude with the engine refused glides into the ground |
 | Event mode | Unlock N min after the event start | delay with an "in MM:SS" countdown on the client |
 | Event mode | Fly button enabled from the start | untick = the HQ Fly button is grey until `##FlyEnable` (or the fight). Only read with event mode on: an arena without event mode always starts with its Fly button (v968f9g) |
 | Event mode | Event length (min) | counted from the start of the fight; when it elapses the server ends the event (tournament finished - fewest deaths wins, tie = draw - and weapons locked, "EVENT OVER"); 5-min and 1-min warnings; 0 = until `event end`/`hold` by hand |

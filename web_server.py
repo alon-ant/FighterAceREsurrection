@@ -2532,10 +2532,14 @@ class WebInterfaceHandler(BaseHTTPRequestHandler):
                 + _tnchk('tn_last_is_winner', 'Last one flying wins', '(the server announces the winner)')
                 + '</div>'
                 + '<div style="margin:14px 0 6px 0; font-weight:bold;">Event mode (weapons lock)' + ev_edited + '</div>' + _row
-                + _tnchk('ev_enabled', '<b>Event mode: weapons and engines locked until the host starts the event</b>',
+                + _tnchk('ev_enabled', '<b>Event mode: locked until the host starts the event</b>',
                          '(##StartEvent / <code>event start &lt;room&gt;</code> frees them, <code>event stop &lt;room&gt;</code> locks again; off = no event timers at all)')
                 + _tnnum('ev_start_delay', 'Unlock', 0, 240, 'min after the event start')
-                + _tnchk('ev_fly_button', 'Fly button enabled from the start', '(untick = greyed until ##EnableFlyButton / <code>event fly on</code>)')
+                + _tnchk('ev_fly_button', 'Fly button enabled from the start', '(untick = greyed until ##FlyEnable / <code>event fly on</code>; only with event mode)')
+                + '</div>' + _row
+                + _tnchk('ev_engines', 'Engines free while locked (weapons-only lock)',
+                         '(tick = pilots can start engines and fly at once; guns, rockets, bombs and supplies refuse until the fight. '
+                         'Untick = engines are locked too - a held start. An AIR-START arena always has the engines free, ticked or not)')
                 + '</div>' + _row
                 + _tnnum('ev_length', 'Event length', 0, 1440, 'min from the start of the fight (0 = until ended by hand); the server ends it: tournament finished, weapons locked')
                 + '</div>'
@@ -4521,7 +4525,7 @@ tick();setInterval(tick,5000);
             settings['rd_works'] = 1 if qs.get('s_rd_works', [''])[0].strip() else 0
             settings['rd_apply_local'] = 1 if qs.get('s_rd_apply_local', [''])[0].strip() else 0
             # TOURNAMENT (v952f5): checkboxes stored 1/0, numbers only when given (blank = template value)
-            for _tk in ('tn_enabled', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner', 'ev_enabled', 'ev_fly_button'):
+            for _tk in ('tn_enabled', 'tn_ghosting', 'tn_allow_tabbing', 'tn_last_is_winner', 'ev_enabled', 'ev_fly_button', 'ev_engines'):
                 settings[_tk] = 1 if qs.get('s_' + _tk, [''])[0].strip() else 0
             _scr = qs.get('s_ev_script', [''])[0].strip()
             if _scr:

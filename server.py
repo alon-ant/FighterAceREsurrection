@@ -353,7 +353,7 @@ for _stream in (sys.stdout, sys.stderr):
 # what a session log is read against when reconstructing which code served a run - so it must never
 # drift from the docstring again. v286 shipped with the banner still hardcoded to 'v285', which made
 # a live log claim the wrong build and sent a diagnosis down the wrong path. Bump VERSION only.
-VERSION = 'v968f9q-stable'
+VERSION = 'v968f9r-stable'
 
 HOST = "0.0.0.0"; PORT = 38999
 FA_EPOCH = 0x7C558180; STATUS_INDEX = 0x1FF
@@ -1756,17 +1756,29 @@ def event_state(room_id):
         e = EVENTS[room_id] = {'start': None, 'fly': bool(cfg.get('ev_fly_button', 1)) if cfg else True,
                                'by': 'arena default', 'timer': None}
         log('EVENT', f'room {room_id}: event mode, initial state LOCKED (fly button {"on" if e["fly"] else "off"}'
-                     + (', engines free - weapons-only lock' if cfg.get('ev_engines') else ', engines and weapons') + ')')
+                     + ((', engines free - weapons-only lock' + ('' if cfg.get('ev_engines') else ' (air-start arena)'))
+                        if event_engines_wanted(room_id, cfg) else ', engines and weapons') + ')')
         if _EVENT_REFRESH['t'] is None:                           # v968f9g
             _event_lock_refresh_arm()
     return e
 
-def event_engines_free(room_id, cfg=None):
-    """v968f9g: True when the room's lock is the weapons-only one - the web box is ticked AND the GAME_DEF last
-    built for it carried the [EventParam] table (False after a tail the writer did not recognise or a message
-    that would have been too long: such an arena keeps the full lock)."""
+# v968f9r [AN AIR-START ARENA NEVER HOLDS THE ENGINES] (Alon 11-18 23:21: 'before starting an event, with fly enable
+# on, engines and guns off. this is ok for ground starts but not good for air start arenas. on air start arenas we need
+# the engines on no matter if the event has started or not'). A pilot who spawns at altitude with the engine refused
+# glides into the ground (Taurus 11-17). So in an arena whose GAME_DEF says StartGround = no the lock is ALWAYS the
+# weapons-only one - the web box 'Engines free while locked' only decides for ground-start arenas.
+EVENT_AIR_START_ENGINES_FREE = True
+
+def event_engines_wanted(room_id, cfg=None):
+    """The arena's lock should leave the engines free: the web box, or (v968f9r) an air-start arena."""
     cfg = cfg if cfg is not None else (event_cfg_for_room(room_id) or {})
-    return bool(cfg.get('ev_engines')) and _EVENT_TABLE_ROOMS.get(room_id) is not False
+    return bool(cfg.get('ev_engines')) or (EVENT_AIR_START_ENGINES_FREE and room_is_air_start(room_id))
+
+def event_engines_free(room_id, cfg=None):
+    """v968f9g: True when the room's lock is the weapons-only one - wanted (the web box, or an air-start arena) AND the
+    GAME_DEF last built for it carried the [EventParam] table (False after a tail the writer did not recognise or a
+    message that would have been too long: such an arena keeps the full lock)."""
+    return event_engines_wanted(room_id, cfg) and _EVENT_TABLE_ROOMS.get(room_id) is not False
 
 def event_note_gamedef(s, room_id):
     """v968f9g: called after a GAME_DEF 212 of the room went to this session - remember whether THAT one carried the
@@ -3865,7 +3877,18 @@ def record_air_start_from_blob(room_id, blob):
         pass
 
 def room_is_air_start(room_id):
-    """True if the arena spawns planes in the air (StartGround=no). Unknown -> False."""
+    """True if the arena spawns planes in the air (StartGround=no). Unknown -> False.
+    v968f9r: a room nobody has been served yet is read from its stored GAME_DEF once (the event lock asks before the
+    first 212 of a run can have been built)."""
+    if room_id is not None and room_id not in _ROOM_AIR_START:
+        try:
+            for _r in db_get_open_rooms():
+                if _r[0] == room_id:
+                    record_air_start_from_blob(room_id, bytes(_r[6]) if len(_r) > 6 and _r[6] else b'')
+                    break
+        except Exception:
+            pass
+        _ROOM_AIR_START.setdefault(room_id, False)
     return bool(_ROOM_AIR_START.get(room_id, False))
 GAMEDEF_DEBUG = False  # v188: gate the per-212-build decompressed-hex dump. Set True to re-enable when diffing GAME_DEF fields.
 
@@ -6626,7 +6649,14 @@ def apply_event_plane_config(d, settings):
             return bool(int(float(settings.get(k, 0) or 0)))
         except (TypeError, ValueError):
             return False
-    if not (_on('ev_enabled') and _on('ev_engines')):
+    _air9r = False                                        # v968f9r: StartGround = no in THIS (final) GAME_DEF
+    if EVENT_AIR_START_ENGINES_FREE:
+        try:
+            _sg9r = gamedef_startground_offset(d)
+            _air9r = _sg9r is not None and d[_sg9r] == 0
+        except Exception:
+            _air9r = False
+    if not _on('ev_enabled') or _on('ev_no_table') or not (_on('ev_engines') or _air9r):
         return ''
     o = _gamedef_tournament_offsets(d)
     if o is None:
@@ -11829,7 +11859,7 @@ def build_gamedef_212(room, hide_planes=None):
         if (_try212 == 0 and 5 + len(comp) > GAMEDEF_TABLE_MAX_PAYLOAD and _EVENT_TABLE_ROOMS.get(room[0]) is True):
             log('GAMEDEF212', f'room {room[0]}: {5 + len(comp)} B with the event plane table > {GAMEDEF_TABLE_MAX_PAYLOAD} B - '
                               f'served WITHOUT it (engines-free lock not available in this arena: the lock holds engines too)')
-            _st212 = dict(_st212 or {}); _st212['ev_engines'] = 0
+            _st212 = dict(_st212 or {}); _st212['ev_engines'] = 0; _st212['ev_no_table'] = 1     # v968f9r: also for an air-start arena
             continue
         if _try212 == 1:
             _EVENT_TABLE_ROOMS[room[0]] = False

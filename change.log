@@ -15635,3 +15635,78 @@ v188: FFA neutral-team guard (camps AllianceVar collapse at serve time); GAMEDEF
     churn, logout from inside an arena, 200 names, wire bytes, the switch) ALL PASS; test_9p, 9o, 9n, 9k, 9g_e2e pass.
   Files: server.py only. Backup _scratch/server.py.bak_v968f9p. Patch _scratch/patch_9q.py (+ the overflow adds, applied
     after it). NOT on the live server (v968f9p), NOT banked (bank = v968f9p).
+
+2026-11-18  LIVE RESULT of v968f9q (Alon 19:13: 'works!') - tested straight on the live server, three clients
+  LIVE restarted on v968f9q 17:11:55 UTC (BASELINE lobbylist=True). 17:12:15-17:13:38, Moira@HQ, Alon@HQ, BZRD_Scraps_wCw:
+    17:12:15 Moira: lobby opened - 0 others            17:12:17 Alon logged in -> added to Moira's list
+    17:12:18 Alon: lobby opened - [Moira]              17:12:27 Moira enters room 130 -> taken off Alon's list
+    17:12:28 Scraps logged in -> added to Alon's       17:12:29 Scraps: lobby opened - [Alon]   (Moira is flying: not listed)
+    17:12:31 Moira back: lobby opened - [Alon, Scraps], added to both
+    17:12:47 Moira -> 134, 17:12:49 Scraps -> 134: each taken off the lists of those still in the lobby
+    17:12:52 Moira back - [Alon]; 17:12:58 Scraps back - [Moira, Alon]; 17:13:02 Alon -> 134, off both; 17:13:05 Alon back -
+    [Moira, Scraps], added to both; 17:13:25 Alon left -> taken off both; 17:13:38 Moira -> 134, off Scraps's.
+  Steps 1-4 and 6 of the VERIFY list, several times each; every LOBBYLIST line is the one the model predicts. No Traceback,
+    no 'failed' line. What the three screens showed is Alon's word ('works!').
+
+2026-11-18  BANKED: v968f9q-stable   (user 19:13: "bank!")   previous bank: v968f9p-stable (11-18 16:27 UTC)
+  SNAPSHOT: _scratch/bank/server.py.v968f9q (2,707,444 B, sha1 99a6c96371eb...) + web_server.py.v968f9q + fa_logging.py.v968f9q
+    - byte-identical to the working files at 17:15 UTC. web_server.py and fa_logging.py are unchanged against the last
+    five banks. LIVE already runs this server.py (v968f9q, since 17:11:55 UTC).
+  IN THIS BANK (entry above):
+    9q the main lobby's player list: the 0xcb request answered with the pilots who are not in an arena; added when a pilot's
+       lobby opens (login, back from an arena), taken off when he enters an arena or leaves; `lobbylist on|off|show`.
+  STATE AT BANK - what has flown: login, arena entry, return, logout, with three clients on the live server (LIVE RESULT).
+  STATE AT BANK - NOT yet seen working:
+    - step 5: a PILOT SWITCH inside one login (the client sends 0xcb again; if its list is not empty at that moment the
+      names would show twice). No 'pilot switch' line in this run.
+    - a disconnect without logout (timeout / crash / reap) of a pilot who is listed; a kick / ban.
+    - more names than one packet holds (overflow adds - offline test only); `lobbylist show` / `off` on a console.
+    - still open from earlier blocks: an event-mode arena under a hold on the list-only arena page (9p step 4); tanks,
+      ships, lorries with the AI station on PlayerIndex 0 (9o).
+  KNOWN AND OPEN AT BANK:
+    - the pilot's own name is not in the list the server sends him; the 'In lobby: ...' chat line at login names
+      everybody online, arenas included; the status byte is 0 for everybody (no sysop mark in the lobby list).
+    - the open lists of the v968f9p / v968f9o / v968f9n blocks.
+
+2026-11-18  v968f9r-stable  AN AIR-START ARENA NEVER HOLDS THE ENGINES (Alon 23:21: 'before starting an event, with fly enable on,
+            engines and guns off. this is ok for ground starts but not good for air start arenas. on air start arenas we
+            need the engines on no matter if the event has started or not')
+  WHAT WAS THERE: the event lock has two forms. The FULL lock ('no start' sent: the client refuses engine, taxi and every
+    weapon - 'You'll be able to start engines after Event starts') and, since v968f9g, the WEAPONS-ONLY lock (the
+    [EventParam] table in the GAME_DEF + the lock sent as a start in the past: engines and taxi free, guns / rockets /
+    bombs / supplies refuse until the fight). Which one an arena got was the web box 'Engines free while locked' alone.
+    An air-start arena with the box unticked put every pilot in the air with a dead engine (Taurus 11-17: they glided
+    into the ground).
+  CHANGE: an arena whose GAME_DEF says StartGround = no always gets the weapons-only lock; the box only decides for
+    ground-start arenas. EVENT_AIR_START_ENGINES_FREE = True.
+    - apply_event_plane_config reads the StartGround byte of the GAME_DEF it is finishing (gamedef_startground_offset on
+      the final struct) and inserts the table when event mode is on and (box OR air start).
+    - event_engines_wanted(room) = box OR room_is_air_start(room); event_engines_free(room) = wanted AND the table went
+      out (unchanged second half: a GAME_DEF that would be too long with the table, or a tail the writer does not know,
+      keeps the full lock - 'served WITHOUT it' in the log; the retry now carries ev_no_table so an air-start arena does
+      not put it back).
+    - room_is_air_start reads a room nobody has been served yet from its stored GAME_DEF once (with the prime gone, 9p,
+      the lock can be asked about before the first 212 of a run is built).
+    - EVENT line at the first use of an arena: '... engines free - weapons-only lock (air-start arena)'.
+    - web_server.py: the box's help text ends 'An AIR-START arena always has the engines free, ticked or not'.
+  UNCHANGED: ground-start arenas (box off = engines and weapons held, 'ok for ground starts'); the fight / hold / reset
+    commands; the Fly button; a pilot who entered with a GAME_DEF that has no table keeps the full lock until he
+    re-enters (his client cannot do the other form); non-event arenas carry nothing of this.
+  KNOWN LIMITS of the weapons-only lock, as before (v968f9k block): during a hold with nothing scheduled the HUD shows a
+    placeholder countdown (90..70 min) and 'Event will be started in MM:SS' every 15 s.
+  VERIFY (local): an AIR-START arena (local 48 / 52 / 55 are; 49 is ground), event mode on, 'Engines free' UNticked:
+    1. server log at the first entry: 'EVENT room N: event mode, initial state LOCKED (... engines free - weapons-only
+       lock (air-start arena))'; GAMEDEF212 'event: ... [EventParam] ...' line when the 212 is served.
+    2. spawn before any event command: the engine runs, you fly; guns / rockets / bombs refuse ('You'll be able to
+       open fire in ...').      3. `event fight <room>` (##EventFight): weapons free.   4. `event hold`: weapons
+       refuse again, engine keeps running.
+    5. a GROUND-start arena (49), event mode on, box unticked: as before - engine refused until the fight.
+    6. `event status`: the arena reads 'weapons-only lock, engines free'.
+  Tests: _scratch/test_9r_e2e.py (the real GAME_DEF pipeline on a copy of the local DB, each of the 4 arenas served as
+    air and as ground start: air + box off -> 24 table records and the weapons-only lock; ground + box off -> none, full
+    lock; ground + box -> table; air with event mode off -> nothing; too-long GAME_DEF -> full lock; the switch; the EVENT
+    line) ALL PASS. _scratch/test_9r.py (= test_9k's event round + 6 checks: the lock an air-start arena sends before the
+    event, at the fight, at a new hold; ground unchanged; no-table cases) ALL PASS. test_9q, 9p, 9o, 9n, 9g_e2e pass.
+    test_9k itself now stops at a NameError (its loader does not know the new names) - superseded by test_9r.
+  Files: server.py, web_server.py (one help text). Backups _scratch/server.py.bak_v968f9q, web_server.py.bak_v968f9q.
+    Patch _scratch/patch_9r.py. NOT on the live server (v968f9q), NOT banked (bank = v968f9q).
